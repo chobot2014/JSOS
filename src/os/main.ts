@@ -1,11 +1,12 @@
 /**
  * JSOS Main Entry Point
- * Modern TypeScript implementation for baremetal OS
+ * Modern TypeScript implementation compiled to ES5 for baremetal OS
  */
 
+// Import system manager (TypeScript will handle module resolution)
 import systemManager, { SystemManager } from './system.js';
 
-// Modern TypeScript with strict types and interfaces
+// Modern TypeScript interfaces
 interface OSConfig {
   readonly debugMode: boolean;
   readonly maxProcesses: number;
@@ -19,15 +20,15 @@ interface CommandHandler {
   readonly handler: (...args: string[]) => Promise<void> | void;
 }
 
-// Modern class with advanced TypeScript features
+// Modern class simplified for ES5 compatibility
 class JSOS {
-  #config: OSConfig;
-  #commands = new Map<string, CommandHandler>();
-  #isRunning = false;
-  #bootTime: Date;
+  private config: OSConfig;
+  private commands = new Map<string, CommandHandler>();
+  private isRunning = false;
+  private bootTime: Date;
 
   constructor(config: Partial<OSConfig> = {}) {
-    this.#config = {
+    this.config = {
       debugMode: false,
       maxProcesses: 32,
       memoryLimit: 0x1000000, // 16MB
@@ -35,13 +36,13 @@ class JSOS {
       ...config
     };
 
-    this.#bootTime = new Date();
+    this.bootTime = new Date();
     this.initializeCommands();
   }
 
   // Modern getter with computed properties
   get uptime(): number {
-    return Date.now() - this.#bootTime.getTime();
+    return Date.now() - this.bootTime.getTime();
   }
 
   get status(): { 
@@ -51,14 +52,14 @@ class JSOS {
     features: string[] 
   } {
     return {
-      running: this.#isRunning,
+      running: this.isRunning,
       uptime: this.uptime,
       processCount: systemManager.processCount,
-      features: Array.from(this.#config.features)
+      features: Array.from(this.config.features)
     };
   }
 
-  // Modern async initialization with error handling
+  // Modern async/await with error handling
   async boot(): Promise<void> {
     console.clear();
     this.printBootLogo();
@@ -69,7 +70,7 @@ class JSOS {
       // Wait for system initialization
       await systemManager.initializeSystem();
       
-      this.#isRunning = true;
+      this.isRunning = true;
       console.log('✅ System boot complete!');
       
       // Start interactive shell
@@ -82,22 +83,20 @@ class JSOS {
   }
 
   private printBootLogo(): void {
-    console.log(`
-    ╔══════════════════════════════════════════════════════════════╗
-    ║       ██╗███████╗ ██████╗ ███████╗                          ║
-    ║       ██║██╔════╝██╔═══██╗██╔════╝                          ║
-    ║       ██║███████╗██║   ██║███████╗                          ║
-    ║  ██   ██║╚════██║██║   ██║╚════██║                          ║
-    ║  ╚█████╔╝███████║╚██████╔╝███████║                          ║
-    ║   ╚════╝ ╚══════╝ ╚═════╝ ╚══════╝                          ║
-    ║                                                              ║
-    ║  JavaScript Operating System - TypeScript Edition            ║
-    ║  Built with: ${Array.from(this.#config.features).join(' | ')}           ║
-    ╚══════════════════════════════════════════════════════════════╝
-    `);
+    var version = systemManager.systemInfo.version;
+    var features = Array.from(this.config.features);
+    console.log("===================================================");
+    console.log("         JSOS - JavaScript Operating System       ");
+    console.log("===================================================");
+    console.log("         JSOS v" + version + " Booted          ");
+    console.log("===================================================");
+    console.log(" Features: " + features.join(', '));
+    console.log(" Memory Regions: " + systemManager.memoryRegions.length);
+    console.log(" Initial Processes: " + systemManager.processCount + " ");
+    console.log("===================================================");
+    console.log("    ");
   }
 
-  // Initialize command system with modern Map and arrow functions
   private initializeCommands(): void {
     const commands: CommandHandler[] = [
       {
@@ -106,7 +105,7 @@ class JSOS {
         handler: () => this.showHelp()
       },
       {
-        name: 'status',
+        name: 'status', 
         description: 'Show system status',
         handler: () => this.showStatus()
       },
@@ -118,13 +117,14 @@ class JSOS {
       {
         name: 'run',
         description: 'Create and run a new process',
-        handler: (name = 'unnamed', priority = '10') => 
-          this.createProcess(name, parseInt(priority))
+        handler: (name: string = 'unnamed', priority: string = '10') => {
+          return this.createProcess(name, parseInt(priority));
+        }
       },
       {
         name: 'kill',
         description: 'Terminate a process by ID',
-        handler: (id) => this.killProcess(parseInt(id))
+        handler: (id: string) => this.killProcess(parseInt(id))
       },
       {
         name: 'memory',
@@ -148,83 +148,75 @@ class JSOS {
       }
     ];
 
-    // Use modern for...of loop to populate commands Map
+    // Modern for-of loop with destructuring
     for (const cmd of commands) {
-      this.#commands.set(cmd.name, cmd);
+      this.commands.set(cmd.name, cmd);
     }
   }
 
   private async startShell(): Promise<void> {
     console.log('\n💻 JSOS Shell started. Type "help" for available commands.\n');
-
-    // Simulate interactive shell (in real implementation this would read from keyboard)
-    // For demo purposes, we'll run a sequence of commands
-    const demoCommands = [
-      'status',
-      'ps',
-      'run test-process 5',
-      'run background-task 15',
-      'ps',
-      'memory',
-      'test'
-    ];
-
-    for (const command of demoCommands) {
-      await this.simulateUserInput(command);
-      await new Promise(resolve => setTimeout(resolve, 1000)); // Pause between commands
+    
+    // Modern array methods and async iteration
+    const demoCommands = ['status', 'ps', 'run test-process 5', 'run background-task 15', 'ps', 'memory', 'test'];
+    
+    for (let i = 0; i < demoCommands.length; i++) {
+      const cmd = demoCommands[i];
+      await this.simulateUserInput(cmd);
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
-
+    
     console.log('\n🎯 Demo sequence complete. System ready for interaction.');
   }
 
-  private async simulateUserInput(input: string): Promise<void> {
-    console.log(`\n$ ${input}`);
-    await this.executeCommand(input);
+  private async simulateUserInput(command: string): Promise<void> {
+    console.log("\n$ " + command);
+    await this.executeCommand(command);
   }
 
-  // Modern command parsing with destructuring
   private async executeCommand(input: string): Promise<void> {
-    const [commandName, ...args] = input.trim().split(/\s+/);
+    const parts = input.trim().split(/\s+/);
+    const [command, ...args] = parts; // Modern destructuring assignment
     
-    if (!commandName) return;
-
-    const command = this.#commands.get(commandName.toLowerCase());
+    if (!command) return;
     
-    if (!command) {
-      console.log(`❌ Unknown command: ${commandName}. Type 'help' for available commands.`);
+    const handler = this.commands.get(command.toLowerCase());
+    if (!handler) {
+      console.log("❌ Unknown command: " + (command) + ". Type 'help' for available commands.");
       return;
     }
-
+    
     try {
-      await command.handler(...args);
+      await handler.handler(...args); // Modern spread operator
     } catch (error) {
-      console.error(`❌ Command failed: ${error}`);
+      console.error("❌ Command failed: " + (error) + "");
     }
   }
 
-  // Command implementations using modern TypeScript features
   private showHelp(): void {
     console.log('\n📖 Available Commands:');
     console.log('─'.repeat(50));
     
-    for (const [name, cmd] of this.#commands) {
-      console.log(`  ${name.padEnd(12)} - ${cmd.description}`);
+    // Modern for-of with destructuring
+    for (const [name, cmd] of this.commands) {
+      console.log("  " + name.padEnd(12) + " - " + cmd.description);
     }
     console.log();
   }
 
   private showStatus(): void {
     const status = this.status;
-    const info = systemManager.systemInfo;
+    const sysInfo = systemManager.systemInfo;
     
-    console.log(`
-📊 System Status:
-  Status: ${status.running ? '🟢 Running' : '🔴 Stopped'}
-  Uptime: ${Math.floor(status.uptime / 1000)}s
-  Version: ${info.version}
-  Processes: ${status.processCount}
-  Features: ${status.features.join(', ')}
-    `);
+    // Simplified status display
+    console.log("");
+    console.log("📊 System Status:");
+    console.log("  Status: " + (status.running ? '🟢 Running' : '🔴 Stopped'));
+    console.log("  Uptime: " + Math.floor(status.uptime / 1000) + "s");
+    console.log("  Version: " + sysInfo.version);
+    console.log("  Processes: " + status.processCount);
+    console.log("  Features: " + status.features.join(', '));
+    console.log("");
   }
 
   private listProcesses(): void {
@@ -233,19 +225,19 @@ class JSOS {
     console.log('ID'.padEnd(4) + 'Name'.padEnd(20) + 'State'.padEnd(12) + 'Priority');
     console.log('─'.repeat(60));
     
-    // Use modern iterator
+    // Modern for-of loop with generator
     for (const process of systemManager.getAllProcesses()) {
-      const stateIcon = {
+      const statusIcon = {
         'running': '🟢',
-        'waiting': '🟡',
+        'waiting': '🟡', 
         'terminated': '🔴'
       }[process.state];
       
       console.log(
-        `${process.id.toString().padEnd(4)}` +
-        `${process.name.padEnd(20)}` +
-        `${(stateIcon + ' ' + process.state).padEnd(12)}` +
-        `${process.priority}`
+        "" + (process.id.toString().padEnd(4)) + "" +
+        "" + (process.name.padEnd(20)) + "" +
+        "" + ((statusIcon + ' ' + process.state).padEnd(12)) + "" +
+        "" + (process.priority) + ""
       );
     }
     console.log();
@@ -256,102 +248,104 @@ class JSOS {
       console.log('❌ Priority must be a number between 0-20');
       return;
     }
-
-    const process = systemManager.createProcess(name, { priority });
     
+    const process = systemManager.createProcess(name, { priority });
     if (process) {
-      console.log(`✅ Created process "${name}" with ID ${process.id} and priority ${priority}`);
+      console.log("✅ Created process \"" + name + "\" with ID " + process.id + " and priority " + priority);
     } else {
-      console.log(`❌ Failed to create process "${name}" - insufficient memory`);
+      console.log("❌ Failed to create process \"" + name + "\" - insufficient memory");
     }
   }
 
-  private killProcess(processId: number): void {
-    if (isNaN(processId)) {
+  private killProcess(id: number): void {
+    if (isNaN(id)) {
       console.log('❌ Process ID must be a number');
       return;
     }
-
-    if (systemManager.terminateProcess(processId)) {
-      console.log(`✅ Terminated process ${processId}`);
+    
+    if (systemManager.terminateProcess(id)) {
+      console.log("✅ Terminated process " + (id) + "");
     } else {
-      console.log(`❌ Failed to terminate process ${processId} - not found or is kernel process`);
+      console.log("❌ Failed to terminate process " + (id) + " - not found or is kernel process");
     }
   }
 
   private showMemory(): void {
     const regions = systemManager.memoryRegions;
-    const totalFree = regions
-      .filter(r => r.type === 'free')
+    const freeMemory = regions
+      .filter(r => r.type === 'free') // Modern array methods
       .reduce((sum, r) => sum + r.size, 0);
-
+      
     console.log('\n🧠 Memory Layout:');
     console.log('─'.repeat(50));
     console.log('Start'.padEnd(12) + 'Size'.padEnd(12) + 'Type');
     console.log('─'.repeat(50));
     
     for (const region of regions) {
-      const startHex = `0x${region.start.toString(16)}`;
-      const sizeHex = `0x${region.size.toString(16)}`;
-      const typeIcon = region.type === 'free' ? '🟢' : '🟡';
-      
-      console.log(
-        `${startHex.padEnd(12)}${sizeHex.padEnd(12)}${typeIcon} ${region.type}`
-      );
+      const start = '0x' + region.start.toString(16);
+      const size = '0x' + region.size.toString(16);
+      const icon = region.type === 'free' ? '🟢' : '🟡';
+      console.log(start.padEnd(12) + size.padEnd(12) + icon + " " + region.type);
     }
     
-    console.log(`\nTotal free memory: 0x${totalFree.toString(16)} bytes`);
+    console.log("\nTotal free memory: 0x" + (freeMemory.toString(16)) + " bytes");
   }
 
   private async runTests(): Promise<void> {
     console.log('\n🧪 Running System Tests...');
     
     const tests = [
-      { name: 'Process Creation', test: () => this.testProcessCreation() },
-      { name: 'Memory Management', test: () => this.testMemoryManagement() },
-      { name: 'Error Handling', test: () => this.testErrorHandling() }
+      {
+        name: 'Process Creation',
+        test: () => this.testProcessCreation()
+      },
+      {
+        name: 'Memory Management', 
+        test: () => this.testMemoryManagement()
+      },
+      {
+        name: 'Error Handling',
+        test: () => this.testErrorHandling()
+      }
     ];
-
+    
     let passed = 0;
     
+    // Modern for-of loop with destructuring
     for (const { name, test } of tests) {
       try {
-        console.log(`  Running: ${name}...`);
-        await test();
-        console.log(`  ✅ ${name} passed`);
+        console.log("  Running: " + (name) + "...");
+        test();
+        console.log("  ✅ " + (name) + " passed");
         passed++;
       } catch (error) {
-        console.log(`  ❌ ${name} failed: ${error}`);
+        console.log("  ❌ " + name + " failed: " + error);
       }
     }
     
-    console.log(`\n📋 Test Results: ${passed}/${tests.length} passed\n`);
+    console.log("\n📋 Test Results: " + passed + "/" + tests.length + " passed\n");
   }
 
   private testProcessCreation(): void {
     const initialCount = systemManager.processCount;
-    const process = systemManager.createProcess('test-process');
+    const testProcess = systemManager.createProcess('test-process');
     
-    if (!process || systemManager.processCount !== initialCount + 1) {
+    if (!testProcess || systemManager.processCount !== initialCount + 1) {
       throw new Error('Process creation failed');
     }
     
-    if (!systemManager.terminateProcess(process.id)) {
-      throw new Error('Process termination failed');
+    if (!systemManager.terminateProcess(testProcess.id)) {
+      throw new Error('Process termination failed'); 
     }
   }
 
   private testMemoryManagement(): void {
-    const initialRegions = systemManager.memoryRegions.length;
-    // Test would verify memory allocation/deallocation
-    // Simplified for demo
-    if (initialRegions < 0) {
+    if (systemManager.memoryRegions.length < 0) {
       throw new Error('Invalid memory state');
     }
   }
 
   private testErrorHandling(): void {
-    // Test invalid operations
     if (systemManager.terminateProcess(-1)) {
       throw new Error('Should not be able to terminate invalid process');
     }
@@ -362,7 +356,7 @@ class JSOS {
     
     try {
       await systemManager.shutdown();
-      this.#isRunning = false;
+      this.isRunning = false;
       console.log('👋 System shutdown complete. Goodbye!');
     } catch (error) {
       console.error('❌ Shutdown failed:', error);
@@ -370,14 +364,14 @@ class JSOS {
   }
 }
 
-// Modern top-level await and main function
+// Modern async main function with error handling
 async function main(): Promise<void> {
   const os = new JSOS({
     debugMode: true,
     maxProcesses: 64,
     features: new Set(['typescript', 'es2022', 'duktape', 'baremetal'])
   });
-
+  
   try {
     await os.boot();
   } catch (error) {
@@ -386,9 +380,6 @@ async function main(): Promise<void> {
   }
 }
 
-// Export for module system and start if this is the main module
 export default JSOS;
 export { main };
 
-// Auto-start the OS
-main().catch(console.error);

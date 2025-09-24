@@ -24,15 +24,15 @@ interface ProcessDescriptor {
   readonly memoryUsage: number;
 }
 
-// Modern class with private fields and getters
+// Modern class simplified for ES5 compatibility 
 export class SystemManager {
-  #processes = new Map<number, ProcessDescriptor>();
-  #memoryRegions: MemoryRegion[] = [];
-  #nextProcessId = 1;
-  #systemInfo: SystemInfo;
+  private processes = new Map<number, ProcessDescriptor>();
+  private memoryRegionsInternal: MemoryRegion[] = [];
+  private nextProcessId = 1;
+  private systemInfoInternal: SystemInfo;
 
   constructor() {
-    this.#systemInfo = {
+    this.systemInfoInternal = {
       version: '1.0.0',
       buildTime: new Date(),
       features: ['modern-typescript', 'es2022', 'duktape-runtime'] as const
@@ -43,15 +43,15 @@ export class SystemManager {
 
   // Getter with modern syntax
   get systemInfo(): SystemInfo {
-    return this.#systemInfo;
+    return this.systemInfoInternal;
   }
 
   get processCount(): number {
-    return this.#processes.size;
+    return this.processes.size;
   }
 
   get memoryRegions(): ReadonlyArray<MemoryRegion> {
-    return [...this.#memoryRegions];
+    return [...this.memoryRegionsInternal];
   }
 
   // Modern async/await pattern (will be transpiled to ES5 promises)
@@ -61,7 +61,7 @@ export class SystemManager {
       await this.initializeProcessManager();
       this.logSystemBoot();
     } catch (error) {
-      this.panic(`System initialization failed: ${error}`);
+      this.panic("System initialization failed: " + (error) + "");
     }
   }
 
@@ -73,22 +73,22 @@ export class SystemManager {
       { start: 0x250000, size: 0x200000, type: 'free' }
     ];
 
-    this.#memoryRegions = detectedRegions.filter(region => region.type === 'free');
+    this.memoryRegionsInternal = detectedRegions.filter(region => region.type === 'free');
     
-    console.log(`Initialized ${this.#memoryRegions.length} memory regions`);
+    console.log("Initialized " + (this.memoryRegionsInternal.length) + " memory regions");
   }
 
   private async initializeProcessManager(): Promise<void> {
     // Create kernel process with modern object spread
     const kernelProcess: ProcessDescriptor = {
-      id: this.#nextProcessId++,
+      id: this.nextProcessId++,
       name: 'kernel',
       state: 'running',
       priority: 0,
       memoryUsage: 0x10000
     };
 
-    this.#processes.set(kernelProcess.id, kernelProcess);
+    this.processes.set(kernelProcess.id, kernelProcess);
   }
 
   // Modern method with destructuring and optional parameters
@@ -103,33 +103,33 @@ export class SystemManager {
     }
 
     const process: ProcessDescriptor = {
-      id: this.#nextProcessId++,
+      id: this.nextProcessId++,
       name,
       state: 'running',
       priority,
       memoryUsage: memorySize
     };
 
-    this.#processes.set(process.id, process);
+    this.processes.set(process.id, process);
     return process;
   }
 
   // Modern array methods and functional programming
   getProcessesByState(state: ProcessDescriptor['state']): ProcessDescriptor[] {
-    return Array.from(this.#processes.values())
+    return Array.from(this.processes.values())
       .filter(process => process.state === state)
       .sort((a, b) => a.priority - b.priority);
   }
 
   terminateProcess(processId: number): boolean {
-    const process = this.#processes.get(processId);
+    const process = this.processes.get(processId);
     if (!process || process.name === 'kernel') {
       return false;
     }
 
     // Update with modern object spread for immutability
     const terminatedProcess = { ...process, state: 'terminated' as const };
-    this.#processes.set(processId, terminatedProcess);
+    this.processes.set(processId, terminatedProcess);
     
     // Clean up memory (simplified)
     this.deallocateMemory(process.memoryUsage);
@@ -137,7 +137,7 @@ export class SystemManager {
   }
 
   private allocateMemory(size: number): boolean {
-    const availableRegion = this.#memoryRegions.find(region => 
+    const availableRegion = this.memoryRegionsInternal.find(region => 
       region.type === 'free' && region.size >= size
     );
 
@@ -146,7 +146,7 @@ export class SystemManager {
     }
 
     // Update memory region (simplified)
-    const index = this.#memoryRegions.indexOf(availableRegion);
+    const index = this.memoryRegionsInternal.indexOf(availableRegion);
     if (availableRegion.size > size) {
       // Split the region
       const newRegion: MemoryRegion = {
@@ -154,10 +154,10 @@ export class SystemManager {
         size: availableRegion.size - size,
         type: 'free'
       };
-      this.#memoryRegions[index] = newRegion;
+      this.memoryRegionsInternal[index] = newRegion;
     } else {
       // Remove the region entirely
-      this.#memoryRegions.splice(index, 1);
+      this.memoryRegionsInternal.splice(index, 1);
     }
 
     return true;
@@ -170,40 +170,37 @@ export class SystemManager {
       size,
       type: 'free'
     };
-    this.#memoryRegions.push(newRegion);
+    this.memoryRegionsInternal.push(newRegion);
   }
 
-  // Modern template literals and logging
+  // Simplified system boot logging
   private logSystemBoot(): void {
-    const { version, features } = this.#systemInfo;
-    console.log(`
-╔══════════════════════════════════════╗
-║         JSOS v${version} Booted          ║
-╠══════════════════════════════════════╣
-║ Features: ${features.join(', ')}
-║ Memory Regions: ${this.#memoryRegions.length}
-║ Initial Processes: ${this.#processes.size}
-╚══════════════════════════════════════╝
-    `);
+    var version = this.systemInfoInternal.version;
+    var features = this.systemInfoInternal.features;
+    console.log("===================================================");
+    console.log("         JSOS v" + version + " System Ready       ");
+    console.log("===================================================");
+    console.log(" Features: " + features.join(', '));
+    console.log(" Memory Regions: " + this.memoryRegionsInternal.length);
+    console.log(" Initial Processes: " + this.processes.size);
+    console.log("===================================================");
   }
 
-  // System panic with modern error handling
+  // System panic with simplified error handling
   panic(message: string): never {
-    console.error(`
-💀 KERNEL PANIC 💀
-${message}
-
-System halted.
-    `);
+    console.error("💀 KERNEL PANIC 💀");
+    console.error("" + message + "");
+    console.error("");
+    console.error("System halted.");
     
     // In a real OS, this would halt the system
     // For our JS environment, we'll throw an error
-    throw new Error(`KERNEL PANIC: ${message}`);
+    throw new Error("KERNEL PANIC: " + message);
   }
 
   // Modern iterator support
   *getAllProcesses(): Generator<ProcessDescriptor> {
-    for (const process of this.#processes.values()) {
+    for (const process of this.processes.values()) {
       yield process;
     }
   }
@@ -213,7 +210,7 @@ System halted.
     console.log('Initiating system shutdown...');
     
     // Terminate all non-kernel processes
-    const processesToTerminate = Array.from(this.#processes.values())
+    const processesToTerminate = Array.from(this.processes.values())
       .filter(p => p.name !== 'kernel')
       .map(p => p.id);
 
@@ -231,3 +228,5 @@ System halted.
 // Modern export with default
 const systemManager = new SystemManager();
 export default systemManager;
+
+
