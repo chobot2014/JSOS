@@ -1,0 +1,46 @@
+# Build artifacts
+build/
+dist/
+*.iso
+*.bin
+*.elf
+*.o
+*.obj
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+.npm
+
+# TypeScript
+*.tsbuildinfo
+
+# Generated files
+src/kernel/embedded_js.h
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Logs
+logs/
+*.log

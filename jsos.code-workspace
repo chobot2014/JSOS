@@ -1,0 +1,111 @@
+{
+  "folders": [
+    {
+      "name": "JSOS Root",
+      "path": "."
+    },
+    {
+      "name": "TypeScript OS",
+      "path": "./src/os"
+    },
+    {
+      "name": "C Kernel",
+      "path": "./src/kernel"
+    }
+  ],
+  "settings": {
+    "typescript.preferences.importModuleSpecifier": "relative",
+    "typescript.suggest.autoImports": false,
+    "files.associations": {
+      "*.s": "asm",
+      "*.ld": "linkerscript"
+    },
+    "terminal.integrated.defaultProfile.windows": "PowerShell",
+    "terminal.integrated.defaultProfile.linux": "bash"
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "JSOS: Build",
+        "type": "shell",
+        "command": "npm run build",
+        "group": {
+          "kind": "build",
+          "isDefault": true
+        },
+        "presentation": {
+          "echo": true,
+          "reveal": "always",
+          "focus": false,
+          "panel": "shared"
+        },
+        "problemMatcher": []
+      },
+      {
+        "label": "JSOS: Test",
+        "type": "shell",
+        "command": "npm run test",
+        "group": "test",
+        "presentation": {
+          "echo": true,
+          "reveal": "always",
+          "focus": false,
+          "panel": "shared"
+        },
+        "problemMatcher": []
+      },
+      {
+        "label": "JSOS: Test Interactive",
+        "type": "shell",
+        "command": "npm run test:interactive",
+        "group": "test",
+        "presentation": {
+          "echo": true,
+          "reveal": "always",
+          "focus": true,
+          "panel": "new"
+        },
+        "problemMatcher": []
+      },
+      {
+        "label": "JSOS: Clean",
+        "type": "shell",
+        "command": "npm run clean",
+        "group": "build",
+        "presentation": {
+          "echo": true,
+          "reveal": "always",
+          "focus": false,
+          "panel": "shared"
+        },
+        "problemMatcher": []
+      },
+      {
+        "label": "JSOS: Setup",
+        "type": "shell",
+        "command": "npm run setup",
+        "group": "build",
+        "presentation": {
+          "echo": true,
+          "reveal": "always",
+          "focus": true,
+          "panel": "new"
+        },
+        "problemMatcher": []
+      }
+    ]
+  },
+  "launch": {
+    "version": "0.2.0",
+    "configurations": []
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-vscode.vscode-typescript-next",
+      "ms-vscode.cpptools",
+      "ms-azuretools.vscode-docker",
+      "bradlc.vscode-tailwindcss"
+    ]
+  }
+}

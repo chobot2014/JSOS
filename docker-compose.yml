@@ -1,0 +1,30 @@
+services:
+  build:
+    image: jsos-build:latest
+    volumes:
+      - .:/host
+    working_dir: /
+    command: ["sh", "-c", "cp /jsos.iso /host/build/jsos.iso"]
+
+  test:
+    build:
+      context: .
+      dockerfile: docker/test.Dockerfile
+    volumes:
+      - ./build:/workspace/build
+    working_dir: /workspace
+    command: ["./scripts/test.sh"]
+
+  test-interactive:
+    build:
+      context: .
+      dockerfile: docker/test.Dockerfile
+    volumes:
+      - ./build:/workspace/build
+    working_dir: /workspace
+    command: ["./scripts/test-interactive.sh"]
+    stdin_open: true
+    tty: true
+
+volumes:
+  build-cache:
