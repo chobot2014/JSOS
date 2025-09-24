@@ -22,7 +22,8 @@ static const char* embedded_js_code =
 EOF
 
 # Escape the JavaScript code and append it
-sed 's/\\/\\\\/g; s/"/\\"/g; s/^/"/; s/$/\\n"/' "$BUNDLE_FILE" >> "$OUTPUT_FILE"
+# Handle Unicode escape sequences specially
+sed 's/\\u001b/\\\\u001b/g; s/\\/\\\\/g; s/"/\\"/g; s/^/"/; s/$/\\n"/' "$BUNDLE_FILE" >> "$OUTPUT_FILE"
 
 # Close the string and header
 cat >> "$OUTPUT_FILE" << 'EOF'
