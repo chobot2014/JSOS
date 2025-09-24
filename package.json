@@ -12,6 +12,8 @@
     "test": "docker-compose run --rm test",
     "test:interactive": "docker-compose run --rm test-interactive",
     "test:wsl": "wsl bash test-wsl.sh",
+    "test:windows": "powershell -ExecutionPolicy Bypass -File test-windows.ps1",
+    "install:qemu": "powershell -ExecutionPolicy Bypass -File test-windows.ps1 -Install",
     "dev": "npm run build && npm run test",
     "clean": "docker-compose down -v && npm run clean:local",
     "clean:local": "if exist build rmdir /s /q build 2>nul || rm -rf build/ 2>/dev/null || true",

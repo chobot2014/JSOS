@@ -11,12 +11,12 @@ fi
 
 # Install QEMU if not already installed
 if ! command -v qemu-system-x86_64 &> /dev/null; then
-    echo "Installing QEMU..."
+    echo "Installing QEMU with GUI support..."
     sudo apt update
     # Fix any broken dependencies first
     sudo apt --fix-broken install -y
-    # Install minimal QEMU without GUI dependencies
-    sudo apt install -y qemu-system-x86 --no-install-recommends
+    # Install QEMU with GUI support
+    sudo apt install -y qemu-system-x86 qemu-system-gui
 fi
 
 echo "Starting JSOS..."
