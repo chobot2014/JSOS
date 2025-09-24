@@ -48,10 +48,13 @@ async function bundleWithBabelAndEsbuild() {
         filename: tsFile,
         presets: [
           ['@babel/preset-env', {
-            targets: 'defaults',
+            targets: {
+              ie: '11'
+            },
             modules: false, // Keep ES modules for esbuild to handle
             loose: true,
-            forceAllTransforms: true
+            forceAllTransforms: true,
+            exclude: ['transform-regenerator']
           }],
           '@babel/preset-typescript'
         ],
@@ -60,7 +63,14 @@ async function bundleWithBabelAndEsbuild() {
           '@babel/plugin-transform-private-methods',
           '@babel/plugin-transform-private-property-in-object',
           '@babel/plugin-transform-nullish-coalescing-operator',
-          '@babel/plugin-transform-optional-chaining'
+          '@babel/plugin-transform-optional-chaining',
+          '@babel/plugin-transform-arrow-functions',
+          '@babel/plugin-transform-block-scoping',
+          '@babel/plugin-transform-destructuring',
+          '@babel/plugin-transform-spread',
+          '@babel/plugin-transform-parameters',
+          '@babel/plugin-transform-template-literals',
+          '@babel/plugin-transform-shorthand-properties'
         ]
       });
 
@@ -89,12 +99,29 @@ async function bundleWithBabelAndEsbuild() {
 (function() {
   'use strict';
   
-  var global = (function() {
-    if (typeof global !== 'undefined') return global;
-    if (typeof window !== 'undefined') return window;
-    if (typeof self !== 'undefined') return self;
-    return this || {};
-  })();
+  // Global object is already set up by C code to prevent module conflicts
+  // Just ensure we have a reference to it
+  var global = (typeof globalThis !== 'undefined' && globalThis) ||
+               (typeof global !== 'undefined' && global) ||
+               (typeof window !== 'undefined' && window) ||
+               (typeof self !== 'undefined' && self) ||
+               this || {};
+  
+  // Ensure global is properly set
+  if (typeof globalThis === 'undefined') {
+    global.globalThis = global;
+  }
+  
+  // Ensure global is properly set
+  if (typeof globalThis === 'undefined') {
+    global.globalThis = global;
+  }
+  if (typeof window === 'undefined') {
+    global.window = global;
+  }
+  if (typeof self === 'undefined') {
+    global.self = global;
+  }
 
   // Console polyfill for kernel integration
   if (typeof global.console === 'undefined') {
@@ -399,6 +426,173 @@ async function bundleWithBabelAndEsbuild() {
     global.Symbol.iterator = 'Symbol(iterator)';
   }
   
+  // Additional IE11-level polyfills
+  
+  // Array.isArray polyfill
+  if (typeof Array.isArray === 'undefined') {
+    Array.isArray = function(arg) {
+      return Object.prototype.toString.call(arg) === '[object Array]';
+    };
+  }
+  
+  // Object.keys polyfill
+  if (typeof Object.keys === 'undefined') {
+    Object.keys = function(obj) {
+      var keys = [];
+      for (var key in obj) {
+        if (obj.hasOwnProperty(key)) {
+          keys.push(key);
+        }
+      }
+      return keys;
+    };
+  }
+  
+  // Object.create polyfill
+  if (typeof Object.create === 'undefined') {
+    Object.create = function(proto, propertiesObject) {
+      if (typeof proto !== 'object' && typeof proto !== 'function') {
+        throw new TypeError('Object prototype may only be an Object or null');
+      }
+      function F() {}
+      F.prototype = proto;
+      var obj = new F();
+      if (propertiesObject !== undefined) {
+        Object.defineProperties(obj, propertiesObject);
+      }
+      return obj;
+    };
+  }
+  
+  // Function.prototype.bind polyfill
+  if (typeof Function.prototype.bind === 'undefined') {
+    Function.prototype.bind = function(oThis) {
+      if (typeof this !== 'function') {
+        throw new TypeError('Function.prototype.bind - what is trying to be bound is not callable');
+      }
+      var aArgs = Array.prototype.slice.call(arguments, 1);
+      var fToBind = this;
+      var fNOP = function() {};
+      var fBound = function() {
+        return fToBind.apply(this instanceof fNOP && oThis ? this : oThis,
+                             aArgs.concat(Array.prototype.slice.call(arguments)));
+      };
+      fNOP.prototype = this.prototype;
+      fBound.prototype = new fNOP();
+      return fBound;
+    };
+  }
+  
+  // String.prototype.trim polyfill
+  if (typeof String.prototype.trim === 'undefined') {
+    String.prototype.trim = function() {
+      return this.replace(/^[\s\uFEFF\xA0]+|[\s\uFEFF\xA0]+$/g, '');
+    };
+  }
+  
+  // Array.prototype.indexOf polyfill
+  if (typeof Array.prototype.indexOf === 'undefined') {
+    Array.prototype.indexOf = function(searchElement, fromIndex) {
+      var k;
+      if (this == null) {
+        throw new TypeError('"this" is null or not defined');
+      }
+      var o = Object(this);
+      var len = o.length >>> 0;
+      if (len === 0) {
+        return -1;
+      }
+      var n = fromIndex | 0;
+      if (n >= len) {
+        return -1;
+      }
+      k = Math.max(n >= 0 ? n : len - Math.abs(n), 0);
+      while (k < len) {
+        if (k in o && o[k] === searchElement) {
+          return k;
+        }
+        k++;
+      }
+      return -1;
+    };
+  }
+  
+  // Array.prototype.forEach polyfill
+  if (typeof Array.prototype.forEach === 'undefined') {
+    Array.prototype.forEach = function(callback, thisArg) {
+      if (this == null) {
+        throw new TypeError('this is null or not defined');
+      }
+      if (typeof callback !== 'function') {
+        throw new TypeError(callback + ' is not a function');
+      }
+      var O = Object(this);
+      var len = O.length >>> 0;
+      var k = 0;
+      while (k < len) {
+        if (k in O) {
+          callback.call(thisArg, O[k], k, O);
+        }
+        k++;
+      }
+    };
+  }
+  
+  // Array.prototype.filter polyfill
+  if (typeof Array.prototype.filter === 'undefined') {
+    Array.prototype.filter = function(fun) {
+      if (this === void 0 || this === null) {
+        throw new TypeError();
+      }
+      var t = Object(this);
+      var len = t.length >>> 0;
+      if (typeof fun !== 'function') {
+        throw new TypeError();
+      }
+      var res = [];
+      var thisArg = arguments.length >= 2 ? arguments[1] : void 0;
+      for (var i = 0; i < len; i++) {
+        if (i in t) {
+          var val = t[i];
+          if (fun.call(thisArg, val, i, t)) {
+            res.push(val);
+          }
+        }
+      }
+      return res;
+    };
+  }
+  
+  // Array.prototype.map polyfill
+  if (typeof Array.prototype.map === 'undefined') {
+    Array.prototype.map = function(callback, thisArg) {
+      var T, A, k;
+      if (this == null) {
+        throw new TypeError('this is null or not defined');
+      }
+      var O = Object(this);
+      var len = O.length >>> 0;
+      if (typeof callback !== 'function') {
+        throw new TypeError(callback + ' is not a function');
+      }
+      if (arguments.length > 1) {
+        T = thisArg;
+      }
+      A = new Array(len);
+      k = 0;
+      while (k < len) {
+        var kValue, mappedValue;
+        if (k in O) {
+          kValue = O[k];
+          mappedValue = callback.call(T, kValue, k, O);
+          A[k] = mappedValue;
+        }
+        k++;
+      }
+      return A;
+    };
+  }
+  
 })();
   
 })();
@@ -412,7 +606,6 @@ async function bundleWithBabelAndEsbuild() {
       format: 'iife',
       target: 'es2015', // Use ES2015 as intermediate, then post-process
       platform: 'neutral',
-      globalName: 'JSOS',
       minify: false,
       sourcemap: false,
       banner: {
@@ -423,17 +616,7 @@ async function bundleWithBabelAndEsbuild() {
 // Start the operating system
 (function() {
   try {
-    if (typeof JSOS !== 'undefined' && typeof JSOS.main === 'function') {
-      console.log('Starting JSOS...');
-      var result = JSOS.main();
-      if (result && typeof result.then === 'function') {
-        result.then(function() {
-          console.log('JSOS started successfully');
-        }).catch(function(error) {
-          console.error('Fatal error:', error);
-        });
-      }
-    } else if (typeof main === 'function') {
+    if (typeof main === 'function') {
       console.log('Starting with global main...');
       var result = main();
       if (result && typeof result.then === 'function') {

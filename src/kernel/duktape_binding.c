@@ -87,6 +87,16 @@ int duktape_initialize(void) {
     // Set as global 'kernel' object
     duk_put_global_string(ctx, "kernel");
     
+    // Prevent module system conflicts by explicitly setting global properties to undefined
+    duk_push_undefined(ctx);
+    duk_put_global_string(ctx, "require");
+    duk_push_undefined(ctx);
+    duk_put_global_string(ctx, "exports");
+    duk_push_undefined(ctx);
+    duk_put_global_string(ctx, "module");
+    duk_push_undefined(ctx);
+    duk_put_global_string(ctx, "define");
+    
     // Add basic Date.now() support
     duk_eval_string(ctx, 
         "Date = { now: function() { return 0; } };"  // Simplified for demo
