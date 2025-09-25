@@ -117,17 +117,18 @@ class JSOS {
       {
         name: 'run',
         description: 'Create and run a new process',
-        handler: (...args: string[]) => {
-          const name = args[0] || 'unnamed';
-          const priority = parseInt(args[1] || '10');
+        handler: function() {
+          const name = (arguments.length > 0 ? arguments[0] : undefined) || 'unnamed';
+          const priority = parseInt((arguments.length > 1 ? arguments[1] : undefined) || '10');
           this.createProcess(name, priority);
         }
       },
       {
         name: 'kill',
         description: 'Terminate a process by ID',
-        handler: (...args: string[]) => {
-          this.killProcess(parseInt(args[0] || '0'));
+        handler: function() {
+          const id = arguments.length > 0 ? arguments[0] : '0';
+          this.killProcess(parseInt(id));
         }
       },
       {
@@ -153,8 +154,9 @@ class JSOS {
       {
         name: 'screenshot',
         description: 'Capture comprehensive system state snapshot',
-        handler: (...args: string[]) => {
-          this.takeScreenshot(args[0]);
+        handler: function() {
+          const format = arguments.length > 0 ? arguments[0] : undefined;
+          this.takeScreenshot(format);
         }
       }
     ];

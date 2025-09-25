@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "JavaScript Operating System - TypeScript to bare metal",
   "scripts": {
-    "info": "echo \"JSOS - JavaScript Operating System\" && echo \"====================================\" && echo \"\" && echo \"Available commands:\" && echo \"  npm run build           - Build the OS ISO\" && echo \"  npm run test            - Test in QEMU (automated)\" && echo \"  npm run test:interactive - Test in QEMU (interactive)\" && echo \"  npm run dev             - Build and test (development)\" && echo \"  npm run clean           - Clean build artifacts\" && echo \"  npm run docker:build    - Build Docker images\" && echo \"\" && echo \"Requirements: Docker and npm\"",
+    "info": "echo \"JSOS - JavaScript Operating System\" && echo \"====================================\" && echo \"\" && echo \"Available commands:\" && echo \"  npm run build           - Build the OS ISO\" && echo \"  npm run test            - Test in QEMU (automated)\" && echo \"  npm run test:automated  - Test in QEMU (headless, with output capture)\" && echo \"  npm run test:interactive - Test in QEMU (interactive)\" && echo \"  npm run dev             - Build and test (development)\" && echo \"  npm run clean           - Clean build artifacts\" && echo \"  npm run docker:build    - Build Docker images\" && echo \"\" && echo \"Requirements: Docker and npm\"",
     "build": "docker build -f docker/build.Dockerfile -t jsos-build . && docker create --name temp-jsos jsos-build /bin/true && docker cp temp-jsos:/jsos.iso build/jsos.iso && docker rm temp-jsos",
     "build:local": "npm run build:ts && npm run embed:js && echo \"TypeScript build complete\"",
     "build:ts": "npm run bundle",
@@ -14,6 +14,7 @@
     "bundle:legacy": "npm run transpile && node scripts/bundle-es5.js",
     "test": "docker-compose run --rm test",
     "test:interactive": "docker-compose run --rm test-interactive",
+    "test:automated": "powershell -ExecutionPolicy Bypass -File test-windows.ps1 -Automated",
     "test:wsl": "wsl bash test-wsl.sh",
     "test:windows": "powershell -ExecutionPolicy Bypass -File test-windows.ps1",
     "install:qemu": "powershell -ExecutionPolicy Bypass -File test-windows.ps1 -Install",
