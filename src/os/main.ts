@@ -117,14 +117,18 @@ class JSOS {
       {
         name: 'run',
         description: 'Create and run a new process',
-        handler: (name: string = 'unnamed', priority: string = '10') => {
-          return this.createProcess(name, parseInt(priority));
+        handler: (...args: string[]) => {
+          const name = args[0] || 'unnamed';
+          const priority = parseInt(args[1] || '10');
+          this.createProcess(name, priority);
         }
       },
       {
         name: 'kill',
         description: 'Terminate a process by ID',
-        handler: (id: string) => this.killProcess(parseInt(id))
+        handler: (...args: string[]) => {
+          this.killProcess(parseInt(args[0] || '0'));
+        }
       },
       {
         name: 'memory',
@@ -145,6 +149,13 @@ class JSOS {
         name: 'test',
         description: 'Run system tests',
         handler: () => this.runTests()
+      },
+      {
+        name: 'screenshot',
+        description: 'Capture comprehensive system state snapshot',
+        handler: (...args: string[]) => {
+          this.takeScreenshot(args[0]);
+        }
       }
     ];
 
@@ -349,6 +360,109 @@ class JSOS {
     if (systemManager.terminateProcess(-1)) {
       throw new Error('Should not be able to terminate invalid process');
     }
+  }
+
+  private takeScreenshot(format?: string): void {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const screenshotId = 'screenshot_' + timestamp;
+
+    console.log('\n📸 Taking System Screenshot...');
+    console.log('═'.repeat(60));
+    console.log('🖼️  JSOS System Snapshot - ' + timestamp);
+    console.log('═'.repeat(60));
+
+    // System Overview
+    console.log('\n🏗️  SYSTEM OVERVIEW');
+    console.log('─'.repeat(40));
+    const status = this.status;
+    const sysInfo = systemManager.systemInfo;
+    console.log('Status:      ' + (status.running ? '🟢 RUNNING' : '🔴 STOPPED'));
+    console.log('Uptime:      ' + Math.floor(status.uptime / 1000) + 's');
+    console.log('Version:     ' + sysInfo.version);
+    console.log('Build Time:  ' + sysInfo.buildTime.toISOString());
+    console.log('Features:    ' + status.features.join(', '));
+
+    // Process Snapshot
+    console.log('\n🔄 PROCESS SNAPSHOT');
+    console.log('─'.repeat(40));
+    console.log('ID'.padEnd(4) + 'Name'.padEnd(20) + 'State'.padEnd(12) + 'Priority'.padEnd(10) + 'Memory');
+    console.log('─'.repeat(60));
+
+    const processes = Array.from(systemManager.getAllProcesses());
+    if (processes.length === 0) {
+      console.log('(no active processes)');
+    } else {
+      for (const process of processes) {
+        const stateIcon = {
+          'running': '🟢',
+          'waiting': '🟡',
+          'terminated': '🔴'
+        }[process.state];
+
+        console.log(
+          process.id.toString().padEnd(4) +
+          process.name.padEnd(20) +
+          (stateIcon + ' ' + process.state).padEnd(12) +
+          process.priority.toString().padEnd(10) +
+          process.memoryUsage + ' bytes'
+        );
+      }
+    }
+
+    // Memory Layout
+    console.log('\n🧠 MEMORY LAYOUT');
+    console.log('─'.repeat(40));
+    console.log('Start'.padEnd(12) + 'Size'.padEnd(12) + 'Type'.padEnd(10) + 'Usage');
+    console.log('─'.repeat(50));
+
+    const regions = systemManager.memoryRegions;
+    let totalMemory = 0;
+    let usedMemory = 0;
+
+    for (const region of regions) {
+      const start = '0x' + region.start.toString(16).padStart(8, '0');
+      const size = '0x' + region.size.toString(16).padStart(8, '0');
+      const icon = region.type === 'free' ? '🟢' : region.type === 'used' ? '🟡' : '🔵';
+      const usage = region.type === 'used' ? 'allocated' : region.type === 'reserved' ? 'system' : 'available';
+
+      console.log(start.padEnd(12) + size.padEnd(12) + (icon + ' ' + region.type).padEnd(10) + usage);
+
+      totalMemory += region.size;
+      if (region.type === 'used') {
+        usedMemory += region.size;
+      }
+    }
+
+    // Memory Statistics
+    const freeMemory = totalMemory - usedMemory;
+    const usagePercent = totalMemory > 0 ? Math.round((usedMemory / totalMemory) * 100) : 0;
+
+    console.log('\n📊 MEMORY STATISTICS');
+    console.log('─'.repeat(40));
+    console.log('Total Memory:  0x' + totalMemory.toString(16) + ' bytes');
+    console.log('Used Memory:   0x' + usedMemory.toString(16) + ' bytes');
+    console.log('Free Memory:   0x' + freeMemory.toString(16) + ' bytes');
+    console.log('Usage:         ' + usagePercent + '%');
+
+    // Performance Metrics
+    console.log('\n⚡ PERFORMANCE METRICS');
+    console.log('─'.repeat(40));
+    console.log('Active Processes:    ' + status.processCount);
+    console.log('System Load:         ' + (status.processCount > 10 ? 'High' : status.processCount > 5 ? 'Medium' : 'Low'));
+    console.log('Memory Pressure:     ' + (usagePercent > 80 ? 'High' : usagePercent > 50 ? 'Medium' : 'Low'));
+
+    // Screenshot Metadata
+    console.log('\n📋 SCREENSHOT METADATA');
+    console.log('─'.repeat(40));
+    console.log('ID:           ' + screenshotId);
+    console.log('Timestamp:    ' + timestamp);
+    console.log('Format:       ' + (format || 'console'));
+    console.log('Captured by:  JSOS v' + sysInfo.version);
+
+    console.log('\n═'.repeat(60));
+    console.log('✅ Screenshot captured successfully!');
+    console.log('💾 Use "screenshot <format>" for different output formats');
+    console.log('═'.repeat(60));
   }
 
   private async shutdown(): Promise<void> {
