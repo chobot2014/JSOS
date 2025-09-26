@@ -12,7 +12,7 @@ const TEMP_DIR = path.join(BUILD_DIR, 'temp');
 const OUTPUT_FILE = path.join(BUILD_DIR, 'bundle.js');
 
 async function bundleWithBabelAndEsbuild() {
-  console.log('🔨 Bundling TypeScript with Babel + esbuild for Duktape...');
+  console.log('Bundling TypeScript with Babel + esbuild for Duktape...');
   
   // Ensure directories exist
   if (!fs.existsSync(BUILD_DIR)) {
@@ -26,7 +26,7 @@ async function bundleWithBabelAndEsbuild() {
   const tsFiles = fs.readdirSync(SRC_DIR).filter(file => file.endsWith('.ts'));
   
   if (tsFiles.length === 0) {
-    console.error('❌ No TypeScript files found in src/os directory');
+    console.error('No TypeScript files found in src/os directory');
     process.exit(1);
   }
 
@@ -94,14 +94,14 @@ async function bundleWithBabelAndEsbuild() {
       transformedFiles.push(outputPath);
     }
 
-    console.log('✅ TypeScript to JavaScript transformation complete');
+    console.log('TypeScript to JavaScript transformation complete');
 
     // Step 2: Bundle with esbuild
     console.log('   Bundling with esbuild...');
 
     const mainFile = path.join(TEMP_DIR, 'main.js');
     if (!fs.existsSync(mainFile)) {
-      console.error('❌ main.js not found after transformation');
+      console.error('main.js not found after transformation');
       process.exit(1);
     }
 
@@ -1521,13 +1521,13 @@ async function bundleWithBabelAndEsbuild() {
     });
 
     if (result.errors.length > 0) {
-      console.error('❌ esbuild errors:');
+      console.error('esbuild errors:');
       result.errors.forEach(error => console.error(error));
       process.exit(1);
     }
 
     if (result.warnings.length > 0) {
-      console.warn('⚠️ esbuild warnings:');
+      console.warn('esbuild warnings:');
       result.warnings.forEach(warning => console.warn(warning));
     }
 
@@ -1545,18 +1545,18 @@ async function bundleWithBabelAndEsbuild() {
     fs.unlinkSync(OUTPUT_FILE + '.temp');
     fs.rmSync(TEMP_DIR, { recursive: true, force: true });
 
-    console.log('✅ Successfully bundled with Babel + esbuild!');
+    console.log('Successfully bundled with Babel + esbuild!');
     console.log(`   Output: ${OUTPUT_FILE}`);
     console.log(`   Size:   ${Math.round(bundledCode.length / 1024 * 100) / 100}KB`);
 
   } catch (error) {
-    console.error('❌ Bundling failed:', error);
+    console.error('Bundling failed:', error);
     process.exit(1);
   }
 }
 
 // Run the bundler
 bundleWithBabelAndEsbuild().catch(error => {
-  console.error('❌ Bundling failed:', error);
+  console.error('Bundling failed:', error);
   process.exit(1);
 });

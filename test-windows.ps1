@@ -1,4 +1,4 @@
-# Test JSOS with QEMU on Windows
+﻿# Test JSOS with QEMU on Windows
 param(
     [switch]$Install,
     [switch]$Automated,
@@ -40,7 +40,7 @@ if (-not $qemuExe -or $Install) {
     Write-Host "Please install QEMU for Windows from: https://www.qemu.org/download/#windows" -ForegroundColor Yellow
     Write-Host "Or use Chocolatey: choco install qemu" -ForegroundColor Yellow
     Write-Host "Or use winget: winget install qemu.qemu" -ForegroundColor Yellow
-
+    
     if ($Install) {
         # Try to install with winget
         Write-Host "Attempting to install QEMU with winget..." -ForegroundColor Yellow
@@ -65,13 +65,11 @@ if (-not (Test-Path $testDir)) {
 
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $logFile = "$testDir\test_$timestamp.log"
-$screenshotFile = "$testDir\screenshot_$timestamp.ppm"
 
 if ($Automated) {
     Write-Host "Running automated test..." -ForegroundColor Green
     Write-Host "Timeout: $Timeout seconds" -ForegroundColor Yellow
     Write-Host "Log file: $logFile" -ForegroundColor Yellow
-    Write-Host "Screenshot: $screenshotFile" -ForegroundColor Yellow
     Write-Host "==================" -ForegroundColor Green
 
     # Run QEMU in automated mode
@@ -79,99 +77,45 @@ if ($Automated) {
         "-cdrom", "build/jsos.iso",
         "-m", "512M",
         "-no-reboot",
-        "-nographic",
-        "-monitor", "telnet:127.0.0.1:4444,server,nowait"
+        "-nographic"
     )
 
     Write-Host "Starting QEMU..." -ForegroundColor Yellow
-    $qemuProcess = Start-Process -FilePath $qemuExe -ArgumentList $qemuArgs -NoNewWindow -PassThru
-
-    # Wait for QEMU to start
-    Start-Sleep -Seconds 3
-
-    # Try to connect to monitor and check status
-    try {
-        $tcpClient = New-Object System.Net.Sockets.TcpClient
-        $tcpClient.Connect("127.0.0.1", 4444)
-        $stream = $tcpClient.GetStream()
-        $reader = New-Object System.IO.StreamReader $stream
-        $writer = New-Object System.IO.StreamWriter $stream
-
-        # Send info command to check if QEMU is responsive
-        $writer.WriteLine("info status")
-        $writer.Flush()
-        Start-Sleep -Milliseconds 500
-
-        $response = $reader.ReadLine()
-        Write-Host "QEMU Monitor Response: $response" -ForegroundColor Cyan
-
-        $tcpClient.Close()
-    } catch {
-        Write-Host "Could not connect to QEMU monitor: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
+    $qemuProcess = Start-Process -FilePath $qemuExe -ArgumentList $qemuArgs -NoNewWindow -PassThru -RedirectStandardOutput $logFile -RedirectStandardError ($logFile + ".err")
 
     # Wait for timeout
-    $timeoutReached = $false
     $startTime = Get-Date
     while (-not $qemuProcess.HasExited -and ((Get-Date) - $startTime).TotalSeconds -lt $Timeout) {
         Start-Sleep -Milliseconds 500
     }
 
     if (-not $qemuProcess.HasExited) {
-        $timeoutReached = $true
-        Write-Host "Timeout reached, terminating QEMU..." -ForegroundColor Yellow
-        $qemuProcess.Kill()
-        $qemuProcess.WaitForExit()
-    }
-        Start-Sleep -Milliseconds 500
-    }
-
-    if (-not $qemuProcess.HasExited) {
-        $timeoutReached = $true
         Write-Host "Timeout reached, terminating QEMU..." -ForegroundColor Yellow
         $qemuProcess.Kill()
         $qemuProcess.WaitForExit()
     }
 
-    # Analyze the log output
-    Write-Host "`nAnalyzing test results..." -ForegroundColor Green
-    Write-Host "==================" -ForegroundColor Green
-
+    # Analyze results
+    Write-Host "
+Analyzing test results..." -ForegroundColor Green
     if (Test-Path $logFile) {
         $logContent = Get-Content $logFile -Raw
-
-        # Check for boot success
         $bootSuccess = $logContent -match "System boot complete"
         $jsErrors = $logContent -match "SyntaxError|parse error|empty expression"
-        $panicErrors = $logContent -match "panic|fatal error"
-
+        
         Write-Host "Boot Status: $(if ($bootSuccess) { 'SUCCESS' } else { 'FAILED' })" -ForegroundColor $(if ($bootSuccess) { 'Green' } else { 'Red' })
         Write-Host "JavaScript Errors: $(if ($jsErrors) { 'FOUND' } else { 'NONE' })" -ForegroundColor $(if ($jsErrors) { 'Red' } else { 'Green' })
-        Write-Host "System Panics: $(if ($panicErrors) { 'FOUND' } else { 'NONE' })" -ForegroundColor $(if ($panicErrors) { 'Red' } else { 'Green' })
-
+        
         if ($jsErrors) {
-            Write-Host "`nJavaScript Errors Found:" -ForegroundColor Red
-            $errorLines = ($logContent -split "`n") | Where-Object { $_ -match "SyntaxError|parse error|empty expression" }
-            $errorLines | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+            Write-Host "
+JavaScript Errors:" -ForegroundColor Red
+            ($logContent -split "
+") | Where-Object { $_ -match "SyntaxError|parse error|empty expression" } | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
         }
-
-        if ($panicErrors) {
-            Write-Host "`nSystem Panics Found:" -ForegroundColor Red
-            $panicLines = ($logContent -split "`n") | Where-Object { $_ -match "panic|fatal error" }
-            $panicLines | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
-        }
-
-        # Show last 20 lines of log
-        Write-Host "`nLast 20 lines of log:" -ForegroundColor Yellow
-        $lines = $logContent -split "`n"
-        $lastLines = $lines | Select-Object -Last 20
-        $lastLines | ForEach-Object { Write-Host "  $_" }
-
-    } else {
-        Write-Host "No log file generated!" -ForegroundColor Red
     }
-
-    Write-Host "`nTest completed. Full log saved to: $logFile" -ForegroundColor Green
+    
+    Write-Host "
+Test completed. Log saved to: $logFile" -ForegroundColor Green
 
 } else {
     Write-Host "Starting JSOS in QEMU..." -ForegroundColor Green
@@ -181,8 +125,5 @@ if ($Automated) {
 
     # Run QEMU with our ISO in a graphical window
     Write-Host "Using QEMU at: $qemuExe" -ForegroundColor Green
-    & $qemuExe `
-        -cdrom "build/jsos.iso" `
-        -m 512M `
-        -no-reboot
+    & $qemuExe -cdrom "build/jsos.iso" -m 512M -no-reboot
 }
