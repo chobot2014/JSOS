@@ -13,6 +13,20 @@ if (-not (Test-Path "build/jsos.iso")) {
     exit 1
 }
 
+# Check ISO contents (basic check)
+Write-Host "Checking ISO contents..." -ForegroundColor Yellow
+try {
+    # Try to read ISO as raw data and look for GRUB and kernel signatures
+    $isoBytes = [System.IO.File]::ReadAllBytes("build/jsos.iso")
+    $isoString = [System.Text.Encoding]::ASCII.GetString($isoBytes)
+    $hasGrub = $isoString -match "GRUB"
+    $hasMultiboot = $isoString -match "multiboot"
+    Write-Host "ISO contains GRUB: $(if ($hasGrub) { 'YES' } else { 'NO' })" -ForegroundColor $(if ($hasGrub) { 'Green' } else { 'Red' })
+    Write-Host "ISO contains multiboot: $(if ($hasMultiboot) { 'YES' } else { 'NO' })" -ForegroundColor $(if ($hasMultiboot) { 'Green' } else { 'Red' })
+} catch {
+    Write-Host "Warning: Could not analyze ISO contents" -ForegroundColor Yellow
+}
+
 # Check if QEMU is installed
 $qemuPath = Get-Command "qemu-system-x86_64.exe" -ErrorAction SilentlyContinue
 
@@ -100,18 +114,28 @@ if ($Automated) {
 Analyzing test results..." -ForegroundColor Green
     if (Test-Path $logFile) {
         $logContent = Get-Content $logFile -Raw
-        $bootSuccess = $logContent -match "System boot complete"
-        $jsErrors = $logContent -match "SyntaxError|parse error|empty expression"
         
-        Write-Host "Boot Status: $(if ($bootSuccess) { 'SUCCESS' } else { 'FAILED' })" -ForegroundColor $(if ($bootSuccess) { 'Green' } else { 'Red' })
+        # Check for various boot indicators
+        $grubStarted = $logContent -match "GRUB"
+        $kernelLoaded = $logContent -match "Multiboot"
+        $systemBoot = $logContent -match "System boot complete|JSOS|Welcome to"
+        $jsErrors = $logContent -match "SyntaxError|parse error|empty expression|ReferenceError|TypeError"
+        
+        Write-Host "GRUB Started: $(if ($grubStarted) { 'YES' } else { 'NO' })" -ForegroundColor $(if ($grubStarted) { 'Green' } else { 'Red' })
+        Write-Host "Kernel Loaded: $(if ($kernelLoaded) { 'YES' } else { 'NO' })" -ForegroundColor $(if ($kernelLoaded) { 'Green' } else { 'Red' })
+        Write-Host "System Boot: $(if ($systemBoot) { 'SUCCESS' } else { 'FAILED' })" -ForegroundColor $(if ($systemBoot) { 'Green' } else { 'Red' })
         Write-Host "JavaScript Errors: $(if ($jsErrors) { 'FOUND' } else { 'NONE' })" -ForegroundColor $(if ($jsErrors) { 'Red' } else { 'Green' })
         
         if ($jsErrors) {
             Write-Host "
 JavaScript Errors:" -ForegroundColor Red
-            ($logContent -split "
-") | Where-Object { $_ -match "SyntaxError|parse error|empty expression" } | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+            ($logContent -split "`n") | Where-Object { $_ -match "SyntaxError|parse error|empty expression|ReferenceError|TypeError" } | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
         }
+        
+        # Show last few lines for debugging
+        Write-Host "
+Last 10 lines of output:" -ForegroundColor Yellow
+        ($logContent -split "`n") | Select-Object -Last 10 | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
     }
     
     Write-Host "

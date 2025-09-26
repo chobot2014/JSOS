@@ -21,6 +21,7 @@ int main(void) {
     memory_initialize();
     
     terminal_writestring("JSOS Kernel Starting...\n");
+    terminal_writestring("Multiboot kernel loaded successfully!\n");
     terminal_writestring("Initializing JavaScript Runtime...\n");
     
     /* Initialize and run JavaScript */

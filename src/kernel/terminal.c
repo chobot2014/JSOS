@@ -1,6 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* IO port functions */
+static inline void outb(uint16_t port, uint8_t val) {
+    __asm__ volatile ( "outb %0, %1" : : "a"(val), "Nd"(port) );
+}
+
 /* Hardware text mode color constants. */
 enum vga_color {
     VGA_COLOR_BLACK = 0,
@@ -67,6 +72,9 @@ void terminal_putentryat(char c, uint8_t color, size_t x, size_t y) {
 }
 
 void terminal_putchar(char c) {
+    // Also write to serial port for QEMU logging
+    outb(0x3F8, c);
+    
     if (c == '\n') {
         terminal_column = 0;
         if (++terminal_row == VGA_HEIGHT) {

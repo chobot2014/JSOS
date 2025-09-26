@@ -1113,7 +1113,7 @@ async function bundleWithBabelAndEsbuild() {
     if (typeof String.prototype.repeat === 'undefined') {
       String.prototype.repeat = function(count) {
         if (this == null) {
-          throw new TypeError('can\'t convert ' + this + ' to object');
+          throw new TypeError('can\\'t convert ' + this + ' to object');
         }
         var str = '' + this;
         count = +count;
