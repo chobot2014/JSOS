@@ -28,7 +28,6 @@
     "start": "npm run info"
   },
   "devDependencies": {
-    "@babel/core": "^7.25.0",
     "@babel/plugin-transform-class-properties": "^7.25.0",
     "@babel/plugin-transform-nullish-coalescing-operator": "^7.25.0",
     "@babel/plugin-transform-optional-chaining": "^7.25.0",
@@ -51,5 +50,10 @@
     "javascript"
   ],
   "author": "JSOS Developer",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@babel/core": "^7.28.4",
+    "@babel/generator": "^7.28.3",
+    "@babel/traverse": "^7.28.4"
+  }
 }
