@@ -54,12 +54,12 @@ RUN cd build-gcc && \
 # Clean up
 RUN rm -rf /tmp/*
 
-# Download and build Duktape with minimal configuration
+# Download QuickJS source
 WORKDIR /opt
-RUN wget https://duktape.org/duktape-2.7.0.tar.xz \
-    && tar xf duktape-2.7.0.tar.xz \
-    && mv duktape-2.7.0 duktape \
-    && rm duktape-2.7.0.tar.xz
+RUN wget https://bellard.org/quickjs/quickjs-2025-09-13-2.tar.xz \
+    && tar xf quickjs-2025-09-13-2.tar.xz \
+    && mv quickjs-2025-09-13-2 quickjs \
+    && rm quickjs-2025-09-13-2.tar.xz
 
 # Set up working directory for our project
 WORKDIR /workspace
