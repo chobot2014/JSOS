@@ -283,6 +283,55 @@ static JSValue js_kernel_outb(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* --- Scrollback view --- */
+
+static JSValue js_kernel_scroll_view_up(JSContext *ctx, JSValueConst this_val,
+                                        int argc, JSValueConst *argv)
+{
+    int32_t n = 20;
+    if (argc > 0) JS_ToInt32(ctx, &n, argv[0]);
+    terminal_scroll_view_up(n);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_kernel_scroll_view_down(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv)
+{
+    int32_t n = 20;
+    if (argc > 0) JS_ToInt32(ctx, &n, argv[0]);
+    terminal_scroll_view_down(n);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_kernel_resume_live(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    terminal_resume_live();
+    return JS_UNDEFINED;
+}
+
+static JSValue js_kernel_get_view_offset(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv)
+{
+    return JS_NewInt32(ctx, terminal_get_view_offset());
+}
+
+/* drawRow(row, text, colorByte)
+ * Writes exactly 80 chars to VGA row without any cursor/scroll side-effects.
+ * colorByte = (bg << 4) | fg  (use bg 0-7 to avoid blink).
+ */
+static JSValue js_kernel_draw_row(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    int32_t row = 0, color = 0x07;
+    JS_ToInt32(ctx, &row, argv[0]);
+    const char *text = JS_ToCString(ctx, argv[1]);
+    if (argc > 2) JS_ToInt32(ctx, &color, argv[2]);
+    terminal_drawrow(row, text, (uint8_t)color);
+    if (text) JS_FreeCString(ctx, text);
+    return JS_UNDEFINED;
+}
+
 /* ============================================================
  * Function list for kernel object
  * ============================================================ */
@@ -318,8 +367,12 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("eval", 1, js_kernel_eval),
     /* Port I/O */
     JS_CFUNC_DEF("inb", 1, js_kernel_inb),
-    JS_CFUNC_DEF("outb", 2, js_kernel_outb),
-};
+    JS_CFUNC_DEF("outb", 2, js_kernel_outb),    /* Scrollback view */
+    JS_CFUNC_DEF("scrollUp",      1, js_kernel_scroll_view_up),
+    JS_CFUNC_DEF("scrollDown",    1, js_kernel_scroll_view_down),
+    JS_CFUNC_DEF("resumeLive",    0, js_kernel_resume_live),
+    JS_CFUNC_DEF("getViewOffset", 0, js_kernel_get_view_offset),
+    JS_CFUNC_DEF("drawRow",       3, js_kernel_draw_row),};
 
 /* ============================================================
  * Initialization

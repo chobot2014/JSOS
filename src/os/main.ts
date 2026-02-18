@@ -12,6 +12,7 @@ import { Color } from './kernel.js';
 import { startRepl } from './repl.js';
 import fs from './filesystem.js';
 import systemManager from './system.js';
+import { openEditor } from './editor.js';
 
 declare var kernel: import('./kernel.js').KernelAPI;
 
@@ -321,6 +322,9 @@ function setupGlobals(): void {
   g.halt   = function() { kernel.halt(); };
   g.reboot = function() { kernel.reboot(); };
 
+  // ── Text editor ──────────────────────────────────────────────────
+  g.edit = function(path?: string) { openEditor(path); };
+
   g.help = function() {
     terminal.println('');
     terminal.colorPrintln('JSOS  —  everything is JavaScript', Color.WHITE);
@@ -354,6 +358,7 @@ function setupGlobals(): void {
     terminal.println('  clear()              clear the screen');
     terminal.println('  halt()               power off');
     terminal.println('  reboot()             reboot');
+    terminal.println('  edit(path?)          fullscreen text editor  (^S save  ^Q quit)');
     terminal.println('');
     terminal.colorPrintln('REPL functions:', Color.YELLOW);
     terminal.println('  history()            show input history');

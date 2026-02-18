@@ -38,6 +38,12 @@ function readline(printPrompt: () => void): string {
   for (;;) {
     var key = kernel.waitKeyEx();
 
+    // ── Scrollback: PgUp / PgDown ──────────────────────────────────────────
+    if (key.ext === 0x86) { kernel.scrollUp(20);   continue; }  // PgUp
+    if (key.ext === 0x87) { kernel.scrollDown(20); continue; }  // PgDown
+    // Any other key snaps back to the live view before acting
+    kernel.resumeLive();
+
     if (key.ext !== 0) {
       if (key.ext === 0x80) {
         if (_history.length === 0) continue;

@@ -35,4 +35,13 @@ void terminal_set_cursor(size_t row, size_t col);
 size_t terminal_get_width(void);
 size_t terminal_get_height(void);
 
+/* Scrollback-view API */
+void terminal_scroll_view_up(int n);
+void terminal_scroll_view_down(int n);
+void terminal_resume_live(void);
+int  terminal_get_view_offset(void);
+
+/* Direct VGA row write (no cursor/scroll side-effects) */
+void terminal_drawrow(int row, const char *text, uint8_t color);
+
 #endif

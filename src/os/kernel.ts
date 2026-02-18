@@ -100,6 +100,18 @@ export interface KernelAPI {
   // Port I/O
   inb(port: number): number;
   outb(port: number, value: number): void;
+
+  // Scrollback view (PgUp/PgDown support)
+  // Key codes: UP=0x80 DOWN=0x81 LEFT=0x82 RIGHT=0x83
+  //            HOME=0x84 END=0x85 PAGEUP=0x86 PAGEDOWN=0x87 DELETE=0x88
+  scrollUp(n?: number): void;    // scroll view up N lines (default 20)
+  scrollDown(n?: number): void;  // scroll view down N lines (default 20)
+  resumeLive(): void;            // snap back to live view instantly
+  getViewOffset(): number;       // 0 = live; N = scrolled N lines up
+
+  // Direct VGA row write — no cursor/scroll side-effects (for editor)
+  // colorByte = (bg << 4) | fg  (bg 0-7 to avoid blink)
+  drawRow(row: number, text: string, colorByte: number): void;
 }
 
 // Declare the global kernel object

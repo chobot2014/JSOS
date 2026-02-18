@@ -30,16 +30,60 @@ static inline uint16_t vga_entry(unsigned char uc, uint8_t color) {
     return (uint16_t) uc | (uint16_t) color << 8;
 }
 
-static const size_t VGA_WIDTH = 80;
-static const size_t VGA_HEIGHT = 25;
+#define VGA_WIDTH  80
+#define VGA_HEIGHT 25
 
 size_t terminal_row;
 size_t terminal_column;
 uint8_t terminal_color;
 uint16_t* terminal_buffer;
 
+/* ─── Scrollback buffer ──────────────────────────────────────────────────── */
+#define SCROLLBACK_LINES 200
+static uint16_t scrollback_buf[SCROLLBACK_LINES][VGA_WIDTH];
+static int sb_write = 0;   /* next write index (circular)        */
+static int sb_count = 0;   /* lines stored, 0..SCROLLBACK_LINES  */
+static int sb_view  = 0;   /* 0=live; N=scrolled N lines up      */
+static uint16_t live_snapshot[VGA_HEIGHT][VGA_WIDTH]; /* VGA at scroll entry */
+
+/* Push the about-to-be-evicted top row into the scrollback ring */
+static void scrollback_push(void) {
+    for (size_t x = 0; x < VGA_WIDTH; x++)
+        scrollback_buf[sb_write][x] = terminal_buffer[x]; /* row 0 */
+    sb_write = (sb_write + 1) % SCROLLBACK_LINES;
+    if (sb_count < SCROLLBACK_LINES) sb_count++;
+}
+
+/* Re-paint VGA from scrollback + live_snapshot for current sb_view.
+ * For screen row r:
+ *   tape_idx = r + sb_count - sb_view
+ *   < 0          → blank (beyond oldest record)
+ *   < sb_count   → circular scrollback
+ *   >= sb_count  → live_snapshot row (tape_idx - sb_count)
+ */
+static void scrollback_render(void) {
+    for (int r = 0; r < (int)VGA_HEIGHT; r++) {
+        int tape_idx = r + sb_count - sb_view;
+        if (tape_idx < 0) {
+            for (int c = 0; c < (int)VGA_WIDTH; c++)
+                terminal_buffer[r * VGA_WIDTH + c] = vga_entry(' ', terminal_color);
+        } else if (tape_idx < sb_count) {
+            int sb_abs = sb_write - sb_count + tape_idx;
+            int idx = ((sb_abs % SCROLLBACK_LINES) + SCROLLBACK_LINES) % SCROLLBACK_LINES;
+            for (int c = 0; c < (int)VGA_WIDTH; c++)
+                terminal_buffer[r * VGA_WIDTH + c] = scrollback_buf[idx][c];
+        } else {
+            int live_r = tape_idx - sb_count;
+            if (live_r < (int)VGA_HEIGHT)
+                for (int c = 0; c < (int)VGA_WIDTH; c++)
+                    terminal_buffer[r * VGA_WIDTH + c] = live_snapshot[live_r][c];
+        }
+    }
+}
+
 /* Scroll the terminal up by one line */
 static void terminal_scroll(void) {
+    scrollback_push(); /* save evicted top row before overwriting */
     /* Move all lines up by one */
     for (size_t y = 0; y < VGA_HEIGHT - 1; y++) {
         for (size_t x = 0; x < VGA_WIDTH; x++) {
@@ -199,4 +243,65 @@ size_t terminal_get_width(void) {
 
 size_t terminal_get_height(void) {
     return VGA_HEIGHT;
+}
+
+/* ─── Public scrollback-view API ─────────────────────────────────────────── */
+
+void terminal_scroll_view_up(int n) {
+    if (sb_count == 0) return;
+    if (sb_view == 0) {
+        /* First scroll away from live — snapshot current VGA */
+        for (size_t r = 0; r < VGA_HEIGHT; r++)
+            for (size_t c = 0; c < VGA_WIDTH; c++)
+                live_snapshot[r][c] = terminal_buffer[r * VGA_WIDTH + c];
+        /* Hide hardware cursor to signal scroll mode */
+        outb(0x3D4, 0x0A);
+        outb(0x3D5, 0x20);
+    }
+    sb_view += n;
+    if (sb_view > sb_count) sb_view = sb_count;
+    scrollback_render();
+}
+
+void terminal_scroll_view_down(int n) {
+    if (sb_view == 0) return;
+    sb_view -= n;
+    if (sb_view < 0) sb_view = 0;
+    if (sb_view == 0) {
+        /* Restore live VGA */
+        for (size_t r = 0; r < VGA_HEIGHT; r++)
+            for (size_t c = 0; c < VGA_WIDTH; c++)
+                terminal_buffer[r * VGA_WIDTH + c] = live_snapshot[r][c];
+        terminal_enable_cursor();
+        terminal_update_cursor();
+    } else {
+        scrollback_render();
+    }
+}
+
+void terminal_resume_live(void) {
+    if (sb_view == 0) return;
+    sb_view = 0;
+    for (size_t r = 0; r < VGA_HEIGHT; r++)
+        for (size_t c = 0; c < VGA_WIDTH; c++)
+            terminal_buffer[r * VGA_WIDTH + c] = live_snapshot[r][c];
+    terminal_enable_cursor();
+    terminal_update_cursor();
+}
+
+int terminal_get_view_offset(void) {
+    return sb_view;
+}
+
+/*
+ * Write exactly VGA_WIDTH characters to a VGA row with the given colour byte.
+ * No cursor movement, no newline/scroll side-effects. For the fullscreen editor.
+ * colorByte = (bg << 4) | fg  (bg must be 0-7 to avoid blink)
+ */
+void terminal_drawrow(int row, const char *text, uint8_t color) {
+    if (row < 0 || row >= (int)VGA_HEIGHT) return;
+    for (int c = 0; c < (int)VGA_WIDTH; c++) {
+        char ch = (text && *text) ? *text++ : ' ';
+        terminal_buffer[row * VGA_WIDTH + c] = vga_entry((unsigned char)ch, color);
+    }
 }
