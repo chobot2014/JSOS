@@ -128,6 +128,9 @@ function evalAndPrint(code: string): void {
     'if(__r===undefined)return"__JSOS_UNDEF__";' +
     'if(__r===null)return"null";' +
     'if(__r instanceof Error)return String(__r);' +
+    // If the value carries a pretty-printer, call it and signal the outer
+    // handler to stay silent — the printer already wrote to the terminal.
+    'if(__r&&typeof __r.__jsos_print__==="function"){__r.__jsos_print__();return"__JSOS_PRINTED__";}' +
     'if(typeof __r==="object")return JSON.stringify(__r,null,2);' +
     'return String(__r);' +
     '})()';
@@ -140,6 +143,8 @@ function evalAndPrint(code: string): void {
     if (result === 'undefined') return;
   }
 
+  // Printable already wrote its output; nothing more to do.
+  if (result === '__JSOS_PRINTED__') return;
   if (result === '__JSOS_UNDEF__' || result === 'undefined') return;
 
   if (result === 'null') {
@@ -175,7 +180,7 @@ function printContinuePrompt(): void {
 export function startRepl(): void {
   // Register history() as a global here so it closes over _history
   (globalThis as any).history = function() {
-    if (_history.length === 0) { kernel.print('(empty)'); return; }
+    if (_history.length === 0) { terminal.println('(empty)'); return; }
     for (var i = 0; i < _history.length; i++) {
       var n = '' + (i + 1);
       while (n.length < 3) n = ' ' + n;

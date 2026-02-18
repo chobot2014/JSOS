@@ -76,26 +76,27 @@ export class FileSystem {
     // Create some example programs
     this.writeFile('/bin/hello.js',
       '// Hello World program\n' +
-      'kernel.print("Hello, World!");\n'
+      'print("Hello, World!");\n'
     );
     this.writeFile('/bin/sysinfo.js',
       '// System information\n' +
       'var mem = kernel.getMemoryInfo();\n' +
       'var screen = kernel.getScreenSize();\n' +
-      'kernel.print("Memory: " + mem.used + " / " + mem.total + " bytes used");\n' +
-      'kernel.print("Screen: " + screen.width + "x" + screen.height);\n' +
-      'kernel.print("Uptime: " + kernel.getUptime() + " ms");\n'
+      'print("Memory: " + mem.used + " / " + mem.total + " bytes used");\n' +
+      'print("Screen: " + screen.width + "x" + screen.height);\n' +
+      'print("Uptime: " + kernel.getUptime() + " ms");\n'
     );
     this.writeFile('/bin/colors.js',
-      '// Color demo\n' +
-      'var colors = ["BLACK","BLUE","GREEN","CYAN","RED","MAGENTA","BROWN","LIGHT_GREY",\n' +
-      '  "DARK_GREY","LIGHT_BLUE","LIGHT_GREEN","LIGHT_CYAN","LIGHT_RED","LIGHT_MAGENTA","YELLOW","WHITE"];\n' +
+      '// Color palette demo\n' +
+      'var names = ["BLACK","BLUE","GREEN","CYAN","RED","MAGENTA","BROWN","LT_GREY",\n' +
+      '  "DK_GREY","LT_BLUE","LT_GREEN","LT_CYAN","LT_RED","LT_MAG","YELLOW","WHITE"];\n' +
       'for (var i = 0; i < 16; i++) {\n' +
-      '  kernel.setColor(i, 0);\n' +
-      '  kernel.printRaw(colors[i] + " ");\n' +
+      '  terminal.setColor(i, 0);\n' +
+      '  terminal.print("  " + i + " ########  ");\n' +
+      '  terminal.setColor(7, 0);\n' +
+      '  terminal.println(names[i]);\n' +
       '}\n' +
-      'kernel.setColor(7, 0);\n' +
-      'kernel.print("");\n'
+      'terminal.setColor(7, 0);\n'
     );
   }
 

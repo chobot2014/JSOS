@@ -54,15 +54,46 @@ function setupConsole(): void {
   (globalThis as any).console = con;
 }
 
+// ── Printable result helpers ──────────────────────────────────────────────
+// Wrap a real JS value so the REPL auto-pretty-prints it when it is the
+// result of an expression, while keeping it fully usable for scripting:
+//   ls()                   → pretty-prints the directory listing
+//   ls().map(f => f.name)  → returns a plain string array (no magic)
+//   ls().length            → number of entries
+//
+// The sentinel method __jsos_print__ is non-enumerable so it never shows up
+// in JSON.stringify, Object.keys, for..in, or spread.
+
+function printableArray<T>(items: T[], printer: (arr: T[]) => void): T[] {
+  var arr: any = items.slice();
+  Object.defineProperty(arr, '__jsos_print__', {
+    value: function() { printer(arr); }, enumerable: false, configurable: true,
+  });
+  return arr as T[];
+}
+
+function printableObject<T extends object>(data: T, printer: (obj: T) => void): T {
+  var obj: any = Object.assign({}, data);
+  Object.defineProperty(obj, '__jsos_print__', {
+    value: function() { printer(obj); }, enumerable: false, configurable: true,
+  });
+  return obj as T;
+}
+
 /**
  * All OS functionality exposed as plain JS globals in the REPL.
- * Shell-like functions print their own output and return undefined.
- * Raw-data functions (fs.*, sys.*) return values for scripting.
+ * Data functions (ls, ps, mem, …) return Printable values: they auto-
+ * pretty-print as a REPL expression but are real arrays/objects for scripting.
+ * Raw-data functions (fs.*, sys.*) always return plain values.
  */
 function setupGlobals(): void {
   var g = globalThis as any;
 
   // ── Scripting APIs (return raw data) ──────────────────────────────────────
+
+  // Expose terminal directly so user scripts can use terminal.println(),
+  // terminal.setColor(), etc. without going through the kernel binding.
+  g.terminal = terminal;
 
   g.fs = {
     ls:     function(p?: string) { return fs.ls(p || ''); },
@@ -83,7 +114,7 @@ function setupGlobals(): void {
     find:   function(path: string, pat: string) { return fs.find(path, pat); },
     run:    function(p: string) {
       var code = fs.readFile(p) || fs.readFile('/bin/' + p);
-      if (!code) { kernel.print('Not found: ' + p); return; }
+      if (!code) { terminal.println('Not found: ' + p); return; }
       return kernel.eval(code);
     },
   };
@@ -117,7 +148,7 @@ function setupGlobals(): void {
 
   // ── Shorthand print ───────────────────────────────────────────────────────
 
-  g.print = function(s: any) { kernel.print(String(s)); };
+  g.print = function(s: any) { terminal.println(String(s)); };
 
   // ── Shell-like functions (print output, return undefined) ─────────────────
   // These behave like unix commands: they display formatted output.
@@ -128,30 +159,29 @@ function setupGlobals(): void {
 
   g.ls = function(path?: string) {
     var target = path || fs.cwd();
+    if (path && !fs.exists(path)) { terminal.println('ls: ' + path + ': no such directory'); return; }
     var items = fs.ls(path || '');
-    if (items.length === 0) {
-      if (!fs.exists(target)) { kernel.print('ls: ' + target + ': no such directory'); return; }
-      terminal.colorPrintln('(empty)', Color.DARK_GREY);
-      return;
-    }
-    terminal.colorPrintln('  ' + target, Color.DARK_GREY);
-    for (var i = 0; i < items.length; i++) {
-      var item = items[i];
-      terminal.print('  ');
-      if (item.type === 'directory') {
-        terminal.colorPrint(item.name + '/', Color.LIGHT_BLUE);
-        terminal.println('');
-      } else {
-        var nameCol = item.name.slice(-3) === '.js' ? Color.LIGHT_GREEN : Color.LIGHT_GREY;
-        terminal.colorPrint(pad(item.name, 28), nameCol);
-        terminal.colorPrintln(item.size + 'B', Color.DARK_GREY);
+    return printableArray(items, function(arr) {
+      terminal.colorPrintln('  ' + target, Color.DARK_GREY);
+      if (arr.length === 0) { terminal.colorPrintln('  (empty)', Color.DARK_GREY); return; }
+      for (var i = 0; i < arr.length; i++) {
+        var item = arr[i];
+        terminal.print('  ');
+        if (item.type === 'directory') {
+          terminal.colorPrint(item.name + '/', Color.LIGHT_BLUE);
+          terminal.println('');
+        } else {
+          var nameCol = item.name.slice(-3) === '.js' ? Color.LIGHT_GREEN : Color.LIGHT_GREY;
+          terminal.colorPrint(pad(item.name, 28), nameCol);
+          terminal.colorPrintln(item.size + 'B', Color.DARK_GREY);
+        }
       }
-    }
+    });
   };
 
   g.cd = function(path?: string) {
     var p = path || '/home/user';
-    if (!fs.cd(p)) { kernel.print('cd: ' + p + ': no such directory'); return; }
+    if (!fs.cd(p)) { terminal.println('cd: ' + p + ': no such directory'); return; }
     var cwd = fs.cwd();
     if (cwd.indexOf('/home/user') === 0) cwd = '~' + cwd.slice(10);
     terminal.colorPrintln(cwd, Color.LIGHT_BLUE);
@@ -160,113 +190,123 @@ function setupGlobals(): void {
   g.pwd = function() { terminal.colorPrintln(fs.cwd(), Color.LIGHT_BLUE); };
 
   g.cat = function(path: string) {
-    if (!path) { kernel.print('usage: cat(path)'); return; }
+    if (!path) { terminal.println('usage: cat(path)'); return; }
     var c = fs.readFile(path);
-    if (c === null) { kernel.print('cat: ' + path + ': no such file'); return; }
-    kernel.print(c);
+    if (c === null) { terminal.println('cat: ' + path + ': no such file'); return; }
+    terminal.print(c[c.length - 1] === '\n' ? c : c + '\n');
   };
 
   g.mkdir = function(path: string) {
-    if (!path) { kernel.print('usage: mkdir(path)'); return; }
+    if (!path) { terminal.println('usage: mkdir(path)'); return; }
     if (fs.mkdir(path)) terminal.colorPrintln('created: ' + path, Color.LIGHT_GREEN);
-    else kernel.print('mkdir: ' + path + ': failed');
+    else terminal.println('mkdir: ' + path + ': failed');
   };
 
   g.touch = function(path: string) {
-    if (!path) { kernel.print('usage: touch(path)'); return; }
+    if (!path) { terminal.println('usage: touch(path)'); return; }
     if (!fs.exists(path)) fs.writeFile(path, '');
     terminal.colorPrintln('touched: ' + path, Color.LIGHT_GREEN);
   };
 
   g.rm = function(path: string) {
-    if (!path) { kernel.print('usage: rm(path)'); return; }
+    if (!path) { terminal.println('usage: rm(path)'); return; }
     if (fs.rm(path)) terminal.colorPrintln('removed: ' + path, Color.LIGHT_GREEN);
-    else kernel.print('rm: ' + path + ': failed (not found or non-empty dir)');
+    else terminal.println('rm: ' + path + ': failed (not found or non-empty dir)');
   };
 
   g.cp = function(src: string, dst: string) {
-    if (!src || !dst) { kernel.print('usage: cp(src, dst)'); return; }
+    if (!src || !dst) { terminal.println('usage: cp(src, dst)'); return; }
     if (fs.cp(src, dst)) terminal.colorPrintln('copied: ' + src + ' -> ' + dst, Color.LIGHT_GREEN);
-    else kernel.print('cp: ' + src + ': failed');
+    else terminal.println('cp: ' + src + ': failed');
   };
 
   g.mv = function(src: string, dst: string) {
-    if (!src || !dst) { kernel.print('usage: mv(src, dst)'); return; }
+    if (!src || !dst) { terminal.println('usage: mv(src, dst)'); return; }
     if (fs.mv(src, dst)) terminal.colorPrintln('moved: ' + src + ' -> ' + dst, Color.LIGHT_GREEN);
-    else kernel.print('mv: ' + src + ': failed');
+    else terminal.println('mv: ' + src + ': failed');
   };
 
   g.write = function(path: string, content: string) {
-    if (!path) { kernel.print('usage: write(path, content)'); return; }
+    if (!path) { terminal.println('usage: write(path, content)'); return; }
     if (fs.writeFile(path, content || ''))
       terminal.colorPrintln('wrote ' + (content || '').length + 'B -> ' + path, Color.LIGHT_GREEN);
-    else kernel.print('write: ' + path + ': failed');
+    else terminal.println('write: ' + path + ': failed');
   };
 
   g.append = function(path: string, content: string) {
-    if (!path) { kernel.print('usage: append(path, content)'); return; }
+    if (!path) { terminal.println('usage: append(path, content)'); return; }
     if (fs.appendFile(path, content || ''))
       terminal.colorPrintln('appended ' + (content || '').length + 'B -> ' + path, Color.LIGHT_GREEN);
-    else kernel.print('append: ' + path + ': failed');
+    else terminal.println('append: ' + path + ': failed');
   };
 
   g.find = function(pathOrPat: string, pattern?: string) {
     var base = pattern ? pathOrPat : '/';
     var pat  = pattern || pathOrPat || '*';
     var results = fs.find(base, pat);
-    for (var i = 0; i < results.length; i++) terminal.println('  ' + results[i]);
-    terminal.colorPrintln('  ' + results.length + ' match(es)', Color.DARK_GREY);
+    return printableArray(results, function(arr) {
+      for (var i = 0; i < arr.length; i++) terminal.println('  ' + arr[i]);
+      terminal.colorPrintln('  ' + arr.length + ' match(es)', Color.DARK_GREY);
+    });
   };
 
   g.stat = function(path: string) {
-    if (!path) { kernel.print('usage: stat(path)'); return; }
+    if (!path) { terminal.println('usage: stat(path)'); return; }
     var info = fs.stat(path);
-    if (!info) { kernel.print('stat: ' + path + ': no such path'); return; }
-    terminal.println('  path : ' + path);
-    terminal.println('  type : ' + info.type);
-    terminal.println('  size : ' + info.size + ' bytes');
-    terminal.println('  perm : ' + info.permissions);
+    if (!info) { terminal.println('stat: ' + path + ': no such path'); return; }
+    var data = Object.assign({ path: path }, info);
+    return printableObject(data, function(obj: any) {
+      terminal.println('  path : ' + obj.path);
+      terminal.println('  type : ' + obj.type);
+      terminal.println('  size : ' + obj.size + ' bytes');
+      terminal.println('  perm : ' + obj.permissions);
+    });
   };
 
   g.run = function(path: string) {
-    if (!path) { kernel.print('usage: run(path)'); return; }
+    if (!path) { terminal.println('usage: run(path)'); return; }
     var code = fs.readFile(path) || fs.readFile('/bin/' + path);
-    if (!code) { kernel.print('run: ' + path + ': not found'); return; }
+    if (!code) { terminal.println('run: ' + path + ': not found'); return; }
     terminal.colorPrintln('running ' + path + '...', Color.DARK_GREY);
     var r = kernel.eval(code);
-    if (r && r !== 'undefined') kernel.print(r);
+    if (r && r !== 'undefined') terminal.println(r);
   };
 
   g.ps = function() {
     var procs = systemManager.getProcessList();
-    terminal.colorPrintln('  ' + lpad('PID', 4) + '  ' + pad('NAME', 20) + pad('STATE', 12) + 'PRI', Color.LIGHT_CYAN);
-    terminal.colorPrintln('  ' + pad('', 42, ).replace(/ /g, '-'), Color.DARK_GREY);
-    for (var i = 0; i < procs.length; i++) {
-      var p = procs[i];
-      terminal.println('  ' + lpad('' + p.id, 4) + '  ' + pad(p.name, 20) + pad(p.state, 12) + p.priority);
-    }
-    terminal.colorPrintln('  ' + procs.length + ' process(es)', Color.DARK_GREY);
+    return printableArray(procs, function(arr: any[]) {
+      terminal.colorPrintln('  ' + lpad('PID', 4) + '  ' + pad('NAME', 20) + pad('STATE', 12) + 'PRI', Color.LIGHT_CYAN);
+      terminal.colorPrintln('  ' + pad('', 42).replace(/ /g, '-'), Color.DARK_GREY);
+      for (var i = 0; i < arr.length; i++) {
+        var p = arr[i];
+        terminal.println('  ' + lpad('' + p.id, 4) + '  ' + pad(p.name, 20) + pad(p.state, 12) + p.priority);
+      }
+      terminal.colorPrintln('  ' + arr.length + ' process(es)', Color.DARK_GREY);
+    });
   };
 
   g.kill = function(pid: number) {
-    if (pid === undefined) { kernel.print('usage: kill(pid)'); return; }
+    if (pid === undefined) { terminal.println('usage: kill(pid)'); return; }
     if (systemManager.terminateProcess(pid))
       terminal.colorPrintln('killed PID ' + pid, Color.LIGHT_GREEN);
-    else kernel.print('kill: PID ' + pid + ': not found or protected');
+    else terminal.println('kill: PID ' + pid + ': not found or protected');
   };
 
   g.mem = function() {
     var m = kernel.getMemoryInfo();
-    terminal.colorPrintln('Memory', Color.WHITE);
-    terminal.println('  total : ' + Math.floor(m.total / 1024) + ' KB');
-    terminal.println('  used  : ' + Math.floor(m.used  / 1024) + ' KB');
-    terminal.println('  free  : ' + Math.floor(m.free  / 1024) + ' KB');
-    var BAR = 36, used = Math.min(BAR, Math.floor((m.used / m.total) * BAR));
-    var b1 = pad('', used).replace(/ /g, '#');
-    var b2 = pad('', BAR - used).replace(/ /g, '.');
-    terminal.print('  ['); terminal.colorPrint(b1, Color.LIGHT_RED);
-    terminal.colorPrint(b2, Color.LIGHT_GREEN);
-    terminal.println(']  ' + Math.floor((m.used / m.total) * 100) + '%');
+    var kb = { total: Math.floor(m.total / 1024), used: Math.floor(m.used / 1024), free: Math.floor(m.free / 1024) };
+    return printableObject(kb, function(obj: any) {
+      terminal.colorPrintln('Memory', Color.WHITE);
+      terminal.println('  total : ' + obj.total + ' KB');
+      terminal.println('  used  : ' + obj.used  + ' KB');
+      terminal.println('  free  : ' + obj.free  + ' KB');
+      var BAR = 36, usedBars = Math.min(BAR, Math.floor((m.used / m.total) * BAR));
+      var b1 = pad('', usedBars).replace(/ /g, '#');
+      var b2 = pad('', BAR - usedBars).replace(/ /g, '.');
+      terminal.print('  ['); terminal.colorPrint(b1, Color.LIGHT_RED);
+      terminal.colorPrint(b2, Color.LIGHT_GREEN);
+      terminal.println(']  ' + Math.floor((m.used / m.total) * 100) + '%');
+    });
   };
 
   g.uptime = function() {
@@ -277,21 +317,36 @@ function setupGlobals(): void {
     if (h > 0) parts.push(h + 'h');
     if (m2 > 0) parts.push(m2 + 'm');
     parts.push(s + 's');
-    terminal.println('  ' + parts.join(' ') + '  (' + ms + ' ms)');
-    terminal.colorPrintln('  ticks: ' + kernel.getTicks(), Color.DARK_GREY);
+    var info = { uptime: parts.join(' '), ms: ms, ticks: kernel.getTicks() };
+    return printableObject(info, function(obj: any) {
+      terminal.println('  ' + obj.uptime + '  (' + obj.ms + ' ms)');
+      terminal.colorPrintln('  ticks: ' + obj.ticks, Color.DARK_GREY);
+    });
   };
 
   g.sysinfo = function() {
     var m = kernel.getMemoryInfo(), sc = kernel.getScreenSize();
-    terminal.colorPrintln('JSOS System Information', Color.WHITE);
-    terminal.println('  os       : JSOS v' + (fs.readFile('/etc/version') || '1.0.0'));
-    terminal.println('  hostname : ' + (fs.readFile('/etc/hostname') || 'jsos'));
-    terminal.println('  arch     : i686 (x86 32-bit)');
-    terminal.println('  runtime  : QuickJS ES2023');
-    terminal.println('  screen   : ' + sc.width + 'x' + sc.height + ' VGA text');
-    terminal.println('  memory   : ' + Math.floor(m.total / 1024) + ' KB total, ' + Math.floor(m.free / 1024) + ' KB free');
-    terminal.println('  uptime   : ' + Math.floor(kernel.getUptime() / 1000) + 's');
-    terminal.println('  procs    : ' + systemManager.getProcessList().length);
+    var info = {
+      os:       'JSOS v' + (fs.readFile('/etc/version') || '1.0.0'),
+      hostname: fs.readFile('/etc/hostname') || 'jsos',
+      arch:     'i686 (x86 32-bit)',
+      runtime:  'QuickJS ES2023',
+      screen:   sc.width + 'x' + sc.height + ' VGA text',
+      memory:   { total: Math.floor(m.total/1024), free: Math.floor(m.free/1024), used: Math.floor(m.used/1024) },
+      uptime:   Math.floor(kernel.getUptime() / 1000) + 's',
+      procs:    systemManager.getProcessList().length,
+    };
+    return printableObject(info, function(obj: any) {
+      terminal.colorPrintln('JSOS System Information', Color.WHITE);
+      terminal.println('  os       : ' + obj.os);
+      terminal.println('  hostname : ' + obj.hostname);
+      terminal.println('  arch     : ' + obj.arch);
+      terminal.println('  runtime  : ' + obj.runtime);
+      terminal.println('  screen   : ' + obj.screen);
+      terminal.println('  memory   : ' + obj.memory.total + ' KB total, ' + obj.memory.free + ' KB free');
+      terminal.println('  uptime   : ' + obj.uptime);
+      terminal.println('  procs    : ' + obj.procs);
+    });
   };
 
   g.colors = function() {
@@ -312,7 +367,7 @@ function setupGlobals(): void {
   g.echo = function() {
     var parts: string[] = [];
     for (var i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
-    kernel.print(parts.join(' '));
+    terminal.println(parts.join(' '));
   };
 
   g.clear  = function() { terminal.clear(); };
@@ -322,6 +377,13 @@ function setupGlobals(): void {
 
   // ── Text editor ──────────────────────────────────────────────────
   g.edit = function(path?: string) { openEditor(path); };
+
+  // ── User-defined printables ──────────────────────────────────────
+  // Let users wrap their own data: printable([1,2,3], arr => arr.forEach(x => print(x)))
+  g.printable = function(data: any, printer: (d: any) => void): any {
+    if (Array.isArray(data)) return printableArray(data, printer);
+    return printableObject(data, printer);
+  };
 
   g.help = function() {
     terminal.println('');
@@ -361,7 +423,8 @@ function setupGlobals(): void {
     terminal.colorPrintln('REPL functions:', Color.YELLOW);
     terminal.println('  history()            show input history');
     terminal.println('  echo(...)            print arguments');
-    terminal.println('  print(s)             kernel.print shorthand');
+    terminal.println('  print(s)             print a value');
+    terminal.println('  printable(data, fn)  wrap data with a custom pretty-printer');
     terminal.println('');
     terminal.colorPrintln('Scripting APIs (return raw data):', Color.YELLOW);
     terminal.colorPrint('  fs', Color.LIGHT_CYAN);
@@ -380,12 +443,15 @@ function setupGlobals(): void {
     terminal.println('');
     terminal.colorPrintln('Examples:', Color.YELLOW);
     terminal.colorPrintln("  ls()", Color.WHITE);
-    terminal.colorPrintln("  ls('/bin').map(function(f){return f.name;})", Color.WHITE);
+    terminal.colorPrintln("  ls('/bin').map(f => f.name)", Color.WHITE);
+    terminal.colorPrintln("  ls('/bin').filter(f => f.type === 'file')", Color.WHITE);
+    terminal.colorPrintln("  ps().find(p => p.name === 'repl')", Color.WHITE);
+    terminal.colorPrintln("  mem().free", Color.WHITE);
+    terminal.colorPrintln("  sysinfo().hostname", Color.WHITE);
     terminal.colorPrintln("  cat('/etc/hostname')", Color.WHITE);
-    terminal.colorPrintln("  write('/tmp/hi.js', 'kernel.print(42)')", Color.WHITE);
+    terminal.colorPrintln("  write('/tmp/hi.js', 'print(42)')", Color.WHITE);
     terminal.colorPrintln("  run('/tmp/hi.js')", Color.WHITE);
     terminal.colorPrintln("  JSON.stringify(sys.sysinfo(), null, 2)", Color.WHITE);
-    terminal.colorPrintln("  for(var i=0;i<16;i++){kernel.setColor(i,0);kernel.printRaw('##');}", Color.WHITE);
     terminal.println('');
   };
 }

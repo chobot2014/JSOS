@@ -3,6 +3,9 @@
  * Process management and system services backed by real kernel APIs
  */
 
+import terminal from './terminal.js';
+import { Color } from './kernel.js';
+
 declare var kernel: import('./kernel.js').KernelAPI;
 
 export interface ProcessDescriptor {
@@ -107,25 +110,25 @@ export class SystemManager {
 
   /** Shutdown the system */
   shutdown(): void {
-    kernel.print('Terminating all processes...');
+    terminal.println('Terminating all processes...');
     var procs = this.getProcessList();
     for (var i = 0; i < procs.length; i++) {
       if (procs[i].name !== 'kernel') {
         this.terminateProcess(procs[i].id);
       }
     }
-    kernel.print('System shutdown complete.');
+    terminal.println('System shutdown complete.');
   }
 
   /** Panic and halt */
   panic(message: string): void {
-    kernel.setColor(15, 4); // White on red
-    kernel.print('');
-    kernel.print('*** KERNEL PANIC ***');
-    kernel.print(message);
-    kernel.print('');
-    kernel.print('System halted.');
-    kernel.setColor(7, 0);
+    terminal.setColor(Color.WHITE, 4); // White on red
+    terminal.println('');
+    terminal.println('*** KERNEL PANIC ***');
+    terminal.println(message);
+    terminal.println('');
+    terminal.println('System halted.');
+    terminal.setColor(Color.LIGHT_GREY, Color.BLACK);
     kernel.halt();
   }
 }
