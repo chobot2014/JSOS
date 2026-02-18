@@ -8,7 +8,7 @@ QJS_SOURCES = $(QUICKJS_DIR)/quickjs.c $(QUICKJS_DIR)/libregexp.c \
               $(QUICKJS_DIR)/libunicode.c $(QUICKJS_DIR)/cutils.c \
               $(QUICKJS_DIR)/dtoa.c
 
-SOURCES = boot.s crt0.s irq_asm.s kernel.c quickjs_binding.c terminal.c memory.c \
+SOURCES = boot.s crt0.s irq_asm.s kernel.c quickjs_binding.c platform.c memory.c \
           syscalls.c math_impl.c irq.c keyboard.c timer.c
 OBJECTS = $(SOURCES:.s=.o)
 OBJECTS := $(OBJECTS:.c=.o)

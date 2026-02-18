@@ -45,9 +45,6 @@ char keyboard_getchar(void);
 /* Get a key from the buffer (returns 0 if none available) */
 char keyboard_poll(void);
 
-/* Read a line of input into buffer, returns length */
-int keyboard_readline(char *buffer, int max_length);
-
 /* Get extended key code (for special keys) */
 int keyboard_get_extended(void);
 

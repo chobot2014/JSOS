@@ -1,7 +1,6 @@
 #include "keyboard.h"
 #include "irq.h"
 #include "io.h"
-#include "terminal.h"
 #include <stddef.h>
 
 /* Keyboard I/O ports */
@@ -188,57 +187,6 @@ char keyboard_poll(void) {
     char c = kb_buffer[kb_buffer_tail];
     kb_buffer_tail = (kb_buffer_tail + 1) % KB_BUFFER_SIZE;
     return c;
-}
-
-int keyboard_readline(char *buffer, int max_length) {
-    int pos = 0;
-    
-    while (pos < max_length - 1) {
-        char c = keyboard_getchar();
-        
-        if (c == '\n' || c == '\r') {
-            terminal_putchar('\n');
-            break;
-        }
-        
-        if (c == '\b' || c == 0x7F) {
-            if (pos > 0) {
-                pos--;
-                /* Move cursor back, print space, move back again */
-                terminal_putchar('\b');
-                terminal_putchar(' ');
-                terminal_putchar('\b');
-            }
-            continue;
-        }
-        
-        /* Ctrl+C - cancel input */
-        if (c == 0x03) {
-            terminal_writestring("^C\n");
-            buffer[0] = '\0';
-            return 0;
-        }
-        
-        /* Ctrl+U - clear line */
-        if (c == 0x15) {
-            while (pos > 0) {
-                pos--;
-                terminal_putchar('\b');
-                terminal_putchar(' ');
-                terminal_putchar('\b');
-            }
-            continue;
-        }
-        
-        /* Only accept printable characters */
-        if (c >= 0x20 && c < 0x7F) {
-            buffer[pos++] = c;
-            terminal_putchar(c);
-        }
-    }
-    
-    buffer[pos] = '\0';
-    return pos;
 }
 
 int keyboard_get_extended(void) {

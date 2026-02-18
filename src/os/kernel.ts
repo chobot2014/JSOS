@@ -1,10 +1,12 @@
-/**
+﻿/**
  * JSOS Kernel Bindings
- * TypeScript declarations for the C kernel API exposed through QuickJS
- * These functions are injected as globals by the kernel before JS execution
+ *
+ * TypeScript declarations for the raw platform API exposed by QuickJS.
+ * This is the ONLY interface between JavaScript and hardware.
+ * All higher-level OS behaviour (terminal, readline, scrollback) is in TypeScript.
  */
 
-/** Color constants matching VGA hardware colors */
+/** VGA colour indices (0-15) */
 export const enum Color {
   BLACK = 0,
   BLUE = 1,
@@ -24,95 +26,95 @@ export const enum Color {
   WHITE = 15,
 }
 
-export interface MemoryInfo {
-  total: number;
-  free: number;
-  used: number;
-}
-
-export interface CursorPosition {
-  row: number;
-  col: number;
-}
-
-export interface ScreenSize {
-  width: number;
-  height: number;
-}
+export interface MemoryInfo { total: number; free: number; used: number; }
+export interface ScreenSize  { width: number; height: number; }
+export interface CursorPosition { row: number; col: number; }
 
 export interface KernelColors {
-  BLACK: number;
-  BLUE: number;
-  GREEN: number;
-  CYAN: number;
-  RED: number;
-  MAGENTA: number;
-  BROWN: number;
-  LIGHT_GREY: number;
-  DARK_GREY: number;
-  LIGHT_BLUE: number;
-  LIGHT_GREEN: number;
-  LIGHT_CYAN: number;
-  LIGHT_RED: number;
-  LIGHT_MAGENTA: number;
-  YELLOW: number;
-  WHITE: number;
+  BLACK: number; BLUE: number; GREEN: number; CYAN: number;
+  RED: number; MAGENTA: number; BROWN: number; LIGHT_GREY: number;
+  DARK_GREY: number; LIGHT_BLUE: number; LIGHT_GREEN: number;
+  LIGHT_CYAN: number; LIGHT_RED: number; LIGHT_MAGENTA: number;
+  YELLOW: number; WHITE: number;
 }
 
-/** The kernel object injected by the C runtime */
+/**
+ * Raw platform API injected by the C kernel into the QuickJS global scope.
+ * Only hardware primitives live here  no string formatting, no state.
+ */
 export interface KernelAPI {
-  // Terminal
-  print(message: string): void;
-  printRaw(message: string): void;
-  putchar(char: string): void;
-  clear(): void;
-  
-  // Colors & cursor
-  setColor(fg: number, bg: number): void;
-  getColor(): number;
-  setCursor(row: number, col: number): void;
-  getCursor(): CursorPosition;
+  //  VGA raw cell access 
+  /** Write one character at (row, col) with colorByte = (bg<<4)|fg */
+  vgaPut(row: number, col: number, ch: string, colorByte: number): void;
+  /** Read VGA cell: (colorByte<<8) | charCode */
+  vgaGet(row: number, col: number): number;
+  /** Write exactly 80 chars to a row; shorter text is space-padded */
+  vgaDrawRow(row: number, text: string, colorByte: number): void;
+  /** Copy srcRow to dstRow directly in VGA buffer */
+  vgaCopyRow(dstRow: number, srcRow: number): void;
+  /** Fill a single row with ch + colorByte */
+  vgaFillRow(row: number, ch: string, colorByte: number): void;
+  /** Fill the entire 8025 VGA buffer */
+  vgaFill(ch: string, colorByte: number): void;
+  /** Move the hardware blinking cursor */
+  vgaSetCursor(row: number, col: number): void;
+  /** Hide hardware cursor (entering raw/full-screen mode) */
+  vgaHideCursor(): void;
+  /** Show hardware cursor */
+  vgaShowCursor(): void;
+  /** Returns {width: 80, height: 25} */
   getScreenSize(): ScreenSize;
-  colors: KernelColors;
-  
-  // Memory
-  getMemoryInfo(): MemoryInfo;
-  
-  // Keyboard
+  /** Screen width (80) */
+  screenWidth: number;
+  /** Screen height (25) */
+  screenHeight: number;
+
+  //  Keyboard (raw, no echo) 
+  /** Non-blocking poll; returns '' when nothing is ready */
   readKey(): string;
+  /** Blocking; waits for next printable character */
   waitKey(): string;
+  /** Blocking; returns {ch, ext}  ext != 0 for special/extended keys */
   waitKeyEx(): { ch: string; ext: number };
+  /** Returns true if a keypress is queued */
   hasKey(): boolean;
-  readline(): string;
-  
-  // Timer
+
+  //  Timer 
   getTicks(): number;
-  getUptime(): number;
+  getUptime(): number;   /* milliseconds since boot */
   sleep(ms: number): void;
-  
-  // System
-  halt(): void;
-  reboot(): void;
-  
-  // Eval
-  eval(code: string): string;
-  
-  // Port I/O
+
+  //  Memory 
+  getMemoryInfo(): MemoryInfo;
+
+  //  Port I/O 
   inb(port: number): number;
   outb(port: number, value: number): void;
 
-  // Scrollback view (PgUp/PgDown support)
-  // Key codes: UP=0x80 DOWN=0x81 LEFT=0x82 RIGHT=0x83
-  //            HOME=0x84 END=0x85 PAGEUP=0x86 PAGEDOWN=0x87 DELETE=0x88
-  scrollUp(n?: number): void;    // scroll view up N lines (default 20)
-  scrollDown(n?: number): void;  // scroll view down N lines (default 20)
-  resumeLive(): void;            // snap back to live view instantly
-  getViewOffset(): number;       // 0 = live; N = scrolled N lines up
+  //  Native code execution 
+  /** Call a void C/ASM function at the given 32-bit address */
+  callNative(addr: number): void;
+  /** Call a C/ASM function at addr with up to 3 int32 args; returns int32 */
+  callNativeI(addr: number, a0?: number, a1?: number, a2?: number): number;
+  /** Read one byte from a physical memory address */
+  readMem8(addr: number): number;
+  /** Write one byte to a physical memory address */
+  writeMem8(addr: number, value: number): void;
 
-  // Direct VGA row write — no cursor/scroll side-effects (for editor)
-  // colorByte = (bg << 4) | fg  (bg 0-7 to avoid blink)
-  drawRow(row: number, text: string, colorByte: number): void;
+  //  System 
+  halt(): void;
+  reboot(): void;
+  /** Evaluate a JS string in the global QuickJS context; returns result as string */
+  eval(code: string): string;
+
+  //  Constants 
+  colors: KernelColors;
+  KEY_UP: number;    KEY_DOWN: number;   KEY_LEFT: number;  KEY_RIGHT: number;
+  KEY_HOME: number;  KEY_END: number;    KEY_PAGEUP: number; KEY_PAGEDOWN: number;
+  KEY_DELETE: number;
+  KEY_F1: number; KEY_F2: number; KEY_F3: number;  KEY_F4: number;
+  KEY_F5: number; KEY_F6: number; KEY_F7: number;  KEY_F8: number;
+  KEY_F9: number; KEY_F10: number; KEY_F11: number; KEY_F12: number;
 }
 
-// Declare the global kernel object
 declare var kernel: KernelAPI;

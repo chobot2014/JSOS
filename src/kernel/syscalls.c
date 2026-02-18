@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <stddef.h>
-#include "terminal.h"
+#include "platform.h"
 
 #undef errno
 extern int errno;
@@ -19,7 +19,7 @@ char **environ = __env;
 // System call stubs for newlib
 void _exit(int status) {
     (void)status;
-    terminal_writestring("System exit called\n");
+    platform_boot_print("System exit called\n");
     for(;;);
 }
 
