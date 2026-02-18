@@ -160,11 +160,8 @@ function evalAndPrint(code: string): void {
 //  Shell prompt ─────────────────────────────────────────────────────────────
 
 function printShellPrompt(): void {
-  var hostname = fs.readFile('/etc/hostname') || 'jsos';
   var cwd = fs.cwd();
   if (cwd.indexOf('/home/user') === 0) cwd = '~' + cwd.slice(10);
-  terminal.colorPrint(hostname, Color.LIGHT_GREEN);
-  terminal.colorPrint(':', Color.LIGHT_GREY);
   terminal.colorPrint(cwd, Color.LIGHT_BLUE);
   terminal.colorPrint('> ', Color.YELLOW);
 }

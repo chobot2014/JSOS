@@ -278,14 +278,11 @@ export class Shell {
 
   /** Print the shell prompt */
   private printPrompt(): void {
-    var hostname = fs.readFile('/etc/hostname') || 'jsos';
     var cwd = fs.cwd();
     // Shorten home directory
     if (cwd.indexOf('/home/user') === 0) {
       cwd = '~' + cwd.substring(10);
     }
-    terminal.colorPrint(hostname, Color.LIGHT_GREEN);
-    terminal.colorPrint(':', Color.LIGHT_GREY);
     terminal.colorPrint(cwd, Color.LIGHT_BLUE);
     terminal.colorPrint('$ ', Color.LIGHT_GREY);
   }
