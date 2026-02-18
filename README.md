@@ -4,6 +4,8 @@
 
 JSOS compiles TypeScript to JavaScript, embeds it in a custom C kernel powered by [QuickJS](https://bellard.org/quickjs/) (a full ES2023 engine by Fabrice Bellard), and boots from a standard ISO image via GRUB. The result is a real, interactive OS where every user-facing feature — the shell, the filesystem, the REPL, process management — is written in TypeScript.
 
+![JSOS Demo](2026-02-18%2009-30-26.gif)
+
 ![Architecture: TypeScript → ES2023 → QuickJS → C Kernel → x86 Bare Metal](https://img.shields.io/badge/stack-TypeScript→ES2023→QuickJS→C→x86-blue)
 
 ---
