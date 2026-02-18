@@ -98,6 +98,44 @@ export class FileSystem {
       '}\n' +
       'terminal.setColor(7, 0);\n'
     );
+
+    // OS Components Test
+    this.writeFile('/bin/test-os.js',
+      'print("=== JSOS Operating System Test ===");\\n' +
+      'print("");\\n' +
+      'print("Testing Virtual Memory Manager...");\\n' +
+      'try {\\n' +
+      '  var memStats = sys.vmm.getMemoryStats();\\n' +
+      '  print("  Total Physical Memory: " + memStats.totalPhysical + " bytes");\\n' +
+      '  print("  Used Physical Memory: " + memStats.usedPhysical + " bytes");\\n' +
+      '  print("  Free Physical Memory: " + memStats.freePhysical + " bytes");\\n' +
+      '  print("  Mapped Pages: " + memStats.mappedPages);\\n' +
+      '} catch (e) { print("  VMM Error: " + e); }\\n' +
+      'print("");\\n' +
+      'print("Testing Process Scheduler...");\\n' +
+      'try {\\n' +
+      '  var processes = sys.scheduler.getAllProcesses();\\n' +
+      '  print("  Total processes: " + processes.length);\\n' +
+      '  print("  Current process: " + (sys.scheduler.getCurrentProcess()?.pid || "none"));\\n' +
+      '} catch (e) { print("  Scheduler Error: " + e); }\\n' +
+      'print("");\\n' +
+      'print("Testing System Calls...");\\n' +
+      'try {\\n' +
+      '  var pidResult = sys.syscalls.getpid();\\n' +
+      '  print("  Current PID: " + (pidResult.success ? pidResult.value : "error"));\\n' +
+      '} catch (e) { print("  Syscalls Error: " + e); }\\n' +
+      'print("");\\n' +
+      'print("Enhanced System Information:");\\n' +
+      'try {\\n' +
+      '  var info = sys.sysinfo();\\n' +
+      '  print("  OS: " + info.os);\\n' +
+      '  print("  Virtual Memory: " + info.virtualMemory.mappedPages + " pages mapped");\\n' +
+      '  print("  Scheduler: " + info.scheduler);\\n' +
+      '  print("  Runlevel: " + info.runlevel);\\n' +
+      '} catch (e) { print("  Sysinfo Error: " + e); }\\n' +
+      'print("");\\n' +
+      'print("=== OS Test Complete ===");\\n'
+    );
   }
 
   /** Resolve a path relative to cwd */

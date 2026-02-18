@@ -13,6 +13,10 @@ import { startRepl } from './repl.js';
 import fs from './filesystem.js';
 import systemManager from './system.js';
 import { openEditor } from './editor.js';
+import { syscalls } from './syscalls.js';
+import { scheduler } from './scheduler.js';
+import { vmm } from './vmm.js';
+import { init } from './init.js';
 
 declare var kernel: import('./kernel.js').KernelAPI;
 
@@ -137,13 +141,21 @@ function setupGlobals(): void {
     version:  function() { return fs.readFile('/etc/version') || '1.0.0'; },
     sysinfo:  function() {
       var m = kernel.getMemoryInfo();
+      var vm = vmm.getMemoryStats();
       return { os: 'JSOS v' + (fs.readFile('/etc/version') || '1.0.0'),
                hostname: fs.readFile('/etc/hostname') || 'jsos',
                arch: 'i686', runtime: 'QuickJS ES2023',
-               screen: kernel.getScreenSize(), memory: m,
+               screen: kernel.getScreenSize(), memory: m, virtualMemory: vm,
                uptime: kernel.getUptime(),
-               processes: systemManager.getProcessList().length };
+               processes: systemManager.getProcessList().length,
+               scheduler: scheduler.getAlgorithm(),
+               runlevel: init.getCurrentRunlevel() };
     },
+    // New OS components
+    scheduler: scheduler,
+    vmm: vmm,
+    init: init,
+    syscalls: syscalls,
   };
 
   // ── Shorthand print ───────────────────────────────────────────────────────
@@ -478,10 +490,31 @@ function printBanner(): void {
 }
 
 /** Main entry point - called by the bundled JS IIFE footer */
-function main(): void {
+async function main(): Promise<void> {
   setupConsole();
+
+  // Initialize core OS components
+  terminal.println('Initializing JSOS Operating System...');
+
+  // Start virtual memory manager
+  terminal.println('  Starting Virtual Memory Manager...');
+
+  // Initialize system calls
+  terminal.println('  Initializing System Call Interface...');
+
+  // Start process scheduler
+  terminal.println('  Starting Process Scheduler...');
+
+  // Start init system
+  terminal.println('  Starting Init System...');
+  await init.initialize();
+
   setupGlobals();
   printBanner();
+
+  terminal.println('OS initialization complete. Starting REPL...');
+  terminal.println('');
+
   startRepl();
   // startRepl() loops forever; only returns on halt/reboot
   kernel.halt();
