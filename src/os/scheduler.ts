@@ -16,6 +16,7 @@ export type ProcessState = 'ready' | 'running' | 'blocked' | 'terminated' | 'wai
 export interface ProcessContext {
   pid: number;
   ppid: number;
+  name: string;
   state: ProcessState;
   priority: number;
   timeSlice: number;
@@ -53,8 +54,23 @@ export class ProcessScheduler {
   constructor() {
     // Create the idle process (PID 0)
     this.createProcess(0, {
+      name: 'idle',
       priority: 0,
       timeSlice: 0,
+      memory: { heapStart: 0, heapEnd: 0, stackStart: 0, stackEnd: 0 }
+    });
+    // Create the kernel process (PID 1)
+    this.createProcess(0, {
+      name: 'kernel',
+      priority: 0,
+      timeSlice: 0,
+      memory: { heapStart: 0, heapEnd: 0, stackStart: 0, stackEnd: 0 }
+    });
+    // Create the init process (PID 2)
+    this.createProcess(1, {
+      name: 'init',
+      priority: 1,
+      timeSlice: 10,
       memory: { heapStart: 0, heapEnd: 0, stackStart: 0, stackEnd: 0 }
     });
   }
@@ -63,6 +79,7 @@ export class ProcessScheduler {
    * Create a new process
    */
   createProcess(ppid: number, options: {
+    name?: string;
     priority?: number;
     timeSlice?: number;
     memory: ProcessContext['memory'];
@@ -73,6 +90,7 @@ export class ProcessScheduler {
     const context: ProcessContext = {
       pid,
       ppid,
+      name: options.name || 'process-' + pid,
       state: 'ready',
       priority: options.priority || 10,
       timeSlice: options.timeSlice || this.timeSlice,
@@ -310,6 +328,13 @@ export class ProcessScheduler {
    */
   setTimeSlice(ms: number): void {
     this.timeSlice = ms;
+  }
+
+  /**
+   * Get current scheduling algorithm
+   */
+  getAlgorithm(): SchedulingAlgorithm {
+    return this.algorithm;
   }
 
   /**

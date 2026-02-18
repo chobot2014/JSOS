@@ -1,13 +1,19 @@
 /**
  * JSOS System Manager
- * Process management and system services backed by real kernel APIs
+ *
+ * User-facing process management API. Delegates all process lifecycle
+ * operations to the ProcessScheduler, which is the authoritative source
+ * of process state. This layer adapts ProcessContext -> ProcessDescriptor
+ * for display and scripting consumers (shell, REPL, etc.).
  */
 
 import terminal from './terminal.js';
 import { Color } from './kernel.js';
+import { scheduler } from './scheduler.js';
 
 declare var kernel: import('./kernel.js').KernelAPI;
 
+/** User-visible process descriptor (adapted from scheduler's ProcessContext) */
 export interface ProcessDescriptor {
   readonly id: number;
   readonly name: string;
@@ -17,90 +23,39 @@ export interface ProcessDescriptor {
 }
 
 export class SystemManager {
-  private processes = new Map<number, ProcessDescriptor>();
-  private nextProcessId = 1;
   private version = '1.0.0';
-
-  constructor() {
-    // Create the kernel process (PID 1)
-    var kernelProc: ProcessDescriptor = {
-      id: this.nextProcessId++,
-      name: 'kernel',
-      state: 'running',
-      priority: 0,
-      memoryUsage: 0x10000
-    };
-    this.processes.set(kernelProc.id, kernelProc);
-
-    // Create the init/shell process (PID 2)
-    var initProc: ProcessDescriptor = {
-      id: this.nextProcessId++,
-      name: 'init',
-      state: 'running',
-      priority: 1,
-      memoryUsage: 0x4000
-    };
-    this.processes.set(initProc.id, initProc);
-  }
 
   get systemVersion(): string {
     return this.version;
   }
 
   get processCount(): number {
-    return this.processes.size;
+    return scheduler.getAllProcesses().length;
   }
 
-  /** Create a new process */
+  /** Create a new user-space process (delegates to scheduler) */
   createProcess(
     name: string,
     options: { priority?: number; memorySize?: number } = {}
   ): ProcessDescriptor | null {
     var priority = (options.priority !== undefined) ? options.priority : 10;
-    var memorySize = (options.memorySize !== undefined) ? options.memorySize : 0x1000;
-
-    var proc: ProcessDescriptor = {
-      id: this.nextProcessId++,
+    var ctx = scheduler.createProcess(0, {
       name: name,
-      state: 'running',
       priority: priority,
-      memoryUsage: memorySize
-    };
-
-    this.processes.set(proc.id, proc);
-    return proc;
+      timeSlice: 10,
+      memory: { heapStart: 0, heapEnd: 0, stackStart: 0, stackEnd: 0 }
+    });
+    return this.toDescriptor(ctx);
   }
 
-  /** Terminate a process by PID */
+  /** Terminate a process by PID (delegates to scheduler) */
   terminateProcess(pid: number): boolean {
-    var proc = this.processes.get(pid);
-    if (!proc || proc.name === 'kernel') {
-      return false;
-    }
-
-    var terminated: ProcessDescriptor = {
-      id: proc.id,
-      name: proc.name,
-      state: 'terminated',
-      priority: proc.priority,
-      memoryUsage: proc.memoryUsage
-    };
-    this.processes.set(pid, terminated);
-
-    // Clean up after a tick
-    this.processes.delete(pid);
-    return true;
+    return scheduler.terminateProcess(pid);
   }
 
   /** Get a flat list of all processes */
   getProcessList(): ProcessDescriptor[] {
-    var list: ProcessDescriptor[] = [];
-    var keys = Array.from(this.processes.keys());
-    for (var i = 0; i < keys.length; i++) {
-      var p = this.processes.get(keys[i]);
-      if (p) list.push(p);
-    }
-    return list.sort(function(a, b) { return a.id - b.id; });
+    return scheduler.getAllProcesses().map((ctx) => this.toDescriptor(ctx));
   }
 
   /** Get processes filtered by state */
@@ -108,13 +63,13 @@ export class SystemManager {
     return this.getProcessList().filter(function(p) { return p.state === state; });
   }
 
-  /** Shutdown the system */
+  /** Shutdown: stop all non-kernel processes */
   shutdown(): void {
     terminal.println('Terminating all processes...');
     var procs = this.getProcessList();
     for (var i = 0; i < procs.length; i++) {
       if (procs[i].name !== 'kernel') {
-        this.terminateProcess(procs[i].id);
+        scheduler.terminateProcess(procs[i].id);
       }
     }
     terminal.println('System shutdown complete.');
@@ -130,6 +85,24 @@ export class SystemManager {
     terminal.println('System halted.');
     terminal.setColor(Color.LIGHT_GREY, Color.BLACK);
     kernel.halt();
+  }
+
+  /** Adapt a ProcessContext to the simplified ProcessDescriptor interface */
+  private toDescriptor(ctx: import('./scheduler.js').ProcessContext): ProcessDescriptor {
+    var stateMap: Record<string, ProcessDescriptor['state']> = {
+      ready: 'waiting',
+      running: 'running',
+      blocked: 'waiting',
+      terminated: 'terminated',
+      waiting: 'waiting'
+    };
+    return {
+      id:          ctx.pid,
+      name:        ctx.name,
+      state:       stateMap[ctx.state] || 'waiting',
+      priority:    ctx.priority,
+      memoryUsage: ctx.memory.heapEnd - ctx.memory.heapStart
+    };
   }
 }
 

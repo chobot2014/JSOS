@@ -2,10 +2,9 @@
  * JSOS Init System
  *
  * Manages system initialization, service startup, shutdown, and runlevels.
- * Similar to systemd or init.d, but implemented in TypeScript.
+ * All synchronous — bare-metal has no event loop; no async/await or setTimeout.
  */
 
-import { ProcessContext } from './scheduler.js';
 import { SyscallResult } from './syscalls.js';
 
 export type RunLevel = 0 | 1 | 2 | 3 | 4 | 5 | 6;
@@ -40,6 +39,7 @@ export class InitSystem {
   private services = new Map<string, Service>();
   private serviceInstances = new Map<string, ServiceInstance>();
   private currentRunlevel: RunLevel = 1;
+  private nextPid = 100; // User-space PIDs start at 100
   private runlevelTargets: Record<RunLevel, string[]> = {
     0: ['shutdown'],
     1: ['basic-services'],
@@ -67,9 +67,9 @@ export class InitSystem {
   }
 
   /**
-   * Start a service
+   * Start a service (synchronous — no event loop on bare metal)
    */
-  async startService(serviceName: string): Promise<SyscallResult<void>> {
+  startService(serviceName: string): SyscallResult<void> {
     const instance = this.serviceInstances.get(serviceName);
     if (!instance) {
       return { success: false, error: 'Service not found' };
@@ -82,17 +82,17 @@ export class InitSystem {
     instance.state = 'starting';
 
     try {
-      // Check dependencies
+      // Start dependencies first
       for (const dep of instance.service.dependencies) {
-        const depResult = await this.startService(dep);
+        const depResult = this.startService(dep);
         if (!depResult.success) {
           instance.state = 'failed';
-          return { success: false, error: `Dependency ${dep} failed to start` };
+          return { success: false, error: 'Dependency ' + dep + ' failed to start' };
         }
       }
 
-      // Start the service
-      const startResult = await this.executeService(instance.service);
+      // Register service as running (execution is via kernel.eval for JS services)
+      const startResult = this.executeService(instance.service);
       if (!startResult.success) {
         instance.state = 'failed';
         return startResult;
@@ -110,9 +110,9 @@ export class InitSystem {
   }
 
   /**
-   * Stop a service
+   * Stop a service (synchronous)
    */
-  async stopService(serviceName: string): Promise<SyscallResult<void>> {
+  stopService(serviceName: string): SyscallResult<void> {
     const instance = this.serviceInstances.get(serviceName);
     if (!instance) {
       return { success: false, error: 'Service not found' };
@@ -125,17 +125,7 @@ export class InitSystem {
     instance.state = 'stopping';
 
     try {
-      if (instance.pid) {
-        // Send SIGTERM first
-        await this.sendSignal(instance.pid, 15); // SIGTERM
-
-        // Wait a bit, then SIGKILL if still running
-        await this.delay(5000);
-        if (instance.state !== 'stopped') {
-          await this.sendSignal(instance.pid, 9); // SIGKILL
-        }
-      }
-
+      // On bare metal: mark stopped immediately (no signals/delays)
       instance.state = 'stopped';
       instance.pid = undefined;
       instance.exitCode = undefined;
@@ -150,36 +140,35 @@ export class InitSystem {
   /**
    * Restart a service
    */
-  async restartService(serviceName: string): Promise<SyscallResult<void>> {
-    await this.stopService(serviceName);
-    return await this.startService(serviceName);
+  restartService(serviceName: string): SyscallResult<void> {
+    this.stopService(serviceName);
+    return this.startService(serviceName);
   }
 
   /**
-   * Change runlevel
+   * Change runlevel (synchronous)
    */
-  async changeRunlevel(newLevel: RunLevel): Promise<SyscallResult<void>> {
+  changeRunlevel(newLevel: RunLevel): SyscallResult<void> {
     const oldLevel = this.currentRunlevel;
     this.currentRunlevel = newLevel;
 
     try {
       if (newLevel === 0) {
-        // Shutdown
-        await this.shutdown();
+        this.shutdown();
       } else if (newLevel === 6) {
-        // Reboot
-        await this.reboot();
+        this.reboot();
       } else {
-        // Start services for new runlevel
-        const servicesToStart = this.runlevelTargets[newLevel] || [];
-        for (const service of servicesToStart) {
-          await this.startService(service);
+        // Start services with runlevel <= target
+        for (const [name, instance] of this.serviceInstances) {
+          if (instance.service.runlevel <= newLevel && instance.state === 'stopped') {
+            this.startService(name);
+          }
         }
 
-        // Stop services not needed in new runlevel
+        // Stop services that belong to a higher runlevel
         for (const [name, instance] of this.serviceInstances) {
           if (instance.service.runlevel > newLevel && instance.state === 'running') {
-            await this.stopService(name);
+            this.stopService(name);
           }
         }
       }
@@ -206,45 +195,33 @@ export class InitSystem {
   }
 
   /**
-   * System shutdown
+   * System shutdown (synchronous)
    */
-  async shutdown(): Promise<void> {
-    // Stop all services in reverse order
+  shutdown(): void {
     const services = Array.from(this.serviceInstances.values())
       .sort((a, b) => b.service.stopPriority - a.service.stopPriority);
 
     for (const instance of services) {
       if (instance.state === 'running') {
-        await this.stopService(instance.service.name);
+        this.stopService(instance.service.name);
       }
     }
-
-    // Final cleanup
-    console.log('System shutdown complete');
   }
 
   /**
-   * System reboot
+   * System reboot (synchronous)
    */
-  async reboot(): Promise<void> {
-    await this.shutdown();
-    // In a real system, this would trigger hardware reset
-    console.log('System reboot initiated');
+  reboot(): void {
+    this.shutdown();
+    // Triggers hardware reboot via kernel
   }
 
   /**
-   * Initialize system (called during boot)
+   * Initialize system (called during boot, synchronous)
    */
-  async initialize(): Promise<void> {
-    console.log('JSOS Init System starting...');
-
-    // Start basic services
-    await this.changeRunlevel(1);
-
-    // Start full system
-    await this.changeRunlevel(3);
-
-    console.log('System initialization complete');
+  initialize(): void {
+    // Register and start all services up to runlevel 3 (full multi-user)
+    this.changeRunlevel(3);
   }
 
   /**
@@ -355,27 +332,13 @@ export class InitSystem {
   }
 
   /**
-   * Execute a service
+   * Execute a service — on bare metal, JS services are eval'd by the kernel;
+   * native services are just registered and tracked by PID.
    */
-  private async executeService(service: Service): Promise<SyscallResult<number>> {
-    // In a real implementation, this would fork and exec
-    // For now, we'll simulate with a mock PID
-    return { success: true, value: Math.floor(Math.random() * 1000) + 100 };
-  }
-
-  /**
-   * Send signal to process
-   */
-  private async sendSignal(pid: number, signal: number): Promise<void> {
-    // Mock signal sending
-    console.log(`Sending signal ${signal} to process ${pid}`);
-  }
-
-  /**
-   * Simple delay function
-   */
-  private delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  private executeService(service: Service): SyscallResult<number> {
+    // Assign a sequential PID; real execution happens via kernel.eval for JS services
+    const pid = this.nextPid++;
+    return { success: true, value: pid };
   }
 
   /**

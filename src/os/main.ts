@@ -11,7 +11,6 @@ import terminal from './terminal.js';
 import { Color } from './kernel.js';
 import { startRepl } from './repl.js';
 import fs from './filesystem.js';
-import systemManager from './system.js';
 import { openEditor } from './editor.js';
 import { syscalls } from './syscalls.js';
 import { scheduler } from './scheduler.js';
@@ -128,9 +127,11 @@ function setupGlobals(): void {
     uptime:   function() { return kernel.getUptime(); },
     ticks:    function() { return kernel.getTicks(); },
     screen:   function() { return kernel.getScreenSize(); },
-    ps:       function() { return systemManager.getProcessList(); },
-    spawn:    function(name: string) { return systemManager.createProcess(name); },
-    kill:     function(pid: number) { return systemManager.terminateProcess(pid); },
+    ps:       function() { return scheduler.getAllProcesses(); },
+    spawn:    function(name: string) {
+      return scheduler.createProcess(0, { priority: 10, timeSlice: 10, memory: { heapStart: 0, heapEnd: 0, stackStart: 0, stackEnd: 0 } });
+    },
+    kill:     function(pid: number) { return scheduler.terminateProcess(pid); },
     sleep:    function(ms: number) { kernel.sleep(ms); },
     reboot:   function() { kernel.reboot(); },
     halt:     function() { kernel.halt(); },
@@ -144,10 +145,13 @@ function setupGlobals(): void {
       var vm = vmm.getMemoryStats();
       return { os: 'JSOS v' + (fs.readFile('/etc/version') || '1.0.0'),
                hostname: fs.readFile('/etc/hostname') || 'jsos',
-               arch: 'i686', runtime: 'QuickJS ES2023',
-               screen: kernel.getScreenSize(), memory: m, virtualMemory: vm,
+               arch: 'i686',
+               runtime: 'QuickJS ES2023',
+               screen: kernel.getScreenSize(),
+               memory: m,
+               virtualMemory: vm,
                uptime: kernel.getUptime(),
-               processes: systemManager.getProcessList().length,
+               processes: scheduler.getAllProcesses().length,
                scheduler: scheduler.getAlgorithm(),
                runlevel: init.getCurrentRunlevel() };
     },
@@ -285,13 +289,13 @@ function setupGlobals(): void {
   };
 
   g.ps = function() {
-    var procs = systemManager.getProcessList();
+    var procs = scheduler.getAllProcesses();
     return printableArray(procs, function(arr: any[]) {
-      terminal.colorPrintln('  ' + lpad('PID', 4) + '  ' + pad('NAME', 20) + pad('STATE', 12) + 'PRI', Color.LIGHT_CYAN);
+      terminal.colorPrintln('  ' + lpad('PID', 4) + '  ' + pad('NAME', 18) + pad('STATE', 12) + 'PRI', Color.LIGHT_CYAN);
       terminal.colorPrintln('  ' + pad('', 42).replace(/ /g, '-'), Color.DARK_GREY);
       for (var i = 0; i < arr.length; i++) {
         var p = arr[i];
-        terminal.println('  ' + lpad('' + p.id, 4) + '  ' + pad(p.name, 20) + pad(p.state, 12) + p.priority);
+        terminal.println('  ' + lpad('' + p.pid, 4) + '  ' + pad(p.ppid ? '[' + p.ppid + '] ' : '[0] ', 18) + pad(p.state, 12) + p.priority);
       }
       terminal.colorPrintln('  ' + arr.length + ' process(es)', Color.DARK_GREY);
     });
@@ -299,7 +303,7 @@ function setupGlobals(): void {
 
   g.kill = function(pid: number) {
     if (pid === undefined) { terminal.println('usage: kill(pid)'); return; }
-    if (systemManager.terminateProcess(pid))
+    if (scheduler.terminateProcess(pid))
       terminal.colorPrintln('killed PID ' + pid, Color.LIGHT_GREEN);
     else terminal.println('kill: PID ' + pid + ': not found or protected');
   };
@@ -346,7 +350,7 @@ function setupGlobals(): void {
       screen:   sc.width + 'x' + sc.height + ' VGA text',
       memory:   { total: Math.floor(m.total/1024), free: Math.floor(m.free/1024), used: Math.floor(m.used/1024) },
       uptime:   Math.floor(kernel.getUptime() / 1000) + 's',
-      procs:    systemManager.getProcessList().length,
+      procs:    scheduler.getAllProcesses().length,
     };
     return printableObject(info, function(obj: any) {
       terminal.colorPrintln('JSOS System Information', Color.WHITE);
@@ -490,31 +494,14 @@ function printBanner(): void {
 }
 
 /** Main entry point - called by the bundled JS IIFE footer */
-async function main(): Promise<void> {
+function main(): void {
   setupConsole();
 
-  // Initialize core OS components
-  terminal.println('Initializing JSOS Operating System...');
-
-  // Start virtual memory manager
-  terminal.println('  Starting Virtual Memory Manager...');
-
-  // Initialize system calls
-  terminal.println('  Initializing System Call Interface...');
-
-  // Start process scheduler
-  terminal.println('  Starting Process Scheduler...');
-
-  // Start init system
-  terminal.println('  Starting Init System...');
-  await init.initialize();
+  // Initialize OS subsystems synchronously (bare metal — no event loop)
+  init.initialize();   // registers and starts services up to runlevel 3
 
   setupGlobals();
   printBanner();
-
-  terminal.println('OS initialization complete. Starting REPL...');
-  terminal.println('');
-
   startRepl();
   // startRepl() loops forever; only returns on halt/reboot
   kernel.halt();
