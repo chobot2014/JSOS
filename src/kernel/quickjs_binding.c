@@ -162,6 +162,34 @@ static JSValue js_kernel_readline(JSContext *ctx, JSValueConst this_val,
     return JS_NewString(ctx, buffer);
 }
 
+/* waitKeyEx — blocks until a regular key OR an extended key (arrow, fn, etc.)
+ * is available.  Returns { ch: string, ext: number }.
+ * ext == 0  → regular key in ch
+ * ext != 0  → special key code (KEY_UP=0x80, KEY_DOWN=0x81, …), ch == ""
+ */
+static JSValue js_kernel_wait_key_ex(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    for (;;) {
+        int ext = keyboard_get_extended();
+        if (ext != 0) {
+            JSValue obj = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, obj, "ch",  JS_NewString(ctx, ""));
+            JS_SetPropertyStr(ctx, obj, "ext", JS_NewInt32(ctx, ext));
+            return obj;
+        }
+        if (keyboard_has_key()) {
+            char c = keyboard_poll();
+            char buf[2] = { c, 0 };
+            JSValue obj = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, obj, "ch",  JS_NewString(ctx, buf));
+            JS_SetPropertyStr(ctx, obj, "ext", JS_NewInt32(ctx, 0));
+            return obj;
+        }
+        __asm__ volatile ("hlt");
+    }
+}
+
 /* --- Timer --- */
 
 static JSValue js_kernel_get_ticks(JSContext *ctx, JSValueConst this_val,
@@ -278,6 +306,7 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("waitKey", 0, js_kernel_wait_key),
     JS_CFUNC_DEF("hasKey", 0, js_kernel_has_key),
     JS_CFUNC_DEF("readline", 0, js_kernel_readline),
+    JS_CFUNC_DEF("waitKeyEx", 0, js_kernel_wait_key_ex),
     /* Timer */
     JS_CFUNC_DEF("getTicks", 0, js_kernel_get_ticks),
     JS_CFUNC_DEF("getUptime", 0, js_kernel_get_uptime),

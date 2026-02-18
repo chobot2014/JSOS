@@ -81,6 +81,7 @@ export interface KernelAPI {
   // Keyboard
   readKey(): string;
   waitKey(): string;
+  waitKeyEx(): { ch: string; ext: number };
   hasKey(): boolean;
   readline(): string;
   
