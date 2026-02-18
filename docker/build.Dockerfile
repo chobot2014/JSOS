@@ -54,12 +54,18 @@ RUN cd build-gcc && \
 # Clean up
 RUN rm -rf /tmp/*
 
-# Download QuickJS source
+# Download QuickJS source from official GitHub repo
 WORKDIR /opt
-RUN wget https://bellard.org/quickjs/quickjs-2025-09-13-2.tar.xz \
-    && tar xf quickjs-2025-09-13-2.tar.xz \
-    && mv quickjs-2025-09-13-2 quickjs \
-    && rm quickjs-2025-09-13-2.tar.xz
+RUN git clone --depth 1 https://github.com/bellard/quickjs.git quickjs
+
+# Patch QuickJS for bare-metal cross-compilation (no pthreads, no atomics)
+RUN cd quickjs && \
+    # Disable CONFIG_ATOMICS (requires pthread) as recommended by QuickJS docs
+    sed -i 's/^#define CONFIG_ATOMICS/\/\/ #define CONFIG_ATOMICS  \/\* disabled for bare-metal *\//' quickjs.c && \
+    # Fix tm_gmtoff - newlib doesn't have this GNU extension (use dot accessor)
+    sed -i 's/tm\.tm_gmtoff/0 \/\* tm_gmtoff unavailable \*\//' quickjs.c && \
+    # Fix C11 asm keyword - use __asm__ instead
+    sed -i 's/\basm volatile\b/__asm__ volatile/g; s/\basm(\b/__asm__(/g' quickjs.c
 
 # Set up working directory for our project
 WORKDIR /workspace
@@ -71,8 +77,9 @@ RUN npm ci
 # Copy source code and scripts
 COPY . .
 
-# Make scripts executable (they should now be in /workspace/scripts/)
-RUN ls -la scripts/ && chmod +x scripts/*.sh
+# Fix line endings (Windows → Unix) and make scripts executable
+RUN find . -name "*.sh" -exec sed -i 's/\r$//' {} + && \
+    chmod +x scripts/*.sh
 
 # Build TypeScript to ES5 JavaScript with modern tooling
 RUN npm run build:local

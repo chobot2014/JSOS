@@ -1,11 +1,28 @@
 // Simple math function implementations for bare metal
-// These are minimal implementations to satisfy Duktape's needs
+// These are minimal implementations to satisfy QuickJS's needs
 
-#include <math.h>
+// We provide math functions, so avoid pulling in <math.h> macros that
+// might conflict. Just declare what we need.
+#include <stddef.h>
+
+// Undefine any macros that may leak from toolchain headers
+#undef log2
+#undef fmax
+#undef fmin
+#undef round
+#undef lrint
+#undef expm1
+#undef log1p
 
 // Constants
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
+#endif
+#ifndef M_LN2
+#define M_LN2 0.69314718055994530942
+#endif
+#ifndef M_LN10
+#define M_LN10 2.30258509299404568402
 #endif
 
 // Basic math functions
@@ -167,4 +184,91 @@ double cbrt(double x) {
         guess = (2.0 * guess + x / (guess * guess)) / 3.0;
     }
     return x < 0 ? -guess : guess;
+}
+
+// Additional math functions required by QuickJS
+
+double round(double x) {
+    if (x >= 0.0) {
+        return floor(x + 0.5);
+    } else {
+        return ceil(x - 0.5);
+    }
+}
+
+long lrint(double x) {
+    return (long)round(x);
+}
+
+double hypot(double x, double y) {
+    // sqrt(x*x + y*y) with overflow protection
+    x = fabs(x);
+    y = fabs(y);
+    if (x > y) {
+        double t = y / x;
+        return x * sqrt(1.0 + t * t);
+    } else if (y > 0.0) {
+        double t = x / y;
+        return y * sqrt(1.0 + t * t);
+    }
+    return 0.0;
+}
+
+double fmax(double x, double y) {
+    return x > y ? x : y;
+}
+
+double fmin(double x, double y) {
+    return x < y ? x : y;
+}
+
+double cosh(double x) {
+    double ex = exp(x);
+    return (ex + 1.0 / ex) / 2.0;
+}
+
+double sinh(double x) {
+    double ex = exp(x);
+    return (ex - 1.0 / ex) / 2.0;
+}
+
+double tanh(double x) {
+    if (x > 20.0) return 1.0;
+    if (x < -20.0) return -1.0;
+    double e2x = exp(2.0 * x);
+    return (e2x - 1.0) / (e2x + 1.0);
+}
+
+double acosh(double x) {
+    if (x < 1.0) return 0.0;
+    return log(x + sqrt(x * x - 1.0));
+}
+
+double asinh(double x) {
+    return log(x + sqrt(x * x + 1.0));
+}
+
+double atanh(double x) {
+    if (fabs(x) >= 1.0) return 0.0;
+    return 0.5 * log((1.0 + x) / (1.0 - x));
+}
+
+double expm1(double x) {
+    // For small x, use Taylor series for better precision
+    if (fabs(x) < 1e-5) {
+        return x + 0.5 * x * x;
+    }
+    return exp(x) - 1.0;
+}
+
+double log1p(double x) {
+    // For small x, use Taylor series for better precision
+    if (fabs(x) < 1e-5) {
+        return x - 0.5 * x * x;
+    }
+    return log(1.0 + x);
+}
+
+double log2(double x) {
+    return log(x) / M_LN2;
 }
