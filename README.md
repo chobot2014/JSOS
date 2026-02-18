@@ -2,7 +2,9 @@
 
 **A complete operating system written in TypeScript, running on bare metal x86 hardware.**
 
-JSOS compiles TypeScript to JavaScript, embeds it in a custom C kernel powered by [QuickJS](https://bellard.org/quickjs/) (a full ES2023 engine by Fabrice Bellard), and boots from a standard ISO image via GRUB. The result is a real, interactive OS where **everything is JavaScript** — the filesystem, process management, terminal, and all user-facing features are written in TypeScript and exposed as global JavaScript functions.
+**All applications run natively in JavaScript/TypeScript - no other languages needed.**
+
+JSOS compiles TypeScript to JavaScript, embeds it in a custom C kernel powered by [QuickJS](https://bellard.org/quickjs/) (a full ES2023 engine by Fabrice Bellard), and boots from a standard ISO image via GRUB. The result is a real, interactive OS where **everything is JavaScript** — the filesystem, process management, terminal, networking, and **all applications** are written in TypeScript/JavaScript and run natively on bare metal.
 
 ![JSOS Demo](2026-02-18%2009-30-26.gif)
 
@@ -90,6 +92,69 @@ kernel.KEY_UP, kernel.KEY_DOWN, kernel.KEY_F1, etc.
 
 ---
 
+## Applications: Everything in JavaScript
+
+**All applications run natively in JavaScript/TypeScript** - no compilation, no separate runtimes, no foreign function interfaces.
+
+### System Applications
+```javascript
+// File Manager - pure JavaScript
+function listDirectory(path) {
+  return fs.readdir(path).map(file => ({
+    name: file,
+    size: fs.stat(file).size,
+    type: fs.isDirectory(file) ? 'directory' : 'file'
+  }));
+}
+
+// Process Monitor - pure JavaScript
+function showProcesses() {
+  return sys.processes().map(proc => ({
+    pid: proc.pid,
+    name: proc.name,
+    cpu: proc.cpuUsage,
+    memory: proc.memoryUsage
+  }));
+}
+```
+
+### User Applications
+```javascript
+// Text Editor - pure JavaScript
+class TextEditor {
+  constructor() {
+    this.buffer = [];
+    this.cursor = { x: 0, y: 0 };
+  }
+
+  insert(text) {
+    // Direct hardware access through TypeScript APIs
+    terminal.setCursor(this.cursor.x, this.cursor.y);
+    terminal.print(text);
+  }
+
+  save(filename) {
+    fs.writeFile(filename, this.buffer.join('\n'));
+  }
+}
+```
+
+### Network Applications
+```javascript
+// HTTP Client - pure JavaScript
+async function fetch(url) {
+  const socket = sys.net.createSocket();
+  await socket.connect(url, 80);
+
+  socket.write(`GET / HTTP/1.1\r\nHost: ${url}\r\n\r\n`);
+
+  const response = await socket.read();
+  return parseHttpResponse(response);
+}
+```
+
+---
+
 ## Architecture
 
 ```
@@ -112,6 +177,8 @@ kernel.KEY_UP, kernel.KEY_DOWN, kernel.KEY_F1, etc.
 │            boot.s → crt0.s → kernel.c            │
 └─────────────────────────────────────────────────┘
 ```
+
+**Applications run directly in the TypeScript OS Layer** - no separate runtimes, no compilation, pure JavaScript/TypeScript from bare metal to user interface.
 
 ---
 

@@ -131,6 +131,100 @@ class TCPStack {
 }
 ```
 
+#### Applications
+```typescript
+// Web Server Application
+class WebServer {
+  constructor(port: number) {
+    this.port = port;
+    this.routes = new Map<string, RouteHandler>();
+  }
+
+  get(path: string, handler: RouteHandler) {
+    this.routes.set('GET ' + path, handler);
+  }
+
+  listen() {
+    const socket = sys.net.createSocket();
+    socket.bind(this.port);
+    socket.listen();
+
+    while (true) {
+      const client = socket.accept();
+      this.handleRequest(client);
+    }
+  }
+}
+
+// Usage - all in JavaScript/TypeScript
+const server = new WebServer(8080);
+server.get('/', (req, res) => {
+  res.send('Hello from JSOS!');
+});
+server.listen();
+```
+
+### Applications: Everything in JavaScript
+
+**All applications run natively in JavaScript/TypeScript** - no compilation, no separate runtimes, no foreign function interfaces.
+
+#### System Applications
+```typescript
+// File Manager - pure JavaScript
+function listDirectory(path: string) {
+  return fs.readdir(path).map(file => ({
+    name: file,
+    size: fs.stat(file).size,
+    type: fs.isDirectory(file) ? 'directory' : 'file'
+  }));
+}
+
+// Process Monitor - pure JavaScript
+function showProcesses() {
+  return sys.processes().map(proc => ({
+    pid: proc.pid,
+    name: proc.name,
+    cpu: proc.cpuUsage,
+    memory: proc.memoryUsage
+  }));
+}
+```
+
+#### User Applications
+```typescript
+// Text Editor - pure JavaScript
+class TextEditor {
+  constructor() {
+    this.buffer = [];
+    this.cursor = { x: 0, y: 0 };
+  }
+
+  insert(text: string) {
+    // Direct hardware access through TypeScript APIs
+    terminal.setCursor(this.cursor.x, this.cursor.y);
+    terminal.print(text);
+  }
+
+  save(filename: string) {
+    fs.writeFile(filename, this.buffer.join('\n'));
+  }
+}
+```
+
+#### Network Applications
+```typescript
+// HTTP Client - pure JavaScript
+async function fetch(url: string) {
+  const socket = sys.net.createSocket();
+  await socket.connect(url, 80);
+
+  socket.write(`GET / HTTP/1.1\r\nHost: ${url}\r\n\r\n`);
+
+  const response = await socket.read();
+  return parseHttpResponse(response);
+}
+```
+
 ### Why This Architecture Matters
 
 #### 1. **Unified Programming Model**
@@ -208,6 +302,32 @@ JSOS isn't just running JavaScript on bare metal - it's **being** the operating 
 3. **API Design**: C functions should be pure, stateless, and minimal
 4. **Testing**: All OS logic must be unit testable in TypeScript
 5. **Documentation**: Every TypeScript function should be documented as if it's kernel API
+6. **Applications**: All applications must be written in JavaScript/TypeScript - no other languages allowed
+
+### Seamless OS-Application Integration
+
+Since everything is JavaScript/TypeScript, applications have **direct access** to OS APIs:
+
+```typescript
+// Applications can directly call OS functions
+function myApp() {
+  // Direct filesystem access
+  const files = fs.readdir('/home/user');
+
+  // Direct process management
+  const myPid = sys.getpid();
+
+  // Direct memory management
+  const buffer = sys.vmm.allocate(1024);
+
+  // Direct networking
+  const socket = sys.net.createSocket();
+
+  // Direct hardware access through TypeScript APIs
+  terminal.setColor(Color.RED);
+  terminal.print('Hello from user app!');
+}
+```
 
 ### Success Metrics
 
@@ -216,8 +336,11 @@ JSOS isn't just running JavaScript on bare metal - it's **being** the operating 
 - **Full test coverage**: 100% of TypeScript code under test
 - **Architecture independence**: Easy to port to ARM, RISC-V, etc.
 - **Modern development**: Hot reload, debugging, IDE support for all OS code
+- **Pure JavaScript ecosystem**: All applications written in JavaScript/TypeScript only
 
 ---
 
-**JSOS: Where TypeScript doesn't run ON the OS - TypeScript IS the OS.**</content>
+**JSOS: Where TypeScript doesn't run ON the OS - TypeScript IS the OS.**
+
+**And every application runs natively in JavaScript/TypeScript - no other languages needed.**
 <parameter name="filePath">c:\DEV\JSOS\agents.md
