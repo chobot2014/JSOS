@@ -20,6 +20,7 @@
  */
 
 import fs from './filesystem.js';
+import terminal from './terminal.js';
 
 declare var kernel: import('./kernel.js').KernelAPI;
 
@@ -83,9 +84,9 @@ export function openEditor(filePath?: string): void {
     var docRow = viewTop + screenRow;
     if (docRow < lines.length) {
       var line = lines[docRow];
-      kernel.drawRow(screenRow, pad80(line), C_NORMAL);
+      kernel.vgaDrawRow(screenRow, pad80(line), C_NORMAL);
     } else {
-      kernel.drawRow(screenRow, pad80('~'), C_TILDE);
+      kernel.vgaDrawRow(screenRow, pad80('~'), C_TILDE);
     }
   }
 
@@ -103,7 +104,7 @@ export function openEditor(filePath?: string): void {
     var status  = left;
     while (status.length < 80 - posInfo.length) status += ' ';
     status = pad80(status + posInfo);
-    kernel.drawRow(STATUS_ROW, status, message ? C_WARN : C_STATUS);
+    kernel.vgaDrawRow(STATUS_ROW, status, message ? C_WARN : C_STATUS);
 
     // Hint bar — show one-shot message or default hints
     var hintText: string;
@@ -114,11 +115,11 @@ export function openEditor(filePath?: string): void {
       hintText = pad80(' ^S:Save  ^Q:Quit  ^X:Force-quit  ^K:Cut  ^U:Paste  ' +
                        'Home/End  PgUp/Dn  Del');
     }
-    kernel.drawRow(HINT_ROW, hintText, C_HINT);
+    kernel.vgaDrawRow(HINT_ROW, hintText, C_HINT);
 
     // Position hardware cursor
     var hcol = curCol < 80 ? curCol : 79;
-    kernel.setCursor(curRow - viewTop, hcol);
+    kernel.vgaSetCursor(curRow - viewTop, hcol);
   }
 
   // ── Prompt for a string in the status bar ────────────────────────────────
@@ -127,8 +128,8 @@ export function openEditor(filePath?: string): void {
     for (;;) {
       var promptLine = ' ' + label + val;
       while (promptLine.length < 79) promptLine += ' ';
-      kernel.drawRow(STATUS_ROW, pad80(promptLine), C_PROMPT);
-      kernel.setCursor(STATUS_ROW, 1 + label.length + val.length);
+      kernel.vgaDrawRow(STATUS_ROW, pad80(promptLine), C_PROMPT);
+      kernel.vgaSetCursor(STATUS_ROW, 1 + label.length + val.length);
 
       var k = kernel.waitKeyEx();
       if (k.ch === '\n' || k.ch === '\r') return val;
@@ -157,8 +158,8 @@ export function openEditor(filePath?: string): void {
   }
 
   // ── Initialize ───────────────────────────────────────────────────────────
-  kernel.resumeLive();  // snap out of any scrollback view
-  kernel.clear();
+  terminal.resumeLive();  // snap out of any scrollback view
+  kernel.vgaFill(' ', C_NORMAL);
   render();
 
   // ── Main loop ────────────────────────────────────────────────────────────
@@ -311,6 +312,5 @@ export function openEditor(filePath?: string): void {
   }
 
   // ── Restore terminal ──────────────────────────────────────────────────────
-  kernel.clear();
-  kernel.setColor(7, 0);
+  terminal.clear();
 }

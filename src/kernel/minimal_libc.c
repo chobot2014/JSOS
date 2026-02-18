@@ -1,6 +1,6 @@
 #include "minimal_libc.h"
 #include "memory.h"
-#include "terminal.h"
+#include "platform.h"
 
 // Simplified va_list for our minimal implementation
 typedef char* va_list;
@@ -235,11 +235,11 @@ int _setjmp(jmp_buf env) {
 void longjmp(jmp_buf env, int val) {
     // Very simplified longjmp - just panic for now
     (void)env; (void)val;
-    terminal_writestring("longjmp called - system halt\n");
+    platform_boot_print("longjmp called - system halt\n");
     for(;;); // Infinite loop instead of hlt
 }
 
 void abort(void) {
-    terminal_writestring("abort() called - system halt\n");
+    platform_boot_print("abort() called - system halt\n");
     for(;;); // Infinite loop instead of hlt
 }

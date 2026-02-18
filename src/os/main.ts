@@ -16,7 +16,7 @@ import { openEditor } from './editor.js';
 
 declare var kernel: import('./kernel.js').KernelAPI;
 
-/** Route console.log / .error / .warn through kernel VGA output */
+/** Route console.log / .error / .warn through the TypeScript terminal */
 function setupConsole(): void {
   var con = {
     log: function() {
@@ -33,25 +33,23 @@ function setupConsole(): void {
           parts.push('' + arg);
         }
       }
-      kernel.print(parts.join(' '));
+      terminal.println(parts.join(' '));
     },
     error: function() {
       var parts: string[] = [];
       for (var i = 0; i < arguments.length; i++) parts.push('' + arguments[i]);
-      var saved = kernel.getColor();
-      kernel.setColor(Color.LIGHT_RED, Color.BLACK);
-      kernel.print(parts.join(' '));
-      kernel.setColor(saved & 0x0F, (saved >> 4) & 0x0F);
+      var saved = terminal.pushColor(Color.LIGHT_RED, Color.BLACK);
+      terminal.println(parts.join(' '));
+      terminal.popColor(saved);
     },
     warn: function() {
       var parts: string[] = [];
       for (var i = 0; i < arguments.length; i++) parts.push('' + arguments[i]);
-      var saved = kernel.getColor();
-      kernel.setColor(Color.YELLOW, Color.BLACK);
-      kernel.print(parts.join(' '));
-      kernel.setColor(saved & 0x0F, (saved >> 4) & 0x0F);
+      var saved = terminal.pushColor(Color.YELLOW, Color.BLACK);
+      terminal.println(parts.join(' '));
+      terminal.popColor(saved);
     },
-    clear: function() { kernel.clear(); }
+    clear: function() { terminal.clear(); }
   };
   (globalThis as any).console = con;
 }
@@ -301,8 +299,8 @@ function setupGlobals(): void {
                  'DK_GREY','LT_BLUE','LT_GREEN','LT_CYAN','LT_RED','LT_MAG','YELLOW','WHITE'];
     terminal.colorPrintln('VGA Palette (0-15)', Color.WHITE);
     for (var i = 0; i < 16; i++) {
-      kernel.setColor(i, 0); kernel.printRaw('  ' + lpad('' + i, 2) + ' ########  ');
-      kernel.setColor(7, 0); terminal.colorPrintln(names[i], Color.DARK_GREY);
+      terminal.setColor(i, 0); terminal.print('  ' + lpad('' + i, 2) + ' ########  ');
+      terminal.setColor(7, 0); terminal.colorPrintln(names[i], Color.DARK_GREY);
     }
   };
 
@@ -317,7 +315,7 @@ function setupGlobals(): void {
     kernel.print(parts.join(' '));
   };
 
-  g.clear  = function() { kernel.clear(); };
+  g.clear  = function() { terminal.clear(); };
   g.sleep  = function(ms: number) { kernel.sleep(ms); };
   g.halt   = function() { kernel.halt(); };
   g.reboot = function() { kernel.reboot(); };
@@ -394,23 +392,23 @@ function setupGlobals(): void {
 
 /** Boot banner */
 function printBanner(): void {
-  kernel.clear();
-  kernel.setColor(Color.LIGHT_CYAN, Color.BLACK);
-  kernel.print('');
-  kernel.print('     ######  ######  ####### ######  ');
-  kernel.print('       ##   ##       ##   ## ##      ');
-  kernel.print('       ##    ######  ##   ##  #####  ');
-  kernel.print('  ##   ##        ## ##   ##      ## ');
-  kernel.print('   #####   ######  ####### ######  ');
-  kernel.print('');
-  kernel.setColor(Color.WHITE, Color.BLACK);
-  kernel.print('       JavaScript Operating System');
-  kernel.print('');
-  kernel.setColor(Color.DARK_GREY, Color.BLACK);
-  kernel.print('  QuickJS ES2023  |  i686  |  Bare Metal');
-  kernel.print('  Type help() to see all available functions');
-  kernel.print('');
-  kernel.setColor(Color.LIGHT_GREY, Color.BLACK);
+  terminal.clear();
+  terminal.setColor(Color.LIGHT_CYAN, Color.BLACK);
+  terminal.println('');
+  terminal.println('     ######  ######  ####### ######  ');
+  terminal.println('       ##   ##       ##   ## ##      ');
+  terminal.println('       ##    ######  ##   ##  #####  ');
+  terminal.println('  ##   ##        ## ##   ##      ## ');
+  terminal.println('   #####   ######  ####### ######  ');
+  terminal.println('');
+  terminal.setColor(Color.WHITE, Color.BLACK);
+  terminal.println('       JavaScript Operating System');
+  terminal.println('');
+  terminal.setColor(Color.DARK_GREY, Color.BLACK);
+  terminal.println('  QuickJS ES2023  |  i686  |  Bare Metal');
+  terminal.println('  Type help() to see all available functions');
+  terminal.println('');
+  terminal.setColor(Color.LIGHT_GREY, Color.BLACK);
 }
 
 /** Main entry point - called by the bundled JS IIFE footer */

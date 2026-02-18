@@ -39,10 +39,10 @@ function readline(printPrompt: () => void): string {
     var key = kernel.waitKeyEx();
 
     // ── Scrollback: PgUp / PgDown ──────────────────────────────────────────
-    if (key.ext === 0x86) { kernel.scrollUp(20);   continue; }  // PgUp
-    if (key.ext === 0x87) { kernel.scrollDown(20); continue; }  // PgDown
+    if (key.ext === 0x86) { terminal.scrollViewUp(20);   continue; }  // PgUp
+    if (key.ext === 0x87) { terminal.scrollViewDown(20); continue; }  // PgDown
     // Any other key snaps back to the live view before acting
-    kernel.resumeLive();
+    terminal.resumeLive();
 
     if (key.ext !== 0) {
       if (key.ext === 0x80) {
@@ -50,12 +50,12 @@ function readline(printPrompt: () => void): string {
         if (histIdx === -1) { savedBuf = buf; histIdx = _history.length - 1; }
         else if (histIdx > 0) { histIdx--; }
         else { continue; }
-        for (var i = 0; i < buf.length; i++) kernel.printRaw('\b \b');
+        for (var i = 0; i < buf.length; i++) terminal.print('\b \b');
         buf = _history[histIdx];
-        kernel.printRaw(buf);
+        terminal.print(buf);
       } else if (key.ext === 0x81) {
         if (histIdx === -1) continue;
-        for (var i = 0; i < buf.length; i++) kernel.printRaw('\b \b');
+        for (var i = 0; i < buf.length; i++) terminal.print('\b \b');
         if (histIdx < _history.length - 1) {
           histIdx++;
           buf = _history[histIdx];
@@ -63,7 +63,7 @@ function readline(printPrompt: () => void): string {
           histIdx = -1;
           buf = savedBuf;
         }
-        kernel.printRaw(buf);
+        terminal.print(buf);
       }
       continue;
     }
@@ -71,29 +71,29 @@ function readline(printPrompt: () => void): string {
     var ch = key.ch;
     if (!ch) continue;
 
-    if (ch === '\n' || ch === '\r') { kernel.print(''); return buf; }
+    if (ch === '\n' || ch === '\r') { terminal.putchar('\n'); return buf; }
 
     if (ch === '\b' || ch === '\x7f') {
-      if (buf.length > 0) { buf = buf.slice(0, -1); kernel.printRaw('\b \b'); histIdx = -1; }
+      if (buf.length > 0) { buf = buf.slice(0, -1); terminal.print('\b \b'); histIdx = -1; }
       continue;
     }
 
-    if (ch === '\x03') { kernel.print('^C'); return ''; }
+    if (ch === '\x03') { terminal.println('^C'); return ''; }
 
     if (ch === '\x15') {
-      for (var i = 0; i < buf.length; i++) kernel.printRaw('\b \b');
+      for (var i = 0; i < buf.length; i++) terminal.print('\b \b');
       buf = ''; histIdx = -1;
       continue;
     }
 
     if (ch === '\x0c') {
-      kernel.clear();
+      terminal.clear();
       printPrompt();
-      kernel.printRaw(buf);
+      terminal.print(buf);
       continue;
     }
 
-    if (ch >= ' ') { buf += ch; kernel.printRaw(ch); histIdx = -1; }
+    if (ch >= ' ') { buf += ch; terminal.print(ch); histIdx = -1; }
   }
 }
 

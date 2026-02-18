@@ -121,9 +121,8 @@ int _wait(int *status) {
 
 int _write(int file, char *ptr, int len) {
     if (file == 1 || file == 2) { // stdout or stderr
-        for (int i = 0; i < len; i++) {
-            terminal_putchar(ptr[i]);
-        }
+        char buf[2] = { 0, 0 };
+        for (int i = 0; i < len; i++) { buf[0] = ptr[i]; platform_boot_print(buf); }
         return len;
     }
     return -1;

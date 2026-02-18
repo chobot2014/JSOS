@@ -1,6 +1,5 @@
 #include "irq.h"
 #include "io.h"
-#include "terminal.h"
 #include <stddef.h>
 
 /* PIC ports */

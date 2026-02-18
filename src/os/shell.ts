@@ -329,10 +329,10 @@ export class Shell {
 
     terminal.println('');
 
-    // Main event loop - this blocks on keyboard input via kernel.readline()
+    // Main event loop - blocks on keyboard input via terminal.readLine()
     while (this.running) {
       this.printPrompt();
-      var line = kernel.readline();
+      var line = terminal.readLine();
       this.execute(line);
     }
 
