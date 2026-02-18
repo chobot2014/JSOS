@@ -46,7 +46,7 @@
     "operating-system",
     "typescript",
     "bare-metal",
-    "duktape",
+    "quickjs",
     "javascript"
   ],
   "author": "JSOS Developer",
