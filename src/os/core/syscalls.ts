@@ -115,7 +115,8 @@ export const enum Errno {
   EMLINK = 31,    // Too many links
   EPIPE = 32,     // Broken pipe
   EDOM = 33,      // Math argument out of domain
-  ERANGE = 34     // Math result not representable
+  ERANGE = 34,    // Math result not representable
+  ENOSYS = 38     // Function not implemented
 }
 
 export class SystemCallInterface {
@@ -155,7 +156,7 @@ export class SystemCallInterface {
   }
 
   exec(path: string, args: string[]): SyscallResult<never> {
-    return this.syscall(SyscallNumber.EXEC, path, args);
+    return this.syscall(SyscallNumber.EXEC, path, args) as SyscallResult<never>;
   }
 
   exit(status: number): void {

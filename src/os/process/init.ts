@@ -95,7 +95,7 @@ export class InitSystem {
       const startResult = this.executeService(instance.service);
       if (!startResult.success) {
         instance.state = 'failed';
-        return startResult;
+        return { success: false, error: startResult.error };
       }
 
       instance.pid = startResult.value;

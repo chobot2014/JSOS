@@ -88,7 +88,7 @@ export class SystemManager {
   }
 
   /** Adapt a ProcessContext to the simplified ProcessDescriptor interface */
-  private toDescriptor(ctx: import('./scheduler.js').ProcessContext): ProcessDescriptor {
+  private toDescriptor(ctx: import('../process/scheduler').ProcessContext): ProcessDescriptor {
     var stateMap: Record<string, ProcessDescriptor['state']> = {
       ready: 'waiting',
       running: 'running',

@@ -266,7 +266,7 @@ export function openEditor(filePath?: string): void {
         message = 'Pasted line from clipboard';
 
       } else if (ch === '\x0c') {      // Ctrl+L — force full redraw
-        kernel.clear();
+        kernel.vgaFill(' ', 0x07);
 
       } else if (ch === '\n' || ch === '\r') {   // Enter — split line
         var before = lines[curRow].slice(0, curCol);
