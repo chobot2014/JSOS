@@ -81,11 +81,19 @@ COPY . .
 RUN find . -name "*.sh" -exec sed -i 's/\r$//' {} + && \
     chmod +x scripts/*.sh
 
+# Install dosfstools for FAT16 disk image creation (kept separate for cache)
+RUN apt-get update && apt-get install -y dosfstools && rm -rf /var/lib/apt/lists/*
+
 # Build TypeScript to ES5 JavaScript with modern tooling
 RUN npm run build:local
 
 # Build the kernel and create ISO
 RUN ./scripts/build.sh
 
+# Create a 64 MiB FAT16 disk image for persistent storage
+RUN dd if=/dev/zero of=/workspace/build/disk.img bs=1M count=64 && \
+    mkfs.fat -F 16 -n "JSDISK" /workspace/build/disk.img
+
 FROM scratch
 COPY --from=builder /workspace/build/jsos.iso /jsos.iso
+COPY --from=builder /workspace/build/disk.img /disk.img

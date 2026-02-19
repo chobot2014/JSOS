@@ -16,9 +16,13 @@
 #include "timer.h"
 #include "io.h"
 #include "embedded_js.h"
+#include "ata.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+
+/* Static ATA sector buffer: 8 sectors × 256 words = 4 KB on BSS, not stack */
+static uint16_t ata_sector_buf[256 * 8];
 
 static JSRuntime *rt  = NULL;
 static JSContext *ctx = NULL;
@@ -275,6 +279,60 @@ static JSValue js_eval(JSContext *c, JSValueConst this_val, int argc, JSValueCon
 
 /*  Function table  */
 
+/* ── ATA block device bindings ─────────────────────────────────── */
+
+static JSValue js_ata_present(JSContext *c, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewBool(c, ata_present());
+}
+
+static JSValue js_ata_read(JSContext *c, JSValueConst this_val,
+                           int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(c, "ataRead(lba, sectors)");
+    uint32_t lba;
+    int32_t  secs;
+    if (JS_ToUint32(c, &lba,  argv[0])) return JS_EXCEPTION;
+    if (JS_ToInt32 (c, &secs, argv[1])) return JS_EXCEPTION;
+    if (secs < 1 || secs > 8)
+        return JS_ThrowRangeError(c, "sectors must be 1-8");
+
+    if (ata_read28(lba, (uint8_t)secs, ata_sector_buf) != 0)
+        return JS_NULL;
+
+    /* Return flat byte array (length = secs * 512) */
+    int total = secs * 512;
+    JSValue arr = JS_NewArray(c);
+    uint8_t *bytes = (uint8_t *)ata_sector_buf;
+    for (int i = 0; i < total; i++)
+        JS_SetPropertyUint32(c, arr, (uint32_t)i, JS_NewInt32(c, bytes[i]));
+    return arr;
+}
+
+static JSValue js_ata_write(JSContext *c, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 3) return JS_ThrowTypeError(c, "ataWrite(lba, sectors, data)");
+    uint32_t lba;
+    int32_t  secs;
+    if (JS_ToUint32(c, &lba,  argv[0])) return JS_EXCEPTION;
+    if (JS_ToInt32 (c, &secs, argv[1])) return JS_EXCEPTION;
+    if (secs < 1 || secs > 8)
+        return JS_ThrowRangeError(c, "sectors must be 1-8");
+
+    int total = secs * 512;
+    uint8_t *bytes = (uint8_t *)ata_sector_buf;
+    for (int i = 0; i < total; i++) {
+        JSValue v = JS_GetPropertyUint32(c, argv[2], (uint32_t)i);
+        int32_t b = 0;
+        JS_ToInt32(c, &b, v);
+        JS_FreeValue(c, v);
+        bytes[i] = (uint8_t)b;
+    }
+    return JS_NewBool(c, ata_write28(lba, (uint8_t)secs, ata_sector_buf) == 0);
+}
+
 static const JSCFunctionListEntry js_kernel_funcs[] = {
     /* VGA raw access */
     JS_CFUNC_DEF("vgaPut",        4, js_vga_put),
@@ -314,11 +372,20 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("serialGetchar", 0, js_serial_getchar),
     /* Eval */
     JS_CFUNC_DEF("eval",   1, js_eval),
+    /* ATA block device */
+    JS_CFUNC_DEF("ataPresent", 0, js_ata_present),
+    JS_CFUNC_DEF("ataRead",    2, js_ata_read),
+    JS_CFUNC_DEF("ataWrite",   3, js_ata_write),
 };
 
 /*  Initialization  */
 
 int quickjs_initialize(void) {
+    /* Probe ATA before starting QuickJS */
+    ata_initialize();
+    platform_boot_print(ata_present() ? "[ATA] Drive detected\n"
+                                      : "[ATA] No drive\n");
+
     rt = JS_NewRuntime();
     if (!rt) return -1;
 

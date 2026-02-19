@@ -111,6 +111,21 @@ export interface KernelAPI {
   /** Read one byte from COM1; returns -1 if no data available */
   serialGetchar(): number;
 
+  // ─ ATA block device ─────────────────────────────────────────────────────
+  /** Returns true if an ATA drive was detected at boot */
+  ataPresent(): boolean;
+  /**
+   * Read `sectors` (1-8) sectors starting at `lba`.
+   * Returns a flat byte array of length `sectors * 512`, or null on error.
+   */
+  ataRead(lba: number, sectors: number): number[] | null;
+  /**
+   * Write `sectors` (1-8) sectors starting at `lba`.
+   * `data` must be a flat byte array of exactly `sectors * 512` bytes.
+   * Returns true on success.
+   */
+  ataWrite(lba: number, sectors: number, data: number[]): boolean;
+
   //  Constants 
   colors: KernelColors;
   KEY_UP: number;    KEY_DOWN: number;   KEY_LEFT: number;  KEY_RIGHT: number;

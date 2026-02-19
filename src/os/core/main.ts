@@ -20,6 +20,7 @@ import { procFS } from '../fs/proc.js';
 import { users } from '../users/users.js';
 import { ipc } from '../ipc/ipc.js';
 import { net } from '../net/net.js';
+import { fat16 } from '../storage/fat16.js';
 
 declare var kernel: import('./kernel.js').KernelAPI; // kernel.js is in core/
 
@@ -106,6 +107,43 @@ function setupGlobals(): void {
   g.users = users;
   g.ipc   = ipc;
   g.net   = net;
+
+  // ── Persistent disk (FAT16) ───────────────────────────────────────────
+  g.disk = {
+    ls: function(path?: string) {
+      var p = path || '/';
+      var items = fat16.list(p);
+      return printableArray(items, function(arr) {
+        terminal.colorPrintln('  [disk] ' + p, Color.DARK_GREY);
+        if (arr.length === 0) { terminal.colorPrintln('  (empty)', Color.DARK_GREY); return; }
+        for (var i = 0; i < arr.length; i++) {
+          var item = arr[i];
+          terminal.print('  ');
+          if (item.type === 'directory') terminal.colorPrint(item.name + '/', Color.LIGHT_BLUE);
+          else terminal.colorPrint(item.name, Color.WHITE);
+          terminal.colorPrintln('  ' + (item.type === 'file' ? item.size + 'B' : ''), Color.DARK_GREY);
+        }
+      });
+    },
+    read:   function(path: string) { return fat16.read(path); },
+    write:  function(path: string, content: string) { return fat16.writeFile(path, content); },
+    mkdir:  function(path: string) { return fat16.mkdir(path); },
+    rm:     function(path: string) { return fat16.remove(path); },
+    exists: function(path: string) { return fat16.exists(path); },
+    isDir:  function(path: string) { return fat16.isDirectory(path); },
+    stat:   function(path: string) {
+      var items = fat16.list(path.substring(0, path.lastIndexOf('/')) || '/');
+      var name  = path.substring(path.lastIndexOf('/') + 1);
+      for (var i = 0; i < items.length; i++) if (items[i].name.toUpperCase() === name.toUpperCase()) return items[i];
+      return null;
+    },
+    stats: function() { return fat16.getStats(); },
+    cp: function(src: string, dst: string) {
+      var data = fat16.read(src);
+      if (data === null) { terminal.println('cp: ' + src + ': not found'); return false; }
+      return fat16.writeFile(dst, data);
+    },
+  };
 
   g.fs = {
     ls:     function(p?: string) { return fs.ls(p || ''); },
@@ -658,6 +696,17 @@ function setupGlobals(): void {
     terminal.println('  passwd(name, pw)     change password');
     terminal.println('');
 
+    terminal.colorPrintln('Disk (FAT16 persistent storage):', Color.YELLOW);
+    terminal.println('  disk.ls(path?)       list directory on disk');
+    terminal.println('  disk.read(path)      read file from disk');
+    terminal.println('  disk.write(path, s)  write/create file on disk');
+    terminal.println('  disk.mkdir(path)     create directory on disk');
+    terminal.println('  disk.rm(path)        delete file or empty dir');
+    terminal.println('  disk.cp(src, dst)    copy file on disk');
+    terminal.println('  disk.exists(path)    check if path exists');
+    terminal.println('  disk.stats()         free/used cluster info');
+    terminal.println('');
+
     terminal.colorPrintln('Networking:', Color.YELLOW);
     terminal.println('  ifconfig()           interface configuration');
     terminal.println('  netstat()            active TCP connections');
@@ -745,6 +794,13 @@ function main(): void {
 
   // Mount virtual filesystems before any code reads them
   fs.mountVFS('/proc', procFS);
+
+  // Mount persistent FAT16 disk (non-fatal if not present)
+  if (fat16.mount()) {
+    kernel.serialPut('[disk] FAT16 mounted\n');
+  } else {
+    kernel.serialPut('[disk] No FAT16 disk\n');
+  }
 
   // Initialize OS subsystems synchronously (bare metal — no event loop)
   init.initialize();   // registers and starts services up to runlevel 3

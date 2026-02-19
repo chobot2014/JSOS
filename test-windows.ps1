@@ -70,6 +70,8 @@ if ($Headless) {
 
     $proc = Start-Process -FilePath $qemuExe -ArgumentList @(
         "-cdrom", "build/jsos.iso",
+        "-drive", "file=build/disk.img,format=raw,media=disk",
+        "-boot", "order=d",
         "-m", "512M",
         "-no-reboot",
         "-display", "none",
@@ -103,6 +105,8 @@ if ($Headless) {
 
     & $qemuExe `
         -cdrom "build/jsos.iso" `
+        -drive "file=build/disk.img,format=raw,media=disk" `
+        -boot order=d `
         -m 512M `
         -no-reboot
 }
