@@ -432,7 +432,7 @@ src/
 scripts/
     bundle-hybrid.js       # Babel + esbuild bundler (TS → ES2023)
     build.sh               # Full kernel + ISO build
-    embed-js.sh            # Embeds JS bundle as C string literal
+    embed-js.js            # Embeds JS bundle as C string literal
 docker/
     build.Dockerfile       # Cross-compiler toolchain (GCC + newlib + QuickJS)
     test.Dockerfile        # QEMU test environment

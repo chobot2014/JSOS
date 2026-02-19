@@ -17,8 +17,7 @@ fi
 
 # Embed JavaScript into C header
 echo "Embedding JavaScript code..."
-chmod +x scripts/embed-js.sh
-./scripts/embed-js.sh
+node scripts/embed-js.js
 
 # Build the kernel
 echo "Building kernel..."

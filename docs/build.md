@@ -37,7 +37,7 @@ This runs a single Docker build that:
 4. Runs `npm run build:local` inside Docker:
    - Babel transpiles TypeScript → ES5
    - esbuild bundles everything into `build/bundle.js`
-   - `embed-js.sh` turns the bundle into `src/kernel/embedded_js.h`
+   - `embed-js.js` turns the bundle into `src/kernel/embedded_js.h`
 5. `make` builds the kernel (i686-elf-gcc, links QuickJS + newlib)
 6. `grub-mkrescue` produces `/jsos.iso` inside the container
 7. `docker cp` extracts it to `build/jsos.iso` on your host
@@ -121,7 +121,7 @@ Uses Babel with:
 
 Output: `build/bundle.js` — a single IIFE with no external dependencies.
 
-### 2. JS Embedding (`scripts/embed-js.sh`)
+### 2. JS Embedding (`scripts/embed-js.js`)
 
 ```bash
 # Turns build/bundle.js into a C header:

@@ -229,7 +229,7 @@ No `import`/`export` remains. Tree-shaking removes unused code.
 
 ### Step 3: JS embedding
 
-`scripts/embed-js.sh` produces `src/kernel/embedded_js.h`:
+`scripts/embed-js.js` produces `src/kernel/embedded_js.h`:
 ```bash
 echo 'const char embedded_js_code[] = ' > embedded_js.h
 cat build/bundle.js | python3 -c "

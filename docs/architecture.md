@@ -111,7 +111,7 @@ ES5 JavaScript
         ▼  esbuild  (bundle-hybrid.js)
 build/bundle.js   (single IIFE, ~200 KB)
         │
-        ▼  embed-js.sh
+        ▼  embed-js.js
 src/kernel/embedded_js.h   (C char array)
         │
         ▼  i686-elf-gcc -ffreestanding
