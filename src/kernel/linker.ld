@@ -26,7 +26,7 @@ SECTIONS
         *(.bss)
         . = ALIGN(4K);
         _heap_start = .;
-        . += 0x100000; /* 1MB heap */
+        . += 0x800000; /* 8MB heap */
         _heap_end = .;
     }
 }

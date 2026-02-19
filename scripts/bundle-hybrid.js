@@ -111,23 +111,33 @@ async function bundleForQuickJS() {
     // Step 3: Inject main() call inside the IIFE
     let bundledCode = fs.readFileSync(OUTPUT_FILE, 'utf8');
     
+    // Inject main() call inside the IIFE
     const mainCall = [
       '',
       '  // Start the operating system',
-      '  try {',
-      '    main();',
-      '  } catch (error) {',
-      '    kernel.print("FATAL startup error: " + error);',
-      '    kernel.halt();',
-      '  }'
+      '  main();'
     ].join('\n');
-    
+
     const lastIIFE = bundledCode.lastIndexOf('})();');
     if (lastIIFE !== -1) {
       bundledCode = bundledCode.slice(0, lastIIFE) + mainCall + '\n' + bundledCode.slice(lastIIFE);
     } else {
-      bundledCode += '\ntry { main(); } catch(e) { kernel.print("FATAL: " + e); kernel.halt(); }\n';
+      bundledCode += '\nmain();\n';
     }
+
+    // Add a probe at the start of the IIFE body
+    bundledCode = bundledCode.replace('(() => {\n', '(() => {\n  kernel.serialPut("JS:iife\\n");\n');
+
+    // Wrap the entire IIFE in an outer try/catch so module-level errors are caught too
+    bundledCode =
+      'kernel.serialPut("JS:boot\\n");\n' +
+      'try {\n' +
+      bundledCode +
+      '} catch (e) {\n' +
+      '  var msg = e ? (e.stack || e.toString()) : "null";\n' +
+      '  kernel.serialPut("JSOS FATAL: " + msg + "\\n");\n' +
+      '  kernel.halt();\n' +
+      '}\n';
     
     fs.writeFileSync(OUTPUT_FILE, bundledCode);
 

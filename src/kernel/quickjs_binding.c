@@ -321,8 +321,8 @@ int quickjs_initialize(void) {
     rt = JS_NewRuntime();
     if (!rt) return -1;
 
-    JS_SetMemoryLimit(rt, 768 * 1024);
-    JS_SetMaxStackSize(rt, 32 * 1024);
+    JS_SetMemoryLimit(rt, 6 * 1024 * 1024);
+    JS_SetMaxStackSize(rt, 128 * 1024);
 
     ctx = JS_NewContext(rt);
     if (!ctx) { JS_FreeRuntime(rt); rt = NULL; return -1; }
@@ -398,9 +398,22 @@ int quickjs_run_os(void) {
         JSValue exc = JS_GetException(ctx);
         const char *err = JS_ToCString(ctx, exc);
         platform_boot_print("JavaScript Error: ");
-        platform_boot_print(err ? err : "unknown error");
+        platform_boot_print(err ? err : "(null exception)");
         platform_boot_print("\n");
         if (err) JS_FreeCString(ctx, err);
+        /* Print stack trace if available */
+        if (JS_IsObject(exc)) {
+            JSValue stack = JS_GetPropertyStr(ctx, exc, "stack");
+            if (!JS_IsUndefined(stack) && !JS_IsNull(stack)) {
+                const char *stk = JS_ToCString(ctx, stack);
+                if (stk) {
+                    platform_boot_print(stk);
+                    platform_boot_print("\n");
+                    JS_FreeCString(ctx, stk);
+                }
+            }
+            JS_FreeValue(ctx, stack);
+        }
         JS_FreeValue(ctx, exc);
         JS_FreeValue(ctx, result);
         return -1;
