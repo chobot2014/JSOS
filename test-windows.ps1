@@ -73,8 +73,8 @@ if ($Headless) {
         "-m", "512M",
         "-no-reboot",
         "-display", "none",
-        "-serial", "stdio"
-    ) -NoNewWindow -PassThru -RedirectStandardOutput "test-output\serial.log" -RedirectStandardError "test-output\qemu-err.log"
+        "-serial", "file:test-output/serial.log"
+    ) -NoNewWindow -PassThru -RedirectStandardError "test-output\qemu-err.log"
 
     $deadline = (Get-Date).AddSeconds($Timeout)
     while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
@@ -86,7 +86,7 @@ if ($Headless) {
 
     if (-not $proc.HasExited) {
         $proc.Kill()
-        Write-Host "`n[Timeout after ${Timeout}s — QEMU killed]" -ForegroundColor Yellow
+        Write-Host "`n[Timeout after ${Timeout}s - QEMU killed]" -ForegroundColor Yellow
     }
 
     Write-Host "==================" -ForegroundColor Cyan
