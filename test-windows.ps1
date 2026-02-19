@@ -1,9 +1,15 @@
 # Test JSOS with QEMU on Windows
 param(
-    [switch]$Install
+    [switch]$Install,
+    [switch]$Headless,
+    [int]$Timeout = 15
 )
 
-Write-Host "Testing JSOS with QEMU on Windows..." -ForegroundColor Green
+if ($Headless) {
+    Write-Host "Testing JSOS with QEMU (headless)..." -ForegroundColor Cyan
+} else {
+    Write-Host "Testing JSOS with QEMU on Windows..." -ForegroundColor Green
+}
 
 # Check if build/jsos.iso exists
 if (-not (Test-Path "build/jsos.iso")) {
@@ -55,14 +61,48 @@ if (-not $qemuExe -or $Install) {
     exit 1
 }
 
-Write-Host "Starting JSOS in QEMU..." -ForegroundColor Green
-Write-Host "Press Ctrl+Alt+G to release mouse/keyboard from QEMU window" -ForegroundColor Yellow
-Write-Host "Press Alt+Ctrl+2 then type 'quit' to exit QEMU" -ForegroundColor Yellow
-Write-Host "==================" -ForegroundColor Green
-
-# Run QEMU with our ISO in a graphical window
 Write-Host "Using QEMU at: $qemuExe" -ForegroundColor Green
-& $qemuExe `
-    -cdrom "build/jsos.iso" `
-    -m 512M `
-    -no-reboot
+
+if ($Headless) {
+    # Headless mode: no GUI, serial output to stdout, auto-exit after timeout
+    Write-Host "Running headless for ${Timeout}s (serial output below)..." -ForegroundColor Cyan
+    Write-Host "==================" -ForegroundColor Cyan
+
+    $proc = Start-Process -FilePath $qemuExe -ArgumentList @(
+        "-cdrom", "build/jsos.iso",
+        "-m", "512M",
+        "-no-reboot",
+        "-display", "none",
+        "-serial", "stdio"
+    ) -NoNewWindow -PassThru -RedirectStandardOutput "test-output\serial.log" -RedirectStandardError "test-output\qemu-err.log"
+
+    $deadline = (Get-Date).AddSeconds($Timeout)
+    while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        if (Test-Path "test-output\serial.log") {
+            Get-Content "test-output\serial.log" -Tail 5 2>$null
+        }
+    }
+
+    if (-not $proc.HasExited) {
+        $proc.Kill()
+        Write-Host "`n[Timeout after ${Timeout}s — QEMU killed]" -ForegroundColor Yellow
+    }
+
+    Write-Host "==================" -ForegroundColor Cyan
+    if (Test-Path "test-output\serial.log") {
+        Write-Host "Full serial log: test-output\serial.log" -ForegroundColor DarkGray
+    }
+    exit $proc.ExitCode
+} else {
+    # Interactive GUI mode
+    Write-Host "Starting JSOS in QEMU..." -ForegroundColor Green
+    Write-Host "Press Ctrl+Alt+G to release mouse/keyboard from QEMU window" -ForegroundColor Yellow
+    Write-Host "Press Alt+Ctrl+2 then type 'quit' to exit QEMU" -ForegroundColor Yellow
+    Write-Host "==================" -ForegroundColor Green
+
+    & $qemuExe `
+        -cdrom "build/jsos.iso" `
+        -m 512M `
+        -no-reboot
+}
