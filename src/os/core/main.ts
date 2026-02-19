@@ -143,6 +143,11 @@ function setupGlobals(): void {
       if (data === null) { terminal.println('cp: ' + src + ': not found'); return false; }
       return fat16.writeFile(dst, data);
     },
+    format: function(label?: string) {
+      var ok = fat16.format(label || 'JSDISK');
+      terminal.println(ok ? '[disk] Formatted and mounted' : '[disk] Format failed');
+      return ok;
+    },
   };
 
   g.fs = {
@@ -697,6 +702,7 @@ function setupGlobals(): void {
     terminal.println('');
 
     terminal.colorPrintln('Disk (FAT16 persistent storage):', Color.YELLOW);
+    terminal.println('  disk.format(label?)  format a blank attached disk');
     terminal.println('  disk.ls(path?)       list directory on disk');
     terminal.println('  disk.read(path)      read file from disk');
     terminal.println('  disk.write(path, s)  write/create file on disk');
@@ -798,8 +804,10 @@ function main(): void {
   // Mount persistent FAT16 disk (non-fatal if not present)
   if (fat16.mount()) {
     kernel.serialPut('[disk] FAT16 mounted\n');
+  } else if (kernel.ataPresent()) {
+    kernel.serialPut('[disk] Disk present but not FAT16 - run disk.format() to initialize\n');
   } else {
-    kernel.serialPut('[disk] No FAT16 disk\n');
+    kernel.serialPut('[disk] No disk attached\n');
   }
 
   // Initialize OS subsystems synchronously (bare metal — no event loop)

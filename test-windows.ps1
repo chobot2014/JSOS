@@ -17,6 +17,17 @@ if (-not (Test-Path "build/jsos.iso")) {
     exit 1
 }
 
+# Create a blank 64 MiB disk image if one doesn't exist.
+# JSOS will auto-format it as FAT16 on first boot.
+if (-not (Test-Path "build/disk.img")) {
+    Write-Host "Creating blank 64 MiB disk.img for persistent storage..." -ForegroundColor Cyan
+    New-Item -ItemType Directory -Path "build" -Force | Out-Null
+    $diskStream = [System.IO.File]::Create("$PWD\build\disk.img")
+    $diskStream.SetLength(67108864)
+    $diskStream.Close()
+    Write-Host "disk.img created - JSOS will format it on first boot." -ForegroundColor Cyan
+}
+
 # Check if QEMU is installed
 $qemuPath = Get-Command "qemu-system-x86_64.exe" -ErrorAction SilentlyContinue
 

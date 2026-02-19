@@ -143,6 +143,103 @@ export class FAT16 implements VFSMount {
     this._dev = dev;
   }
 
+  // ── Format ─────────────────────────────────────────────────────────────
+
+  /**
+   * Low-level FAT16 format.  Writes a valid BPB, two FAT copies, and a
+   * zeroed root directory.  The device is left in a mountable state.
+   * Safe to call on a blank or previously-formatted disk.
+   */
+  format(label: string = 'JSDISK'): boolean {
+    if (!this._dev.isPresent()) return false;
+
+    var totalSectors = this._dev.sectorCount;
+    var reserved     = 4;
+    var numFats      = 2;
+    var rootEntries  = 512;
+    var rootDirSecs  = ceilDiv(rootEntries * DIR_ENTRY_SIZE, SECTOR_SIZE); // 32
+
+    // Choose sectors-per-cluster based on disk size
+    var spc = 4;
+    if      (totalSectors <= 65536 ) spc = 2;
+    else if (totalSectors <= 131072) spc = 4;
+    else if (totalSectors <= 262144) spc = 8;
+    else if (totalSectors <= 524288) spc = 16;
+    else                             spc = 32;
+
+    // Iterate twice to converge on the correct FAT size
+    var fatSize = ceilDiv((Math.floor(totalSectors / spc) + 2) * 2, SECTOR_SIZE);
+    for (var pass = 0; pass < 2; pass++) {
+      var dataStart   = reserved + numFats * fatSize + rootDirSecs;
+      var dataSectors = totalSectors - dataStart;
+      var numClusters = Math.floor(dataSectors / spc);
+      fatSize         = ceilDiv((numClusters + 2) * 2, SECTOR_SIZE);
+    }
+
+    // ── Write boot sector / BPB ────────────────────────────────────────
+    var boot = new Array<number>(SECTOR_SIZE).fill(0);
+    // Jump boot + NOP
+    boot[0] = 0xEB; boot[1] = 0x58; boot[2] = 0x90;
+    // OEM name: "JSOS    "
+    var oem = 'JSOS    ';
+    for (var i = 0; i < 8; i++) boot[3 + i] = oem.charCodeAt(i);
+    // BPB fields
+    writeLE16(boot, 11, SECTOR_SIZE);           // bytesPerSector
+    boot[13] = spc;                             // sectorsPerCluster
+    writeLE16(boot, 14, reserved);              // reservedSectors
+    boot[16] = numFats;                         // numFATs
+    writeLE16(boot, 17, rootEntries);           // rootEntryCount
+    writeLE16(boot, 19, 0);                     // totalSectors16 (0 = use 32-bit)
+    boot[21] = 0xF8;                            // mediaType (fixed disk)
+    writeLE16(boot, 22, fatSize);               // fatSizeSectors
+    writeLE16(boot, 24, 63);                    // sectorsPerTrack
+    writeLE16(boot, 26, 255);                   // numHeads
+    writeLE32(boot, 28, 0);                     // hiddenSectors
+    writeLE32(boot, 32, totalSectors);          // totalSectors32
+    boot[36] = 0x80;                            // driveNumber
+    boot[38] = 0x29;                            // extBootSig
+    // Volume ID (pseudo-random from uptime)
+    writeLE32(boot, 39, 0xDEAD0000 | (totalSectors & 0xFFFF));
+    // Volume label (11 bytes, space-padded)
+    var padLabel = (label + '           ').substring(0, 11).toUpperCase();
+    for (var i = 0; i < 11; i++) boot[43 + i] = padLabel.charCodeAt(i);
+    // FS type string: "FAT16   "
+    var fsType = 'FAT16   ';
+    for (var i = 0; i < 8; i++) boot[54 + i] = fsType.charCodeAt(i);
+    // Boot signature
+    boot[510] = 0x55; boot[511] = 0xAA;
+    if (!this._dev.writeSectors(0, 1, boot)) return false;
+
+    // ── Write FAT copies ───────────────────────────────────────────────
+    var fatBase = new Array<number>(fatSize * SECTOR_SIZE).fill(0);
+    // FAT[0] = media byte | 0xFF00, FAT[1] = EOC
+    fatBase[0] = 0xF8; fatBase[1] = 0xFF;   // FAT[0]
+    fatBase[2] = 0xFF; fatBase[3] = 0xFF;   // FAT[1]
+    for (var copy = 0; copy < numFats; copy++) {
+      var base = reserved + copy * fatSize;
+      for (var s = 0; s < fatSize; s++) {
+        var sec = fatBase.slice(s * SECTOR_SIZE, (s + 1) * SECTOR_SIZE);
+        if (!this._dev.writeSectors(base + s, 1, sec)) return false;
+      }
+    }
+
+    // ── Zero root directory ────────────────────────────────────────────
+    var blank  = new Array<number>(SECTOR_SIZE).fill(0);
+    var rdBase = reserved + numFats * fatSize;
+    for (var s = 0; s < rootDirSecs; s++) {
+      if (!this._dev.writeSectors(rdBase + s, 1, blank)) return false;
+    }
+
+    this._dev.flush();
+
+    // Re-mount immediately
+    this._bpb     = null;
+    this._fat     = [];
+    this._fatDirty = false;
+    this._mounted  = false;
+    return this.mount();
+  }
+
   // ── Mount ──────────────────────────────────────────────────────────────
 
   mount(): boolean {
@@ -151,7 +248,12 @@ export class FAT16 implements VFSMount {
     var boot = this._dev.readSectors(0, 1);
     if (boot === null) return false;
 
-    // Verify boot signature
+    // Check for a blank disk (first 512 bytes all zero) → auto-format
+    var isBlank = true;
+    for (var i = 0; i < SECTOR_SIZE; i++) { if (boot[i] !== 0) { isBlank = false; break; } }
+    if (isBlank) return this.format();
+
+    // Verify FAT boot signature
     if (boot[510] !== 0x55 || boot[511] !== 0xAA) return false;
 
     var bps  = readLE16(boot, 11);
