@@ -4,6 +4,7 @@
 #include "memory.h"
 #include "irq.h"
 #include "keyboard.h"
+#include "mouse.h"
 #include "timer.h"
 #include "quickjs_binding.h"
 
@@ -12,9 +13,11 @@
 #endif
 
 extern void gdt_flush(void);
+extern uint32_t _multiboot2_ptr;   /* set by boot.s before calling _start */
 
 int main(void) {
     platform_init();
+    platform_boot_print("JSOS booting...\n");
     platform_boot_print("JSOS Kernel v1.0.0\n==================\n\n");
 
     platform_boot_print("[BOOT] Initializing memory...\n");
@@ -31,6 +34,13 @@ int main(void) {
 
     platform_boot_print("[BOOT] Initializing keyboard...\n");
     keyboard_initialize();
+
+    platform_boot_print("[BOOT] Initializing mouse...\n");
+    mouse_initialize();
+
+    /* Parse multiboot2 info for framebuffer address before QuickJS starts */
+    platform_fb_init(_multiboot2_ptr);
+
 
     platform_boot_print("[BOOT] Initializing QuickJS runtime (ES2023)...\n");
     if (quickjs_initialize() != 0) {

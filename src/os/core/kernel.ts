@@ -126,6 +126,56 @@ export interface KernelAPI {
    */
   ataWrite(lba: number, sectors: number, data: number[]): boolean;
 
+  // ─ Framebuffer (Phase 3) ─────────────────────────────────────────────────
+  /**
+   * Returns framebuffer info if GRUB negotiated a pixel graphics mode,
+   * or null if no framebuffer is available (fallback to VGA text).
+   */
+  fbInfo(): { width: number; height: number; pitch: number; bpp: number } | null;
+  /**
+   * Copy a flat BGRA pixel array to the framebuffer at (x, y).
+   * pixels.length must equal w * h.
+   * No-op if no framebuffer available.
+   */
+  fbBlit(pixels: number[], x: number, y: number, w: number, h: number): void;
+
+  // ─ Mouse (Phase 3) ───────────────────────────────────────────────────────
+  /**
+   * Returns the next PS/2 mouse packet, or null if the queue is empty.
+   * dx/dy are signed relative motion; buttons is a bitmask (bit0=left, bit1=right, bit2=middle).
+   */
+  readMouse(): { dx: number; dy: number; buttons: number } | null;
+
+  // ─ Memory map + paging (Phase 4) ─────────────────────────────────────────
+  /**
+   * Returns the multiboot2 memory map as an array of entries.
+   * type: 1=usable, 2=reserved, 3=ACPI reclaimable, 4=ACPI NVS, 5=bad RAM.
+   * base/length are 32-bit unsigned values (addresses < 4 GB).
+   */
+  getMemoryMap(): Array<{ base: number; baseHi: number; length: number; lenHi: number; type: number }>;
+  /**
+   * Write addr into CR3 (page directory physical address).
+   * Side-effect: flushes entire TLB.
+   */
+  setPDPT(addr: number): void;
+  /** Flush the entire non-global TLB by re-writing CR3 to itself. */
+  flushTLB(): void;
+  /**
+   * Write one entry in the kernel's static page directory.
+   *   pdIdx: 0-1023 index into the page directory.
+   *   ptIdx: 0-1023 index into the page table at pdIdx (ignored for huge pages).
+   *   physAddr: physical address (page-aligned).
+   *   flags: combination of PageFlag constants.
+   * If PageFlag.HUGE is set, a 4 MB page is mapped and ptIdx is ignored.
+   */
+  setPageEntry(pdIdx: number, ptIdx: number, physAddr: number, flags: number): void;
+  /**
+   * Enable hardware paging: sets CR4.PSE, loads CR3, sets CR0.PG.
+   * Returns true on success; false if the page directory appears empty (safety check).
+   * CALL ONLY AFTER setPageEntry() has mapped at least PDE[0].
+   */
+  enablePaging(): boolean;
+
   //  Constants 
   colors: KernelColors;
   KEY_UP: number;    KEY_DOWN: number;   KEY_LEFT: number;  KEY_RIGHT: number;
@@ -137,3 +187,19 @@ export interface KernelAPI {
 }
 
 declare var kernel: KernelAPI;
+
+/**
+ * Page table entry flag constants for use with kernel.setPageEntry().
+ * These match the i686 hardware PTE/PDE bit definitions.
+ */
+export namespace PageFlag {
+  export const PRESENT       = 0x001;  /** Page is present in memory */
+  export const WRITABLE      = 0x002;  /** Page is writable */
+  export const USER          = 0x004;  /** Accessible from ring 3 (user mode) */
+  export const WRITE_THROUGH = 0x008;  /** Write-through caching */
+  export const NO_CACHE      = 0x010;  /** Disable caching for this page */
+  export const ACCESSED      = 0x020;  /** Set by CPU on first access */
+  export const DIRTY         = 0x040;  /** Set by CPU on first write */
+  export const HUGE          = 0x080;  /** 4 MB page (PS bit in PDE; requires CR4.PSE) */
+  export const GLOBAL        = 0x100;  /** Not flushed from TLB on CR3 write */
+}

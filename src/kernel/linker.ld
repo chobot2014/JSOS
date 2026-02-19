@@ -6,7 +6,7 @@ SECTIONS
 
     .text BLOCK(4K) : ALIGN(4K)
     {
-        *(.multiboot)
+        *(.multiboot2)
         *(.text)
     }
 
@@ -26,7 +26,7 @@ SECTIONS
         *(.bss)
         . = ALIGN(4K);
         _heap_start = .;
-        . += 0x800000; /* 8MB heap */
+        . += 0x4000000; /* 64 MB heap (Phase 3+) */
         _heap_end = .;
     }
 }

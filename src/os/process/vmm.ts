@@ -7,7 +7,10 @@
  * - Memory protection
  * - Page fault handling
  * - Memory-mapped I/O
+ * - Phase 4: hardware paging via kernel.setPageEntry / kernel.enablePaging
  */
+
+declare var kernel: import('../core/kernel.js').KernelAPI;
 
 export interface PageTableEntry {
   present: boolean;
@@ -338,6 +341,55 @@ export class VirtualMemoryManager {
    */
   getMemoryRegions(): MemoryRegion[] {
     return [...this.memoryRegions];
+  }
+
+  // ── Phase 4: real paging (hardware page table support) ─────────────────
+
+  /**
+   * Set up an identity-mapped page directory covering `ramMB` megabytes of
+   * physical RAM using 4 MB huge pages, plus the high MMIO region (0xE0000000–
+   * 0xFFFFFFFF) with cache-disable for PCI/VESA framebuffer access.
+   * Then enables hardware paging via kernel.enablePaging().
+   *
+   * @param ramMB   Total usable physical RAM in MB (from physAlloc.totalMB()).
+   * @returns true if paging was enabled successfully.
+   */
+  enableHardwarePaging(ramMB: number): boolean {
+    var MB4      = 4 * 1024 * 1024;
+    var PRESENT  = 0x001;
+    var WRITABLE = 0x002;
+    var HUGE     = 0x080;   // PS bit — 4 MB page
+    var NO_CACHE = 0x010;
+
+    // 1. Identity-map physical RAM (up to 512 MB = 128 PDEs).
+    var rampages = Math.ceil(ramMB / 4);
+    if (rampages > 128) rampages = 128;
+    for (var i = 0; i < rampages; i++) {
+      kernel.setPageEntry(i, 0, i * MB4, PRESENT | WRITABLE | HUGE);
+    }
+
+    // 2. MMIO identity-map 0xE0000000–0xFFFFFFFF (PDE 896–1023).
+    //    Covers all PCI/VESA framebuffer addresses QEMU might place at high PA.
+    for (var m = 896; m < 1024; m++) {
+      kernel.setPageEntry(m, 0, m * MB4, PRESENT | WRITABLE | HUGE | NO_CACHE);
+    }
+
+    // 3. Enable paging.
+    return kernel.enablePaging();
+  }
+
+  /**
+   * Minimal mmap test: allocate and free one page via the physical allocator.
+   * Returns true if the round-trip succeeded without throwing.
+   */
+  mmapTest(physAlloc: import('./physalloc.js').PhysicalAllocator): boolean {
+    try {
+      var phys = physAlloc.alloc(1);    // allocate one 4 KB frame
+      physAlloc.free(phys, 1);          // release it
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 }
 

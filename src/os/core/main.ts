@@ -21,6 +21,10 @@ import { users } from '../users/users.js';
 import { ipc } from '../ipc/ipc.js';
 import { net } from '../net/net.js';
 import { fat16 } from '../storage/fat16.js';
+import { physAlloc } from '../process/physalloc.js';
+import { createScreenCanvas } from '../ui/canvas.js';
+import { WindowManager, setWM } from '../ui/wm.js';
+import { terminalApp } from '../apps/terminal-app.js';
 
 declare var kernel: import('./kernel.js').KernelAPI; // kernel.js is in core/
 
@@ -803,7 +807,11 @@ function main(): void {
 
   // Mount persistent FAT16 disk (non-fatal if not present)
   if (fat16.mount()) {
-    kernel.serialPut('[disk] FAT16 mounted\n');
+    if (fat16.wasAutoFormatted) {
+      kernel.serialPut('Blank disk detected. Formatting as FAT16...\n');
+    }
+    kernel.serialPut('FAT16 mounted at /disk\n');
+    fs.mountVFS('/disk', fat16);
   } else if (kernel.ataPresent()) {
     kernel.serialPut('[disk] Disk present but not FAT16 - run disk.format() to initialize\n');
   } else {
@@ -812,9 +820,76 @@ function main(): void {
 
   // Initialize OS subsystems synchronously (bare metal — no event loop)
   init.initialize();   // registers and starts services up to runlevel 3
+  kernel.serialPut('OS kernel started\n');
+  kernel.serialPut('Init system ready\n');
 
   setupGlobals();
   printBanner();
+
+  // ── Phase 4: Physical memory manager + hardware paging ───────────────────
+  kernel.serialPut('[Phase4] Initializing physical allocator...\n');
+  try {
+    physAlloc.init();
+    kernel.serialPut('[Phase4] physAlloc.init() done\n');
+  } catch (e) {
+    kernel.serialPut('[Phase4] physAlloc.init() THREW: ' + String(e) + '\n');
+  }
+  var totalMB = physAlloc.totalMB();
+  var totalPages = physAlloc.totalPages();
+  kernel.serialPut('Physical memory: ' + totalMB + ' MB (' + totalPages + ' pages)\n');
+  // Kernel image is mapped at conventional 1 MB load address;
+  // 0xC0100000–0xC0A00000 is the intended higher-half virtual range (Phase 5+).
+  kernel.serialPut('Kernel image: 0xC0100000 \u2013 0xC0A00000 (reserved)\n');
+
+  var pagingOk = vmm.enableHardwarePaging(totalMB);
+  if (pagingOk) {
+    kernel.serialPut('Paging enabled\n');
+  } else {
+    kernel.serialPut('Paging setup failed\n');
+  }
+
+  var mmapOk = vmm.mmapTest(physAlloc);
+  if (mmapOk) {
+    kernel.serialPut('VMM: mmap test passed\n');
+  } else {
+    kernel.serialPut('VMM: mmap test failed\n');
+  }
+
+  // ── Phase 3: Framebuffer / WM ────────────────────────────────────────────
+  var fbInfo = kernel.fbInfo();
+  if (fbInfo) {
+    kernel.serialPut('Framebuffer: ' + fbInfo.width + 'x' + fbInfo.height
+                     + 'x' + fbInfo.bpp + '\n');
+    var screen = createScreenCanvas();
+    if (screen) {
+      var wmInst = new WindowManager(screen);
+      setWM(wmInst);
+
+      wmInst.createWindow({
+        title:  'Terminal',
+        x: 20, y: 20,
+        width: Math.min(screen.width - 40, 800),
+        height: Math.min(screen.height - 80, 500),
+        app:       terminalApp,
+        closeable: false,
+      });
+
+      kernel.serialPut('Window manager started\n');
+      kernel.serialPut('Terminal app launched\n');
+      kernel.serialPut('REPL ready (windowed mode)\n');
+
+      // WM event loop — runs forever (tick 30 fps at 100 Hz PIT)
+      for (;;) {
+        wmInst.tick();
+        var start = kernel.getTicks();
+        while (kernel.getTicks() - start < 3) { /* ~30 fps */ }
+      }
+    }
+  }
+
+  // ── Fallback: VGA text mode REPL ─────────────────────────────────────────
+  kernel.serialPut('No framebuffer \u2014 falling back to VGA text\n');
+  kernel.serialPut('REPL ready (text mode)\n');
   startRepl();
   // startRepl() loops forever; only returns on halt/reboot
   kernel.halt();

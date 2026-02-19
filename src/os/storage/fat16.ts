@@ -138,6 +138,9 @@ export class FAT16 implements VFSMount {
   private _fat:    number[]     = [];   // full FAT16 table (16-bit entries)
   private _fatDirty = false;
   private _mounted  = false;
+  private _autoFormatted = false;
+
+  get wasAutoFormatted(): boolean { return this._autoFormatted; }
 
   constructor(dev: BlockDevice) {
     this._dev = dev;
@@ -251,7 +254,7 @@ export class FAT16 implements VFSMount {
     // Check for a blank disk (first 512 bytes all zero) → auto-format
     var isBlank = true;
     for (var i = 0; i < SECTOR_SIZE; i++) { if (boot[i] !== 0) { isBlank = false; break; } }
-    if (isBlank) return this.format();
+    if (isBlank) { this._autoFormatted = true; return this.format(); }
 
     // Verify FAT boot signature
     if (boot[510] !== 0x55 || boot[511] !== 0xAA) return false;

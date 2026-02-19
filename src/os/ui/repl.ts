@@ -241,6 +241,7 @@ function printContinuePrompt(): void {
 //  Main REPL loop ───────────────────────────────────────────────────────────
 
 export function startRepl(): void {
+  kernel.serialPut('REPL ready\n');
   // Register history() as a global here so it closes over _history
   (globalThis as any).history = function() {
     if (_history.length === 0) { terminal.println('(empty)'); return; }

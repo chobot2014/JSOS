@@ -3,8 +3,45 @@
 
 #include <stdint.h>
 
+/* ── Multiboot2 tag structures ──────────────────────────────────────────── */
+
+#define MULTIBOOT2_BOOTLOADER_MAGIC 0x36d76289
+
+/* Generic tag header */
+typedef struct {
+    uint32_t type;
+    uint32_t size;
+} mb2_tag_t;
+
+/* Type 8 — framebuffer info */
+typedef struct {
+    uint32_t type;          /* = 8 */
+    uint32_t size;
+    uint64_t framebuffer_addr;
+    uint32_t framebuffer_pitch;
+    uint32_t framebuffer_width;
+    uint32_t framebuffer_height;
+    uint8_t  framebuffer_bpp;
+    uint8_t  framebuffer_type; /* 1=RGB, 0=indexed, 2=EGA text */
+    uint16_t reserved;
+} mb2_tag_framebuffer_t;
+
+/* ── Framebuffer descriptor ─────────────────────────────────────────────── */
+
+typedef struct {
+    uint32_t *address;      /* physical framebuffer mapping */
+    uint32_t  width;
+    uint32_t  height;
+    uint32_t  pitch;        /* bytes per row */
+    uint8_t   bpp;          /* bits per pixel */
+    uint8_t   available;    /* 1 if framebuffer was negotiated by GRUB */
+} fb_info_t;
+
 /* Initialise VGA buffer, boot-time cursor, and serial port */
 void platform_init(void);
+
+/* Initialise framebuffer from multiboot2 boot info (call after platform_init) */
+void platform_fb_init(uint32_t mb2_info_addr);
 
 /* Boot-time sequential print (before QuickJS starts) */
 void platform_boot_print(const char *s);
@@ -33,5 +70,14 @@ void platform_cursor_hide(void);
 /* Screen dimensions */
 int platform_vga_width(void);   /* 80 */
 int platform_vga_height(void);  /* 25 */
+
+/* Framebuffer access ───────────────────────────────────────────────────── */
+
+/* Get framebuffer info (address, size, bpp).  available=0 → no framebuffer. */
+void platform_fb_get_info(fb_info_t *out);
+
+/* Copy pixel data (BGRA, w*h*4 bytes) to framebuffer at (x,y).
+ * No-op if framebuffer not available. */
+void platform_fb_blit(const uint32_t *src, int x, int y, int w, int h);
 
 #endif /* PLATFORM_H */

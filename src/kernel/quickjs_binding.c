@@ -13,6 +13,7 @@
 #include "quickjs.h"
 #include "platform.h"
 #include "keyboard.h"
+#include "mouse.h"
 #include "timer.h"
 #include "io.h"
 #include "embedded_js.h"
@@ -23,6 +24,17 @@
 
 /* Static ATA sector buffer: 8 sectors × 256 words = 4 KB on BSS, not stack */
 static uint16_t ata_sector_buf[256 * 8];
+
+/* ── Paging support (Phase 4) ──────────────────────────────────────────── */
+/*
+ * A 4 KB-aligned page directory stored in BSS.
+ * TypeScript fills PDEs via js_set_page_entry(); js_enable_paging() then
+ * loads CR3 with its physical address and sets CR0.PG.
+ */
+static uint32_t __attribute__((aligned(4096))) paging_pd[1024];
+
+/* The multiboot2 boot-info pointer saved by boot.s */
+extern uint32_t _multiboot2_ptr;
 
 static JSRuntime *rt  = NULL;
 static JSContext *ctx = NULL;
@@ -278,7 +290,231 @@ static JSValue js_eval(JSContext *c, JSValueConst this_val, int argc, JSValueCon
 }
 
 /*  Function table  */
+/* ── Framebuffer bindings ──────────────────────────────────────────── */
 
+/*
+ * kernel.fbInfo() → {width, height, pitch, bpp} | null
+ * Returns null when no pixel framebuffer was negotiated by GRUB.
+ */
+static JSValue js_fb_info(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    fb_info_t fb;
+    platform_fb_get_info(&fb);
+    if (!fb.available) return JS_NULL;
+    JSValue obj = JS_NewObject(c);
+    JS_SetPropertyStr(c, obj, "width",  JS_NewInt32(c, (int32_t)fb.width));
+    JS_SetPropertyStr(c, obj, "height", JS_NewInt32(c, (int32_t)fb.height));
+    JS_SetPropertyStr(c, obj, "pitch",  JS_NewInt32(c, (int32_t)fb.pitch));
+    JS_SetPropertyStr(c, obj, "bpp",    JS_NewInt32(c, (int32_t)fb.bpp));
+    return obj;
+}
+
+/*
+ * kernel.fbBlit(pixels, x, y, w, h)
+ * pixels: flat JS Array of 32-bit BGRA values, length = w*h
+ * C side: copies to physical framebuffer at (x,y).
+ */
+static JSValue js_fb_blit(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 5) return JS_UNDEFINED;
+    int32_t x = 0, y = 0, w = 0, h = 0;
+    JS_ToInt32(c, &x, argv[1]);
+    JS_ToInt32(c, &y, argv[2]);
+    JS_ToInt32(c, &w, argv[3]);
+    JS_ToInt32(c, &h, argv[4]);
+    if (w <= 0 || h <= 0) return JS_UNDEFINED;
+
+    int total = w * h;
+    /* Allocate a temporary C buffer for the pixel data */
+    static uint32_t fb_blit_buf[1024 * 768]; /* max 3 MB, in BSS */
+    if (total > 1024 * 768) total = 1024 * 768;
+    for (int i = 0; i < total; i++) {
+        JSValue v = JS_GetPropertyUint32(c, argv[0], (uint32_t)i);
+        uint32_t px = 0;
+        JS_ToUint32(c, &px, v);
+        JS_FreeValue(c, v);
+        fb_blit_buf[i] = px;
+    }
+    platform_fb_blit(fb_blit_buf, x, y, w, h);
+    return JS_UNDEFINED;
+}
+
+/* ── Phase 4 — Memory map ──────────────────────────────────────────────── */
+
+/*
+ * Multiboot2 tag layouts used by js_get_memory_map().
+ * We redeclare them here to avoid pulling in platform.h tag structs
+ * (and to keep this file's C dependencies minimal).
+ */
+typedef struct { uint32_t type; uint32_t size; } _mb2hdr_t;
+typedef struct {
+    uint32_t type;          /* 6 */
+    uint32_t size;
+    uint32_t entry_size;
+    uint32_t entry_version;
+} _mb2mmap_tag_t;
+typedef struct {
+    uint64_t base_addr;
+    uint64_t length;
+    uint32_t type;          /* 1=usable 2=reserved 3=ACPI 4=NVS 5=bad */
+    uint32_t reserved;
+} _mb2mmap_entry_t;
+
+/*
+ * kernel.getMemoryMap() → [{base,length,type}, ...]
+ * Walks the multiboot2 memory-map tag and returns all entries as a JS array.
+ * base / length are 32-bit (JS number) — high halves are baseHi / lenHi.
+ */
+static JSValue js_get_memory_map(JSContext *c, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    JSValue arr = JS_NewArray(c);
+    uint32_t mb2 = _multiboot2_ptr;
+    if (!mb2) return arr;
+
+    uint8_t *info = (uint8_t *)(uintptr_t)mb2;
+    uint32_t total_size = *(uint32_t *)info;
+    uint8_t *tag        = info + 8;
+    uint8_t *end        = info + total_size;
+    int idx = 0;
+
+    while (tag < end) {
+        _mb2hdr_t *hdr = (_mb2hdr_t *)tag;
+        if (hdr->type == 0) break;           /* end tag */
+        if (hdr->type == 6) {                /* memory map */
+            _mb2mmap_tag_t *mt = (_mb2mmap_tag_t *)tag;
+            uint32_t esz = mt->entry_size;
+            uint8_t *ep  = tag + sizeof(_mb2mmap_tag_t);
+            uint8_t *ee  = tag + hdr->size;
+            for (; ep + esz <= ee; ep += esz) {
+                _mb2mmap_entry_t *e = (_mb2mmap_entry_t *)ep;
+                JSValue obj = JS_NewObject(c);
+                JS_SetPropertyStr(c, obj, "base",
+                    JS_NewFloat64(c, (double)(uint32_t)e->base_addr));
+                JS_SetPropertyStr(c, obj, "baseHi",
+                    JS_NewFloat64(c, (double)(uint32_t)(e->base_addr >> 32)));
+                JS_SetPropertyStr(c, obj, "length",
+                    JS_NewFloat64(c, (double)(uint32_t)e->length));
+                JS_SetPropertyStr(c, obj, "lenHi",
+                    JS_NewFloat64(c, (double)(uint32_t)(e->length >> 32)));
+                JS_SetPropertyStr(c, obj, "type",
+                    JS_NewInt32(c, (int32_t)e->type));
+                JS_SetPropertyUint32(c, arr, (uint32_t)idx++, obj);
+                JS_FreeValue(c, obj);
+            }
+            break;
+        }
+        uint32_t sz = hdr->size;
+        tag += (sz + 7) & ~7u;
+    }
+    return arr;
+}
+
+/* ── Phase 4 — Paging primitives ───────────────────────────────────────── */
+
+/*
+ * kernel.setPDPT(physAddr) — write physAddr into CR3.
+ * Flushes the entire TLB as a side-effect.
+ */
+static JSValue js_set_pdpt(JSContext *c, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    (void)this_val;
+    uint32_t addr = 0;
+    if (argc >= 1) JS_ToUint32(c, &addr, argv[0]);
+    __asm__ volatile("mov %0, %%cr3" :: "r"(addr) : "memory");
+    return JS_UNDEFINED;
+}
+
+/*
+ * kernel.flushTLB() — re-write CR3 to itself, flushing all non-global TLB.
+ */
+static JSValue js_flush_tlb(JSContext *c, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    uint32_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
+    return JS_UNDEFINED;
+}
+
+/*
+ * kernel.setPageEntry(pdIdx, ptIdx, physAddr, flags)
+ * Write one entry in the statically allocated page directory.
+ *   flags bit 0x080 (PS) → 4 MB huge page (PDE only, ptIdx ignored).
+ *   Otherwise, physAddr is treated as a page-table physical address (PDE)
+ *   or a 4 KB frame address (PTE) — TypeScript decides which to fill.
+ *
+ * For Phase 4 we only use huge pages.
+ */
+static JSValue js_set_page_entry(JSContext *c, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 4) return JS_UNDEFINED;
+    uint32_t pdIdx = 0, ptIdx = 0, physAddr = 0, flags = 0;
+    JS_ToUint32(c, &pdIdx,    argv[0]);
+    JS_ToUint32(c, &ptIdx,    argv[1]);
+    JS_ToUint32(c, &physAddr, argv[2]);
+    JS_ToUint32(c, &flags,    argv[3]);
+    (void)ptIdx;   /* only used when !PS -- Phase 5 adds small-page support */
+    if (pdIdx >= 1024) return JS_UNDEFINED;
+    if (flags & 0x080u) {
+        /* 4 MB huge page: PDE = 4MB-aligned physAddr | flags */
+        paging_pd[pdIdx] = (physAddr & 0xFFC00000u) | flags;
+    } else {
+        /* Small-page PDE: physAddr is the page-table physical address */
+        paging_pd[pdIdx] = (physAddr & 0xFFFFF000u) | (flags & 0xFFFu);
+    }
+    return JS_UNDEFINED;
+}
+
+/*
+ * kernel.enablePaging() → boolean
+ * 1. Enables CR4.PSE (4 MB page support).
+ * 2. Sets CR3 to the physical address of paging_pd.
+ * 3. Sets CR0.PG.
+ * Returns true on success, false if the page directory appears empty.
+ */
+static JSValue js_enable_paging(JSContext *c, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    /* Sanity: PDE[0] must be present (should cover the kernel at ~1 MB) */
+    if (!(paging_pd[0] & 1u)) return JS_FALSE;
+
+    /* Enable PSE (4 MB pages) in CR4 */
+    uint32_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= 0x10u; /* CR4.PSE */
+    __asm__ volatile("mov %0, %%cr4" :: "r"(cr4) : "memory");
+
+    /* Load CR3 with page directory physical address */
+    uint32_t pd_phys = (uint32_t)(uintptr_t)paging_pd;
+    __asm__ volatile("mov %0, %%cr3" :: "r"(pd_phys) : "memory");
+
+    /* Set CR0.PG — paging is now live */
+    uint32_t cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 |= 0x80000000u;
+    __asm__ volatile("mov %0, %%cr0" :: "r"(cr0) : "memory");
+
+    return JS_TRUE;
+}
+
+/* ── Mouse binding ─────────────────────────────────────────────────── */
+
+/*
+ * kernel.readMouse() → {dx, dy, buttons} | null
+ * Returns null when the mouse packet queue is empty.
+ */
+static JSValue js_read_mouse(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    mouse_packet_t pkt;
+    if (!mouse_read(&pkt)) return JS_NULL;
+    JSValue obj = JS_NewObject(c);
+    JS_SetPropertyStr(c, obj, "dx",      JS_NewInt32(c, (int32_t)pkt.dx));
+    JS_SetPropertyStr(c, obj, "dy",      JS_NewInt32(c, (int32_t)pkt.dy));
+    JS_SetPropertyStr(c, obj, "buttons", JS_NewInt32(c, (int32_t)pkt.buttons));
+    return obj;
+}
 /* ── ATA block device bindings ─────────────────────────────────── */
 
 static JSValue js_ata_present(JSContext *c, JSValueConst this_val,
@@ -376,6 +612,17 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("ataPresent", 0, js_ata_present),
     JS_CFUNC_DEF("ataRead",    2, js_ata_read),
     JS_CFUNC_DEF("ataWrite",   3, js_ata_write),
+    /* Framebuffer (Phase 3) */
+    JS_CFUNC_DEF("fbInfo",     0, js_fb_info),
+    JS_CFUNC_DEF("fbBlit",     5, js_fb_blit),
+    /* Mouse (Phase 3) */
+    JS_CFUNC_DEF("readMouse",  0, js_read_mouse),
+    /* Memory map + paging (Phase 4) */
+    JS_CFUNC_DEF("getMemoryMap",  0, js_get_memory_map),
+    JS_CFUNC_DEF("setPDPT",       1, js_set_pdpt),
+    JS_CFUNC_DEF("flushTLB",      0, js_flush_tlb),
+    JS_CFUNC_DEF("setPageEntry",  4, js_set_page_entry),
+    JS_CFUNC_DEF("enablePaging",  0, js_enable_paging),
 };
 
 /*  Initialization  */
@@ -383,14 +630,14 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
 int quickjs_initialize(void) {
     /* Probe ATA before starting QuickJS */
     ata_initialize();
-    platform_boot_print(ata_present() ? "[ATA] Drive detected\n"
+    platform_boot_print(ata_present() ? "ATA disk detected\n"
                                       : "[ATA] No drive\n");
 
     rt = JS_NewRuntime();
     if (!rt) return -1;
 
-    JS_SetMemoryLimit(rt, 6 * 1024 * 1024);
-    JS_SetMaxStackSize(rt, 128 * 1024);
+    JS_SetMemoryLimit(rt, 50 * 1024 * 1024);  /* 50 MB — Phase 3 needs space for framebuffer */
+    JS_SetMaxStackSize(rt, 256 * 1024);
 
     ctx = JS_NewContext(rt);
     if (!ctx) { JS_FreeRuntime(rt); rt = NULL; return -1; }
