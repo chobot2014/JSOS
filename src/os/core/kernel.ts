@@ -148,6 +148,12 @@ export interface KernelAPI {
 
   // ─ Memory map + paging (Phase 4) ─────────────────────────────────────────
   /**
+   * Returns the highest usable physical address from the multiboot2 memory map.
+   * For a 512 MB QEMU VM this is 0x20000000 (536870912 bytes).
+   * Use this to determine total RAM without iterating the full memory map.
+   */
+  getRamBytes(): number;
+  /**
    * Returns the multiboot2 memory map as an array of entries.
    * type: 1=usable, 2=reserved, 3=ACPI reclaimable, 4=ACPI NVS, 5=bad RAM.
    * base/length are 32-bit unsigned values (addresses < 4 GB).
@@ -175,6 +181,38 @@ export interface KernelAPI {
    * CALL ONLY AFTER setPageEntry() has mapped at least PDE[0].
    */
   enablePaging(): boolean;
+
+  // ─ Scheduler hook + TSS (Phase 5) ────────────────────────────────────────
+  /**
+   * Register the TypeScript scheduler tick function.
+   * The function will be called cooperatively at yield points.
+   * It should return the new thread's savedESP (or 0 to keep current).
+   */
+  registerSchedulerHook(fn: () => number): void;
+  /**
+   * Update TSS.ESP0 — the kernel stack top for ring-3 → ring-0 transitions.
+   * Call this whenever the scheduler switches to a new thread (Phase 6+).
+   */
+  tssSetESP0(addr: number): void;
+
+  // ─ Process primitives (Phase 6) ───────────────────────────────────────────────
+  /**
+   * Clone the current page directory.
+   * Phase 6 stub: returns 0 (full eager-copy implementation in Phase 9).
+   * TypeScript treats the return value as an opaque CR3 handle.
+   */
+  cloneAddressSpace(): number;
+  /**
+   * Switch to ring-3 (user mode) at eip with stack pointer esp.
+   * Phase 6 stub: no-op (real ring-3 transition added in Phase 9).
+   * Never returns when implemented.
+   */
+  jumpToUserMode(eip: number, esp: number): void;
+  /**
+   * Read CR2 — the faulting linear address from the last page-fault exception.
+   * Called by the TypeScript page-fault handler to identify the bad address.
+   */
+  getPageFaultAddr(): number;
 
   //  Constants 
   colors: KernelColors;

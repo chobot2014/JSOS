@@ -78,6 +78,13 @@ void platform_fb_get_info(fb_info_t *out);
 
 /* Copy pixel data (BGRA, w*h*4 bytes) to framebuffer at (x,y).
  * No-op if framebuffer not available. */
+
+/* TSS (Task State Segment) — Phase 5 ─────────────────────────────────────
+ * Used so the CPU knows which kernel stack to switch to on ring-3→ring-0
+ * transitions (Phase 6+).  Phase 5 initialises the structure; Phase 6 loads TR.
+ */
+void platform_tss_init(void);
+void platform_tss_set_esp0(uint32_t kernel_stack_top);
 void platform_fb_blit(const uint32_t *src, int x, int y, int w, int h);
 
 #endif /* PLATFORM_H */

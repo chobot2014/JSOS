@@ -342,7 +342,7 @@ static JSValue js_fb_blit(JSContext *c, JSValueConst this_val, int argc, JSValue
 /* ── Phase 4 — Memory map ──────────────────────────────────────────────── */
 
 /*
- * Multiboot2 tag layouts used by js_get_memory_map().
+ * Multiboot2 tag layouts used by js_get_memory_map() / js_get_ram_bytes().
  * We redeclare them here to avoid pulling in platform.h tag structs
  * (and to keep this file's C dependencies minimal).
  */
@@ -359,6 +359,54 @@ typedef struct {
     uint32_t type;          /* 1=usable 2=reserved 3=ACPI 4=NVS 5=bad */
     uint32_t reserved;
 } _mb2mmap_entry_t;
+
+/*
+ * Walk the multiboot2 memory map and return the highest physical address
+ * among type-1 (usable) entries.  Returns 0 if the MBI is unavailable.
+ * Used internally by js_get_ram_bytes() and js_get_memory_map().
+ */
+static uint32_t _mb2_max_usable_addr(void) {
+    uint32_t mb2 = _multiboot2_ptr;
+    if (!mb2) return 0;
+    uint8_t *info = (uint8_t *)(uintptr_t)mb2;
+    uint32_t total_size = *(uint32_t *)info;
+    uint8_t *tag        = info + 8;
+    uint8_t *end        = info + total_size;
+    uint32_t max_addr   = 0;
+    while (tag < end) {
+        _mb2hdr_t *hdr = (_mb2hdr_t *)tag;
+        if (hdr->type == 0) break;
+        if (hdr->type == 6) {
+            _mb2mmap_tag_t *mt = (_mb2mmap_tag_t *)tag;
+            uint32_t esz = mt->entry_size;
+            uint8_t *ep  = tag + sizeof(_mb2mmap_tag_t);
+            uint8_t *ee  = tag + hdr->size;
+            for (; ep + esz <= ee; ep += esz) {
+                _mb2mmap_entry_t *e = (_mb2mmap_entry_t *)ep;
+                if (e->type == 1 && (e->base_addr >> 32) == 0) {
+                    uint32_t end_addr = (uint32_t)e->base_addr
+                                      + (uint32_t)e->length;
+                    if (end_addr > max_addr) max_addr = end_addr;
+                }
+            }
+            break;
+        }
+        uint32_t sz = hdr->size;
+        tag += (sz + 7) & ~7u;
+    }
+    return max_addr;
+}
+
+/*
+ * kernel.getRamBytes() → number
+ * Returns the highest usable physical address from the multiboot2 memory map.
+ * For a 512 MB QEMU VM this is 0x20000000 (536870912).
+ */
+static JSValue js_get_ram_bytes(JSContext *c, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewFloat64(c, (double)_mb2_max_usable_addr());
+}
 
 /*
  * kernel.getMemoryMap() → [{base,length,type}, ...]
@@ -499,6 +547,76 @@ static JSValue js_enable_paging(JSContext *c, JSValueConst this_val,
     return JS_TRUE;
 }
 
+/* ── Phase 6: process primitives (stubs — full impl in Phase 9) ───────── */
+
+/*
+ * kernel.cloneAddressSpace() → number
+ * Allocates a new page directory and copies all present PDEs from the current
+ * one (eager copy-on-write deferred to Phase 9).  Phase 6 returns 0 as a
+ * placeholder — TypeScript uses it only as an opaque handle.
+ */
+static JSValue js_clone_address_space(JSContext *c, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    /* Phase 6 stub: full page-directory clone is Phase 9 */
+    return JS_NewInt32(c, 0);
+}
+
+/*
+ * kernel.jumpToUserMode(eip, esp) → void
+ * Sets up an iret frame targeting ring-3 (CS=user_cs, SS=user_ss) and
+ * executes iret.  Never returns.
+ * Phase 6 stub — actual ring-3 transition added in Phase 9.
+ */
+static JSValue js_jump_to_user_mode(JSContext *c, JSValueConst this_val,
+                                     int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    /* Phase 6 stub: ring-3 transition is Phase 9 */
+    return JS_UNDEFINED;
+}
+
+/*
+ * kernel.getPageFaultAddr() → number
+ * Reads CR2, which the CPU populates with the faulting linear address on a
+ * page-fault exception (#14).  Safe to call at any time.
+ */
+static JSValue js_get_page_fault_addr(JSContext *c, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    uint32_t cr2;
+    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    return JS_NewInt32(c, (int32_t)cr2);
+}
+
+/* ── Phase 5: scheduler hook + TSS ─────────────────────────────────── */
+
+/*
+ * The registered JS function is called cooperatively at yield points.
+ * It is NOT called from the IRQ0 ISR directly (QuickJS is not re-entrant).
+ * TypeScript's ThreadManager registers its tick() here so C can invoke it
+ * in future phases via js_scheduler_tick() when proper per-thread C stacks
+ * are in place.
+ */
+static JSValue _scheduler_hook;
+
+static JSValue js_register_scheduler_hook(JSContext *c, JSValueConst this_val,
+                                           int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1 || !JS_IsFunction(c, argv[0])) return JS_UNDEFINED;
+    if (!JS_IsUndefined(_scheduler_hook)) JS_FreeValue(c, _scheduler_hook);
+    _scheduler_hook = JS_DupValue(c, argv[0]);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_tss_set_esp0(JSContext *c, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val;
+    uint32_t addr = 0;
+    if (argc > 0) JS_ToUint32(c, &addr, argv[0]);
+    platform_tss_set_esp0(addr);
+    return JS_UNDEFINED;
+}
+
 /* ── Mouse binding ─────────────────────────────────────────────────── */
 
 /*
@@ -618,11 +736,19 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     /* Mouse (Phase 3) */
     JS_CFUNC_DEF("readMouse",  0, js_read_mouse),
     /* Memory map + paging (Phase 4) */
+    JS_CFUNC_DEF("getRamBytes",    0, js_get_ram_bytes),
     JS_CFUNC_DEF("getMemoryMap",  0, js_get_memory_map),
     JS_CFUNC_DEF("setPDPT",       1, js_set_pdpt),
     JS_CFUNC_DEF("flushTLB",      0, js_flush_tlb),
     JS_CFUNC_DEF("setPageEntry",  4, js_set_page_entry),
     JS_CFUNC_DEF("enablePaging",  0, js_enable_paging),
+    /* Scheduler hook + TSS (Phase 5) */
+    JS_CFUNC_DEF("registerSchedulerHook", 1, js_register_scheduler_hook),
+    JS_CFUNC_DEF("tssSetESP0",            1, js_tss_set_esp0),
+    /* Process primitives (Phase 6) */
+    JS_CFUNC_DEF("cloneAddressSpace",  0, js_clone_address_space),
+    JS_CFUNC_DEF("jumpToUserMode",     2, js_jump_to_user_mode),
+    JS_CFUNC_DEF("getPageFaultAddr",   0, js_get_page_fault_addr),
 };
 
 /*  Initialization  */
@@ -641,6 +767,10 @@ int quickjs_initialize(void) {
 
     ctx = JS_NewContext(rt);
     if (!ctx) { JS_FreeRuntime(rt); rt = NULL; return -1; }
+
+    /* Phase 5: initialise scheduler hook slot + TSS data structure */
+    _scheduler_hook = JS_UNDEFINED;
+    platform_tss_init();
 
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue kobj   = JS_NewObject(ctx);

@@ -231,6 +231,36 @@ void platform_fb_get_info(fb_info_t *out) {
  * Copy a w*h BGRA (32-bit) pixel array into the framebuffer at (x, y).
  * No-op if framebuffer is not available or bpp != 32.
  */
+/* ── TSS (Task State Segment) — Phase 5 ─────────────────────────────────── */
+
+typedef struct __attribute__((packed)) {
+    uint32_t prev_tss;
+    uint32_t esp0;            /* kernel ESP on ring-3 → ring-0 transition */
+    uint32_t ss0;             /* kernel SS (= 0x10, data segment)          */
+    uint32_t esp1; uint32_t ss1;
+    uint32_t esp2; uint32_t ss2;
+    uint32_t cr3, eip, eflags;
+    uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;
+    uint32_t es, cs, ss, ds, fs, gs, ldt;
+    uint16_t trap, iomap_base;
+} tss_t;
+
+static tss_t kernel_tss;
+
+void platform_tss_init(void) {
+    uint32_t i;
+    uint8_t *p = (uint8_t *)&kernel_tss;
+    for (i = 0; i < (uint32_t)sizeof(kernel_tss); i++) p[i] = 0;
+    kernel_tss.ss0        = 0x10;                        /* kernel data segment */
+    kernel_tss.iomap_base = (uint16_t)sizeof(tss_t); /* no I/O permission map */
+}
+
+void platform_tss_set_esp0(uint32_t kernel_stack_top) {
+    kernel_tss.esp0 = kernel_stack_top;
+}
+
+/* ── Framebuffer blit ────────────────────────────────────────────────────── */
+
 void platform_fb_blit(const uint32_t *src, int x, int y, int w, int h) {
     if (!_fb.available || _fb.bpp != 32) return;
     if (!_fb.address) return;

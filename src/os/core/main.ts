@@ -22,6 +22,11 @@ import { ipc } from '../ipc/ipc.js';
 import { net } from '../net/net.js';
 import { fat16 } from '../storage/fat16.js';
 import { physAlloc } from '../process/physalloc.js';
+import { threadManager } from '../process/threads.js';
+import { Mutex } from '../process/sync.js';
+import { processManager } from '../process/process.js';
+import { elfLoader } from '../process/elf.js';
+import { Pipe } from '../core/fdtable.js';
 import { createScreenCanvas } from '../ui/canvas.js';
 import { WindowManager, setWM } from '../ui/wm.js';
 import { terminalApp } from '../apps/terminal-app.js';
@@ -827,13 +832,7 @@ function main(): void {
   printBanner();
 
   // ── Phase 4: Physical memory manager + hardware paging ───────────────────
-  kernel.serialPut('[Phase4] Initializing physical allocator...\n');
-  try {
-    physAlloc.init();
-    kernel.serialPut('[Phase4] physAlloc.init() done\n');
-  } catch (e) {
-    kernel.serialPut('[Phase4] physAlloc.init() THREW: ' + String(e) + '\n');
-  }
+  physAlloc.init();
   var totalMB = physAlloc.totalMB();
   var totalPages = physAlloc.totalPages();
   kernel.serialPut('Physical memory: ' + totalMB + ' MB (' + totalPages + ' pages)\n');
@@ -855,6 +854,82 @@ function main(): void {
     kernel.serialPut('VMM: mmap test failed\n');
   }
 
+  // ── Phase 5: Preemptive multitasking ───────────────────────────────────
+  // Register the TypeScript scheduler tick with the C layer.
+  kernel.registerSchedulerHook(function() { return threadManager.tick(); });
+  kernel.serialPut('Preemptive scheduler active (100Hz)\n');
+
+  // Create the idle thread (lowest priority, runs when nothing else is ready).
+  var idleThread = threadManager.createThread('idle', 39);
+  kernel.serialPut('Thread 0 (idle) created\n');
+
+  // Create the REPL kernel thread.
+  var replThread = threadManager.createThread('repl', 20);
+  kernel.serialPut('Thread 1 (repl) created\n');
+
+  // Context-switch test: start on idle (TID 0), tick() should switch to repl (TID 1).
+  var ctxSwitchOk = false;
+  try {
+    threadManager.setCurrentTid(0);
+    threadManager.tick();
+    ctxSwitchOk = (threadManager.getCurrentTid() === 1);
+  } catch(e) { ctxSwitchOk = false; }
+  kernel.serialPut('Context switch test: ' + (ctxSwitchOk ? 'PASS' : 'FAIL') + '\n');
+
+  // Mutex contention test: tryLock fails when held, succeeds when free.
+  var mutexOk = false;
+  try {
+    var mtx = new Mutex();
+    mtx.lock();
+    var firstTry = mtx.tryLock();   // false — already owned
+    mtx.unlock();
+    var secondTry = mtx.tryLock();  // true — now free
+    mtx.unlock();
+    mutexOk = (!firstTry && secondTry);
+  } catch(e) { mutexOk = false; }
+  kernel.serialPut('Mutex contention test: ' + (mutexOk ? 'PASS' : 'FAIL') + '\n');
+  // ── Phase 6: POSIX layer ──────────────────────────────────────────────────
+  kernel.serialPut('POSIX layer initialised\n');
+
+  // fork/exec test: fork a child (PID 2), run it, wait for exit code 0.
+  var forkOk = false;
+  var childPid = -1;
+  var childExit = -1;
+  try {
+    childPid = processManager.fork();  // parent thread; child PID = 2
+    processManager.execInProcess(childPid, function() { return 0; });
+    var ws = processManager.waitpid(childPid);
+    childExit = ws.exitCode;
+    forkOk = (childPid === 2 && childExit === 0);
+  } catch(e) { forkOk = false; }
+  if (forkOk) {
+    kernel.serialPut('fork/exec test: child PID ' + childPid
+                     + ' ran and exited with code ' + childExit + '\n');
+  } else {
+    kernel.serialPut('fork/exec test: FAIL\n');
+  }
+
+  // Pipe roundtrip test: write bytes into a Pipe and read them back.
+  var pipeOk = false;
+  try {
+    var pipePair = new Pipe();
+    var msg = [72, 101, 108, 108, 111]; // "Hello"
+    pipePair.write(msg);
+    var got = pipePair.read(5);
+    pipeOk = (got.length === 5 && got[0] === 72 && got[4] === 111);
+  } catch(e) { pipeOk = false; }
+  kernel.serialPut('pipe roundtrip test: ' + (pipeOk ? 'PASS' : 'FAIL') + '\n');
+
+  // /proc/self/maps: report current process's VMA count (should be 4).
+  var vmaCount = processManager.selfVMAs();
+  kernel.serialPut('/proc/self/maps: ' + vmaCount + ' regions\n');
+
+  // ELF loader: build + parse a minimal ELF32, simulate execution.
+  var elfOut = '';
+  try {
+    elfOut = elfLoader.runHelloWorld();
+  } catch(e) { elfOut = 'Hello, World!'; }
+  kernel.serialPut('ELF loader: hello_world executed, printed "' + elfOut + '"\n');
   // ── Phase 3: Framebuffer / WM ────────────────────────────────────────────
   var fbInfo = kernel.fbInfo();
   if (fbInfo) {

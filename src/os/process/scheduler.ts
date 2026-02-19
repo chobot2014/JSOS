@@ -10,6 +10,7 @@
  */
 
 import { SyscallResult } from '../core/syscalls.js';
+import { threadManager } from './threads.js';
 
 export type ProcessState = 'ready' | 'running' | 'blocked' | 'terminated' | 'waiting';
 
@@ -280,9 +281,14 @@ export class ProcessScheduler {
   }
 
   /**
-   * Handle time slice expiration
+   * Handle time slice expiration.
+   * Delegates to the kernel ThreadManager first (Phase 5), then handles
+   * process-level rescheduling.
    */
   tick(): void {
+    // Phase 5: advance the kernel thread scheduler
+    threadManager.tick();
+
     if (!this.currentProcess) return;
 
     this.currentProcess.cpuTime++;
