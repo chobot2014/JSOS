@@ -228,107 +228,37 @@ export class InitSystem {
    * Register default system services
    */
   private registerDefaultServices(): void {
-    // Kernel services
-    this.registerService({
-      name: 'kernel',
-      description: 'Core kernel services',
-      executable: '',
-      args: [],
-      runlevel: 1,
-      dependencies: [],
-      startPriority: 0,
-      stopPriority: 100,
-      restartPolicy: 'no',
-      environment: {},
-      workingDirectory: '/',
-      user: 'root',
-      group: 'root'
-    });
+    // Helper to build a service descriptor quickly
+    function svc(
+      name: string, desc: string, exec: string,
+      runlevel: RunLevel, deps: string[],
+      startPri: number, stopPri: number,
+      restart: 'no' | 'always' | 'on-failure' = 'no',
+      user: string = 'root', group: string = 'root'
+    ): Service {
+      return { name, description: desc, executable: exec, args: [], runlevel,
+               dependencies: deps, startPriority: startPri, stopPriority: stopPri,
+               restartPolicy: restart, environment: {}, workingDirectory: '/',
+               user, group };
+    }
 
-    // Basic filesystem
-    this.registerService({
-      name: 'filesystem',
-      description: 'Basic filesystem services',
-      executable: '/bin/fs-init.js',
-      args: [],
-      runlevel: 1,
-      dependencies: ['kernel'],
-      startPriority: 10,
-      stopPriority: 90,
-      restartPolicy: 'no',
-      environment: {},
-      workingDirectory: '/',
-      user: 'root',
-      group: 'root'
-    });
+    // Runlevel 1 — single-user / core OS services
+    this.registerService(svc('kernel',   'Core kernel',                '',                        1, [],                  0,  100, 'no'));
+    this.registerService(svc('vmmd',     'Virtual memory manager',     '/bin/vmmd.js',            1, [],                  5,   95, 'always'));
+    this.registerService(svc('procfs',   'Virtual /proc filesystem',   '/bin/procfs.js',          1, ['kernel'],         10,   90, 'no'));
+    this.registerService(svc('klogd',    'Kernel log daemon',          '/bin/klogd.js',           1, ['kernel'],         15,   85, 'always'));
+    this.registerService(svc('syslogd',  'System log daemon',          '/bin/syslogd.js',         1, ['klogd'],          20,   80, 'always'));
 
-    // Terminal services
-    this.registerService({
-      name: 'terminal',
-      description: 'Terminal and console services',
-      executable: '/bin/terminal-init.js',
-      args: [],
-      runlevel: 1,
-      dependencies: ['filesystem'],
-      startPriority: 20,
-      stopPriority: 80,
-      restartPolicy: 'always',
-      environment: {},
-      workingDirectory: '/',
-      user: 'root',
-      group: 'root'
-    });
+    // Runlevel 2 — network
+    this.registerService(svc('udevd',    'Device event daemon',        '/bin/udevd.js',           2, ['kernel'],         25,   75, 'on-failure'));
+    this.registerService(svc('network',  'Network stack',              '/bin/network.js',         2, ['syslogd','udevd'],30,   70, 'on-failure'));
+    this.registerService(svc('dhcpcd',   'DHCP client',                '/bin/dhcpcd.js',          2, ['network'],        35,   65, 'on-failure'));
 
-    // Network services
-    this.registerService({
-      name: 'network',
-      description: 'Network stack initialization',
-      executable: '/bin/network-init.js',
-      args: [],
-      runlevel: 2,
-      dependencies: ['filesystem'],
-      startPriority: 30,
-      stopPriority: 70,
-      restartPolicy: 'on-failure',
-      environment: {},
-      workingDirectory: '/',
-      user: 'root',
-      group: 'root'
-    });
-
-    // User services
-    this.registerService({
-      name: 'user-services',
-      description: 'User-level services',
-      executable: '/bin/user-init.js',
-      args: [],
-      runlevel: 4,
-      dependencies: ['network', 'terminal'],
-      startPriority: 40,
-      stopPriority: 60,
-      restartPolicy: 'on-failure',
-      environment: {},
-      workingDirectory: '/',
-      user: 'root',
-      group: 'root'
-    });
-
-    // REPL service (main shell)
-    this.registerService({
-      name: 'repl',
-      description: 'JavaScript REPL interface',
-      executable: '/bin/repl.js',
-      args: [],
-      runlevel: 5,
-      dependencies: ['terminal', 'user-services'],
-      startPriority: 50,
-      stopPriority: 50,
-      restartPolicy: 'always',
-      environment: {},
-      workingDirectory: '/home/user',
-      user: 'user',
-      group: 'users'
-    });
+    // Runlevel 3 — full multi-user
+    this.registerService(svc('users',    'User account service',       '/bin/userd.js',           3, ['syslogd'],        40,   60, 'always'));
+    this.registerService(svc('cron',     'Periodic task scheduler',    '/bin/cron.js',            3, ['syslogd'],        45,   55, 'always'));
+    this.registerService(svc('ipc',      'IPC bus daemon',             '/bin/ipc.js',             3, ['syslogd'],        50,   50, 'always'));
+    this.registerService(svc('repl',     'Interactive JavaScript REPL','/bin/repl',               3, ['users','network'],90,   10, 'always', 'user', 'users'));
   }
 
   /**

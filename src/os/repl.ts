@@ -27,6 +27,38 @@ function addHistory(line: string): void {
   if (_history.length > HISTORY_MAX) _history.shift();
 }
 
+//  Tab completion 
+
+function tabComplete(buf: string): string[] {
+  // Extract the last token from the buffer
+  var m = buf.match(/[\w$][\w$.]*$/);
+  var prefix = m ? m[0] : '';
+  if (!prefix) return [];
+
+  var g = globalThis as any;
+  var dot = prefix.lastIndexOf('.');
+
+  if (dot === -1) {
+    // Complete top-level global names
+    var keys: string[] = [];
+    for (var k in g) {
+      if (k.indexOf(prefix) === 0) keys.push(k);
+    }
+    return keys.sort();
+  } else {
+    // Complete object.property
+    var objExpr = prefix.slice(0, dot);
+    var propPfx = prefix.slice(dot + 1);
+    var obj = g[objExpr];
+    if (obj === null || obj === undefined) return [];
+    var keys: string[] = [];
+    for (var k in obj) {
+      if (k.indexOf(propPfx) === 0) keys.push(objExpr + '.' + k);
+    }
+    return keys.sort();
+  }
+}
+
 //  Readline 
 
 function readline(printPrompt: () => void): string {
@@ -90,6 +122,37 @@ function readline(printPrompt: () => void): string {
       terminal.clear();
       printPrompt();
       terminal.print(buf);
+      continue;
+    }
+
+    if (ch === '\t') {
+      var completions = tabComplete(buf);
+      if (completions.length === 0) {
+        // nothing — ring bell
+        terminal.putchar('\x07');
+      } else if (completions.length === 1) {
+        // Inline-complete the remaining suffix
+        var full = completions[0];
+        var m = buf.match(/[\w$][\w$.]*$/);
+        var partial = m ? m[0] : '';
+        var suffix = full.slice(partial.length);
+        buf += suffix;
+        terminal.print(suffix);
+        histIdx = -1;
+      } else {
+        // Show all candidates (sorted, 4 per row)
+        terminal.println('');
+        var cols = 4;
+        for (var ci = 0; ci < completions.length; ci++) {
+          var label = completions[ci];
+          while (label.length < 20) label += ' ';
+          terminal.print(label);
+          if ((ci + 1) % cols === 0) terminal.println('');
+        }
+        if (completions.length % cols !== 0) terminal.println('');
+        printPrompt();
+        terminal.print(buf);
+      }
       continue;
     }
 

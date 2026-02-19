@@ -16,6 +16,10 @@ import { syscalls } from './syscalls.js';
 import { scheduler } from './scheduler.js';
 import { vmm } from './vmm.js';
 import { init } from './init.js';
+import { procFS } from './proc.js';
+import { users } from './users.js';
+import { ipc } from './ipc.js';
+import { net } from './net.js';
 
 declare var kernel: import('./kernel.js').KernelAPI;
 
@@ -98,6 +102,11 @@ function setupGlobals(): void {
   // terminal.setColor(), etc. without going through the kernel binding.
   g.terminal = terminal;
 
+  // Expose OS subsystems directly — user programs use these
+  g.users = users;
+  g.ipc   = ipc;
+  g.net   = net;
+
   g.fs = {
     ls:     function(p?: string) { return fs.ls(p || ''); },
     read:   function(p: string)  { return fs.readFile(p); },
@@ -157,9 +166,12 @@ function setupGlobals(): void {
     },
     // New OS components
     scheduler: scheduler,
-    vmm: vmm,
-    init: init,
-    syscalls: syscalls,
+    vmm:       vmm,
+    init:      init,
+    syscalls:  syscalls,
+    net:       net,
+    users:     users,
+    ipc:       ipc,
   };
 
   // ── Shorthand print ───────────────────────────────────────────────────────
@@ -291,11 +303,11 @@ function setupGlobals(): void {
   g.ps = function() {
     var procs = scheduler.getAllProcesses();
     return printableArray(procs, function(arr: any[]) {
-      terminal.colorPrintln('  ' + lpad('PID', 4) + '  ' + pad('NAME', 18) + pad('STATE', 12) + 'PRI', Color.LIGHT_CYAN);
-      terminal.colorPrintln('  ' + pad('', 42).replace(/ /g, '-'), Color.DARK_GREY);
+      terminal.colorPrintln('  ' + lpad('PID', 4) + '  ' + lpad('PPID', 5) + '  ' + pad('NAME', 16) + '  ' + pad('STATE', 12) + 'PRI', Color.LIGHT_CYAN);
+      terminal.colorPrintln('  ' + pad('', 48).replace(/ /g, '-'), Color.DARK_GREY);
       for (var i = 0; i < arr.length; i++) {
         var p = arr[i];
-        terminal.println('  ' + lpad('' + p.pid, 4) + '  ' + pad(p.ppid ? '[' + p.ppid + '] ' : '[0] ', 18) + pad(p.state, 12) + p.priority);
+        terminal.println('  ' + lpad('' + p.pid, 4) + '  ' + lpad('' + p.ppid, 5) + '  ' + pad(p.name, 16) + '  ' + pad(p.state, 12) + p.priority);
       }
       terminal.colorPrintln('  ' + arr.length + ' process(es)', Color.DARK_GREY);
     });
@@ -391,6 +403,198 @@ function setupGlobals(): void {
   g.halt   = function() { kernel.halt(); };
   g.reboot = function() { kernel.reboot(); };
 
+  // ── User & identity ───────────────────────────────────────────────────────
+  g.whoami = function() {
+    var u = users.getCurrentUser();
+    terminal.println(u ? u.name : 'nobody');
+  };
+
+  g.id = function(name?: string) {
+    var u = name ? users.getUser(name) : users.getCurrentUser();
+    if (!u) { terminal.println('id: ' + name + ': no such user'); return; }
+    terminal.println(users.idString(u));
+  };
+
+  g.who = function() {
+    terminal.colorPrintln('NAME             TTY      TIME', Color.LIGHT_CYAN);
+    var u = users.getCurrentUser();
+    if (u) terminal.println(pad(u.name, 16) + ' console  ' + new Date().toUTCString());
+  };
+
+  g.su = function(nameOrUid: string | number) {
+    if (!users.isRoot()) { terminal.colorPrintln('su: permission denied (not root)', Color.LIGHT_RED); return; }
+    if (users.su(nameOrUid)) {
+      var u = users.getCurrentUser();
+      terminal.colorPrintln('switched to ' + (u ? u.name : '' + nameOrUid), Color.LIGHT_GREEN);
+    } else {
+      terminal.println('su: user not found');
+    }
+  };
+
+  g.adduser = function(name: string, password: string) {
+    if (!name) { terminal.println('usage: adduser(name, password)'); return; }
+    var u = users.addUser(name, password || '');
+    if (u) terminal.colorPrintln('created user ' + u.name + ' (uid=' + u.uid + ')', Color.LIGHT_GREEN);
+    else terminal.println('adduser: user already exists');
+  };
+
+  g.passwd = function(name: string, newPw: string) {
+    if (!name || !newPw) { terminal.println('usage: passwd(name, newPassword)'); return; }
+    if (users.passwd(name, newPw)) terminal.colorPrintln('password changed', Color.LIGHT_GREEN);
+    else terminal.println('passwd: user not found');
+  };
+
+  // ── Date / time ───────────────────────────────────────────────────────────
+  g.date = function() {
+    var ms = kernel.getUptime();
+    var s  = Math.floor(ms / 1000);
+    var m  = Math.floor(s / 60); s %= 60;
+    var h  = Math.floor(m / 60); m %= 60;
+    var info = { uptime: h + 'h ' + m + 'm ' + s + 's', ticks: kernel.getTicks() };
+    return printableObject(info, function(obj: any) {
+      terminal.println('  uptime : ' + obj.uptime);
+      terminal.println('  ticks  : ' + obj.ticks);
+    });
+  };
+
+  // ── Text search ───────────────────────────────────────────────────────────
+  g.grep = function(pattern: string, path: string) {
+    if (!pattern) { terminal.println('usage: grep(pattern, path)'); return; }
+    var content = path ? fs.readFile(path) : null;
+    if (!content) { terminal.colorPrintln('grep: no input', Color.DARK_GREY); return; }
+    var re     = new RegExp(pattern);
+    var lines  = content.split('\n');
+    var matches: string[] = [];
+    for (var i = 0; i < lines.length; i++) {
+      if (re.test(lines[i])) matches.push((path ? path + ':' : '') + (i + 1) + ': ' + lines[i]);
+    }
+    return printableArray(matches, function(arr: string[]) {
+      if (arr.length === 0) { terminal.colorPrintln('  (no matches)', Color.DARK_GREY); return; }
+      for (var j = 0; j < arr.length; j++) terminal.println('  ' + arr[j]);
+      terminal.colorPrintln('  ' + arr.length + ' match(es)', Color.DARK_GREY);
+    });
+  };
+
+  // Word / line / char count
+  g.wc = function(path: string) {
+    if (!path) { terminal.println('usage: wc(path)'); return; }
+    var c = fs.readFile(path);
+    if (c === null) { terminal.println('wc: ' + path + ': not found'); return; }
+    var lines = c.split('\n').length - 1;
+    var words = c.trim() ? c.trim().split(/\s+/).length : 0;
+    var info  = { lines, words, chars: c.length, path };
+    return printableObject(info, function(obj: any) {
+      terminal.println('  ' + lpad('' + obj.lines, 6) + '  ' + lpad('' + obj.words, 6) + '  ' + lpad('' + obj.chars, 6) + '  ' + obj.path);
+    });
+  };
+
+  // uname
+  g.uname = function(opts?: string) {
+    var o = opts || '-s';
+    if (o === '-a') {
+      terminal.println('JSOS 1.0.0 jsos 1.0.0 QuickJS-ES2023 i686 JSOS');
+    } else {
+      if (o.indexOf('s') !== -1) terminal.println('JSOS');
+      if (o.indexOf('r') !== -1) terminal.println('1.0.0');
+      if (o.indexOf('m') !== -1) terminal.println('i686');
+      if (o.indexOf('n') !== -1) terminal.println(fs.readFile('/etc/hostname') || 'jsos');
+    }
+  };
+
+  // Environment
+  g.env = function() {
+    var u = users.getCurrentUser();
+    var pseudo: Record<string, string> = {
+      HOME:         (u ? u.home : '/tmp'),
+      USER:         (u ? u.name : 'nobody'),
+      PATH:         '/bin:/usr/bin',
+      TERM:         'vga',
+      LANG:         'C',
+      SHELL:        '/bin/repl',
+      HOSTNAME:     (fs.readFile('/etc/hostname') || 'jsos'),
+      RUNLEVEL:     '' + init.getCurrentRunlevel(),
+      JSOS_VERSION: (fs.readFile('/etc/version') || '1.0.0'),
+    };
+    return printableObject(pseudo, function(obj: any) {
+      var keys = Object.keys(obj);
+      for (var i = 0; i < keys.length; i++) terminal.println('  ' + pad(keys[i], 14) + '= ' + obj[keys[i]]);
+    });
+  };
+
+  // which
+  g.which = function(cmd: string) {
+    if (!cmd) { terminal.println('usage: which(command)'); return; }
+    var paths = ['/bin/' + cmd, '/bin/' + cmd + '.js', '/usr/bin/' + cmd, '/usr/bin/' + cmd + '.js'];
+    for (var i = 0; i < paths.length; i++) {
+      if (fs.exists(paths[i])) { terminal.colorPrintln(paths[i], Color.LIGHT_GREEN); return; }
+    }
+    // Also check if it is a defined global
+    if ((globalThis as any)[cmd] !== undefined) {
+      terminal.colorPrintln(cmd + ': built-in function', Color.LIGHT_CYAN); return;
+    }
+    terminal.println(cmd + ': not found');
+  };
+
+  // ── Networking ────────────────────────────────────────────────────────────
+  g.ifconfig = function() { terminal.print(net.ifconfig()); };
+
+  g.netstat = function() {
+    var conns = net.getConnections();
+    terminal.colorPrintln('  Proto  Local              Remote             State', Color.LIGHT_CYAN);
+    terminal.colorPrintln('  -----  -----------------  -----------------  -----------', Color.DARK_GREY);
+    if (conns.length === 0) { terminal.colorPrintln('  (no connections)', Color.DARK_GREY); return; }
+    for (var i = 0; i < conns.length; i++) {
+      var c = conns[i];
+      terminal.println('  tcp    ' + pad(c.localIP + ':' + c.localPort, 17) + '  ' + pad(c.remoteIP + ':' + c.remotePort, 17) + '  ' + c.state);
+    }
+    var st = net.getStats();
+    terminal.colorPrintln('  rx=' + st.rxPackets + ' tx=' + st.txPackets + ' errors=' + st.rxErrors, Color.DARK_GREY);
+  };
+
+  g.arp = function() {
+    var table = net.getArpTable();
+    terminal.colorPrintln('  IP               MAC', Color.LIGHT_CYAN);
+    for (var i = 0; i < table.length; i++) {
+      terminal.println('  ' + pad(table[i].ip, 16) + ' ' + table[i].mac);
+    }
+  };
+
+  // ── Interactive top ───────────────────────────────────────────────────────
+  g.top = function() {
+    var running = true;
+    while (running) {
+      terminal.clear();
+      var m  = kernel.getMemoryInfo();
+      var ms = kernel.getUptime();
+      var s = Math.floor(ms / 1000), mn = Math.floor(s / 60), hr = Math.floor(mn / 60);
+      terminal.setColor(Color.WHITE, Color.BLACK);
+      terminal.println(' JSOS top   uptime: ' + hr + 'h ' + (mn % 60) + 'm ' + (s % 60) + 's   [q = quit]');
+      terminal.setColor(Color.LIGHT_GREY, Color.BLACK);
+      terminal.println(' mem: ' + Math.floor(m.used / 1024) + 'K / ' + Math.floor(m.total / 1024) + 'K   runlevel: ' + init.getCurrentRunlevel() + '   scheduler: ' + scheduler.getAlgorithm());
+      terminal.println('');
+      terminal.setColor(Color.LIGHT_CYAN, Color.BLACK);
+      terminal.println('  ' + lpad('PID', 4) + '  ' + lpad('PPID', 5) + '  ' + pad('NAME', 16) + '  ' + pad('STATE', 12) + '  PRI  CPU-ms');
+      terminal.setColor(Color.DARK_GREY, Color.BLACK);
+      terminal.println('  ' + pad('', 60).replace(/ /g, '-'));
+      terminal.setColor(Color.LIGHT_GREY, Color.BLACK);
+      var procs = scheduler.getAllProcesses();
+      for (var i = 0; i < procs.length; i++) {
+        var p = procs[i];
+        terminal.println('  ' + lpad('' + p.pid, 4) + '  ' + lpad('' + p.ppid, 5) + '  ' + pad(p.name, 16) + '  ' + pad(p.state, 12) + '  ' + lpad('' + p.priority, 3) + '  ' + p.cpuTime);
+      }
+      terminal.println('');
+      terminal.setColor(Color.DARK_GREY, Color.BLACK);
+      terminal.println('  ' + procs.length + ' process(es)');
+      terminal.setColor(Color.LIGHT_GREY, Color.BLACK);
+      kernel.sleep(500);
+      if (kernel.hasKey()) {
+        var k = kernel.readKey();
+        if (k === 'q' || k === 'Q' || k === '\x03') running = false;
+      }
+    }
+    terminal.clear();
+  };
+
   // ── Text editor ──────────────────────────────────────────────────
   g.edit = function(path?: string) { openEditor(path); };
 
@@ -406,7 +610,8 @@ function setupGlobals(): void {
     terminal.colorPrintln('JSOS  —  everything is JavaScript', Color.WHITE);
     terminal.colorPrintln('QuickJS ES2023 on bare-metal i686', Color.DARK_GREY);
     terminal.println('');
-    terminal.colorPrintln('Filesystem functions:', Color.YELLOW);
+
+    terminal.colorPrintln('Filesystem:', Color.YELLOW);
     terminal.println('  ls(path?)            list directory');
     terminal.println('  cd(path?)            change directory  (~ = /home/user)');
     terminal.println('  pwd()                print working directory');
@@ -416,58 +621,99 @@ function setupGlobals(): void {
     terminal.println('  rm(path)             remove file or empty dir');
     terminal.println('  cp(src, dst)         copy file');
     terminal.println('  mv(src, dst)         move / rename');
-    terminal.println('  write(path, text)    overwrite file');
+    terminal.println('  write(path, text)    write file');
     terminal.println('  append(path, text)   append to file');
     terminal.println('  find(path?, pat)     find files  (* wildcard)');
-    terminal.println('  stat(path)           file info');
+    terminal.println('  stat(path)           file metadata');
     terminal.println('  run(path)            execute a .js file');
+    terminal.println('  grep(pat, path)      search file for regex pattern');
+    terminal.println('  wc(path)             line / word / char count');
+    terminal.println('  which(cmd)           find command location');
     terminal.println('');
-    terminal.colorPrintln('System functions:', Color.YELLOW);
-    terminal.println('  ps()                 process list');
-    terminal.println('  kill(pid)            terminate process');
+
+    terminal.colorPrintln('Processes & system:', Color.YELLOW);
+    terminal.println('  ps()                 process list  (PID PPID NAME STATE PRI)');
+    terminal.println('  top()                interactive process monitor  (q = quit)');
+    terminal.println('  kill(pid)            terminate a process');
     terminal.println('  mem()                memory usage + bar');
     terminal.println('  uptime()             system uptime');
     terminal.println('  sysinfo()            full system summary');
-    terminal.println('  colors()             VGA color palette');
-    terminal.println('  hostname(name?)      show or set hostname');
+    terminal.println('  uname(opts?)         OS info  (-s -r -m -n -a)');
+    terminal.println('  date()               uptime-based timestamp');
+    terminal.println('  hostname(name?)      show / set hostname');
+    terminal.println('  colors()             VGA color palette demo');
     terminal.println('  sleep(ms)            sleep N milliseconds');
     terminal.println('  clear()              clear the screen');
     terminal.println('  halt()               power off');
     terminal.println('  reboot()             reboot');
     terminal.println('  edit(path?)          fullscreen text editor  (^S save  ^Q quit)');
     terminal.println('');
-    terminal.colorPrintln('REPL functions:', Color.YELLOW);
+
+    terminal.colorPrintln('Users:', Color.YELLOW);
+    terminal.println('  whoami()             current username');
+    terminal.println('  id(name?)            uid/gid identity string');
+    terminal.println('  who()                logged-in users');
+    terminal.println('  su(name)             switch user  (root only)');
+    terminal.println('  adduser(name, pw)    create user account');
+    terminal.println('  passwd(name, pw)     change password');
+    terminal.println('');
+
+    terminal.colorPrintln('Networking:', Color.YELLOW);
+    terminal.println('  ifconfig()           interface configuration');
+    terminal.println('  netstat()            active TCP connections');
+    terminal.println('  arp()                ARP table');
+    terminal.println('  net.ping(ip, ms?)    ICMP echo');
+    terminal.println('  net.configure(opts)  set ip/mac/gw/dns');
+    terminal.println('  net.createSocket(type)  UDP or TCP socket');
+    terminal.println('');
+
+    terminal.colorPrintln('REPL:', Color.YELLOW);
     terminal.println('  history()            show input history');
+    terminal.println('  env()                pseudo-environment variables');
     terminal.println('  echo(...)            print arguments');
     terminal.println('  print(s)             print a value');
     terminal.println('  printable(data, fn)  wrap data with a custom pretty-printer');
     terminal.println('');
-    terminal.colorPrintln('Scripting APIs (return raw data):', Color.YELLOW);
+
+    terminal.colorPrintln('Scripting APIs:', Color.YELLOW);
     terminal.colorPrint('  fs', Color.LIGHT_CYAN);
-    terminal.println('   .ls .read .write .append .mkdir .rm .cp .mv .stat');
-    terminal.println('       .exists .isDir .isFile .pwd .cd .find .run');
+    terminal.println('       .ls .read .write .append .mkdir .rm .cp .mv .stat .find');
     terminal.colorPrint('  sys', Color.LIGHT_CYAN);
-    terminal.println('  .mem .ps .kill .uptime .screen .sysinfo .spawn');
-    terminal.println('       .hostname .version .reboot .halt');
+    terminal.println('      .mem .ps .kill .uptime .sysinfo .spawn .hostname');
+    terminal.colorPrint('  net', Color.LIGHT_CYAN);
+    terminal.println('      .createSocket .bind .listen .connect .send .recv .close .ping');
+    terminal.colorPrint('  users', Color.LIGHT_CYAN);
+    terminal.println('    .getCurrentUser .getUser .addUser .removeUser .su .passwd .listUsers');
+    terminal.colorPrint('  ipc', Color.LIGHT_CYAN);
+    terminal.println('      .pipe() .signal.send(pid,sig) .mq.send(pid,msg)');
+    terminal.colorPrint('  scheduler', Color.LIGHT_CYAN);
+    terminal.println(' .getAllProcesses .spawn .terminate .getAlgorithm');
+    terminal.colorPrint('  vmm', Color.LIGHT_CYAN);
+    terminal.println('      .allocate .free .getStats .protect .mmap');
+    terminal.colorPrint('  init', Color.LIGHT_CYAN);
+    terminal.println('     .getServices .startService .stopService .getCurrentRunlevel');
     terminal.println('');
+
     terminal.colorPrintln('Keyboard:', Color.YELLOW);
     terminal.println('  Up / Down    browse history');
+    terminal.println('  Tab          tab-complete (globals and object properties)');
     terminal.println('  Ctrl+U       erase line');
     terminal.println('  Ctrl+C       cancel line');
     terminal.println('  Ctrl+L       redraw screen');
     terminal.println('  open { ( [   enter multiline mode; blank line to run');
     terminal.println('');
+
     terminal.colorPrintln('Examples:', Color.YELLOW);
-    terminal.colorPrintln("  ls()", Color.WHITE);
     terminal.colorPrintln("  ls('/bin').map(f => f.name)", Color.WHITE);
-    terminal.colorPrintln("  ls('/bin').filter(f => f.type === 'file')", Color.WHITE);
     terminal.colorPrintln("  ps().find(p => p.name === 'repl')", Color.WHITE);
+    terminal.colorPrintln("  cat('/proc/meminfo')", Color.WHITE);
+    terminal.colorPrintln("  cat('/proc/cpuinfo')", Color.WHITE);
+    terminal.colorPrintln("  grep('root', '/etc/passwd')", Color.WHITE);
     terminal.colorPrintln("  mem().free", Color.WHITE);
-    terminal.colorPrintln("  sysinfo().hostname", Color.WHITE);
-    terminal.colorPrintln("  cat('/etc/hostname')", Color.WHITE);
-    terminal.colorPrintln("  write('/tmp/hi.js', 'print(42)')", Color.WHITE);
-    terminal.colorPrintln("  run('/tmp/hi.js')", Color.WHITE);
+    terminal.colorPrintln("  net.configure({ip:'10.0.2.15', gw:'10.0.2.2'})", Color.WHITE);
+    terminal.colorPrintln("  write('/tmp/hi.js', 'print(42)'); run('/tmp/hi.js')", Color.WHITE);
     terminal.colorPrintln("  JSON.stringify(sys.sysinfo(), null, 2)", Color.WHITE);
+    terminal.colorPrintln("  top()", Color.WHITE);
     terminal.println('');
   };
 }
@@ -496,6 +742,9 @@ function printBanner(): void {
 /** Main entry point - called by the bundled JS IIFE footer */
 function main(): void {
   setupConsole();
+
+  // Mount virtual filesystems before any code reads them
+  fs.mountVFS('/proc', procFS);
 
   // Initialize OS subsystems synchronously (bare metal — no event loop)
   init.initialize();   // registers and starts services up to runlevel 3
