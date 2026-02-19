@@ -83,6 +83,7 @@ int _read(int file, char *ptr, int len) {
 caddr_t _sbrk(int incr) {
     // Simple heap management
     extern char _heap_start;
+    extern char _heap_end;       /* defined by linker script */
     static char *heap_end = NULL;
     char *prev_heap_end;
     
@@ -91,6 +92,13 @@ caddr_t _sbrk(int incr) {
     }
     
     prev_heap_end = heap_end;
+
+    /* Bounds check: refuse to go past the linker-defined heap region */
+    if (heap_end + incr > &_heap_end) {
+        errno = ENOMEM;
+        return (caddr_t)-1;
+    }
+
     heap_end += incr;
     
     return (caddr_t)prev_heap_end;

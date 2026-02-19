@@ -25,6 +25,10 @@
 #define M_LN10 2.30258509299404568402
 #endif
 
+/* Forward declarations — exp and log are defined later in this file */
+double exp(double x);
+double log(double x);
+
 // Basic math functions
 double fabs(double x) {
     return x < 0.0 ? -x : x;
@@ -53,18 +57,24 @@ double fmod(double x, double y) {
     return x - floor(x / y) * y;
 }
 
-double pow(double base, double exp) {
-    // Simple power implementation for positive integer exponents
-    if (exp == 0.0) return 1.0;
-    if (exp == 1.0) return base;
-    if (exp < 0.0) return 1.0 / pow(base, -exp);
-    
-    double result = 1.0;
-    int int_exp = (int)exp;
-    for (int i = 0; i < int_exp; i++) {
-        result *= base;
+double pow(double base, double exponent) {
+    if (exponent == 0.0) return 1.0;
+    if (base == 1.0)     return 1.0;
+    if (exponent == 1.0) return base;
+    /* Negative exponent: recurse with positive */
+    if (exponent < 0.0) return 1.0 / pow(base, -exponent);
+    /* Integer exponent: fast binary exponentiation (exact, no fp drift) */
+    long ie = (long)exponent;
+    if ((double)ie == exponent && ie < 1073741824L) {
+        double r = 1.0, b = base;
+        long n = ie;
+        while (n > 0) { if (n & 1) r *= b; b *= b; n >>= 1; }
+        return r;
     }
-    return result;
+    /* Fractional exponent: base^exp = exp(exp * log(base)) */
+    if (base < 0.0) { volatile double z = 0.0; return z / z; } /* NaN */
+    if (base == 0.0) return 0.0;
+    return exp(exponent * log(base));
 }
 
 double sqrt(double x) {
@@ -121,16 +131,18 @@ double exp(double x) {
 }
 
 double log(double x) {
-    if (x <= 0.0) return 0.0;  // Invalid input
-    
-    // Natural logarithm approximation using Newton's method
-    // We want to find y such that e^y = x
-    double y = 0.0;
-    for (int i = 0; i < 20; i++) {
-        double ey = exp(y);
-        y = y - (ey - x) / ey;
-    }
-    return y;
+    if (x <= 0.0) return 0.0;  /* undefined / -inf — return 0 as safe fallback */
+    if (x == 1.0) return 0.0;
+    /* Range reduction: log(x) = k*log(2) + log(m), where m in [0.5, 2) */
+    int k = 0;
+    double m = x;
+    while (m >= 2.0) { m *= 0.5; k++; }
+    while (m <  0.5) { m += m;   k--; }
+    /* Arctanh series: log(m) = 2 * sum_{i=0}^{N} u^(2i+1)/(2i+1), u=(m-1)/(m+1) */
+    double u = (m - 1.0) / (m + 1.0);
+    double u2 = u * u, s = u, t = u;
+    for (int i = 1; i <= 20; i++) { t *= u2; s += t / (2 * i + 1); }
+    return 2.0 * s + k * M_LN2;
 }
 
 double log10(double x) {

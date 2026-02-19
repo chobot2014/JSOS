@@ -42,7 +42,6 @@ export class Terminal {
 
   // Scroll-view state
   private _viewOffset = 0;
-  private _snapshot: Row[] = []; // captured when entering scroll mode
 
   readonly width = VGA_W;
   readonly height = VGA_H;
@@ -50,7 +49,6 @@ export class Terminal {
   constructor() {
     for (var i = 0; i < VGA_H; i++) this._screen.push(blankRow(0x07));
     for (var i = 0; i < SCROLLBACK; i++) this._sb.push(new Uint16Array(VGA_W));
-    for (var i = 0; i < VGA_H; i++) this._snapshot.push(new Uint16Array(VGA_W));
   }
 
   //  Colour management 
@@ -215,12 +213,6 @@ export class Terminal {
   scrollViewUp(n: number = 20): void {
     if (this._sbCount === 0) return;
     if (this._viewOffset === 0) {
-      // Snapshot live screen before leaving it
-      for (var r = 0; r < VGA_H; r++) {
-        var snap = this._snapshot[r];
-        var live = this._screen[r];
-        for (var c = 0; c < VGA_W; c++) snap[c] = live[c];
-      }
       kernel.vgaHideCursor();
     }
     this._viewOffset += n;
@@ -246,9 +238,9 @@ export class Terminal {
 
   private _restoreLive(): void {
     for (var r = 0; r < VGA_H; r++) {
-      var snap = this._snapshot[r];
+      var row = this._screen[r];
       for (var c = 0; c < VGA_W; c++) {
-        var cell = snap[c];
+        var cell = row[c];
         kernel.vgaPut(r, c, String.fromCharCode(cell & 0xFF), (cell >> 8) & 0xFF);
       }
     }
@@ -272,9 +264,9 @@ export class Terminal {
       } else {
         var liveR = tapeIdx - this._sbCount;
         if (liveR < VGA_H) {
-          var snap2 = this._snapshot[liveR];
+          var live2 = this._screen[liveR];
           for (var c = 0; c < VGA_W; c++) {
-            var cell2 = snap2[c];
+            var cell2 = live2[c];
             kernel.vgaPut(r, c, String.fromCharCode(cell2 & 0xFF), (cell2 >> 8) & 0xFF);
           }
         }

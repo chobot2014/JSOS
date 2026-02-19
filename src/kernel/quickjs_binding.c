@@ -12,7 +12,6 @@
 
 #include "quickjs.h"
 #include "platform.h"
-#include "memory.h"
 #include "keyboard.h"
 #include "timer.h"
 #include "io.h"
@@ -167,10 +166,12 @@ static JSValue js_sleep(JSContext *c, JSValueConst this_val, int argc, JSValueCo
 /*  Memory  */
 
 static JSValue js_mem_info(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JSMemoryUsage stats;
+    JS_ComputeMemoryUsage(rt, &stats);
     JSValue obj = JS_NewObject(c);
-    JS_SetPropertyStr(c, obj, "total", JS_NewInt32(c, (int32_t)memory_get_total()));
-    JS_SetPropertyStr(c, obj, "free",  JS_NewInt32(c, (int32_t)memory_get_free()));
-    JS_SetPropertyStr(c, obj, "used",  JS_NewInt32(c, (int32_t)memory_get_used()));
+    JS_SetPropertyStr(c, obj, "total", JS_NewInt32(c, (int32_t)stats.malloc_limit));
+    JS_SetPropertyStr(c, obj, "used",  JS_NewInt32(c, (int32_t)stats.malloc_size));
+    JS_SetPropertyStr(c, obj, "free",  JS_NewInt32(c, (int32_t)(stats.malloc_limit - stats.malloc_size)));
     return obj;
 }
 

@@ -96,7 +96,7 @@ async function bundleForQuickJS() {
       bundle: true,
       outfile: OUTPUT_FILE,
       format: 'iife',
-      target: 'es2020',   // QuickJS supports ES2023 natively!
+      target: 'esnext',  // QuickJS supports ES2023 natively — no downgrade needed
       platform: 'neutral',
       minify: false,
       sourcemap: false,
@@ -125,12 +125,8 @@ async function bundleForQuickJS() {
       bundledCode += '\nmain();\n';
     }
 
-    // Add a probe at the start of the IIFE body
-    bundledCode = bundledCode.replace('(() => {\n', '(() => {\n  kernel.serialPut("JS:iife\\n");\n');
-
-    // Wrap the entire IIFE in an outer try/catch so module-level errors are caught too
+    // Wrap the entire IIFE in a top-level try/catch to catch module-level errors
     bundledCode =
-      'kernel.serialPut("JS:boot\\n");\n' +
       'try {\n' +
       bundledCode +
       '} catch (e) {\n' +
