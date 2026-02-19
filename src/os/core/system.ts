@@ -7,9 +7,9 @@
  * for display and scripting consumers (shell, REPL, etc.).
  */
 
-import terminal from './terminal.js';
+import terminal from '../ui/terminal.js';
 import { Color } from './kernel.js';
-import { scheduler } from './scheduler.js';
+import { scheduler } from '../process/scheduler.js';
 
 declare var kernel: import('./kernel.js').KernelAPI;
 

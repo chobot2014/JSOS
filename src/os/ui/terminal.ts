@@ -7,9 +7,9 @@
  * The C layer only writes individual VGA cells.
  */
 
-import { Color } from './kernel.js';
+import { Color } from '../core/kernel.js';
 
-declare var kernel: import('./kernel.js').KernelAPI;
+declare var kernel: import('../core/kernel.js').KernelAPI;
 
 var VGA_W = 80;
 var VGA_H = 25;
@@ -113,6 +113,8 @@ export class Terminal {
   putchar(ch: string): void {
     if (this._viewOffset !== 0) this.resumeLive();
     var code = ch.charCodeAt(0);
+    // Mirror to serial so QEMU -serial stdio shows all output
+    kernel.serialPut(ch);
 
     if (code === 10) {        // \n  newline
       this._col = 0;

@@ -8,12 +8,12 @@
  * Mounted at /proc by main.ts after boot via fs.mountVFS('/proc', procFS).
  */
 
-import { scheduler } from './scheduler.js';
-import { vmm } from './vmm.js';
-import { init } from './init.js';
+import { scheduler } from '../process/scheduler.js';
+import { vmm } from '../process/vmm.js';
+import { init } from '../process/init.js';
 import { FileType } from './filesystem.js';
 
-declare var kernel: import('./kernel.js').KernelAPI;
+declare var kernel: import('../core/kernel.js').KernelAPI;
 
 export interface VFSEntry {
   name: string;

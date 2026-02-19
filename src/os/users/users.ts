@@ -8,7 +8,7 @@
  * All authentication is synchronous — no PAM, no async on bare metal.
  */
 
-import fs from './filesystem.js';
+import fs from '../fs/filesystem.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

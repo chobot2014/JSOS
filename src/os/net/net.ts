@@ -18,7 +18,7 @@
  *   net.close(s);
  */
 
-declare var kernel: import('./kernel.js').KernelAPI;
+declare var kernel: import('../core/kernel.js').KernelAPI;
 
 // ── Byte-level helpers ───────────────────────────────────────────────────────
 

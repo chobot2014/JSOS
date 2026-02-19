@@ -9,7 +9,7 @@
  * Manages process states, time slices, and context switching.
  */
 
-import { SyscallResult } from './syscalls.js';
+import { SyscallResult } from '../core/syscalls.js';
 
 export type ProcessState = 'ready' | 'running' | 'blocked' | 'terminated' | 'waiting';
 

@@ -106,6 +106,10 @@ export interface KernelAPI {
   reboot(): void;
   /** Evaluate a JS string in the global QuickJS context; returns result as string */
   eval(code: string): string;
+  /** Write a string to the serial port (COM1) — appears on QEMU -serial stdio */
+  serialPut(s: string): void;
+  /** Read one byte from COM1; returns -1 if no data available */
+  serialGetchar(): number;
 
   //  Constants 
   colors: KernelColors;

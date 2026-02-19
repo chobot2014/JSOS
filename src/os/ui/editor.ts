@@ -19,10 +19,10 @@
  *   Ctrl+L          redraw screen
  */
 
-import fs from './filesystem.js';
+import fs from '../fs/filesystem.js';
 import terminal from './terminal.js';
 
-declare var kernel: import('./kernel.js').KernelAPI;
+declare var kernel: import('../core/kernel.js').KernelAPI;
 
 // ── Screen layout ───────────────────────────────────────────────────────────
 var EDIT_ROWS  = 23;   // rows 0-22: text content

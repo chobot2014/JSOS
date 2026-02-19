@@ -15,5 +15,6 @@ qemu-system-x86_64 \
     -cdrom build/jsos.iso \
     -m 512M \
     -serial stdio \
-    -nographic \
+    -display none \
+    -accel tcg \
     -no-reboot

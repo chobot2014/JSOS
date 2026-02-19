@@ -5,7 +5,7 @@
  * All synchronous — bare-metal has no event loop; no async/await or setTimeout.
  */
 
-import { SyscallResult } from './syscalls.js';
+import { SyscallResult } from '../core/syscalls.js';
 
 export type RunLevel = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 export type ServiceState = 'stopped' | 'starting' | 'running' | 'stopping' | 'failed';

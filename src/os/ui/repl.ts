@@ -9,10 +9,10 @@
  */
 
 import terminal from './terminal.js';
-import fs from './filesystem.js';
-import { Color } from './kernel.js';
+import fs from '../fs/filesystem.js';
+import { Color } from '../core/kernel.js';
 
-declare var kernel: import('./kernel.js').KernelAPI;
+declare var kernel: import('../core/kernel.js').KernelAPI;
 
 //  History 
 

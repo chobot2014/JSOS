@@ -7,21 +7,21 @@
  * bare metal via QuickJS ES2023.
  */
 
-import terminal from './terminal.js';
+import terminal from '../ui/terminal.js';
 import { Color } from './kernel.js';
-import { startRepl } from './repl.js';
-import fs from './filesystem.js';
-import { openEditor } from './editor.js';
+import { startRepl } from '../ui/repl.js';
+import fs from '../fs/filesystem.js';
+import { openEditor } from '../ui/editor.js';
 import { syscalls } from './syscalls.js';
-import { scheduler } from './scheduler.js';
-import { vmm } from './vmm.js';
-import { init } from './init.js';
-import { procFS } from './proc.js';
-import { users } from './users.js';
-import { ipc } from './ipc.js';
-import { net } from './net.js';
+import { scheduler } from '../process/scheduler.js';
+import { vmm } from '../process/vmm.js';
+import { init } from '../process/init.js';
+import { procFS } from '../fs/proc.js';
+import { users } from '../users/users.js';
+import { ipc } from '../ipc/ipc.js';
+import { net } from '../net/net.js';
 
-declare var kernel: import('./kernel.js').KernelAPI;
+declare var kernel: import('./kernel.js').KernelAPI; // kernel.js is in core/
 
 /** Route console.log / .error / .warn through the TypeScript terminal */
 function setupConsole(): void {

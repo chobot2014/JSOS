@@ -3,11 +3,16 @@
 
 #include <stdint.h>
 
-/* Initialise VGA buffer and boot-time cursor */
+/* Initialise VGA buffer, boot-time cursor, and serial port */
 void platform_init(void);
 
 /* Boot-time sequential print (before QuickJS starts) */
 void platform_boot_print(const char *s);
+
+/* Serial port (COM1) — also used as stdio mirror for QEMU -serial stdio */
+void platform_serial_putchar(char c);   /* single character (\n → \r\n)  */
+void platform_serial_puts(const char *s);
+int  platform_serial_getchar(void);     /* -1 = no data available         */
 
 /* Raw VGA cell access ─────────────────────────────────────────────────────
  * colorByte = (bg << 4) | fg   (bg 0-7 to avoid blink)

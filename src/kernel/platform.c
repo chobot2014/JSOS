@@ -6,6 +6,8 @@
  *
  * All higher-level terminal behaviour — character processing, scrolling,
  * colour state, scrollback buffer, readline — lives in TypeScript.
+ *
+ * Serial port (COM1, 0x3F8) mirrors all output so QEMU -serial stdio works.
  */
 
 #include <stddef.h>
@@ -17,6 +19,49 @@
 #define VGA_HEIGHT 25
 
 static uint16_t * const vga = (uint16_t *)0xB8000;
+
+/* ── Serial port (COM1) ─────────────────────────────────────────────────── */
+
+#define COM1 0x3F8
+
+static void serial_init(void) {
+    outb(COM1 + 1, 0x00); /* disable interrupts                          */
+    outb(COM1 + 3, 0x80); /* enable DLAB to set baud divisor             */
+    outb(COM1 + 0, 0x01); /* divisor = 1 → 115200 baud (lo byte)        */
+    outb(COM1 + 1, 0x00); /*                             (hi byte)       */
+    outb(COM1 + 3, 0x03); /* 8-N-1                                       */
+    outb(COM1 + 2, 0xC7); /* enable FIFO, clear, 14-byte threshold       */
+    outb(COM1 + 4, 0x0B); /* RTS + DTR, IRQ enable                       */
+}
+
+static inline void serial_waitready(void) {
+    while ((inb(COM1 + 5) & 0x20) == 0);
+}
+
+static void serial_putbyte(char c) {
+    serial_waitready();
+    outb(COM1, c);
+}
+
+/* Write a single character; translate \n → \r\n */
+static void serial_putchar(char c) {
+    if (c == '\n') serial_putbyte('\r');
+    serial_putbyte(c);
+}
+
+static void serial_puts(const char *s) {
+    while (*s) serial_putchar(*s++);
+}
+
+/* Public API used by JS bindings */
+void platform_serial_putchar(char c) { serial_putchar(c); }
+void platform_serial_puts(const char *s) { serial_puts(s); }
+
+int platform_serial_getchar(void) {
+    if (inb(COM1 + 5) & 0x01) return (int)(unsigned char)inb(COM1);
+    return -1; /* no data */
+}
+
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
@@ -52,6 +97,7 @@ static void boot_scroll(void) {
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
 void platform_init(void) {
+    serial_init();
     boot_row = boot_col = 0;
     for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++)
         vga[i] = vga_cell(' ', 0x07);
@@ -60,6 +106,7 @@ void platform_init(void) {
 }
 
 void platform_boot_print(const char *s) {
+    serial_puts(s);   /* mirror to serial first (fast, order guaranteed) */
     while (*s) {
         char c = *s++;
         if (c == '\n') {

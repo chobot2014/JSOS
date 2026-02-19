@@ -238,6 +238,18 @@ static JSValue js_reboot(JSContext *c, JSValueConst this_val, int argc, JSValueC
     outb(0x64, 0xFE); return JS_UNDEFINED;
 }
 
+/*  Serial port  */
+
+static JSValue js_serial_put(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    const char *s = JS_ToCString(c, argv[0]);
+    if (s) { platform_serial_puts(s); JS_FreeCString(c, s); }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_serial_getchar(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    return JS_NewInt32(c, platform_serial_getchar());
+}
+
 /*  Eval  */
 
 static JSValue js_eval(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -296,6 +308,9 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     /* System */
     JS_CFUNC_DEF("halt",   0, js_halt),
     JS_CFUNC_DEF("reboot", 0, js_reboot),
+    /* Serial */
+    JS_CFUNC_DEF("serialPut",     1, js_serial_put),
+    JS_CFUNC_DEF("serialGetchar", 0, js_serial_getchar),
     /* Eval */
     JS_CFUNC_DEF("eval",   1, js_eval),
 };

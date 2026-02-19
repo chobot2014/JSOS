@@ -11,6 +11,21 @@ const BUILD_DIR = path.join(__dirname, '..', 'build');
 const TEMP_DIR = path.join(BUILD_DIR, 'temp');
 const OUTPUT_FILE = path.join(BUILD_DIR, 'bundle.js');
 
+/** Recursively collect all .ts files under a directory, returning relative paths */
+function findTsFiles(dir, base) {
+  base = base || dir;
+  var results = [];
+  fs.readdirSync(dir).forEach(function(entry) {
+    var full = path.join(dir, entry);
+    if (fs.statSync(full).isDirectory()) {
+      findTsFiles(full, base).forEach(function(f) { results.push(f); });
+    } else if (entry.endsWith('.ts') && !entry.endsWith('.d.ts')) {
+      results.push(path.relative(base, full));
+    }
+  });
+  return results;
+}
+
 async function bundleForQuickJS() {
   console.log('🔨 Bundling TypeScript for QuickJS (ES2023)...');
   
@@ -22,8 +37,8 @@ async function bundleForQuickJS() {
     fs.mkdirSync(TEMP_DIR, { recursive: true });
   }
 
-  // Find TypeScript files
-  const tsFiles = fs.readdirSync(SRC_DIR).filter(file => file.endsWith('.ts'));
+  // Find TypeScript files recursively
+  const tsFiles = findTsFiles(SRC_DIR);
   
   if (tsFiles.length === 0) {
     console.error('❌ No TypeScript files found in src/os directory');
@@ -39,6 +54,9 @@ async function bundleForQuickJS() {
       
       const inputPath = path.join(SRC_DIR, tsFile);
       const outputPath = path.join(TEMP_DIR, tsFile.replace('.ts', '.js'));
+      
+      // Ensure the subdirectory exists in temp
+      fs.mkdirSync(path.dirname(outputPath), { recursive: true });
       
       const sourceCode = fs.readFileSync(inputPath, 'utf8');
       
@@ -67,9 +85,9 @@ async function bundleForQuickJS() {
     // Step 2: Bundle with esbuild
     console.log('   Bundling with esbuild...');
 
-    const mainFile = path.join(TEMP_DIR, 'main.js');
+    const mainFile = path.join(TEMP_DIR, 'core', 'main.js');
     if (!fs.existsSync(mainFile)) {
-      console.error('❌ main.js not found after transformation');
+      console.error('❌ core/main.js not found after transformation');
       process.exit(1);
     }
 

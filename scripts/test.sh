@@ -12,7 +12,8 @@ fi
 timeout 30s qemu-system-x86_64 \
     -cdrom build/jsos.iso \
     -m 512M \
-    -nographic \
+    -display none \
+    -accel tcg \
     -serial stdio \
     -no-reboot \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
