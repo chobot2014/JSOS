@@ -33,6 +33,7 @@ import { syscalls } from '../core/syscalls.js';
 import { processManager } from '../process/process.js';
 import { threadManager } from '../process/threads.js';
 import { physAlloc } from '../process/physalloc.js';
+import { JSProcess, listProcesses } from '../process/jsprocess.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -692,6 +693,63 @@ export function registerCommands(g: any): void {
   };
 
   // ──────────────────────────────────────────────────────────────────────────
+  // 10.  MULTI-PROCESS
+  // ──────────────────────────────────────────────────────────────────────────
+
+  // Make JSProcess available as a global constructor for scripts
+  g.JSProcess = JSProcess;
+
+  /**
+   * Spawn a new isolated QuickJS runtime and run `code` inside it.
+   * Returns a JSProcess handle for IPC and lifecycle management.
+   *
+   * Child runtime API (available as `kernel` inside spawned code):
+   *   kernel.postMessage(JSON.stringify(data))  → sends to parent
+   *   kernel.pollMessage()                      → receives from parent (null if empty)
+   *   kernel.serialPut(s)   kernel.getTicks()   kernel.sleep(ms)
+   *
+   * Example:
+   *   var p = spawn('kernel.postMessage(JSON.stringify({hi:42}))');
+   *   p.recv()          // → {hi: 42}
+   *   p.send({x: 1});   p.eval('kernel.pollMessage()')   // → '{"x":1}'
+   *   p.terminate()
+   */
+  g.spawn = function(code: string, name?: string) {
+    var p = JSProcess.spawn(code, name);
+    // Add a REPL pretty-printer so `spawn(...)` shows nicely at the prompt
+    Object.defineProperty(p, '__jsos_print__', {
+      value: function() {
+        terminal.colorPrint('JSProcess ', Color.LIGHT_CYAN);
+        terminal.colorPrint('#' + p.id + ' ', Color.YELLOW);
+        terminal.colorPrint('(' + p.name + ')', Color.DARK_GREY);
+        terminal.colorPrintln(' spawned ✓', Color.LIGHT_GREEN);
+        terminal.colorPrintln('  .eval(code)   .send(msg)   .recv()   .tick()   .terminate()', Color.DARK_GREY);
+      },
+      enumerable: false, configurable: true,
+    });
+    return p;
+  };
+
+  /** List all live child processes. */
+  g.procs = function() {
+    var list = listProcesses();
+    return printableArray(list, function(arr) {
+      if (arr.length === 0) {
+        terminal.colorPrintln('  (no child processes running)', Color.DARK_GREY);
+        return;
+      }
+      terminal.colorPrintln('  ' + pad('ID', 4) + pad('NAME', 12) + pad('INBOX', 8) + 'OUTBOX', Color.LIGHT_CYAN);
+      terminal.colorPrintln('  ' + pad('', 36).replace(/ /g, '-'), Color.DARK_GREY);
+      for (var i = 0; i < arr.length; i++) {
+        var slot = arr[i];
+        terminal.println('  ' + pad('' + slot.id, 4) + pad('proc' + slot.id, 12) +
+                         pad('' + slot.inboxCount, 8) + slot.outboxCount);
+      }
+      terminal.colorPrintln('  ' + arr.length + ' process(es)', Color.DARK_GREY);
+    });
+  };
+
+  // ──────────────────────────────────────────────────────────────────────────
   // 8.  REPL UTILITIES
   // ──────────────────────────────────────────────────────────────────────────
 
@@ -758,6 +816,26 @@ export function registerCommands(g: any): void {
     terminal.println('  shutdown()           power off (graceful)');
     terminal.println('  reboot()             reboot');
     terminal.println('  edit(path?)          fullscreen text editor  (^S save  ^Q quit)');
+    terminal.println('');
+
+    terminal.colorPrintln('Multi-process:', Color.YELLOW);
+    terminal.println('  spawn(code, name?)   spawn isolated JS runtime → JSProcess');
+    terminal.println('  procs()              list live child processes');
+    terminal.println('  p.eval(code)         run code in child process');
+    terminal.println('  p.send(msg)          send JSON value to child inbox');
+    terminal.println('  p.recv()             receive JSON value from child outbox');
+    terminal.println('  p.tick()             pump child async/Promise job queue');
+    terminal.println('  p.recvAll()          drain all pending messages → array');
+    terminal.println('  p.stats()            queue depths + alive status');
+    terminal.println('  p.terminate()        kill process, free runtime');
+    terminal.println('  JSProcess.spawn(c)   same as spawn() — class form');
+    terminal.println('');
+    terminal.colorPrintln('  Child kernel API (inside spawned code):', Color.DARK_GREY);
+    terminal.println('    kernel.postMessage(s)   push string to parent outbox');
+    terminal.println('    kernel.pollMessage()    pop string from parent inbox (null=empty)');
+    terminal.println('    kernel.serialPut(s)     serial debug output');
+    terminal.println('    kernel.sleep(ms)        sleep');
+    terminal.println('    kernel.getTicks()       timer ticks');
     terminal.println('');
 
     terminal.colorPrintln('Users:', Color.YELLOW);

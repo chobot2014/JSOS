@@ -40,6 +40,32 @@ extern uint32_t _multiboot2_ptr;
 static JSRuntime *rt  = NULL;
 static JSContext *ctx = NULL;
 
+/* ── Phase 10: Multi-process pool ─────────────────────────────────────────
+ * Each slot is an independent QuickJS runtime (separate GC, heap, globals).
+ * Up to 8 concurrent child processes; 4 MB heap each.
+ * IPC is done via ring-buffer message queues in BSS (parent ↔ child).
+ */
+#define JSPROC_MAX       8
+#define JSPROC_MSGSLOTS  8
+#define JSPROC_MSGSIZE   2048
+
+typedef struct { char data[JSPROC_MSGSIZE]; int len; } ProcMsg_t;
+
+typedef struct {
+    JSRuntime  *rt;
+    JSContext  *ctx;
+    uint8_t     used;
+    /* parent → child */
+    ProcMsg_t   inbox[JSPROC_MSGSLOTS];
+    int         inbox_r, inbox_w, inbox_cnt;
+    /* child → parent */
+    ProcMsg_t   outbox[JSPROC_MSGSLOTS];
+    int         outbox_r, outbox_w, outbox_cnt;
+} JSProc_t;
+
+static JSProc_t _procs[JSPROC_MAX];
+static int      _cur_proc = -1;   /* -1 = main runtime; ≥0 = child slot index */
+
 /*  VGA raw access  */
 
 static JSValue js_vga_put(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -994,6 +1020,221 @@ static JSValue js_ata_write(JSContext *c, JSValueConst this_val,
     return JS_NewBool(c, ata_write28(lba, (uint8_t)secs, ata_sector_buf) == 0);
 }
 
+/* ── Phase 10: Child runtime IPC + parent management functions ──────────── */
+
+/* Inside a child runtime: push a message to the parent outbox */
+static JSValue js_proc_post_msg(JSContext *c, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (_cur_proc < 0 || _cur_proc >= JSPROC_MAX || !_procs[_cur_proc].used)
+        return JS_FALSE;
+    if (argc < 1) return JS_FALSE;
+    JSProc_t *p = &_procs[_cur_proc];
+    if (p->outbox_cnt >= JSPROC_MSGSLOTS) return JS_FALSE;
+    const char *msg = JS_ToCString(c, argv[0]);
+    if (!msg) return JS_FALSE;
+    ProcMsg_t *slot = &p->outbox[p->outbox_w];
+    int n = (int)strlen(msg);
+    if (n >= JSPROC_MSGSIZE) n = JSPROC_MSGSIZE - 1;
+    memcpy(slot->data, msg, (size_t)n);
+    slot->data[n] = '\0';
+    slot->len = n;
+    JS_FreeCString(c, msg);
+    p->outbox_w = (p->outbox_w + 1) % JSPROC_MSGSLOTS;
+    p->outbox_cnt++;
+    return JS_TRUE;
+}
+
+/* Inside a child runtime: receive a message from the parent inbox */
+static JSValue js_proc_poll_msg(JSContext *c, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    if (_cur_proc < 0 || _cur_proc >= JSPROC_MAX || !_procs[_cur_proc].used)
+        return JS_NULL;
+    JSProc_t *p = &_procs[_cur_proc];
+    if (p->inbox_cnt == 0) return JS_NULL;
+    ProcMsg_t *slot = &p->inbox[p->inbox_r];
+    JSValue ret = JS_NewStringLen(c, slot->data, (size_t)slot->len);
+    p->inbox_r = (p->inbox_r + 1) % JSPROC_MSGSLOTS;
+    p->inbox_cnt--;
+    return ret;
+}
+
+/* Minimal kernel API exposed inside child runtimes */
+static const JSCFunctionListEntry js_child_kernel_funcs[] = {
+    JS_CFUNC_DEF("serialPut",     1, js_serial_put),
+    JS_CFUNC_DEF("getTicks",      0, js_get_ticks),
+    JS_CFUNC_DEF("getUptime",     0, js_get_uptime),
+    JS_CFUNC_DEF("sleep",         1, js_sleep),
+    JS_CFUNC_DEF("getMemoryInfo", 0, js_mem_info),
+    JS_CFUNC_DEF("postMessage",   1, js_proc_post_msg),
+    JS_CFUNC_DEF("pollMessage",   0, js_proc_poll_msg),
+};
+
+/* kernel.procCreate() → id (0-7) or -1 if all slots are occupied */
+static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int id = -1;
+    for (int i = 0; i < JSPROC_MAX; i++)
+        if (!_procs[i].used) { id = i; break; }
+    if (id < 0) return JS_NewInt32(c, -1);
+    JSProc_t *p = &_procs[id];
+    memset(p, 0, sizeof(*p));
+    p->rt = JS_NewRuntime();
+    if (!p->rt) return JS_NewInt32(c, -1);
+    JS_SetMemoryLimit(p->rt, 4 * 1024 * 1024);   /* 4 MB per child process */
+    JS_SetMaxStackSize(p->rt, 64 * 1024);
+    p->ctx = JS_NewContext(p->rt);
+    if (!p->ctx) { JS_FreeRuntime(p->rt); p->rt = NULL; return JS_NewInt32(c, -1); }
+    /* Inject minimal child kernel API */
+    JSValue global = JS_GetGlobalObject(p->ctx);
+    JSValue kobj   = JS_NewObject(p->ctx);
+    JS_SetPropertyFunctionList(p->ctx, kobj, js_child_kernel_funcs,
+        sizeof(js_child_kernel_funcs) / sizeof(js_child_kernel_funcs[0]));
+    JS_SetPropertyStr(p->ctx, global, "kernel", kobj);
+    JS_FreeValue(p->ctx, global);
+    p->used = 1;
+    return JS_NewInt32(c, id);
+}
+
+/* kernel.procEval(id, code) → result string (or error string on exception) */
+static JSValue js_proc_eval(JSContext *c, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_NewString(c, "undefined");
+    int32_t id = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used)
+        return JS_NewString(c, "Error: invalid process id");
+    const char *code = JS_ToCString(c, argv[1]);
+    if (!code) return JS_NewString(c, "undefined");
+    _cur_proc = id;
+    JSValue result = JS_Eval(_procs[id].ctx, code, strlen(code),
+                             "<process>", JS_EVAL_TYPE_GLOBAL);
+    _cur_proc = -1;
+    JS_FreeCString(c, code);
+    if (JS_IsException(result)) {
+        JSValue exc = JS_GetException(_procs[id].ctx);
+        const char *err = JS_ToCString(_procs[id].ctx, exc);
+        JSValue ret = JS_NewString(c, err ? err : "Unknown error");
+        if (err) JS_FreeCString(_procs[id].ctx, err);
+        JS_FreeValue(_procs[id].ctx, exc);
+        return ret;
+    }
+    if (JS_IsUndefined(result)) {
+        JS_FreeValue(_procs[id].ctx, result);
+        return JS_NewString(c, "undefined");
+    }
+    const char *str = JS_ToCString(_procs[id].ctx, result);
+    JSValue ret = JS_NewString(c, str ? str : "undefined");
+    if (str) JS_FreeCString(_procs[id].ctx, str);
+    JS_FreeValue(_procs[id].ctx, result);
+    return ret;
+}
+
+/* kernel.procTick(id) → number of pending async jobs executed */
+static JSValue js_proc_tick(JSContext *c, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewInt32(c, 0);
+    int32_t id = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_NewInt32(c, 0);
+    _cur_proc = id;
+    int count = 0;
+    JSContext *job_ctx = NULL;
+    while (JS_ExecutePendingJob(_procs[id].rt, &job_ctx) > 0 && count < 256) count++;
+    _cur_proc = -1;
+    return JS_NewInt32(c, count);
+}
+
+/* kernel.procSend(id, msg) → bool — push string message into child inbox */
+static JSValue js_proc_send(JSContext *c, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_FALSE;
+    int32_t id = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_FALSE;
+    JSProc_t *p = &_procs[id];
+    if (p->inbox_cnt >= JSPROC_MSGSLOTS) return JS_FALSE;
+    const char *msg = JS_ToCString(c, argv[1]);
+    if (!msg) return JS_FALSE;
+    ProcMsg_t *slot = &p->inbox[p->inbox_w];
+    int n = (int)strlen(msg);
+    if (n >= JSPROC_MSGSIZE) n = JSPROC_MSGSIZE - 1;
+    memcpy(slot->data, msg, (size_t)n);
+    slot->data[n] = '\0';
+    slot->len = n;
+    JS_FreeCString(c, msg);
+    p->inbox_w = (p->inbox_w + 1) % JSPROC_MSGSLOTS;
+    p->inbox_cnt++;
+    return JS_TRUE;
+}
+
+/* kernel.procRecv(id) → string from child outbox, or null if empty */
+static JSValue js_proc_recv(JSContext *c, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    int32_t id = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_NULL;
+    JSProc_t *p = &_procs[id];
+    if (p->outbox_cnt == 0) return JS_NULL;
+    ProcMsg_t *slot = &p->outbox[p->outbox_r];
+    JSValue ret = JS_NewStringLen(c, slot->data, (size_t)slot->len);
+    p->outbox_r = (p->outbox_r + 1) % JSPROC_MSGSLOTS;
+    p->outbox_cnt--;
+    return ret;
+}
+
+/* kernel.procDestroy(id) — free the child runtime and release the slot */
+static JSValue js_proc_destroy(JSContext *c, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 1) return JS_UNDEFINED;
+    int32_t id = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_UNDEFINED;
+    JS_FreeContext(_procs[id].ctx);
+    JS_FreeRuntime(_procs[id].rt);
+    _procs[id].ctx  = NULL;
+    _procs[id].rt   = NULL;
+    _procs[id].used = 0;
+    return JS_UNDEFINED;
+}
+
+/* kernel.procAlive(id) → bool */
+static JSValue js_proc_alive(JSContext *c, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_FALSE;
+    int32_t id = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX) return JS_FALSE;
+    return JS_NewBool(c, _procs[id].used);
+}
+
+/* kernel.procList() → [{id, inboxCount, outboxCount}, ...] */
+static JSValue js_proc_list(JSContext *c, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    JSValue arr = JS_NewArray(c);
+    int idx = 0;
+    for (int i = 0; i < JSPROC_MAX; i++) {
+        if (!_procs[i].used) continue;
+        JSValue obj = JS_NewObject(c);
+        JS_SetPropertyStr(c, obj, "id",          JS_NewInt32(c, i));
+        JS_SetPropertyStr(c, obj, "inboxCount",  JS_NewInt32(c, _procs[i].inbox_cnt));
+        JS_SetPropertyStr(c, obj, "outboxCount", JS_NewInt32(c, _procs[i].outbox_cnt));
+        JS_SetPropertyUint32(c, arr, (uint32_t)idx++, obj);
+        JS_FreeValue(c, obj);
+    }
+    return arr;
+}
+
 static const JSCFunctionListEntry js_kernel_funcs[] = {
     /* VGA raw access */
     JS_CFUNC_DEF("vgaPut",        4, js_vga_put),
@@ -1071,6 +1312,15 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("netDebugInfo",   0, js_net_debug_info),
     JS_CFUNC_DEF("netDebugStatus", 0, js_net_debug_status),
     JS_CFUNC_DEF("netDebugQueues", 0, js_net_debug_queues),
+    /* Multi-process (Phase 10) */
+    JS_CFUNC_DEF("procCreate",  0, js_proc_create),
+    JS_CFUNC_DEF("procEval",    2, js_proc_eval),
+    JS_CFUNC_DEF("procTick",    1, js_proc_tick),
+    JS_CFUNC_DEF("procSend",    2, js_proc_send),
+    JS_CFUNC_DEF("procRecv",    1, js_proc_recv),
+    JS_CFUNC_DEF("procDestroy", 1, js_proc_destroy),
+    JS_CFUNC_DEF("procAlive",   1, js_proc_alive),
+    JS_CFUNC_DEF("procList",    0, js_proc_list),
 };
 
 /*  Initialization  */
