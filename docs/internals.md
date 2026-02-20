@@ -45,11 +45,13 @@ Places sections in order: `.text` at `0x00100000`, then `.rodata`, `.data`, `.bs
 ```c
 int main(void) {
     terminal_initialize();   // VGA 80×25 text mode
-    memory_initialize();     // heap allocator
+    memory_initialize();     // detect physical RAM
     gdt_flush();             // reload GDT (needed before IDT)
     irq_initialize();        // IDT + PIC remapping + enable interrupts
     timer_initialize(100);   // PIT at 100 Hz
-    keyboard_initialize();   // PS/2 IRQ1 handler
+    keyboard_initialize();   // PS/2 keyboard IRQ1 handler
+    mouse_initialize();      // PS/2 mouse IRQ12 handler
+    pci_scan();              // enumerate PCI bus (finds virtio-net)
     quickjs_initialize();    // QuickJS runtime + context + kernel.* globals
     quickjs_run_os();        // JS_Eval(embedded_js_code)
     // if JS returns, halt
@@ -61,23 +63,12 @@ int main(void) {
 
 ## 3. Hardware Drivers
 
-### Terminal (`terminal.c`)
-Writes directly to the VGA text buffer at physical address `0xB8000`.  
-Each character cell is 2 bytes: `[colour_byte][ascii_byte]`.  
-The colour byte is `(bg << 4) | fg` where fg/bg are 4-bit VGA colour indices.
+### Platform (`platform.c`)
+Handles VGA text mode, VESA framebuffer, and serial output.
 
-Key operations:
-- `terminal_putchar(c)` — write char at cursor, scroll if at bottom
-- `terminal_setcolor_fg_bg(fg, bg)` — set global colour byte
-- `terminal_clear()` — fill with spaces at current colour
-- `terminal_set_cursor(row, col)` — update hardware cursor via I/O ports `0x3D4`/`0x3D5`
-
-### Memory (`memory.c`)
-A simple two-stage allocator:
-1. **Bump allocator** for the initial heap (past the kernel BSS end)
-2. **Free list** for subsequent allocations
-
-The heap start is determined by `_kernel_end` from the linker script. QuickJS gets 768 KB allocated up front via `JS_SetMemoryLimit`.
+- **VGA text** — writes to `0xB8000`; each cell is `[colour_byte][ascii_byte]`
+- **VESA framebuffer** — negotiated by GRUB multiboot framebuffer tag; `kernel.fbInfo()` returns dimensions; `kernel.fbBlit()` copies a pixel buffer to the physical address
+- **Serial** — COM1 at `0x3F8`; `kernel.serialPut()` used for headless test output
 
 ### Keyboard (`keyboard.c`)
 IRQ1 (keyboard interrupt) handler:
@@ -93,7 +84,7 @@ IRQ1 (keyboard interrupt) handler:
 
 ### Timer (`timer.c`)
 Configures the Intel 8253/8254 PIT (Programmable Interval Timer) at **100 Hz**.  
-Each IRQ0 fires every 10 ms, incrementing a global `ticks` counter.
+Each IRQ0 fires every 10 ms, incrementing a global `ticks` counter and calling any registered scheduler hook.
 
 `timer_sleep(ms)` busy-waits on the tick counter:
 ```c
@@ -101,10 +92,24 @@ uint32_t target = ticks + (ms / 10);
 while (ticks < target) __asm__ volatile("hlt");
 ```
 
+### Mouse (`mouse.c`)
+IRQ12 handler reads PS/2 mouse packets (3-byte sequences: buttons, dx, dy).  
+`kernel.readMouse()` pops the next packet from the queue or returns `null`.
+
+### ATA (`ata.c`)
+ATA PIO driver. Provides `kernel.ataPresent()`, `kernel.ataRead(lba, sectors)`, `kernel.ataWrite(lba, sectors, data)`.  
+All caching and filesystem logic live in TypeScript (`block.ts`, `fat32.ts`, `fat16.ts`).
+
 ### IRQ (`irq.c` + `irq_asm.s`)
-Sets up the x86 IDT (Interrupt Descriptor Table) with 256 entries.  
-Remaps the PIC (Programmable Interrupt Controller) to IRQ vectors 0x20–0x2F (above CPU exceptions 0x00–0x1F).  
+Sets up the x86 IDT (256 entries). Remaps PIC to vectors 0x20–0x2F (above CPU exceptions).  
 Assembly stubs push a common frame and call `irq_handler(regs)` in C.
+
+### PCI (`pci.c`)
+Scans all PCI buses to enumerate devices. Identifies virtio-net (vendor=0x1AF4, device=0x1000).  
+TypeScript queries via `kernel.netInit()` and `kernel.netPciAddr()`.
+
+### virtio-net (`virtio_net.c`)
+Initialises the virtio-net device's TX/RX virtqueues. C provides only `kernel.netSendFrame(bytes)` and `kernel.netRecvFrame()` — raw Ethernet frame I/O. All protocol logic (ARP, IPv4, TCP, TLS) is TypeScript.
 
 ---
 
@@ -114,8 +119,9 @@ Assembly stubs push a common frame and call `irq_handler(regs)` in C.
 ```c
 int quickjs_initialize(void) {
     rt = JS_NewRuntime();
-    JS_SetMemoryLimit(rt, 768 * 1024);   // 768 KB JS heap
-    JS_SetMaxStackSize(rt, 32 * 1024);   // 32 KB stack
+    // heap: full 256 MB BSS; no explicit JS_SetMemoryLimit so QuickJS can
+    // use all of it (physical allocator manages remaining RAM independently)
+    JS_SetMaxStackSize(rt, 256 * 1024);  // 256 KB stack
     ctx = JS_NewContext(rt);
 
     // Create global `kernel` object and register all C functions
@@ -196,51 +202,33 @@ int quickjs_run_os(void) {
 
 ## 5. TypeScript Build Pipeline
 
-### Step 1: Babel transpilation
+### Step 1: esbuild (type-strip only)
 
-`scripts/bundle-hybrid.js` uses Babel programmatically:
+`scripts/bundle-hybrid.js` uses esbuild to strip TypeScript types and bundle all modules. No polyfills — QuickJS supports ES2023 natively.
+
 ```js
-const result = await babel.transformAsync(combined_source, {
-  presets: [
-    ['@babel/preset-env', { targets: 'defaults' }],  // → ES5
-    '@babel/preset-typescript',
-  ],
-  plugins: [
-    '@babel/plugin-transform-class-properties',
-    '@babel/plugin-transform-private-methods',
-    // ...
-  ]
+await esbuild.build({
+  entryPoints: ['src/os/core/main.ts'],
+  bundle: true,
+  format: 'iife',
+  target: 'es2023',
+  platform: 'browser',
+  outfile: 'build/bundle.js',
 })
 ```
 
-TypeScript's `const enum` values (like `Color.LIGHT_GREEN`) are **inlined** at compile time by `@babel/preset-typescript` — they become integer literals in the output, no `Color` object exists at runtime.
+TypeScript's `const enum` values (like `Color.LIGHT_GREEN`) are inlined as integer literals — no `Color` object exists at runtime.
 
-### Step 2: esbuild bundling
-
-After Babel, esbuild combines all modules into a single IIFE:
-```js
-(function() {
-  // ... all OS code ...
-  main();
-})();
-```
-
-No `import`/`export` remains. Tree-shaking removes unused code.
-
-### Step 3: JS embedding
+### Step 2: JS embedding
 
 `scripts/embed-js.js` produces `src/kernel/embedded_js.h`:
 ```bash
 echo 'const char embedded_js_code[] = ' > embedded_js.h
-cat build/bundle.js | python3 -c "
-import sys, json
-data = sys.stdin.read()
-sys.stdout.write(json.dumps(data))
-" >> embedded_js.h
+node -e "process.stdout.write(JSON.stringify(require('fs').readFileSync('build/bundle.js','utf8')))" >> embedded_js.h
 echo ';' >> embedded_js.h
 ```
 
-The result is a C string literal with all special characters escaped. It's included by `quickjs_binding.c`:
+The result is a C string literal included by `quickjs_binding.c`:
 ```c
 #include "embedded_js.h"
 // embedded_js_code is now available as a C string
@@ -252,81 +240,75 @@ The result is a C string literal with all special characters escaped. It's inclu
 
 ### Module structure
 
-All modules use ES module syntax (`import`/`export`) which esbuild resolves at bundle time.
+All modules use ES module syntax (`import`/`export`) resolved by esbuild at bundle time. The full dependency graph is in `src/os/core/main.ts`.
+
+Key modules:
 
 ```
-main.ts          ──imports──▶  repl.ts
-                 ──imports──▶  terminal.ts
-                 ──imports──▶  filesystem.ts
-                 ──imports──▶  system.ts
-                 ──imports──▶  kernel.ts  (types only)
-repl.ts          ──imports──▶  terminal.ts
-                 ──imports──▶  filesystem.ts
-                 ──imports──▶  kernel.ts  (types only)
+core/main.ts       boot sequence, hardware init
+core/kernel.ts     C binding declarations (types only — zero runtime JS)
+core/syscalls.ts   POSIX syscall routing
+core/fdtable.ts    unified fd table, pipes, epoll
+
+process/threads.ts      kernel threads, priority round-robin scheduler
+process/sync.ts         Mutex / CondVar / Semaphore
+process/process.ts      fork / exec / waitpid
+process/vmm.ts          virtual memory, mmap, page tables
+process/physalloc.ts    physical page bitmap allocator
+process/elf.ts          ELF32 parser + loader
+process/signals.ts      signal delivery
+
+fs/filesystem.ts   in-memory VFS with mount points
+fs/proc.ts         /proc
+fs/dev.ts          /dev
+fs/romfs.ts        bundled ROM files
+
+storage/block.ts   block device + 64-sector LRU cache
+storage/fat32.ts   FAT32 read/write + auto-format
+storage/fat16.ts   FAT16 read/write + auto-format
+
+net/net.ts         full TCP/IP stack
+net/tls.ts         TLS 1.3 (pure TypeScript)
+net/crypto.ts      X25519, AES-GCM, SHA256, HKDF
+net/http.ts        HTTP/HTTPS client
+net/dhcp.ts        DHCP client
+net/dns.ts         DNS resolver
+
+ui/canvas.ts       pixel Canvas, 8x8 bitmap font, color helpers
+ui/wm.ts           window manager: z-order, drag, resize, taskbar
+ui/terminal.ts     terminal emulator (VGA text + windowed)
+ui/repl.ts         JavaScript REPL
+ui/editor.ts       text editor
+
+apps/browser.ts        native HTML browser (HTTP/HTTPS + HTML parser)
+apps/terminal-app.ts   windowed terminal
+apps/editor-app.ts     windowed editor
 ```
 
-`kernel.ts` exports only types and `const enum` — it produces no runtime JavaScript.
+`kernel.ts` exports only types and `const enum` — zero runtime JavaScript.
 
-### `terminal.ts`
+### Key TypeScript Modules
 
-Provides typed wrappers over `kernel.setColor` / `kernel.print`:
-```typescript
-colorPrint(msg: string, color: Color): void
-colorPrintln(msg: string, color: Color): void
-println(msg: string): void
-```
+#### `canvas.ts`
+Maintains a `Uint32Array` pixel buffer. `flip()` copies it to the physical framebuffer via `kernel.fbBlit()` (zero-copy ArrayBuffer path). Implements `drawRect`, `drawText` (8×8 bitmap font), `drawLine`, `blit`, color blending.
 
-The saved-and-restored colour pattern ensures each call is colour-safe:
-```typescript
-colorPrint(msg: string, color: Color): void {
-  var saved = kernel.getColor();
-  kernel.setColor(color, Color.BLACK);
-  kernel.printRaw(msg);
-  kernel.setColor(saved & 0x0F, (saved >> 4) & 0x0F);
-}
-```
+#### `wm.ts`
+Each frame: poll `kernel.readKeyEx()` + `kernel.readMouse()` → dispatch events → composite all windows → flip. Windows own sub-Canvases. Z-order is a sorted array. Drag/resize tracked via mousedown state.
 
-### `filesystem.ts`
+#### `net.ts`
+Full TCP/IP in TypeScript. `NetStack` maintains ARP table, socket table, TCP state machines. When `kernel.netInit()` returns true at boot, `net.initNIC()` wires `kernel.netSendFrame` / `kernel.netRecvFrame` as the bottom-layer I/O hooks. Without a NIC, all traffic loops internally.
 
-`FileSystem` class with a `Map`-based tree:
-```typescript
-class FileSystem {
-  private root: DirectoryEntry;   // { children: Map<name, Entry> }
-  private currentPath: string;
+#### `tls.ts`
+TLS 1.3 client. `TLSSocket` wraps a `net.ts` TCP socket. Handshake: ClientHello → ServerHello → EncryptedExtensions → Certificate → CertificateVerify → Finished. Key schedule and AEAD from `crypto.ts`. No cert validation.
 
-  resolvePath(input: string): string { /* handles ~, .., relative */ }
-  private navigate(path: string): DirectoryEntry | null { /* tree walk */ }
-  readFile(path: string): string | null { /* … */ }
-  writeFile(path: string, content: string): boolean { /* … */ }
-  // ... all operations
-}
-```
+#### `process.ts`
+`ProcessManager` tracks processes, VMAs, file descriptors. `fork()` clones VMA list (calls `kernel.cloneAddressSpace()` — stub in current build). `exec()` runs a JS function as the new process body. `waitpid()` spins until exit.
 
-All file operations resolve the path, navigate to the parent directory, then operate on the leaf node.
+#### `filesystem.ts`
+`FileSystem` is a `Map<path, entry>` tree. Supports `mountVFS(path, provider)` — any object with `read/write/ls/mkdir/rm/stat` becomes a mount. `/proc` and `/dev` are TypeScript providers; `/disk` delegates to `fat32`/`fat16`.
 
-### `system.ts`
-
-`SystemManager` class maintains a `Map<number, ProcessDescriptor>`:
-```typescript
-class SystemManager {
-  private processes = new Map<number, ProcessDescriptor>();
-  private nextProcessId = 1;
-
-  constructor() {
-    // Pre-populate: kernel (PID 1), init (PID 2)
-  }
-  createProcess(name, options?): ProcessDescriptor | null
-  terminateProcess(pid): boolean   // PID 1 (kernel) is protected
-  getProcessList(): ProcessDescriptor[]
-  panic(message): void             // White-on-red screen + halt
-}
-```
-
-Processes are entirely in-memory metadata — there's no real scheduler.
-
-### `repl.ts`
-
-The REPL is a pure event loop:
+#### `repl.ts`
+The REPL is a pure event loop (text mode):
 ```typescript
 export function startRepl(): void {
   for (;;) {
@@ -339,12 +321,7 @@ export function startRepl(): void {
   }
 }
 ```
-
-`evalAndPrint` uses a two-pass strategy:
-1. Wrap in IIFE → `(function(){ var __r=(CODE); return ... })()`
-2. If QuickJS returns `"SyntaxError: ..."` → re-eval as a statement directly
-
-This lets `2 + 2` return `4`, while `var x = 5` works silently (statements don't return values).
+`evalAndPrint` wraps in an IIFE for expression return values; falls back to statement eval on SyntaxError. In windowed mode the REPL runs inside the terminal app, which relays key events from the WM.
 
 ---
 
@@ -354,26 +331,28 @@ Everything in JSOS — the REPL, your scripts, the OS globals — shares **one Q
 
 - Variables you define in the REPL (`var x = 5`) persist for the session
 - Scripts loaded with `run()` see all REPL globals and vice versa
-- `kernel`, `fs`, `sys`, `ls`, `cd`, `cat`, etc. are all on `globalThis`
-- `console.log` → `kernel.print` everywhere
+- `kernel`, `fs`, `sys`, `ls`, `cd`, `cat`, `disk`, etc. are all on `globalThis`
+- `console.log` → terminal output everywhere
 
-This is intentional: the REPL IS the runtime. There's no isolation boundary between "user code" and "OS code".
+This is intentional: the REPL IS the runtime. There's no isolation boundary between "user code" and "OS code" in the primary runtime. For true isolation, use `kernel.procCreate()` to spawn a child QuickJS runtime.
 
 ---
 
-## 8. Constraints and Limitations
 
-| Constraint | Detail |
+## 8. Capabilities
+
+| Capability | Detail |
 |---|---|
-| No `setTimeout` / `setInterval` | QuickJS event loop not running — halted in readline |
-| No `Promise` await (in practice) | Promises would resolve but `.then` never fires without event loop ticks |
-| No dynamic `import()` | All modules bundled at build time |
-| No disk I/O | Filesystem is RAM-only |
-| No networking | No NIC driver |
-| No floating-point display | `math_impl.c` provides `sin/cos/sqrt` but `printf` FP formatting not fully working |
-| 768 KB JS heap max | QuickJS hard limit — large allocations will throw `InternalError: out of memory` |
-| 80×25 VGA text only | No graphics mode |
-| 32 MB physical RAM | QEMU default; can increase with `-m` but allocator doesn't use all of it |
+| Display | VGA text 80×25 (fallback) + VESA 32-bit framebuffer (default) |
+| Graphics | Pixel Canvas in TypeScript; 8×8 bitmap font; window compositing |
+| Mouse | PS/2 relative motion + buttons wired into WM event loop |
+| Persistent storage | ATA PIO + FAT32/FAT16; survives reboots |
+| Networking | virtio-net → TCP/IP → TLS 1.3 → HTTP/HTTPS, all in TypeScript |
+| Memory | Physical page bitmap allocator + hardware paging (CR3, CR4.PSE) |
+| Multitasking | Kernel threads, mutex/condvar, fork/exec/waitpid, signals, ELF loader |
+| Multi-process | 8 isolated QuickJS runtimes with message-passing and shared memory |
+| JS heap | 256 MB BSS (QEMU `-m 256` recommended) |
+| `Promise` / async | Cooperative scheduler pumps the job queue at yield points |
 
 ---
 
@@ -394,7 +373,7 @@ static JSValue js_kernel_myfunc(JSContext *ctx, JSValueConst this_val,
 JS_CFUNC_DEF("myFunc", 1, js_kernel_myfunc),
 ```
 
-3. **Add the TypeScript type** in `src/os/kernel.ts`:
+4. **Add the TypeScript type** in `src/os/core/kernel.ts`:
 ```typescript
 export interface KernelAPI {
   // ...existing...
@@ -402,7 +381,7 @@ export interface KernelAPI {
 }
 ```
 
-4. **Expose it as a global** (optional) in `src/os/main.ts :: setupGlobals()`:
+5. **Expose it as a global** (optional) via `registerCommands` in `src/os/ui/commands.ts`:
 ```typescript
 g.myFunc = function(arg: number) {
   var result = kernel.myFunc(arg);
@@ -410,4 +389,4 @@ g.myFunc = function(arg: number) {
 };
 ```
 
-5. `npm run build` — Docker rebuilds everything.
+6. `npm run build` — Docker rebuilds everything.

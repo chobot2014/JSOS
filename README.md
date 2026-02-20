@@ -2,401 +2,282 @@
 
 **A complete operating system written in TypeScript, running on bare metal x86 hardware.**
 
-**All applications run natively in JavaScript/TypeScript - no other languages needed.**
+**Every application, every OS service, every driver algorithm — TypeScript all the way down.**
 
-JSOS compiles TypeScript to JavaScript, embeds it in a custom C kernel powered by [QuickJS](https://bellard.org/quickjs/) (a full ES2023 engine by Fabrice Bellard), and boots from a standard ISO image via GRUB. The result is a real, interactive OS where **everything is JavaScript** — the filesystem, process management, terminal, networking, and **all applications** are written in TypeScript/JavaScript and run natively on bare metal.
+JSOS compiles TypeScript to JavaScript, embeds it in a custom C kernel powered by [QuickJS](https://bellard.org/quickjs/) (a full ES2023 engine by Fabrice Bellard), and boots from a standard ISO image via GRUB. The C code handles only raw hardware I/O. Everything above that — the scheduler, memory manager, filesystem, network stack, window manager, and browser — is TypeScript running natively on bare metal.
 
 ![JSOS Demo](2026-02-18%2009-30-26.gif)
 
-![Architecture: TypeScript → ES2023 → QuickJS → C Kernel → x86 Bare Metal](https://img.shields.io/badge/stack-TypeScript→ES2023→QuickJS→C→x86-blue)
-
 ---
 
-## Features
+## What's Inside
 
-### Live JavaScript REPL
-- **Direct bare-metal JavaScript execution** — no shell, no commands, everything is JavaScript
-- **ES2023 support** — classes, arrow functions, async/await, destructuring, Map, Set, Promise, etc.
-- **Global functions** for all OS operations (filesystem, processes, memory, etc.)
-- **Multi-line input** — `{`, `(`, `[` enter multi-line mode
-- **Command history** — Up/Down arrows to browse
-- **Auto-pretty printing** — results display beautifully formatted
+### Window Manager + Pixel Graphics
 
-### JavaScript Filesystem API
-- **Unix-like hierarchy** — `/bin`, `/etc`, `/home`, `/tmp`, `/var`, `/proc`, `/dev`
-- **Full path operations** — `ls()`, `cd()`, `cat()`, `mkdir()`, `rm()`, `cp()`, `mv()`, `write()`, `append()`
-- **Pattern matching** — `find()` with `*` wildcards
-- **File execution** — `run()` evaluates `.js` files
-- **Pre-loaded examples** in `/bin/` (hello.js, sysinfo.js, colors.js)
+- **VESA framebuffer** — 32-bit color pixel rendering at full screen resolution
+- **Canvas API** — `drawRect`, `drawText`, `drawLine`, `blit` — everything built on a Uint32Array pixel buffer
+- **8×8 bitmap font** — full printable ASCII, public-domain CP437 glyphs
+- **Window manager** — drag, resize, z-order, taskbar, mouse cursor compositing
+- **PS/2 mouse** — full relative motion + button tracking wired into WM event loop
 
-### Process Management
-- **Process listing** — `ps()` shows all running processes
-- **Process creation** — `sys.spawn()` creates new processes
-- **Process termination** — `kill(pid)` terminates processes
-- **System monitoring** — memory usage, uptime, process count
+### Native Browser
 
-### Terminal & Display
-- **VGA text-mode terminal** — 80×25 with hardware cursor and 16 colors
-- **Color functions** — `colors()` shows palette, `terminal.setColor()` for custom colors
-- **Screen operations** — `clear()`, cursor positioning, scrolling
-- **Text editor** — `edit()` launches fullscreen editor (^S save, ^Q quit)
+- **TypeScript-only browser** — no Chromium, no WebKit, no external renderer
+- **Real HTTP + HTTPS** — uses the JSOS TCP/IP stack and TLS 1.3 implementation
+- **HTML parser** — h1–h6, p, a, ul/ol/li, pre, hr, br, title
+- **Clickable links**, scrollable content, back/forward history
+- **DNS resolution** — digs the system DNS resolver at browse time
+- **Built-in pages** — `about:blank`, `about:jsos`, `about:history`
 
-### Kernel Features
-- **PS/2 keyboard driver** — full US layout, special keys, interrupts
-- **Programmable Interval Timer** — 100Hz ticks, uptime tracking, `sleep()`
-- **Memory management** — 1MB pool with allocation tracking
-- **IDT/PIC interrupt system** — proper IRQ handling with GDT and PIC remapping
-- **QuickJS ES2023 engine** — full JavaScript runtime on bare metal
-- **Platform abstraction** — clean separation of hardware operations
+### Networking
 
-### Kernel API (accessible from TypeScript)
-```typescript
-// VGA Display (raw hardware access)
-kernel.vgaPut(row, col, ch, colorByte)     // Write char at position
-kernel.vgaGet(row, col)                    // Read VGA cell
-kernel.vgaDrawRow(row, text, colorByte)    // Write full row
-kernel.vgaCopyRow(dst, src)                // Copy row
-kernel.vgaFillRow(row, ch, colorByte)      // Fill row
-kernel.vgaFill(ch, colorByte)              // Fill entire screen
-kernel.vgaSetCursor(row, col)              // Move hardware cursor
-kernel.vgaHideCursor()                     // Hide cursor
-kernel.vgaShowCursor()                     // Show cursor
-kernel.getScreenSize()                     // Returns {width: 80, height: 25}
+- **Full TCP/IP stack** — Ethernet → ARP → IPv4 → ICMP / UDP / TCP, written entirely in TypeScript
+- **virtio-net driver** — C primitive that sends/receives raw Ethernet frames; all framing in TypeScript
+- **DHCP client** — on-boot IP acquisition
+- **DNS resolver** — iterative query with A-record parsing
+- **TLS 1.3** — X25519 key exchange, AES-128-GCM-SHA256, SNI, no cert validation
+- **HTTP/HTTPS client** — `httpGet` / `httpsGet` with header parsing and body accumulation
+- **Loopback mode** — entire TCP/IP stack works without a NIC for local socket communication
 
-// Keyboard Input
-kernel.readKey()                           // Non-blocking key poll
-kernel.waitKey()                           // Blocking single key
-kernel.waitKeyEx()                         // Blocking with extended info
-kernel.hasKey()                            // Check if key ready
+### Persistent Storage
 
-// System
-kernel.getTicks()                          // Raw timer ticks
-kernel.getUptime()                         // Milliseconds since boot
-kernel.sleep(ms)                           // Sleep N milliseconds
-kernel.getMemoryInfo()                     // Returns {total, free, used}
-kernel.halt()                              // Power off
-kernel.reboot()                            // Reboot system
-kernel.eval(code)                          // Evaluate JavaScript
+- **ATA PIO driver** — C primitive that reads/writes 512-byte sectors
+- **FAT32** — auto-detected on first boot; auto-formats a blank disk
+- **FAT16** — fallback for small disk images
+- **64-sector LRU block cache** — sits above the ATA driver, below both FAT drivers
+- **ROM filesystem** — bundled read-only files (e.g., `resources/bible.txt`) embedded in the ISO
 
-// Low-level I/O
-kernel.inb(port)                           // Read I/O port
-kernel.outb(port, val)                     // Write I/O port
-kernel.callNative(addr, ...)               // Call native code
-kernel.readMem8(addr)                      // Read physical memory
-kernel.writeMem8(addr, val)                // Write physical memory
+### Memory Management
 
-// Constants
-kernel.colors.BLACK, kernel.colors.WHITE, etc.
-kernel.KEY_UP, kernel.KEY_DOWN, kernel.KEY_F1, etc.
-```
+- **Physical page bitmap allocator** — tracks all 4 KB frames above the kernel image
+- **Virtual memory manager** — mmap, mprotect, page table management, VMA tracking
+- **Hardware paging** — CR3, CR4.PSE, TLB flush primitives called from TypeScript
+- **Multi-process QuickJS pool** — up to 8 isolated JS runtimes with message-passing
+- **Shared memory buffers** — zero-copy ArrayBuffer views shared across runtimes
 
----
+### Multitasking
 
-## Applications: Everything in JavaScript
+- **Kernel threads** — priority round-robin (0 = highest, 39 = idle), `createThread` / `tick`
+- **Mutex / CondVar / Semaphore** — standard sync primitives, all in TypeScript
+- **Preemptive scheduler hook** — 100Hz PIT fires C→TypeScript `tick()` for true preemption
+- **fork / exec / waitpid** — full POSIX process model with VMA copying
+- **ELF32 loader** — parses PT_LOAD segments, maps into virtual address space
+- **Signals** — POSIX subset: SIGTERM, SIGKILL, SIGCHLD, SIGUSR1/2
+- **Unified fd table** — file descriptors, pipes, sockets, and epoll in one table
 
-**All applications run natively in JavaScript/TypeScript** - no compilation, no separate runtimes, no foreign function interfaces.
+### Filesystem
 
-### System Applications
-```javascript
-// File Manager - pure JavaScript
-function listDirectory(path) {
-  return fs.readdir(path).map(file => ({
-    name: file,
-    size: fs.stat(file).size,
-    type: fs.isDirectory(file) ? 'directory' : 'file'
-  }));
-}
+- **In-memory VFS** with pluggable mount points
+- **/proc** — `version`, `uptime`, `meminfo`, `self/maps`
+- **/dev** — `null`, `zero`, `urandom`, `tty`
+- **/disk** — persistent FAT32/FAT16 mount, survives reboots
 
-// Process Monitor - pure JavaScript
-function showProcesses() {
-  return sys.processes().map(proc => ({
-    pid: proc.pid,
-    name: proc.name,
-    cpu: proc.cpuUsage,
-    memory: proc.memoryUsage
-  }));
-}
-```
+### JavaScript REPL
 
-### User Applications
-```javascript
-// Text Editor - pure JavaScript
-class TextEditor {
-  constructor() {
-    this.buffer = [];
-    this.cursor = { x: 0, y: 0 };
-  }
-
-  insert(text) {
-    // Direct hardware access through TypeScript APIs
-    terminal.setCursor(this.cursor.x, this.cursor.y);
-    terminal.print(text);
-  }
-
-  save(filename) {
-    fs.writeFile(filename, this.buffer.join('\n'));
-  }
-}
-```
-
-### Network Applications
-```javascript
-// HTTP Client - pure JavaScript
-async function fetch(url) {
-  const socket = sys.net.createSocket();
-  await socket.connect(url, 80);
-
-  socket.write(`GET / HTTP/1.1\r\nHost: ${url}\r\n\r\n`);
-
-  const response = await socket.read();
-  return parseHttpResponse(response);
-}
-```
+- **Direct bare-metal JavaScript execution** — no shell, no commands; everything is live JS
+- **ES2023** — classes, async/await, destructuring, Map, Set, Promise, BigInt
+- **Multi-line input** — `{`, `(`, `[` enter multi-line mode; auto-closes
+- **Command history** — Up/Down arrow browsing
+- **Auto pretty-printing** — arrays, objects, numbers formatted for the terminal
+- Always reachable — even in windowed mode via the terminal window
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                 TypeScript OS Layer              │
-│  main.ts → repl.ts → filesystem.ts → system.ts   │
-│  terminal.ts → editor.ts → kernel.ts             │
-├─────────────────────────────────────────────────┤
-│        Babel + esbuild → ES2023 Bundle           │
-│       (type-strip only — no polyfills!)          │
-├─────────────────────────────────────────────────┤
-│            QuickJS Engine (ES2023, C)            │
-│        quickjs_binding.c ↔ kernel APIs           │
-├─────────────────────────────────────────────────┤
-│               C Kernel (i686-elf)                │
-│  platform.c │ keyboard.c │ timer.c │ irq.c       │
-│  memory.c   │ syscalls.c │ io.h   │ math_impl.c │
-├─────────────────────────────────────────────────┤
-│         x86 Bare Metal (Multiboot/GRUB)          │
-│            boot.s → crt0.s → kernel.c            │
-└─────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│              Applications (TypeScript)                          │
+│  browser.ts · terminal-app.ts · editor-app.ts                  │
+├─────────────────────────────────────────────────────────────────┤
+│              OS Core (TypeScript)                               │
+│  canvas · wm · net · tls · crypto · vfs · fat32 · threads      │
+│  vmm · physalloc · process · fork/exec · fdtable · signals      │
+├─────────────────────────────────────────────────────────────────┤
+│  esbuild + type-strip → ES2023 bundle → embedded C string       │
+├─────────────────────────────────────────────────────────────────┤
+│              QuickJS ES2023 Engine (C)                          │
+│              quickjs_binding.c ↔ kernel.* globals               │
+├─────────────────────────────────────────────────────────────────┤
+│              C Kernel (i686-elf)                                │
+│  platform.c · keyboard.c · mouse.c · timer.c · irq.c           │
+│  ata.c · virtio_net.c · pci.c · memory.c · syscalls.c          │
+├─────────────────────────────────────────────────────────────────┤
+│              x86 Bare Metal (Multiboot/GRUB)                    │
+│              boot.s → crt0.s → kernel.c                         │
+└─────────────────────────────────────────────────────────────────┘
 ```
-
-**Applications run directly in the TypeScript OS Layer** - no separate runtimes, no compilation, pure JavaScript/TypeScript from bare metal to user interface.
 
 ---
 
 ## Quick Start
 
 ### Prerequisites
-- **Docker** (for the cross-compilation toolchain)
+
+- **Docker** — cross-compilation toolchain
 - **Node.js** ≥ 18
-- **QEMU** (for testing — `qemu-system-i386`)
+- **QEMU** — `qemu-system-i386`
 
 ### Build & Run
 
 ```bash
-# Install dependencies
 npm install
-
-# Build the ISO (compiles TypeScript, cross-compiles kernel, creates bootable ISO)
-npm run build
-
-# Test in QEMU
-npm run test
+npm run build      # Docker cross-compile → jsos.iso
+npm run test       # Headless QEMU boot test
 ```
 
-### Development Workflow
+### Windows
 
-```bash
-# Build TypeScript only (fast iteration)
-npm run build:local
-
-# Full build + test
-npm run dev
-
-# Interactive QEMU session (with keyboard input)
-npm run test:interactive
-
-# Windows: Test with local QEMU
-npm run test:windows
+```powershell
+npm run build
+npm run test:windows     # Headless QEMU test (PowerShell)
+# Interactive:
+& "C:\Program Files\qemu\qemu-system-i386.exe" -cdrom build\jsos.iso -m 256 -display sdl -boot d
 ```
 
 ---
 
 ## JavaScript API Reference
 
-### Filesystem Functions
+### Filesystem
+
 ```javascript
-ls(path?)           // List directory contents (pretty-printed)
-cd(path?)           // Change directory (~ = /home/user)
-pwd()               // Print working directory
-cat(path)           // Display file contents
-mkdir(path)         // Create directory
-touch(path)         // Create empty file
-rm(path)            // Remove file or empty directory
-cp(src, dst)        // Copy file
-mv(src, dst)        // Move/rename file
-write(path, text)   // Overwrite file
-append(path, text)  // Append to file
-find(path?, pat)    // Find files (* wildcards)
-stat(path)          // File/directory info
-run(path)           // Execute .js file
+ls(path?)           // list directory (pretty-printed)
+cd(path?)           // change directory
+pwd()               // print working directory
+cat(path)           // display file contents
+mkdir(path)         // create directory
+touch(path)         // create empty file
+rm(path)            // remove file or empty directory
+cp(src, dst)        // copy file
+mv(src, dst)        // move / rename
+write(path, text)   // overwrite file
+append(path, text)  // append to file
+find(path?, pat)    // find files (* wildcard)
+stat(path)          // file info
+run(path)           // execute .js file
 ```
 
-### System Functions
+### System
+
 ```javascript
-ps()                // List all processes (pretty-printed)
-kill(pid)           // Terminate process
-mem()               // Memory usage with bar graph
-uptime()            // System uptime
-sysinfo()           // Full system information
+ps()                // list all processes
+kill(pid)           // terminate process
+mem()               // memory usage with bar graph
+uptime()            // system uptime
+sysinfo()           // full system information
 colors()            // VGA color palette demo
-hostname(name?)     // Get/set hostname
-sleep(ms)           // Sleep milliseconds
-clear()             // Clear screen
-halt()              // Power off
-reboot()             // Reboot system
-edit(path?)         // Launch text editor
+hostname(name?)     // get/set hostname
+sleep(ms)           // sleep milliseconds
+clear()             // clear screen
+halt()              // power off
+reboot()            // reboot
+edit(path?)         // launch text editor
 ```
 
-### Scripting APIs (Raw Data)
+### Scripting APIs (raw data)
+
 ```javascript
-// Filesystem (returns plain data)
-fs.ls(path)         // Array of {name, type, size}
-fs.read(path)       // File contents string
-fs.write(path, c)   // Boolean success
-fs.append(path, c)  // Boolean success
-fs.mkdir(path)      // Boolean success
-fs.rm(path)         // Boolean success
-fs.cp(src, dst)     // Boolean success
-fs.mv(src, dst)     // Boolean success
-fs.stat(path)       // {type, size, permissions} or null
-fs.exists(path)     // Boolean
-fs.isDir(path)      // Boolean
-fs.isFile(path)     // Boolean
-fs.pwd()            // Current directory string
-fs.cd(path)         // Boolean success
-fs.find(path, pat)  // Array of matching paths
-fs.run(path)        // Eval result string
+// Filesystem
+fs.ls(path)         // [{name, type, size}]
+fs.read(path)       // string
+fs.write(path, c)   // boolean
+fs.mkdir(path)      // boolean
+fs.rm(path)         // boolean
+fs.stat(path)       // {type, size} | null
+fs.exists(path)     // boolean
+fs.run(path)        // eval result string
 
-// System (returns plain data)
-sys.mem()           // {total, free, used} in bytes
-sys.ps()            // Array of {id, name, state, priority}
-sys.kill(pid)       // Boolean success
-sys.uptime()        // Milliseconds number
-sys.screen()        // {width: 80, height: 25}
-sys.spawn(name)     // Process ID number
-sys.sleep(ms)       // undefined
-sys.hostname(n?)    // Get/set hostname string
-sys.version()       // Version string
-sys.sysinfo()       // Full system object
-sys.reboot()        // undefined
-sys.halt()          // undefined
+// System
+sys.mem()           // {total, free, used} bytes
+sys.ps()            // [{id, name, state, priority}]
+sys.kill(pid)       // boolean
+sys.uptime()        // milliseconds
+sys.screen()        // {width, height}
+sys.spawn(name)     // pid
+sys.version()       // string
+sys.sysinfo()       // full object
+
+// Network
+sys.browser(url?)   // open browser window (framebuffer mode only)
 ```
 
-### Terminal & Display
+### Disk (persistent FAT32/FAT16)
+
 ```javascript
-terminal.println(text)           // Print with newline
-terminal.print(text)             // Print without newline
-terminal.setColor(fg, bg)        // Set colors (0-15)
-terminal.pushColor(fg, bg)       // Save and set colors
-terminal.popColor(saved)         // Restore colors
-terminal.clear()                 // Clear screen
-terminal.getCursor()             // {row, col}
-terminal.setCursor(row, col)     // Move cursor
-terminal.colors                  // Color constants object
+disk.ls(path?)          // list /disk directory
+disk.read(path)         // read file from persistent disk
+disk.write(path, text)  // write file to persistent disk
+disk.mkdir(path)        // create directory on disk
+disk.rm(path)           // remove file from disk
+disk.stat(path)         // file info
+disk.format()           // reformat disk (destructive)
 ```
 
-### REPL Functions
+### Terminal
+
 ```javascript
-help()              // Show this help
-echo(...)           // Print arguments
-print(value)        // Print a value
-history()           // Show input history
-printable(data, fn) // Custom pretty-printer
+terminal.println(text)         // print with newline
+terminal.print(text)           // print without newline
+terminal.setColor(fg, bg)      // set colors (0-15)
+terminal.pushColor(fg, bg)     // save and set
+terminal.popColor(saved)       // restore
+terminal.clear()               // clear screen
+terminal.getCursor()           // {row, col}
+terminal.setCursor(row, col)   // move cursor
 ```
 
-### Example Session
+### Kernel (raw hardware access)
 
+```javascript
+kernel.vgaPut(row, col, ch, colorByte)    // write VGA cell
+kernel.vgaDrawRow(row, text, colorByte)   // write full 80-char row
+kernel.vgaSetCursor(row, col)             // hardware cursor
+kernel.fbInfo()                           // {width, height, pitch, bpp} | null
+kernel.fbBlit(pixels, x, y, w, h)        // blit ArrayBuffer to framebuffer
+kernel.readKey()                          // non-blocking key poll
+kernel.readKeyEx()                        // {ch, ext} | null (includes arrows)
+kernel.readMouse()                        // {dx, dy, buttons} | null
+kernel.getTicks()                         // raw PIT ticks
+kernel.getUptime()                        // ms since boot
+kernel.sleep(ms)                          // sleep
+kernel.getMemoryInfo()                    // {total, free, used}
+kernel.getRamBytes()                      // total physical RAM
+kernel.ataPresent()                       // ATA disk detected?
+kernel.ataRead(lba, sectors)              // number[] | null
+kernel.ataWrite(lba, sectors, data)       // boolean
+kernel.netInit()                          // init virtio-net, true if found
+kernel.netSendFrame(bytes)                // send raw Ethernet frame
+kernel.netRecvFrame()                     // number[] | null
+kernel.serialPut(s)                       // write to COM1
+kernel.inb(port)                          // read I/O port
+kernel.outb(port, val)                    // write I/O port
+kernel.halt()                             // power off
+kernel.reboot()                           // reboot
+
+// Multi-process
+kernel.procCreate()                       // allocate JS runtime slot (0-7)
+kernel.procEval(id, code)                 // eval in child runtime
+kernel.procSend(id, msg)                  // send string to child inbox
+kernel.procRecv(id)                       // receive string from child
+kernel.procDestroy(id)                    // free runtime slot
+
+// Shared memory
+kernel.sharedBufferCreate(size)           // allocate shared buffer
+kernel.sharedBufferOpen(id)               // ArrayBuffer view
+kernel.sharedBufferRelease(id)            // free slot
 ```
-JSOS System Information
-  QuickJS ES2023  |  i686  |  Bare Metal
-  Type help() to see all available functions
 
-> help()
-JSOS  —  everything is JavaScript
-QuickJS ES2023 on bare-metal i686
-Type help() to see all available functions
+---
 
-Filesystem functions:
-  ls(path?)            list directory
-  cd(path?)            change directory  (~ = /home/user)
-  pwd()                print working directory
-  cat(path)            print file contents
-  mkdir(path)          create directory
-  touch(path)          create empty file
-  rm(path)             remove file or empty dir
-  cp(src, dst)         copy file
-  mv(src, dst)         move / rename
-  write(path, text)    overwrite file
-  append(path, text)   append to file
-  find(path?, pat)     find files  (* wildcard)
-  stat(path)           file info
-  run(path)            execute a .js file
+## How It Works
 
-System functions:
-  ps()                 process list
-  kill(pid)            terminate process
-  mem()                memory usage + bar
-  uptime()             system uptime
-  sysinfo()            full system summary
-  colors()             VGA color palette
-  hostname(name?)      show or set hostname
-  sleep(ms)            sleep N milliseconds
-  clear()              clear the screen
-  halt()               power off
-  reboot()             reboot
-  edit(path?)          fullscreen text editor  (^S save  ^Q quit)
-
-> ls('/bin')
-  /bin
-    hello.js      27B
-    sysinfo.js    147B
-    colors.js     308B
-
-> run('/bin/hello.js')
-Hello, World!
-
-> sysinfo()
-JSOS System Information
-  os       : JSOS v1.0.0
-  hostname : jsos
-  arch     : i686 (x86 32-bit)
-  runtime  : QuickJS ES2023
-  screen   : 80x25 VGA text
-  memory   : 1048576 KB total, 1047552 KB free
-  uptime   : 1250s
-  procs    : 1
-
-> ps()
-  PID  NAME                 STATE     PRI
-  ---  ------------------   -------   ---
-    0  repl                 running   0
-
-> mem()
-Memory
-  total : 1024 KB
-  used  : 1 KB
-  free  : 1023 KB
-  [##..................................................]  0%
-
-> ls().filter(f => f.name.endsWith('.js')).map(f => f.name)
-[ "hello.js", "sysinfo.js", "colors.js" ]
-```
-js> kernel.getMemoryInfo()
-{"total":1048576,"free":1000000,"used":48576}
-js> for (var i=0; i<16; i++) { kernel.setColor(i,0); kernel.printRaw("X"); }
-js> .exit
-jsos:/$ eval Math.PI * 2
-6.283185307179586
-```
+1. **TypeScript** source in `src/os/` is compiled to ES2023 (type-strip only, no polyfills)
+2. The JS bundle is **embedded as a C string literal** (`embedded_js.h`) in the kernel
+3. The C kernel is **cross-compiled** with `i686-elf-gcc` + newlib for bare metal i386
+4. QuickJS ES2023 is compiled and linked into the kernel binary
+5. The kernel binary is packaged into a **bootable ISO** with GRUB 2
+6. On boot: GRUB → `boot.s` → `kernel.c` → hardware init → QuickJS → TypeScript runs
 
 ---
 
@@ -404,52 +285,23 @@ jsos:/$ eval Math.PI * 2
 
 ```
 src/
-  kernel/                  # C kernel (bare metal)
-    boot.s                 # Multiboot entry point
-    crt0.s                 # C runtime startup
-    kernel.c               # Main kernel init
-    platform.c             # VGA/platform abstraction layer
-    platform.h             # Platform API declarations
-    keyboard.c             # PS/2 keyboard driver (IRQ1, US layout)
-    timer.c                # PIT timer driver (IRQ0, 100 Hz)
-    irq.c                  # IDT/PIC interrupt system
-    irq_asm.s              # Assembly ISR stubs + GDT
-    memory.c               # Memory pool allocator
-    quickjs_binding.c      # JS ↔ kernel bridge (QuickJS API)
-    syscalls.c             # Newlib system call stubs
-    math_impl.c            # Math library (sin, cos, sqrt, etc.)
-    io.h                   # Port I/O (inb/outb)
-    linker.ld              # Linker script (loads at 1MB)
-    Makefile               # Cross-compile with i686-elf-gcc
-  os/                      # TypeScript OS layer
-    main.ts                # Boot sequence + REPL entry point
-    repl.ts                # JavaScript REPL with history
-    terminal.ts            # Terminal abstraction (colors, cursor)
-    filesystem.ts          # In-memory Unix-like filesystem
-    system.ts              # Process manager
-    editor.ts              # Fullscreen text editor
-    kernel.ts              # TypeScript declarations for kernel API
-scripts/
-    bundle-hybrid.js       # Babel + esbuild bundler (TS → ES2023)
-    build.sh               # Full kernel + ISO build
-    embed-js.js            # Embeds JS bundle as C string literal
-docker/
-    build.Dockerfile       # Cross-compiler toolchain (GCC + newlib + QuickJS)
-    test.Dockerfile        # QEMU test environment
+  kernel/            C kernel (hardware primitives only)
+  os/                TypeScript OS (everything above the hardware)
+    core/            kernel bindings, syscalls, fd table
+    process/         threads, vmm, physalloc, process, elf, signals
+    fs/              VFS, /proc, /dev, romfs
+    storage/         block device, FAT32, FAT16
+    net/             TCP/IP, DHCP, DNS, TLS, crypto, HTTP
+    ui/              terminal, REPL, editor, canvas, WM
+    apps/            browser, terminal-app, editor-app
+    users/           user/group management
+    ipc/             pipes, message queues
+scripts/             build helpers (bundler, embed tools)
+docker/              cross-compiler and test Dockerfiles
+build/               compiled output (ISO, JS bundle)
+docs/                documentation
+resources/           bundled ROM files
 ```
-
----
-
-## How It Works
-
-1. **TypeScript** source files in `src/os/` are compiled to ES2023 JavaScript (type-strip only, no polyfills)
-2. The JS bundle is **embedded as a C string literal** in the kernel
-3. The C kernel is **cross-compiled** with `i686-elf-gcc` + newlib for bare metal i386
-4. QuickJS ES2023 engine is compiled and linked into the kernel binary
-5. The kernel binary is packaged into a **bootable ISO** with GRUB
-6. On boot: GRUB → `boot.s` → `kernel.c` → Platform init → QuickJS → **TypeScript REPL runs directly**
-
-The entire OS is a single JavaScript REPL where all system functionality is exposed as global functions. No traditional shell or command parsing — everything is live JavaScript execution on bare metal hardware.
 
 ---
 

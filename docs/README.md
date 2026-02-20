@@ -1,9 +1,9 @@
 # JSOS Documentation
 
-**JSOS** is a bare-metal x86 operating system whose userland is entirely JavaScript (ES2023), running on the [QuickJS](https://bellard.org/quickjs/) engine embedded directly into the kernel binary.
+**JSOS** is a bare-metal x86 operating system where TypeScript IS the OS. Every algorithm, every data structure, every policy lives in TypeScript running on the [QuickJS](https://bellard.org/quickjs/) ES2023 engine embedded in the kernel binary. C code handles only raw hardware I/O.
 
 > _"Everything is JavaScript"_  
-> No shell. No interpreter prompt. Just a live JS REPL where `ls()`, `cat('/etc/hostname')`, and `2 + 2` are all equally valid.
+> No shell. Just a live JS REPL where `ls()`, `cat('/etc/hostname')`, `disk.write('/notes', 'hi')`, and `2 + 2` are equally valid.
 
 ---
 
@@ -11,12 +11,14 @@
 
 | Doc | What it covers |
 |---|---|
-| [architecture.md](architecture.md) | System layers, boot sequence, how C and JS fit together |
+| [architecture.md](architecture.md) | System layers, boot sequence, how C and TypeScript fit together |
 | [build.md](build.md) | How to build the ISO and run it in QEMU |
 | [repl.md](repl.md) | Using the REPL — all globals, keyboard shortcuts, scripting examples |
-| [kernel-api.md](kernel-api.md) | The `kernel` object — every C function exposed to JS |
-| [filesystem.md](filesystem.md) | In-memory filesystem layout, API, and example programs |
-| [internals.md](internals.md) | Deep dive: C kernel, QuickJS binding, TypeScript pipeline |
+| [kernel-api.md](kernel-api.md) | The `kernel` object — C hardware primitives exposed to JS |
+| [filesystem.md](filesystem.md) | VFS layout, /proc, /dev, /disk (persistent FAT32), API and examples |
+| [internals.md](internals.md) | Deep dive: C kernel, QuickJS binding, TypeScript build pipeline |
+
+For the complete feature list and component table see [../OS_IMPLEMENTATION.md](../OS_IMPLEMENTATION.md).
 
 ---
 
@@ -26,18 +28,24 @@
 # Build (requires Docker)
 npm run build
 
-# Run in QEMU
-& "C:\Program Files\qemu\qemu-system-i386.exe" -cdrom build\jsos.iso -m 32 -display sdl
+# Headless test
+npm run test:windows
+
+# Interactive (256 MB RAM, framebuffer enabled)
+& "C:\Program Files\qemu\qemu-system-i386.exe" `
+    -cdrom build\jsos.iso -m 256 -display sdl -boot d `
+    -drive file=build\disk.img,format=raw
 ```
 
 ## At the REPL
 
 ```
-jsos:~> help()           # list all globals
-jsos:~> ls()             # list current directory
-jsos:~> cat('/etc/motd') # read a file
-jsos:~> mem()            # memory usage
-jsos:~> 2 + 2            # → 4
+jsos:~> help()                    # list all globals
+jsos:~> ls()                      # list current directory
+jsos:~> cat('/etc/motd')          # read a file
+jsos:~> disk.write('/hi', 'hey')  # write to persistent /disk
+jsos:~> mem()                     # memory usage
+jsos:~> sys.browser('https://example.com')  # open browser (framebuffer)
 ```
 
 ## Vital Statistics
@@ -46,11 +54,10 @@ jsos:~> 2 + 2            # → 4
 |---|---|
 | Architecture | i686 (x86 32-bit) |
 | JS Engine | QuickJS ES2023 |
-| JS Heap | 768 KB |
-| JS Stack | 32 KB |
-| Total RAM | 32 MB (QEMU default) |
-| Screen | 80×25 VGA text mode |
 | Kernel language | C11 |
-| Userland language | TypeScript → ES5 bundle |
+| OS language | TypeScript → ES2023 bundle |
 | Boot | GRUB 2 multiboot |
+| Display | VGA 80×25 text fallback; VESA 32-bit framebuffer (1024×768+) |
+| Persistent storage | ATA → FAT32 / FAT16 |
+| Networking | virtio-net → TCP/IP → TLS 1.3 → HTTP/HTTPS |
 | Output | Bootable ISO (~10 MB) |

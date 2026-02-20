@@ -1,6 +1,17 @@
 # Filesystem
 
-JSOS has a fully in-memory Unix-like virtual filesystem implemented in TypeScript (`src/os/filesystem.ts`). It persists only for the lifetime of the running OS session — it resets on reboot.
+JSOS has a layered virtual filesystem implemented entirely in TypeScript. The VFS in `src/os/fs/filesystem.ts` supports pluggable mount points, so different providers serve different parts of the tree.
+
+---
+
+## Filesystem Providers
+
+| Mount Point | Provider | Type | Persistent |
+|---|---|---|---|
+| `/` | `filesystem.ts` | In-memory VFS | No |
+| `/proc` | `proc.ts` | Dynamic virtual FS | No |
+| `/dev` | `dev.ts` | Device node FS | No |
+| `/disk` | `fat32.ts` / `fat16.ts` | Block-backed FAT | **Yes** |
 
 ---
 
@@ -17,18 +28,58 @@ JSOS has a fully in-memory Unix-like virtual filesystem implemented in TypeScrip
 │   ├── version         "1.0.0"
 │   └── motd            welcome message
 ├── home/
-│   └── user/           home directory  (~)
-│       └── .profile    # User profile (empty by default)
-├── tmp/                scratch space (not persisted)
+│   └── user/           home directory (~)
+│       └── .profile    user profile (empty by default)
+├── tmp/                scratch space (not persisted across reboots)
 ├── var/
 │   └── log/
-│       └── boot.log    [timestamp] System booted
-├── dev/
-│   └── null            empty file
-└── proc/
-    ├── version         "JSOS 1.0.0 ..."
-    ├── uptime          "0"
-    └── meminfo         ""
+│       └── boot.log    boot timestamp
+├── dev/                device nodes (see /dev below)
+├── proc/               system information (see /proc below)
+└── disk/               persistent FAT32 disk (if attached)
+```
+
+---
+
+## /proc
+
+Read-only virtual files. Contents are generated on each `read()` call.
+
+| File | Contents |
+|---|---|
+| `/proc/version` | `JSOS 1.0.0 QuickJS ES2023 i686` |
+| `/proc/uptime` | milliseconds since boot |
+| `/proc/meminfo` | `MemTotal / MemFree / MemUsed` |
+| `/proc/self/maps` | virtual memory regions for current process |
+
+---
+
+## /dev
+
+Device nodes backed by `dev.ts`.
+
+| Node | Behaviour |
+|---|---|
+| `/dev/null` | reads return 0 bytes; writes are discarded |
+| `/dev/zero` | reads return unlimited zero bytes |
+| `/dev/urandom` | reads return pseudo-random bytes (xorshift64) |
+| `/dev/tty` | reads poll keyboard; writes go to terminal |
+
+---
+
+## /disk — Persistent Storage
+
+`/disk` is mounted from a real ATA block device (QEMU `-drive`) formatted as FAT32 (or FAT16 on small images). Data survives reboots.
+
+On boot, `main.ts` tries `fat32.mount()` first, then `fat16.mount()`. If a blank disk is detected it is automatically formatted.
+
+Use via `fs.*` with paths under `/disk`, or via the `disk.*` convenience API:
+
+```javascript
+disk.write('/notes.txt', 'hello')   // write to persistent disk
+disk.read('/notes.txt')             // 'hello' — survives reboot
+disk.ls()                           // list disk root
+disk.format()                       // reformat (all data lost)
 ```
 
 ---
@@ -268,8 +319,8 @@ run('/tmp/fizzbuzz.js')
 
 ## Implementation Notes
 
-- **Storage:** Everything lives in a JavaScript `Map<string, FileEntry | DirectoryEntry>` tree rooted at `/`.
-- **Permissions:** Stored as Unix-style strings (`"rw-r--r--"`) but not enforced — they're display-only.
-- **Timestamps:** `Date.now()` returns `kernel.getUptime()` (ms since boot), so timestamps are relative to boot, not calendar time.
-- **No inodes:** Each path lookup traverses the tree from root. Hardlinks are not supported.
-- **No persistence:** All data is lost on reboot. Future work could add a RAM disk image embedded in the kernel.
+- **In-memory VFS:** Lives in a `Map<path, entry>` tree. No inodes; lookups traverse from root. Hardlinks not supported.
+- **Permissions:** Stored as Unix-style strings (`"rw-r--r--"`) but not enforced — display-only.
+- **Timestamps:** `Date.now()` is `kernel.getUptime()` (ms since boot), so timestamps are boot-relative, not calendar.
+- **Persistence:** `/disk` survives reboots via FAT32/FAT16 on a QEMU disk image. Everything else resets on reboot.
+- **Mount points:** `fs.mountVFS(path, provider)` registers any object with `read/write/ls/mkdir/rm/stat` as a provider.
