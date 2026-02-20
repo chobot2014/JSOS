@@ -362,11 +362,16 @@ export class NetworkStack {
   gateway: IPv4Address = '10.0.2.2';
   dns:     IPv4Address = '10.0.2.3';
 
+  /** True once a real NIC has been detected and virtqueues are ready */
+  nicReady: boolean = false;
+
   private arpTable    = new Map<IPv4Address, MACAddress>();
   private connections = new Map<number, TCPConnection>();
   private sockets     = new Map<number, Socket>();
   private listeners   = new Map<number, Socket>(); // listening port → socket
   private rxQueue:  number[][] = [];
+  /** Raw UDP inbox: port → queue of { from, fromPort, data } */
+  private udpRxMap  = new Map<number, Array<{ from: IPv4Address; fromPort: number; data: number[] }>>();
   private idCounter = 1;
   private nextConn  = 1;
   private nextSock  = 1;
@@ -468,8 +473,14 @@ export class NetworkStack {
     this.stats.udpRx++;
     var udp = parseUDP(ip.payload);
     if (!udp) return;
+    // Deliver to socket API (string-based)
     var sock = this._findUDPSock(udp.dstPort);
     if (sock) sock.recvQueue.push(bytesToStr(udp.payload));
+    // Deliver to raw UDP inbox (byte-based, for DHCP/DNS)
+    var inbox = this.udpRxMap.get(udp.dstPort);
+    if (inbox !== undefined) {
+      inbox.push({ from: ip.src, fromPort: udp.srcPort, data: udp.payload });
+    }
   }
 
   // ── TCP state machine ─────────────────────────────────────────────────────
@@ -497,6 +508,7 @@ export class NetworkStack {
         break;
       case 'ESTABLISHED':
         if (seg.payload.length > 0) {
+          kernel.serialPut('TCP rx ' + ip.src + ':' + seg.srcPort + ' len=' + seg.payload.length + ' b0=' + seg.payload[0].toString(16) + '\n');
           conn.recvBuf = conn.recvBuf.concat(seg.payload);
           conn.recvSeq = (conn.recvSeq + seg.payload.length) >>> 0;
           // Deliver to socket's recvQueue
@@ -596,22 +608,100 @@ export class NetworkStack {
     var raw = buildEthernet(frame);
     this.stats.txPackets++;
     this.stats.txBytes += raw.length;
-    // Loopback: deliver locally addressed frames back to receive queue
-    if (frame.dst === this.mac || frame.dst === 'ff:ff:ff:ff:ff:ff') {
-      this.rxQueue.push(raw);
+
+    if (this.nicReady) {
+      // Real hardware path: send every frame out the virtio-net NIC.
+      // QEMU SLIRP will reflect broadcast/unicast replies back to us.
+      kernel.netSendFrame(raw);
+      // Also push self-addressed frames to the local RX queue immediately
+      // (for any intra-stack loopback still needed while NIC is active).
+      if (frame.dst === this.mac) {
+        this.rxQueue.push(raw);
+      }
+    } else {
+      // Loopback-only mode (no NIC): deliver locally addressed frames back
+      // to the receive queue so the stack is self-sufficient for unit tests.
+      if (frame.dst === this.mac || frame.dst === 'ff:ff:ff:ff:ff:ff') {
+        this.rxQueue.push(raw);
+      }
     }
-    // Hand off to C Ethernet driver via:
-    //   kernel.callNative(ETH_SEND_ADDR, ...raw bytes via shared memory...)
-    // (wired up when a driver is present)
+  }
+
+  /**
+   * Poll the virtio-net NIC for received frames and feed them to the stack.
+   * Call this in a loop or from a timer tick when the NIC is active.
+   * Returns the number of frames processed.
+   */
+  pollNIC(): number {
+    if (!this.nicReady) return 0;
+    var count = 0;
+    for (var i = 0; i < 32; i++) {   // drain at most 32 frames per call
+      var raw = kernel.netRecvFrame();
+      if (!raw) break;
+      this.receive(raw);
+      count++;
+    }
+    return count;
+  }
+
+  /**
+   * Activate the real NIC and update the MAC address from hardware.
+   * Called once after kernel.netInit() returns true.
+   */
+  initNIC(): void {
+    var macBytes = kernel.netMacAddress();
+    var parts: string[] = [];
+    for (var i = 0; i < 6; i++) {
+      var hex = (macBytes[i] & 0xff).toString(16);
+      parts.push(hex.length < 2 ? '0' + hex : hex);
+    }
+    var hwMac = parts.join(':');
+    this.arpTable.delete(this.mac);
+    this.mac = hwMac;
+    this.arpTable.set(this.ip, this.mac);
+    this.nicReady = true;
+  }
+
+  /**
+   * Send an ARP request for targetIP and poll the NIC until we receive a reply
+   * or the timeout (in PIT ticks, ~10 ms each) expires.
+   * Returns the resolved MAC or null on timeout.
+   */
+  arpWait(targetIP: IPv4Address, timeoutTicks: number = 300): MACAddress | null {
+    // If already in ARP table, return immediately
+    var cached = this.arpTable.get(targetIP);
+    if (cached) return cached;
+
+    // Send ARP request
+    this._arpRequest(targetIP);
+    if (this.nicReady) {
+      var deadline = kernel.getTicks() + timeoutTicks;
+      while (kernel.getTicks() < deadline) {
+        this.pollNIC();
+        var resolved = this.arpTable.get(targetIP);
+        if (resolved) return resolved;
+        kernel.sleep(1);  // yield to QEMU so virtio TX/RX BHs can run
+      }
+      return null;
+    }
+    // Loopback mode: ARP reply comes from our own stack (above loopback path)
+    this.processRxQueue();
+    return this.arpTable.get(targetIP) || null;
   }
 
   private _sendIPv4(pkt: IPv4Packet): void {
     var dst = pkt.dst;
-    var nextHop = sameSubnet(dst, this.ip, this.mask) ? dst : this.gateway;
-    var dstMac = this.arpTable.get(nextHop);
-    if (!dstMac) {
-      dstMac = 'ff:ff:ff:ff:ff:ff'; // send ARP and use broadcast as fallback
-      this._arpRequest(nextHop);
+    var dstMac: MACAddress;
+    // Broadcast address: no ARP needed – always Ethernet broadcast
+    if (dst === '255.255.255.255') {
+      dstMac = 'ff:ff:ff:ff:ff:ff';
+    } else {
+      var nextHop = sameSubnet(dst, this.ip, this.mask) ? dst : this.gateway;
+      dstMac = this.arpTable.get(nextHop) || '';
+      if (!dstMac) {
+        // When NIC is active, block-wait for ARP reply (short timeout = 30 ticks ≈ 300 ms)
+        dstMac = this.arpWait(nextHop, this.nicReady ? 100 : 0) || 'ff:ff:ff:ff:ff:ff';
+      }
     }
     this._sendEth({ dst: dstMac, src: this.mac, ethertype: ETYPE_IPV4, payload: buildIPv4(pkt) });
   }
@@ -669,8 +759,18 @@ export class NetworkStack {
       this.connections.set(conn.id, conn);
       this._sendTCPSeg(conn, TCP_SYN, []);
       conn.sendSeq = (conn.sendSeq + 1) >>> 0;
-      // Flush any loopback replies synchronously
-      this.processRxQueue();
+      if (this.nicReady) {
+        // Block-poll NIC until ESTABLISHED or timeout (200 ticks ≈ 2 s)
+        var deadline = kernel.getTicks() + 200;
+        while (kernel.getTicks() < deadline && conn.state === 'SYN_SENT') {
+          this.pollNIC();
+          this.processRxQueue();
+          kernel.sleep(1);  // yield to QEMU for virtio BH processing
+        }
+      } else {
+        // Loopback mode: process synchronously
+        this.processRxQueue();
+      }
     }
     sock.state = 'connected';
     return true;
@@ -693,13 +793,87 @@ export class NetworkStack {
       });
       this.stats.udpTx++;
     }
+    if (this.nicReady) this.pollNIC();
     this.processRxQueue();
     return true;
   }
 
   recv(sock: Socket): string | null {
+    if (this.nicReady) this.pollNIC();
     this.processRxQueue();
     return sock.recvQueue.shift() || null;
+  }
+
+  /**
+   * Send raw binary data over a TCP socket.
+   */
+  sendBytes(sock: Socket, bytes: number[]): boolean {
+    if (sock.type !== 'tcp') return false;
+    var conn = this._connForSock(sock);
+    if (!conn || conn.state !== 'ESTABLISHED') return false;
+    this._sendTCPSeg(conn, TCP_PSH | TCP_ACK, bytes);
+    if (this.nicReady) this.pollNIC();
+    this.processRxQueue();
+    return true;
+  }
+
+  /**
+   * Receive raw binary data from a TCP socket.
+   * Polls the NIC and processes the RX queue once, then returns buffered data.
+   */
+  recvBytes(sock: Socket, timeoutTicks: number = 0): number[] | null {
+    var deadline = timeoutTicks > 0 ? kernel.getTicks() + timeoutTicks : 0;
+    do {
+      if (this.nicReady) this.pollNIC();
+      this.processRxQueue();
+      var conn = this._connForSock(sock);
+      if (conn && conn.recvBuf.length > 0) {
+        var data = conn.recvBuf.slice();
+        conn.recvBuf = [];
+        return data;
+      }
+      if (deadline > 0 && kernel.getTicks() >= deadline) break;
+      kernel.sleep(1);  // yield to QEMU for virtio BH processing
+    } while (deadline > 0);
+    return null;
+  }
+
+  /**
+   * Send a UDP datagram with raw byte payload.
+   */
+  sendUDPRaw(localPort: number, dstIP: IPv4Address, dstPort: number, data: number[]): void {
+    this._sendIPv4({
+      ihl: 5, dscp: 0, ecn: 0, id: this.idCounter++,
+      flags: 0, fragOff: 0, ttl: 64, protocol: PROTO_UDP,
+      src: this.ip, dst: dstIP,
+      payload: buildUDP(localPort, dstPort, data),
+    });
+    this.stats.udpTx++;
+  }
+
+  /**
+   * Receive one UDP datagram on localPort.
+   * Registers an inbox, blocks-polls the NIC for timeoutTicks, then deregisters.
+   * Returns { from, fromPort, data } or null on timeout.
+   */
+  recvUDPRaw(localPort: number, timeoutTicks: number = 300):
+      { from: IPv4Address; fromPort: number; data: number[] } | null {
+    // Register inbox for this port
+    if (!this.udpRxMap.has(localPort)) this.udpRxMap.set(localPort, []);
+    var inbox = this.udpRxMap.get(localPort)!;
+    var deadline = kernel.getTicks() + timeoutTicks;
+    while (kernel.getTicks() < deadline) {
+      if (this.nicReady) this.pollNIC(); else this.processRxQueue();
+      this.processRxQueue();
+      if (inbox.length > 0) {
+        var pkt = inbox.shift()!;
+        this.udpRxMap.delete(localPort);
+        return pkt;
+      }
+      kernel.sleep(1);  // yield to QEMU for virtio BH processing
+    }
+    this.udpRxMap.delete(localPort);
+    return null;
   }
 
   close(sock: Socket): void {

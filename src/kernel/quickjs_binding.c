@@ -18,6 +18,7 @@
 #include "io.h"
 #include "embedded_js.h"
 #include "ata.h"
+#include "virtio_net.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -575,6 +576,129 @@ static JSValue js_jump_to_user_mode(JSContext *c, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* ── Phase 7: virtio-net NIC bindings ──────────────────────────────────── */
+
+/*
+ * kernel.netInit() → boolean
+ * Probe PCI for virtio-net, initialise TX/RX virtqueues.
+ * Returns true when a NIC is found and ready.
+ */
+static JSValue js_net_init(JSContext *c, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewBool(c, virtio_net_init());
+}
+
+/* Reusable receive buffer in BSS (avoids large stack frame) */
+static uint8_t _net_recv_buf[1514];
+/* Reusable send buffer in BSS */
+static uint8_t _net_send_buf[1514];
+
+/*
+ * kernel.netSendFrame(bytes: number[]) → void
+ * Send a raw Ethernet frame (byte array from TypeScript).
+ */
+static JSValue js_net_send_frame(JSContext *c, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    int32_t len = 0;
+    {
+        JSValue jlen = JS_GetPropertyStr(c, argv[0], "length");
+        JS_ToInt32(c, &len, jlen);
+        JS_FreeValue(c, jlen);
+    }
+    if (len <= 0 || len > 1514) return JS_UNDEFINED;
+    /* Copy JS array into BSS send buffer */
+    for (int i = 0; i < len; i++) {
+        JSValue v = JS_GetPropertyUint32(c, argv[0], (uint32_t)i);
+        int32_t b = 0;
+        JS_ToInt32(c, &b, v);
+        JS_FreeValue(c, v);
+        _net_send_buf[i] = (uint8_t)b;
+    }
+    virtio_net_send(_net_send_buf, (uint16_t)len);
+    return JS_UNDEFINED;
+}
+
+/*
+ * kernel.netRecvFrame() → number[] | null
+ * Poll the NIC for one received Ethernet frame.
+ * Returns null when the RX ring is empty.
+ */
+static JSValue js_net_recv_frame(JSContext *c, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    uint16_t frame_len = virtio_net_recv(_net_recv_buf);
+    if (frame_len == 0) return JS_NULL;
+    JSValue arr = JS_NewArray(c);
+    for (int i = 0; i < (int)frame_len; i++)
+        JS_SetPropertyUint32(c, arr, (uint32_t)i,
+                             JS_NewInt32(c, _net_recv_buf[i]));
+    return arr;
+}
+
+/*
+ * kernel.netMacAddress() → number[6]
+ * Return the NIC's 6-byte MAC address as a JS number array.
+ */
+static JSValue js_net_mac_address(JSContext *c, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    JSValue arr = JS_NewArray(c);
+    for (int i = 0; i < 6; i++)
+        JS_SetPropertyUint32(c, arr, (uint32_t)i,
+                             JS_NewInt32(c, virtio_net_mac[i]));
+    return arr;
+}
+
+static JSValue js_net_debug_rx_used_idx(JSContext *c, JSValueConst this_val,
+                                         int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewInt32(c, (int32_t)virtio_net_rx_used_idx());
+}
+
+static JSValue js_net_debug_info(JSContext *c, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewInt32(c, (int32_t)virtio_net_debug_info());
+}
+
+static JSValue js_net_debug_status(JSContext *c, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewInt32(c, (int32_t)virtio_net_debug_status());
+}
+
+static JSValue js_net_debug_queues(JSContext *c, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewInt32(c, (int32_t)virtio_net_debug_queues());
+}
+
+/*
+ * kernel.netPciAddr() → string  (e.g. "00:03.0")
+ * Returns the PCI bus:dev.fn string of the found NIC.
+ */
+static void _pci_hex2(char *p, uint8_t v) {
+    const char *h = "0123456789abcdef";
+    p[0] = h[v >> 4]; p[1] = h[v & 0xf];
+}
+
+static JSValue js_net_pci_addr(JSContext *c, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    /* Format: "BB:DD.F" e.g. "00:03.0" */
+    char buf[8];
+    _pci_hex2(buf,   virtio_net_pci_bus);
+    buf[2] = ':';
+    _pci_hex2(buf+3, virtio_net_pci_dev);
+    buf[5] = '.';
+    buf[6] = (char)('0' + (virtio_net_pci_fn & 7));
+    buf[7] = '\0';
+    return JS_NewString(c, buf);
+}
+
 /*
  * kernel.getPageFaultAddr() → number
  * Reads CR2, which the CPU populates with the faulting linear address on a
@@ -749,6 +873,16 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("cloneAddressSpace",  0, js_clone_address_space),
     JS_CFUNC_DEF("jumpToUserMode",     2, js_jump_to_user_mode),
     JS_CFUNC_DEF("getPageFaultAddr",   0, js_get_page_fault_addr),
+    /* Network (Phase 7) */
+    JS_CFUNC_DEF("netInit",       0, js_net_init),
+    JS_CFUNC_DEF("netSendFrame",  1, js_net_send_frame),
+    JS_CFUNC_DEF("netRecvFrame",  0, js_net_recv_frame),
+    JS_CFUNC_DEF("netMacAddress", 0, js_net_mac_address),
+    JS_CFUNC_DEF("netPciAddr",    0, js_net_pci_addr),
+    JS_CFUNC_DEF("netDebugRxIdx", 0, js_net_debug_rx_used_idx),
+    JS_CFUNC_DEF("netDebugInfo",   0, js_net_debug_info),
+    JS_CFUNC_DEF("netDebugStatus", 0, js_net_debug_status),
+    JS_CFUNC_DEF("netDebugQueues", 0, js_net_debug_queues),
 };
 
 /*  Initialization  */

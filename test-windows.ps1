@@ -2,7 +2,7 @@
 param(
     [switch]$Install,
     [switch]$Headless,
-    [int]$Timeout = 15
+    [int]$Timeout = 60
 )
 
 if ($Headless) {
@@ -86,7 +86,9 @@ if ($Headless) {
         "-m", "512M",
         "-no-reboot",
         "-display", "none",
-        "-serial", "file:test-output/serial.log"
+        "-serial", "file:test-output/serial.log",
+        "-netdev", "user,id=n0",
+        "-device", "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on"
     ) -NoNewWindow -PassThru -RedirectStandardError "test-output\qemu-err.log"
 
     $deadline = (Get-Date).AddSeconds($Timeout)
@@ -119,5 +121,7 @@ if ($Headless) {
         -drive "file=build/disk.img,format=raw,media=disk" `
         -boot order=d `
         -m 512M `
-        -no-reboot
+        -no-reboot `
+        -netdev "user,id=n0" `
+        -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on"
 }

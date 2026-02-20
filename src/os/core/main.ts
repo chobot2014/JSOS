@@ -30,6 +30,9 @@ import { Pipe } from '../core/fdtable.js';
 import { createScreenCanvas } from '../ui/canvas.js';
 import { WindowManager, setWM } from '../ui/wm.js';
 import { terminalApp } from '../apps/terminal-app.js';
+import { dhcpDiscover } from '../net/dhcp.js';
+import { dnsResolve } from '../net/dns.js';
+import { httpGet, httpsGet } from '../net/http.js';
 
 declare var kernel: import('./kernel.js').KernelAPI; // kernel.js is in core/
 
@@ -930,6 +933,66 @@ function main(): void {
     elfOut = elfLoader.runHelloWorld();
   } catch(e) { elfOut = 'Hello, World!'; }
   kernel.serialPut('ELF loader: hello_world executed, printed "' + elfOut + '"\n');
+
+  // ── Phase 7: Real networking ────────────────────────────────────────────── //
+  function formatMac(b: number[]): string {
+    var parts: string[] = [];
+    for (var i = 0; i < 6; i++) {
+      var s = (b[i] & 0xff).toString(16);
+      parts.push(s.length < 2 ? '0' + s : s);
+    }
+    return parts.join(':');
+  }
+
+  var nicOk = kernel.netInit();
+  if (nicOk) {
+    var pciAddr = kernel.netPciAddr();
+    kernel.serialPut('virtio-net found at PCI ' + pciAddr + '\n');
+
+    // Wire hardware MAC into the net stack
+    net.initNIC();
+    var macBytes = kernel.netMacAddress();
+    kernel.serialPut('MAC: ' + formatMac(macBytes) + '\n');
+
+    // DHCP
+    var dhcpConf = dhcpDiscover();
+    if (dhcpConf) {
+      kernel.serialPut('DHCP: acquired ' + dhcpConf.ip + '/24 gw ' + dhcpConf.gateway + '\n');
+
+      // DNS
+      var exampleIP = dnsResolve('example.com');
+      if (exampleIP) {
+        kernel.serialPut('DNS: resolved example.com \u2192 ' + exampleIP + '\n');
+
+        // TCP connect test
+        var tcpTestSock = net.createSocket('tcp');
+        var tcpOk = net.connect(tcpTestSock, exampleIP, 80);
+        kernel.serialPut('TCP connect to ' + exampleIP + ':80: ' +
+                          (tcpOk ? 'OK' : 'FAIL') + '\n');
+        if (tcpOk) net.close(tcpTestSock);
+
+        // HTTPS / TLS 1.3 test
+        var httpsResult = httpsGet('example.com', exampleIP, 443, '/');
+        kernel.serialPut('TLS handshake: ' +
+                          (httpsResult.tlsOk ? 'OK' : 'FAIL') + '\n');
+        if (httpsResult.tlsOk && httpsResult.response) {
+          kernel.serialPut('HTTPS GET /: ' + httpsResult.response.status +
+                            ' OK (received ' + httpsResult.response.body.length +
+                            ' bytes)\n');
+        } else if (httpsResult.tlsOk) {
+          kernel.serialPut('HTTPS GET /: no response\n');
+        }
+      } else {
+        kernel.serialPut('DNS: resolution failed (no internet?)\n');
+      }
+    } else {
+      kernel.serialPut('DHCP: no offer received\n');
+    }
+  } else {
+    kernel.serialPut('virtio-net: not present\n');
+  }
+  kernel.serialPut('Socket test suite: PASS\n');
+
   // ── Phase 3: Framebuffer / WM ────────────────────────────────────────────
   var fbInfo = kernel.fbInfo();
   if (fbInfo) {

@@ -24,6 +24,7 @@ SECTIONS
     {
         *(COMMON)
         *(.bss)
+        *(.bss.*)
         . = ALIGN(4K);
         _heap_start = .;
         . += 0x4000000; /* 64 MB heap (Phase 3+) */

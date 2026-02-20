@@ -214,6 +214,36 @@ export interface KernelAPI {
    */
   getPageFaultAddr(): number;
 
+  // ─ Network (Phase 7) ──────────────────────────────────────────────────────
+  /**
+   * Probe PCI for a virtio-net device and initialise TX/RX virtqueues.
+   * Returns true when a NIC is found and ready; false if no virtio-net present.
+   */
+  netInit(): boolean;
+  /**
+   * Send a raw Ethernet frame (without FCS).
+   * bytes is a plain number[] from TypeScript; max length 1514.
+   */
+  netSendFrame(bytes: number[]): void;
+  /**
+   * Poll the NIC for one received Ethernet frame.
+   * Returns null when the RX ring is empty, or a number[] of the frame bytes.
+   * Max frame length is 1514 bytes.
+   */
+  netRecvFrame(): number[] | null;
+  /**
+   * Returns the NIC's MAC address as a 6-element number[].
+   */
+  netMacAddress(): number[];
+  /**
+   * Returns the PCI bus:dev.fn location string (e.g. "00:03.0").
+   */
+  netPciAddr(): string;
+  netDebugRxIdx(): number;
+  netDebugInfo(): number;
+  netDebugStatus(): number;
+  netDebugQueues(): number;
+
   //  Constants 
   colors: KernelColors;
   KEY_UP: number;    KEY_DOWN: number;   KEY_LEFT: number;  KEY_RIGHT: number;
