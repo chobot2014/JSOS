@@ -2,7 +2,7 @@
  * JSOS DRM / KMS Shim — Phase 8
  *
  * Implements the Linux DRM/KMS ioctl interface as a TypeScript FileDescription
- * mounted at /dev/dri/card0.  Chromium's Ozone/DRM layer opens this device
+ * mounted at /dev/dri/card0.  The JSOS graphics stack opens this device
  * and drives it via ioctl calls to configure display modes and flip
  * framebuffers; we translate those calls to Canvas.flip() / SwiftShader.
  *
@@ -10,7 +10,7 @@
  * framebuffer, Phase 4 vmm, and Phase 8 SwiftShader APIs.
  *
  * Phase 8 delivers: ioctl dispatch table, dumb-buffer allocation, page-flip.
- * Phase 9 will call this from the actual Chromium process after exec().
+ * Used by the JSOS native browser and WM for hardware-accelerated rendering.
  */
 
 import type { Canvas } from '../ui/canvas.js';
@@ -199,7 +199,7 @@ export class DRMDevice implements FileDescription {
 
       case DRM_IOCTL_VERSION:
         // arg is a pointer to drm_version struct — in our TS simulation
-        // we just return success; Phase 9 Chromium will interpret via mmap.
+        // return success; callers interpret the populated struct via mmap.
         return 0;
 
       case DRM_IOCTL_GET_MAGIC:
@@ -282,8 +282,8 @@ export class DRMDevice implements FileDescription {
   private _getResources(_arg: number): number {
     // In production: write counts + IDs into the userspace struct at arg.
     // For Phase 8 testing we just return counts (trusting arg=0 test calls).
-    // Phase 9 wires real struct writes via vmm.writeU32(arg + offset, val).
-    return 0; // success; Chromium retries with populated arrays
+    // A real implementation writes counts + IDs via vmm.writeU32(arg+offset).
+    return 0; // success; caller retries with populated arrays
   }
 
   private _getCrtc(crtcId: number): number {

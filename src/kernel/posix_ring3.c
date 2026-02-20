@@ -1,7 +1,7 @@
 /*
- * posix_ring3.c — Ring-3 POSIX syscall wrappers for JSOS  (Phase 6 / 9)
+ * posix_ring3.c — Ring-3 POSIX syscall wrappers for JSOS  (Phase 6+)
  *
- * This file is compiled into libposix.a and linked with Chromium (ring-3).
+ * This file is compiled into libposix.a and linked with ring-3 ELF processes.
  * Each function issues an `int $0x80` instruction; the JSOS kernel routes
  * the call through syscall_dispatch() in irq.c (ring-0).
  *
@@ -506,7 +506,7 @@ int pthread_mutex_unlock(void *m) {
     return __retval(__syscall1(NR_MUTEX_UNLOCK, *(int*)m));
 }
 
-/* Condvar — minimal stubs (JSOS Phase 9: single-process Chromium) */
+/* Condvar — minimal stubs for ring-3 single-process programs */
 int pthread_cond_init(void *c, const void *attr)  { (void)c;(void)attr; return 0; }
 int pthread_cond_destroy(void *c)                  { (void)c; return 0; }
 int pthread_cond_wait(void *c, void *m)            {

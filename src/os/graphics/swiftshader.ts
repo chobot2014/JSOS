@@ -3,14 +3,12 @@
  *
  * Software Vulkan / OpenGL ES renderer.
  *
- * Production architecture: SwiftShader (lib/swiftshader/) is compiled as a
- * static archive and linked against JSOS.  TypeScript platform bridges in
- * lib/swiftshader/jsos/ route memory allocation, thread creation, and
- * framebuffer presentation back to JSOS TypeScript APIs.
+ * Pure TypeScript software rasterizer — produces pixel-correct output on
+ * bare metal without any GPU.  Used by the DRM page-flip path and the JSOS
+ * native browser to render content through the WM canvas.
  *
- * This module: pure TypeScript software rasterizer that implements the same
- * public API that Phase 9 Chromium will call.  Produces pixel-correct output
- * on bare metal without any GPU.
+ * Implements the same interface that a real SwiftShader Vulkan/GLES library
+ * would expose so it can be swapped for a hardware-accelerated backend later.
  */
 
 import type { Canvas } from '../ui/canvas.js';
@@ -182,7 +180,7 @@ export class SwiftShaderBackend {
 
   /**
    * Blit a raw BGRA Uint32Array render target into the renderer.
-   * Used by the DRM page-flip path: Chromium writes pixels via mmap'd
+   * Used by the DRM page-flip path — callers write pixels via mmap'd
    * dumb buffers; we copy them here before calling present().
    */
   blitRaw(pixels: Uint32Array, x: number, y: number,

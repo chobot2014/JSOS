@@ -265,25 +265,14 @@ export class InitSystem {
     // Runlevel 4 — graphical environment
     this.registerService(svc('display',  'Display/WM service',         '/bin/display.js',         4, ['ipc'],            55,   45, 'always'));
 
-    // Runlevel 5 — Chromium browser  [Phase 9]
-    // Launched via ELF exec() — the binary lives on the virtual disk at /disk/chromium.
-    // Flags: --no-sandbox disables sandbox (JSOS has no seccomp/namespaces),
-    //        --ozone-platform=jsos selects the JSOS Ozone backend (Phase 9 C++),
-    //        --use-gl=swiftshader routes WebGL through the Phase 8 SwiftShader backend,
-    //        --single-process / --in-process-gpu keep everything in one ring-3 process.
-    const chromeArgs = [
-      '--no-sandbox',
-      '--disable-gpu-sandbox',
-      '--ozone-platform=jsos',
-      '--use-gl=swiftshader',
-      '--in-process-gpu',
-      '--single-process',
-    ];
-    const chromeSvc: Service = {
-      name:          'chromium',
-      description:   'Chromium browser (ELF exec, ring-3)',
-      executable:    '/disk/chromium',
-      args:          chromeArgs,
+    // Runlevel 5 — JSOS native browser  [Phase 9]
+    // Built 100% in TypeScript.  Uses the JSOS DNS + HTTP/HTTPS stack for
+    // real network requests.  Launched as a JS service by the WM init path.
+    const browserSvc: Service = {
+      name:          'browser',
+      description:   'JSOS native TypeScript browser',
+      executable:    '/bin/browser.js',
+      args:          [],
       runlevel:      5 as RunLevel,
       dependencies:  ['network', 'display'],
       startPriority: 70,
@@ -294,8 +283,8 @@ export class InitSystem {
       user:          'root',
       group:         'root',
     };
-    this.registerService(chromeSvc);
-    kernel.serialPut('Chromium service registered (runlevel 5)\n');
+    this.registerService(browserSvc);
+    kernel.serialPut('JSOS native browser service registered (runlevel 5)\n');
   }
 
   /**

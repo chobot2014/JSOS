@@ -32,7 +32,7 @@ import { devFSMount } from '../fs/dev.js';
 import { createScreenCanvas } from '../ui/canvas.js';
 import { WindowManager, setWM } from '../ui/wm.js';
 import { terminalApp } from '../apps/terminal-app.js';
-import { chromiumApp, chromiumLaunched } from '../apps/chromium-app.js';
+import { browserApp } from '../apps/browser.js';
 import { dhcpDiscover } from '../net/dhcp.js';
 import { dnsResolve } from '../net/dns.js';
 import { httpGet, httpsGet } from '../net/http.js';
@@ -297,7 +297,7 @@ function setupGlobals(): void {
   };
 
   // ── Phase 8: Graphics API (SwiftShader + DRM) ────────────────────────
-  // Exposed as g.gl — the same API that Chromium calls in Phase 9.
+  // Exposed as g.gl — software rasterizer API used by the WM and browser.
   g.gl = {
     // SwiftShader Vulkan-like API
     createVkInstance: function() { return swiftShader.createVkInstance(); },
@@ -1176,37 +1176,27 @@ function main(): void {
       kernel.serialPut('Phase 8 graphics stack ready\n');
       // ── End Phase 8 ──────────────────────────────────────────────────────
 
-      // ── Phase 9: Chromium Port ────────────────────────────────────────────
-      // Open a WM window that shows the Chromium splash while the ELF exec()
-      // prepares.  On bare metal with a real /disk/chromium binary, calling
-      // sys.exec('/disk/chromium', [...]) from the REPL (or from the
-      // chromium init service at runlevel 5) will hand control to ring-3.
+      // ── Phase 9: JSOS Native Browser ──────────────────────────────────────
+      // Launch the JSOS native TypeScript browser.  Written 100% in TypeScript
+      // — no Chromium, no external runtimes.  Uses the JSOS DNS + HTTP/HTTPS
+      // stack for real network requests and renders HTML on the WM canvas.
       wmInst.createWindow({
-        title:  'Chromium',
+        title:     'Browser',
         x: 20, y: 20,
         width:  Math.min(screen.width  - 40, 1024),
         height: Math.min(screen.height - 80, 700),
-        app:    chromiumApp,
+        app:    browserApp,
         closeable: true,
       });
 
-      // Register the chromium ELF exec launcher in the REPL so the user or
-      // the init service can trigger it at any time.
-      // e.g.: sys.launch_chromium()
+      // Expose sys.browser() shortcut for the REPL
       var g2 = globalThis as any;
-      g2.sys.launch_chromium = function() {
-        kernel.serialPut('[Phase 9] exec /disk/chromium\n');
-        chromiumLaunched();          // update splash → "Ozone active"
-        return syscalls.exec('/disk/chromium', [
-          '--no-sandbox', '--disable-gpu-sandbox',
-          '--ozone-platform=jsos', '--use-gl=swiftshader',
-          '--in-process-gpu', '--single-process',
-        ]);
+      g2.sys.browser = function(url?: string) {
+        if (url) browserApp.onKey({ ch: url, ext: 0 });
+        return 'Browser: ' + (url || 'about:jsos');
       };
 
-      kernel.serialPut('ELF exec ready: ring-3 transition active\n');
-      kernel.serialPut('Chromium service registered (runlevel 5)\n');
-      kernel.serialPut('Phase 9 Chromium port ready\n');
+      kernel.serialPut('JSOS native browser ready\n');
       // ── End Phase 9 ──────────────────────────────────────────────────────
 
       wmInst.createWindow({
