@@ -108,12 +108,14 @@ export class Terminal {
 
   //  Character output 
 
-  putchar(ch: string): void {
-    if (this._viewOffset !== 0) this.resumeLive();
+  /**
+   * Internal: process one character for VGA output only.
+   * Does NOT write to serial and does NOT update the hardware cursor.
+   * Call putchar() for interactive single-char I/O, or let print()/println()
+   * batch serial + cursor for bulk text (1 C call each vs N per character).
+   */
+  private _putchar_vga(ch: string): void {
     var code = ch.charCodeAt(0);
-    // Mirror to serial so QEMU -serial stdio shows all output
-    kernel.serialPut(ch);
-
     if (code === 10) {        // \n  newline
       this._col = 0;
       this._row++;
@@ -145,19 +147,29 @@ export class Terminal {
         if (this._row >= VGA_H) this._scroll();
       }
     }
-
-    kernel.vgaSetCursor(this._row, this._col);
   }
 
-  /** Print a string (no automatic newline) */
+  /** Output a single character with immediate serial mirror and cursor update.
+   *  Use this for interactive character-by-character I/O (readline echo, etc.). */
+  putchar(ch: string): void {
+    if (this._viewOffset !== 0) this.resumeLive();
+    kernel.serialPut(ch);          // serial mirror
+    this._putchar_vga(ch);         // VGA
+    kernel.vgaSetCursor(this._row, this._col);  // cursor
+  }
+
+  /** Print a string (no automatic newline).
+   *  Batches serial into 1 C call and cursor into 1 C call regardless of length. */
   print(text: string): void {
-    for (var i = 0; i < text.length; i++) this.putchar(text[i]);
+    if (this._viewOffset !== 0) this.resumeLive();
+    kernel.serialPut(text);   // 1 serial call for the whole string
+    for (var i = 0; i < text.length; i++) this._putchar_vga(text[i]);
+    kernel.vgaSetCursor(this._row, this._col);   // 1 cursor update at end
   }
 
   /** Print a string followed by a newline */
   println(text: string = ''): void {
-    this.print(text);
-    this.putchar('\n');
+    this.print(text + '\n');
   }
 
   /** Print with a temporary colour, then restore */

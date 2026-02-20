@@ -39,10 +39,13 @@ var C_WARN    = 0x4E;  // yellow on red
 var C_PROMPT  = 0x1F;  // white on blue
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+// Pre-built space string for O(1) padding (avoids O(n²) concat loop)
+var _SPACES80 = '                                                                                ';
+
 function pad80(s: string): string {
   if (s.length >= 80) return s.slice(0, 80);
-  while (s.length < 80) s += ' ';
-  return s;
+  return s + _SPACES80.slice(0, 80 - s.length);
 }
 
 function lpad(s: string, w: number): string {
@@ -53,8 +56,9 @@ function lpad(s: string, w: number): string {
 // ── Public entry point ───────────────────────────────────────────────────────
 export function openEditor(filePath?: string): void {
 
-  // Load file or start empty
+  // Load file or start empty; normalise CRLF → LF so \r never appears in lines
   var content = filePath ? (fs.readFile(filePath) || '') : '';
+  content = content.replace(/\r/g, '');
   var lines: string[] = content.split('\n');
   if (lines.length === 0) lines = [''];
 
@@ -65,6 +69,18 @@ export function openEditor(filePath?: string): void {
   var savedPath = filePath || '';
   var clipboard = '';
   var message   = '';  // one-shot status message (cleared after next render)
+
+  // ── Render cache ────────────────────────────────────────────────────────
+  // Track what each screen row currently shows to skip redundant vgaDrawRow calls.
+  // Typing on row R → only row R cache-misses → 1 C call instead of 23.
+  var _rendCache: string[] = [];
+  var _rendColor: number[] = [];
+  for (var _ri = 0; _ri < EDIT_ROWS; _ri++) { _rendCache.push(''); _rendColor.push(-1); }
+  var _prevViewTop = -1;
+
+  function invalidateAll(): void {
+    for (var i = 0; i < EDIT_ROWS; i++) { _rendCache[i] = ''; _rendColor[i] = -1; }
+  }
 
   // ── Clamp curCol to line length ──────────────────────────────────────────
   function clampCol(): void {
@@ -79,32 +95,46 @@ export function openEditor(filePath?: string): void {
     if (viewTop < 0) viewTop = 0;
   }
 
-  // ── Render one content row ───────────────────────────────────────────────
+  // ── Render one content row (skips VGA call if content unchanged) ──────────
   function renderContentRow(screenRow: number): void {
     var docRow = viewTop + screenRow;
+    var text: string;
+    var color: number;
     if (docRow < lines.length) {
-      var line = lines[docRow];
-      kernel.vgaDrawRow(screenRow, pad80(line), C_NORMAL);
+      text  = pad80(lines[docRow]);
+      color = C_NORMAL;
     } else {
-      kernel.vgaDrawRow(screenRow, pad80('~'), C_TILDE);
+      text  = '~' + _SPACES80.slice(0, 79);  // pre-padded tilde row (constant)
+      color = C_TILDE;
+    }
+    if (_rendCache[screenRow] !== text || _rendColor[screenRow] !== color) {
+      kernel.vgaDrawRow(screenRow, text, color);
+      _rendCache[screenRow] = text;
+      _rendColor[screenRow] = color;
     }
   }
 
   // ── Render the whole editor ───────────────────────────────────────────────
   function render(): void {
-    // Content area
+    // Invalidate cache when viewport scrolled (docRow→screenRow mapping changed)
+    if (viewTop !== _prevViewTop) {
+      invalidateAll();
+      _prevViewTop = viewTop;
+    }
+
+    // Content area — only rows whose content changed get a vgaDrawRow call
     for (var r = 0; r < EDIT_ROWS; r++) renderContentRow(r);
 
-    // Status bar
+    // Status bar (always — cursor position changes every keypress)
     var fname   = savedPath || '[No File]';
     var mod     = modified ? ' [+]' : '';
     var posInfo = ' Ln ' + (curRow + 1) + '/' + lines.length +
                   ' Co ' + (curCol + 1) + ' ';
     var left    = ' JSOS Edit \u2502 ' + fname + mod;
-    var status  = left;
-    while (status.length < 80 - posInfo.length) status += ' ';
-    status = pad80(status + posInfo);
-    kernel.vgaDrawRow(STATUS_ROW, status, message ? C_WARN : C_STATUS);
+    var needed  = 80 - posInfo.length;
+    var leftTrunc = left.length > needed ? left.slice(0, needed) : left;
+    var status  = leftTrunc + _SPACES80.slice(0, needed - leftTrunc.length) + posInfo;
+    kernel.vgaDrawRow(STATUS_ROW, status.slice(0, 80), message ? C_WARN : C_STATUS);
 
     // Hint bar — show one-shot message or default hints
     var hintText: string;
@@ -267,6 +297,8 @@ export function openEditor(filePath?: string): void {
 
       } else if (ch === '\x0c') {      // Ctrl+L — force full redraw
         kernel.vgaFill(' ', 0x07);
+        invalidateAll();
+        _prevViewTop = -1;
 
       } else if (ch === '\n' || ch === '\r') {   // Enter — split line
         var before = lines[curRow].slice(0, curCol);
