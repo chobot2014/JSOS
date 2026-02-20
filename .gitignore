@@ -20,6 +20,10 @@ package-lock.json
 
 # Generated files
 src/kernel/embedded_js.h
+src/os/fs/romfs.ts
+
+# Downloaded resources (fetched during Docker build, not committed)
+resources/bible.txt
 
 # IDE
 .vscode/
