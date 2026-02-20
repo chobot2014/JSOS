@@ -31,6 +31,7 @@ import { devFSMount } from '../fs/dev.js';
 import { createScreenCanvas } from '../ui/canvas.js';
 import { WindowManager, setWM } from '../ui/wm.js';
 import { terminalApp } from '../apps/terminal-app.js';
+import { chromiumApp, chromiumLaunched } from '../apps/chromium-app.js';
 import { dhcpDiscover } from '../net/dhcp.js';
 import { dnsResolve } from '../net/dns.js';
 import { httpGet, httpsGet } from '../net/http.js';
@@ -280,6 +281,15 @@ function setupGlobals(): void {
     // ── Phase 8: ioctl (device control) ───────────────────────────────────
     ioctl:     function(fd: number, request: number, arg: number) {
                  return globalFDTable.ioctl(fd, request, arg);
+               },
+    // ── Phase 9: ELF exec → ring-3  ───────────────────────────────────────
+    // sys.exec('/disk/chromium', ['--no-sandbox', ...])
+    // Loads the ELF binary from the VFS, maps segments with USER-page flags,
+    // and hands control to ring-3 via kernel.jumpToUserMode.  Does not return
+    // on success (the kernel irets to user space and stays there until the
+    // process exits or is killed by an IRQ handler).
+    exec:      function(path: string, args?: string[]) {
+                 return syscalls.exec(path, args || []);
                },
   };
 
@@ -1152,6 +1162,39 @@ function main(): void {
       }
       kernel.serialPut('Phase 8 graphics stack ready\n');
       // ── End Phase 8 ──────────────────────────────────────────────────────
+
+      // ── Phase 9: Chromium Port ────────────────────────────────────────────
+      // Open a WM window that shows the Chromium splash while the ELF exec()
+      // prepares.  On bare metal with a real /disk/chromium binary, calling
+      // sys.exec('/disk/chromium', [...]) from the REPL (or from the
+      // chromium init service at runlevel 5) will hand control to ring-3.
+      wmInst.createWindow({
+        title:  'Chromium',
+        x: 20, y: 20,
+        width:  Math.min(screen.width  - 40, 1024),
+        height: Math.min(screen.height - 80, 700),
+        app:    chromiumApp,
+        closeable: true,
+      });
+
+      // Register the chromium ELF exec launcher in the REPL so the user or
+      // the init service can trigger it at any time.
+      // e.g.: sys.launch_chromium()
+      var g2 = globalThis as any;
+      g2.sys.launch_chromium = function() {
+        kernel.serialPut('[Phase 9] exec /disk/chromium\n');
+        chromiumLaunched();          // update splash → "Ozone active"
+        return syscalls.exec('/disk/chromium', [
+          '--no-sandbox', '--disable-gpu-sandbox',
+          '--ozone-platform=jsos', '--use-gl=swiftshader',
+          '--in-process-gpu', '--single-process',
+        ]);
+      };
+
+      kernel.serialPut('ELF exec ready: ring-3 transition active\n');
+      kernel.serialPut('Chromium service registered (runlevel 5)\n');
+      kernel.serialPut('Phase 9 Chromium port ready\n');
+      // ── End Phase 9 ──────────────────────────────────────────────────────
 
       wmInst.createWindow({
         title:  'Terminal',

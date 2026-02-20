@@ -1,0 +1,40 @@
+# JSOS Ozone Platform — BUILD.gn  (Phase 9)
+#
+# Builds the JSOS Ozone platform backend for Chromium.
+# Compiled with i686-elf-g++ targeting the JSOS bare-metal sysroot.
+#
+# Add "//ui/ozone/platform/jsos:jsos" to src/ui/ozone/BUILD.gn's
+# ozone_platform_* sources list and register CreateOzonePlatformJsos()
+# in src/ui/ozone/ozone_platform.cc.
+
+import("//ui/ozone/ozone.gni")
+
+ozone_platform("jsos") {
+  platform_name = "jsos"
+  sources = [
+    "jsos_event_source.cc",
+    "jsos_event_source.h",
+    "jsos_surface_factory.cc",
+    "jsos_surface_factory.h",
+    "jsos_window.cc",
+    "jsos_window.h",
+    "ozone_platform_jsos.cc",
+    "ozone_platform_jsos.h",
+  ]
+
+  deps = [
+    "//base",
+    "//ui/events",
+    "//ui/events/ozone",
+    "//ui/events/platform",
+    "//ui/gfx",
+    "//ui/gfx/geometry",
+    "//ui/gl",
+    "//ui/ozone/public",
+    "//ui/platform_window",
+  ]
+
+  defines = [
+    "OZONE_PLATFORM_JSOS",
+  ]
+}

@@ -26,6 +26,11 @@ int main(void) {
     platform_boot_print("[BOOT] Loading GDT...\n");
     gdt_flush();
 
+    /* Phase 9: install user-mode GDT entries + TSS so ring-3 exec works */
+    platform_tss_init();
+    platform_gdt_install_tss();
+    platform_boot_print("[BOOT] TSS installed (ring-3 exec ready)\n");
+
     platform_boot_print("[BOOT] Initializing interrupts...\n");
     irq_initialize();
 

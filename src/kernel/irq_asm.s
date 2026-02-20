@@ -39,23 +39,39 @@ global gdt_end
 section .data
 align 16
 gdt_start:
-    ; Null descriptor
+    ; Null descriptor (0x00)
     dd 0x0
     dd 0x0
-    ; Code segment descriptor (0x08)
+    ; Kernel code segment (0x08) — ring 0, exec+read
     dw 0xFFFF    ; Limit low
     dw 0x0000    ; Base low
     db 0x00      ; Base middle
-    db 10011010b ; Access: present, ring 0, code segment, executable, readable
-    db 11001111b ; Flags: 4KB granularity, 32-bit, limit high
+    db 10011010b ; Access: present, ring 0, code, executable, readable
+    db 11001111b ; Flags: 4KB granularity, 32-bit, limit high=0xF
     db 0x00      ; Base high
-    ; Data segment descriptor (0x10)
+    ; Kernel data segment (0x10) — ring 0, read+write
     dw 0xFFFF    ; Limit low
     dw 0x0000    ; Base low
     db 0x00      ; Base middle
-    db 10010010b ; Access: present, ring 0, data segment, writable
-    db 11001111b ; Flags: 4KB granularity, 32-bit, limit high
+    db 10010010b ; Access: present, ring 0, data, writable
+    db 11001111b ; Flags: 4KB granularity, 32-bit, limit high=0xF
     db 0x00      ; Base high
+    ; User code segment (0x18, selector 0x1B) — ring 3, exec+read  [Phase 9]
+    dw 0xFFFF    ; Limit low
+    dw 0x0000    ; Base low
+    db 0x00      ; Base middle
+    db 11111010b ; Access: present, ring 3, code, executable, readable
+    db 11001111b ; Flags: 4KB granularity, 32-bit, limit high=0xF
+    db 0x00      ; Base high
+    ; User data segment (0x20, selector 0x23) — ring 3, read+write  [Phase 9]
+    dw 0xFFFF    ; Limit low
+    dw 0x0000    ; Base low
+    db 0x00      ; Base middle
+    db 11110010b ; Access: present, ring 3, data, writable
+    db 11001111b ; Flags: 4KB granularity, 32-bit, limit high=0xF
+    db 0x00      ; Base high
+    ; TSS descriptor (0x28) — filled at runtime by platform_gdt_install_tss()  [Phase 9]
+    dq 0x0000000000000000
 gdt_end:
 
 gdtr:

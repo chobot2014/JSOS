@@ -1,15 +1,15 @@
 /**
- * JSOS ELF32 Loader — Phase 6
+ * JSOS ELF32 Loader — Phase 6 / Phase 9
  *
  * Parses ELF32 executables and maps their PT_LOAD segments into an address space.
  *
- * Phase 6 supports static ELF32 executables only.
- * Dynamic linking (.so) is deferred to Phase 9.
- * Actual ring-3 execution (CPU mode switch) is Phase 9; Phase 6 provides the
- * loader plumbing and a TypeScript-native simulation for testing.
+ * Phase 6: parser + TypeScript simulation.
+ * Phase 9: real physical-page allocation + kernel.setPageEntry mapping +
+ *          ring-3 exec via kernel.jumpToUserMode.
  */
 
 /* ELF magic and type constants */
+declare var kernel: import('../core/kernel.js').KernelAPI;
 const ELFMAG0 = 0x7f;
 const ELFMAG1 = 0x45; // 'E'
 const ELFMAG2 = 0x4c; // 'L'
@@ -188,6 +188,121 @@ export class ELFLoader {
     }
 
     return payload; // fallback
+  }
+
+  /**
+   * Phase 9: Load ELF segments into physical memory using 4 MB huge pages.
+   *
+   * For each PT_LOAD segment:
+   *  1. Determine which 4 MB PD entries (pdIdx = vaddr >> 22) it covers.
+   *  2. For each new PDE, allocate a contiguous 4 MB physical region via physAlloc.
+   *  3. Map the region with kernel.setPageEntry using PRESENT | WRITABLE | USER | HUGE.
+   *  4. Copy file bytes into the physical mapping via kernel.writeMem8.
+   *  5. Zero-fill any memsz remainder (BSS).
+   *
+   * Returns an object with { ok, userStackTop } or throws on allocation failure.
+   */
+  loadIntoMemory(
+    info: ELFInfo,
+    physAllocInst: { alloc(pages: number): number }
+  ): { ok: boolean; userStackTop: number } {
+    const PAGE_4MB    = 0x400000;
+    const PAGE_4MB_M  = PAGE_4MB - 1;
+    const FLAG_PRESENT  = 0x001;
+    const FLAG_WRITABLE = 0x002;
+    const FLAG_USER     = 0x004;
+    const FLAG_HUGE     = 0x080;
+    const USER_FLAGS    = FLAG_PRESENT | FLAG_WRITABLE | FLAG_USER | FLAG_HUGE;
+
+    // Track which pdIdx have already been allocated (vaddr → physBase map).
+    var mapped = new Map<number, number>();
+
+    function ensureMapped(vaddr: number): number {
+      var pdIdx   = (vaddr >>> 22) & 0x3FF;
+      if (mapped.has(pdIdx)) return mapped.get(pdIdx)!;
+      // Allocate 1024 x 4KB = 4MB of contiguous physical pages.
+      var physBase = physAllocInst.alloc(1024);
+      // Map into the page directory.
+      kernel.setPageEntry(pdIdx, 0, physBase, USER_FLAGS);
+      mapped.set(pdIdx, physBase);
+      return physBase;
+    }
+
+    // Load all PT_LOAD segments.
+    for (var si = 0; si < info.segments.length; si++) {
+      var seg = info.segments[si];
+      if (seg.type !== 1 /* PT_LOAD */) continue;
+
+      // Ensure every 4 MB page the segment touches is mapped.
+      var segEnd = seg.vaddr + seg.memsz;
+      for (var vpage = seg.vaddr & ~PAGE_4MB_M; vpage < segEnd; vpage = (vpage + PAGE_4MB) >>> 0) {
+        ensureMapped(vpage);
+      }
+
+      // Write file bytes.
+      for (var fi = 0; fi < seg.filesz; fi++) {
+        var va      = (seg.vaddr + fi) >>> 0;
+        var pdIdx2  = (va >>> 22) & 0x3FF;
+        var pBase   = mapped.get(pdIdx2)!;
+        var pAddr   = (pBase + (va & PAGE_4MB_M)) >>> 0;
+        kernel.writeMem8(pAddr, seg.data[fi]);
+      }
+
+      // Zero BSS (memsz > filesz).
+      for (var bi = seg.filesz; bi < seg.memsz; bi++) {
+        var va2   = (seg.vaddr + bi) >>> 0;
+        var pIdx  = (va2 >>> 22) & 0x3FF;
+        var pBas  = mapped.get(pIdx)!;
+        var pAdr  = (pBas + (va2 & PAGE_4MB_M)) >>> 0;
+        kernel.writeMem8(pAdr, 0);
+      }
+    }
+
+    // Allocate and map a user-space stack (4 MB at vaddr 0x7FC00000).
+    var stackVBase = 0x7FC00000;
+    ensureMapped(stackVBase);
+    var userStackTop = (stackVBase + PAGE_4MB - 16) >>> 0; // leave 16B margin
+
+    kernel.flushTLB();
+    return { ok: true, userStackTop };
+  }
+
+  /**
+   * Phase 9: Read an ELF32 binary from the VFS, load it, and return
+   * { entry, userStackTop, ok } so the caller can call kernel.jumpToUserMode.
+   *
+   * @param path          VFS path (e.g. '/disk/chromium')
+   * @param fsInst        filesystem singleton (fs from filesystem.ts)
+   * @param physAllocInst physAlloc singleton
+   */
+  execFromVFS(
+    path: string,
+    fsInst: { readFileBinary?(path: string): number[] | null; readFile(path: string): string | null },
+    physAllocInst: { alloc(pages: number): number }
+  ): { ok: boolean; entry: number; userStackTop: number } {
+    // Try binary read first; fall back to treating the file as raw bytes.
+    var bytes: number[] | null = null;
+    if (typeof (fsInst as any).readFileBinary === 'function') {
+      bytes = (fsInst as any).readFileBinary(path);
+    }
+    if (!bytes) {
+      var raw = fsInst.readFile(path);
+      if (!raw) return { ok: false, entry: 0, userStackTop: 0 };
+      bytes = [];
+      for (var i = 0; i < raw.length; i++) bytes.push(raw.charCodeAt(i) & 0xFF);
+    }
+
+    var info: ELFInfo;
+    try {
+      info = this.parse(bytes);
+    } catch (e) {
+      return { ok: false, entry: 0, userStackTop: 0 };
+    }
+
+    var result = this.loadIntoMemory(info, physAllocInst);
+    if (!result.ok) return { ok: false, entry: 0, userStackTop: 0 };
+
+    return { ok: true, entry: info.entry, userStackTop: result.userStackTop };
   }
 }
 

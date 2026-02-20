@@ -9,6 +9,8 @@
 import { globalFDTable, VFSFileDescription, SocketDescription } from './fdtable.js';
 import { processManager } from '../process/process.js';
 import { vmm } from '../process/vmm.js';
+import { physAlloc } from '../process/physalloc.js';
+import { elfLoader } from '../process/elf.js';
 import { signalManager } from '../process/signals.js';
 import { net } from '../net/net.js';
 import fs from '../fs/filesystem.js';
@@ -133,9 +135,46 @@ export class SystemCallInterface {
     catch (e) { return { success: false, error: String(e), errno: Errno.ENOMEM }; }
   }
 
-  exec(_path: string, _args: string[]): SyscallResult<never> {
-    // Full ELF exec + ring-3 CPU switch is Phase 9; cooperative stub for now.
-    return { success: false, error: 'exec: Phase 9 (ring-3) not yet active', errno: Errno.ENOSYS };
+  exec(path: string, args: string[]): SyscallResult<never> {
+    // Phase 9: real ELF exec + ring-3 CPU switch.
+    // 1. Load the ELF binary from the VFS into user-space physical pages.
+    // 2. Clone the kernel address space so the user process has its own PD.
+    // 3. Set TSS.ESP0 to the current kernel stack top so ring-3→ring-0
+    //    syscall transitions know where to put the kernel stack.
+    // 4. kernel.jumpToUserMode(entry, userESP) — never returns.
+    try {
+      var result = elfLoader.execFromVFS(path, fs as any, physAlloc);
+      if (!result.ok) {
+        return { success: false, error: 'exec: failed to load ' + path, errno: Errno.ENOEXEC };
+      }
+
+      // Clone the kernel page directory so the user process gets its own copy.
+      var newPD = kernel.cloneAddressSpace();
+      if (newPD) {
+        // Switch to the new PD so the user mappings are in effect.
+        kernel.setPDPT(newPD);
+        kernel.flushTLB();
+      }
+
+      // Set TSS.ESP0 to ~current stack pointer so ring-3 syscalls get a valid
+      // kernel stack.  We read a plausible kernel stack base from irq_asm BSS.
+      // Use 512 KB above the first usable physical page (conservative estimate).
+      kernel.tssSetESP0(0x80000);  // 512 KB kernel stack ceiling
+
+      // Log to serial before the point of no return.
+      kernel.serialPut('[exec] jumping to user EIP=0x' + result.entry.toString(16)
+                       + ' ESP=0x' + result.userStackTop.toString(16) + '\n');
+
+      // Transfer control to ring-3 — does not return.
+      kernel.jumpToUserMode(result.entry, result.userStackTop);
+
+      // TypeScript control flow unreachable after jumpToUserMode.
+      // Silence the compiler with an explicit throw.
+      throw new Error('unreachable');
+    } catch (e: any) {
+      if (e && e.message === 'unreachable') throw e;
+      return { success: false, error: 'exec: ' + String(e), errno: Errno.ENOEXEC };
+    }
   }
 
   exit(status: number): void {

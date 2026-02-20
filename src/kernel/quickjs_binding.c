@@ -639,31 +639,84 @@ static JSValue js_enable_paging(JSContext *c, JSValueConst this_val,
     return JS_TRUE;
 }
 
-/* ── Phase 6: process primitives (stubs — full impl in Phase 9) ───────── */
+/* ── Phase 9: real process primitives ─────────────────────────────────── */
+
+/*
+ * Pool of user-space page directories.  Each is 4 KiB, 4 KiB-aligned.
+ * We support up to 32 concurrent user address spaces.
+ */
+#define MAX_USER_PDS 32
+static uint32_t _user_pds[MAX_USER_PDS][1024] __attribute__((aligned(4096)));
+static uint8_t  _user_pd_used[MAX_USER_PDS];
 
 /*
  * kernel.cloneAddressSpace() → number
- * Allocates a new page directory and copies all present PDEs from the current
- * one (eager copy-on-write deferred to Phase 9).  Phase 6 returns 0 as a
- * placeholder — TypeScript uses it only as an opaque handle.
+ * Allocates a new page directory and copies all present huge-page PDEs from
+ * the current kernel paging_pd.  Returns the physical address of the new PD
+ * so TypeScript can pass it to kernel.setPDPT() when setting up the child
+ * address space.
+ * Phase 9: real eager-copy implementation.
  */
 static JSValue js_clone_address_space(JSContext *c, JSValueConst this_val,
                                        int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
-    /* Phase 6 stub: full page-directory clone is Phase 9 */
-    return JS_NewInt32(c, 0);
+    /* Find a free slot */
+    int slot = -1;
+    for (int i = 0; i < MAX_USER_PDS; i++) {
+        if (!_user_pd_used[i]) { slot = i; break; }
+    }
+    if (slot < 0) return JS_NewInt32(c, 0);   /* out of PD slots */
+
+    _user_pd_used[slot] = 1;
+
+    /* Eager copy: duplicate all present kernel PDEs (huge pages) */
+    for (int i = 0; i < 1024; i++)
+        _user_pds[slot][i] = paging_pd[i];
+
+    uint32_t phys = (uint32_t)(uintptr_t)_user_pds[slot];
+    return JS_NewInt32(c, (int32_t)phys);
 }
 
 /*
  * kernel.jumpToUserMode(eip, esp) → void
- * Sets up an iret frame targeting ring-3 (CS=user_cs, SS=user_ss) and
- * executes iret.  Never returns.
- * Phase 6 stub — actual ring-3 transition added in Phase 9.
+ * Loads user-mode data segments, builds a 5-word iret frame on the kernel
+ * stack, and issues iret — transferring control to ring-3 at EIP:ESP.
+ * Phase 9: real ring-3 transition.  Never returns.
  */
 static JSValue js_jump_to_user_mode(JSContext *c, JSValueConst this_val,
                                      int argc, JSValueConst *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    /* Phase 6 stub: ring-3 transition is Phase 9 */
+    (void)c; (void)this_val;
+    uint32_t eip = 0, esp = 0;
+    if (argc >= 1) JS_ToUint32(c, &eip, argv[0]);
+    if (argc >= 2) JS_ToUint32(c, &esp, argv[1]);
+
+    /* User selectors: 0x1B = 0x18|3 (code, RPL=3), 0x23 = 0x20|3 (data, RPL=3) */
+    const uint32_t user_cs = 0x1B;
+    const uint32_t user_ss = 0x23;
+
+    /* Switch data segments to ring-3 before iret so that DS/ES/FS/GS are
+     * all set to the user data selector inside the new ring-3 context.       */
+    __asm__ volatile(
+        "mov %0, %%ds\n\t"
+        "mov %0, %%es\n\t"
+        "mov %0, %%fs\n\t"
+        "mov %0, %%gs\n\t"
+        :: "r"(user_ss) : "memory"
+    );
+
+    /* Push iret frame: SS, ESP, EFLAGS(IF=1), CS, EIP then iret             */
+    __asm__ volatile(
+        "push %0\n\t"           /* user SS                                   */
+        "push %1\n\t"           /* user ESP                                  */
+        "pushf\n\t"             /* current EFLAGS → push                     */
+        "orl  $0x200, (%%esp)\n\t" /* set IF (enable interrupts in ring-3)  */
+        "push %2\n\t"           /* user CS (0x1B)                            */
+        "push %3\n\t"           /* user EIP                                  */
+        "iret\n\t"
+        :: "r"(user_ss), "r"(esp), "r"(user_cs), "r"(eip)
+        : "memory"
+    );
+    __builtin_unreachable();
     return JS_UNDEFINED;
 }
 

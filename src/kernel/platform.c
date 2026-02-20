@@ -259,6 +259,49 @@ void platform_tss_set_esp0(uint32_t kernel_stack_top) {
     kernel_tss.esp0 = kernel_stack_top;
 }
 
+/*
+ * platform_gdt_install_tss()  [Phase 9]
+ * Writes a 32-bit available TSS descriptor into GDT slot 5 (offset 0x28)
+ * then executes `ltr` to make the CPU aware of the task register.
+ *
+ * GDT layout after Phase 9:
+ *   0x00  null
+ *   0x08  kernel code  (ring 0)
+ *   0x10  kernel data  (ring 0)
+ *   0x18  user code    (ring 3)
+ *   0x20  user data    (ring 3)
+ *   0x28  TSS          (DPL 0, type 0x9 = 32-bit available TSS)
+ */
+extern uint8_t gdt_start[];   /* defined in irq_asm.s */
+
+void platform_gdt_install_tss(void) {
+    uint32_t base  = (uint32_t)(uintptr_t)&kernel_tss;
+    uint32_t limit = (uint32_t)sizeof(tss_t) - 1;
+
+    /* GDT entry format (8 bytes):
+     * [15: 0] limit[15:0]
+     * [31:16] base[15:0]
+     * [39:32] base[23:16]
+     * [47:40] type/access:  P=1, DPL=0, S=0 (system), type=9 (32-bit avail TSS)
+     * [51:48] limit[19:16]
+     * [55:52] flags: G=0, D/B=0, L=0, AVL=0
+     * [63:56] base[31:24]
+     */
+    uint8_t *entry = gdt_start + 0x28;   /* slot 5 */
+
+    entry[0] = (uint8_t)(limit & 0xFF);
+    entry[1] = (uint8_t)((limit >> 8) & 0xFF);
+    entry[2] = (uint8_t)(base & 0xFF);
+    entry[3] = (uint8_t)((base >> 8) & 0xFF);
+    entry[4] = (uint8_t)((base >> 16) & 0xFF);
+    entry[5] = 0x89;   /* P=1, DPL=0, S=0, type=9 (32-bit avail. TSS) */
+    entry[6] = (uint8_t)((limit >> 16) & 0x0F);  /* limit[19:16], flags=0 */
+    entry[7] = (uint8_t)((base >> 24) & 0xFF);
+
+    /* Load Task Register with TSS selector 0x28 */
+    __asm__ volatile("ltr %%ax" :: "a"((uint16_t)0x28));
+}
+
 /* ── Framebuffer blit ────────────────────────────────────────────────────── */
 
 void platform_fb_blit(const uint32_t *src, int x, int y, int w, int h) {

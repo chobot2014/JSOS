@@ -7,6 +7,8 @@
 
 import { SyscallResult } from '../core/syscalls.js';
 
+declare var kernel: import('../core/kernel.js').KernelAPI;
+
 export type RunLevel = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 export type ServiceState = 'stopped' | 'starting' | 'running' | 'stopping' | 'failed';
 
@@ -259,6 +261,41 @@ export class InitSystem {
     this.registerService(svc('cron',     'Periodic task scheduler',    '/bin/cron.js',            3, ['syslogd'],        45,   55, 'always'));
     this.registerService(svc('ipc',      'IPC bus daemon',             '/bin/ipc.js',             3, ['syslogd'],        50,   50, 'always'));
     this.registerService(svc('repl',     'Interactive JavaScript REPL','/bin/repl',               3, ['users','network'],90,   10, 'always', 'user', 'users'));
+
+    // Runlevel 4 — graphical environment
+    this.registerService(svc('display',  'Display/WM service',         '/bin/display.js',         4, ['ipc'],            55,   45, 'always'));
+
+    // Runlevel 5 — Chromium browser  [Phase 9]
+    // Launched via ELF exec() — the binary lives on the virtual disk at /disk/chromium.
+    // Flags: --no-sandbox disables sandbox (JSOS has no seccomp/namespaces),
+    //        --ozone-platform=jsos selects the JSOS Ozone backend (Phase 9 C++),
+    //        --use-gl=swiftshader routes WebGL through the Phase 8 SwiftShader backend,
+    //        --single-process / --in-process-gpu keep everything in one ring-3 process.
+    const chromeArgs = [
+      '--no-sandbox',
+      '--disable-gpu-sandbox',
+      '--ozone-platform=jsos',
+      '--use-gl=swiftshader',
+      '--in-process-gpu',
+      '--single-process',
+    ];
+    const chromeSvc: Service = {
+      name:          'chromium',
+      description:   'Chromium browser (ELF exec, ring-3)',
+      executable:    '/disk/chromium',
+      args:          chromeArgs,
+      runlevel:      5 as RunLevel,
+      dependencies:  ['network', 'display'],
+      startPriority: 70,
+      stopPriority:  30,
+      restartPolicy: 'on-failure',
+      environment:   { DISPLAY: ':0', HOME: '/root' },
+      workingDirectory: '/',
+      user:          'root',
+      group:         'root',
+    };
+    this.registerService(chromeSvc);
+    kernel.serialPut('Chromium service registered (runlevel 5)\n');
   }
 
   /**

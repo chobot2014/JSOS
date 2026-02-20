@@ -81,10 +81,12 @@ void platform_fb_get_info(fb_info_t *out);
 
 /* TSS (Task State Segment) — Phase 5 ─────────────────────────────────────
  * Used so the CPU knows which kernel stack to switch to on ring-3→ring-0
- * transitions (Phase 6+).  Phase 5 initialises the structure; Phase 6 loads TR.
+ * transitions (Phase 6+).  Phase 5 initialises the structure; Phase 9 loads TR.
  */
 void platform_tss_init(void);
 void platform_tss_set_esp0(uint32_t kernel_stack_top);
+/* Install the TSS into GDT slot 5 (0x28) and execute ltr.  [Phase 9] */
+void platform_gdt_install_tss(void);
 void platform_fb_blit(const uint32_t *src, int x, int y, int w, int h);
 
 #endif /* PLATFORM_H */
