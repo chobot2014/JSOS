@@ -15,9 +15,15 @@
 static volatile uint32_t timer_ticks = 0;
 static uint32_t timer_freq = 0;
 
+/* Preemption counter — incremented every IRQ0, read+reset by js_sched_tick()
+ * in quickjs_binding.c.  JS can call kernel.schedTick() at any safe point to
+ * discover how many ticks elapsed and voluntarily run the scheduler hook.    */
+volatile uint32_t _preempt_counter = 0;
+
 /* IRQ0 handler - timer interrupt */
 static void timer_irq_handler(void) {
     timer_ticks++;
+    _preempt_counter++;
 }
 
 void timer_initialize(uint32_t frequency_hz) {

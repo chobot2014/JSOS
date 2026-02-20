@@ -13,6 +13,7 @@
  */
 
 import { Canvas, Colors, defaultFont, createScreenCanvas, type PixelColor } from './canvas.js';
+import { net } from '../net/net.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -261,6 +262,9 @@ export class WindowManager {
         focused.app.onKey({ ch: ch, ext: 0 });
       }
     }
+
+    // Drain virtio-net RX ring — keep the TCP/IP stack ticking every frame.
+    net.pollNIC();
   }
 
   // ── Compositing ────────────────────────────────────────────────────────

@@ -1037,8 +1037,10 @@ function main(): void {
       kernel.serialPut('REPL ready (windowed mode)\n');
 
       // WM event loop — cap at ~60 fps (2 PIT ticks @ 100 Hz = 20 ms/frame)
-      // Record start BEFORE tick so we cap on total frame time, not sleep-only.
+      // kernel.yield() at the top lets the cooperative scheduler run all ready
+      // threads before we render, so threads blocked in sleep() get their turn.
       for (;;) {
+        kernel.yield();           // cooperative scheduler tick (Phase 5)
         var _t0 = kernel.getTicks();
         wmInst.tick();
         while (kernel.getTicks() - _t0 < 2) { /* spin until 20 ms elapsed */ }

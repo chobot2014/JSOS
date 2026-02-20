@@ -149,6 +149,18 @@ export interface KernelAPI {
    */
   volatileAsm(hexBytes: string): number;
 
+  // ─ Deferred preemption (Phase 5) ──────────────────────────────────────────
+  /**
+   * Cooperatively yield to the TypeScript scheduler hook right now.
+   * Safe to call from any JS context (WM loop top, busy-wait loops, etc.).
+   */
+  yield(): void;
+  /**
+   * Returns how many IRQ0 timer ticks have fired since the last call, then
+   * resets the counter to zero.  Use this to decide when to call yield().
+   */
+  schedTick(): number;
+
   // ─ Mouse (Phase 3) ───────────────────────────────────────────────────────
   /**
    * Returns the next PS/2 mouse packet, or null if the queue is empty.

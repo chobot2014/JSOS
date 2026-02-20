@@ -175,9 +175,27 @@ static JSValue js_get_ticks(JSContext *c, JSValueConst this_val, int argc, JSVal
 static JSValue js_get_uptime(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
     return JS_NewInt32(c, (int32_t)timer_get_ms());
 }
+/* Forward-declared here so js_sleep() can call the scheduler hook on every
+ * tick during its busy-wait.  The actual storage lives further down in the
+ * Phase-5 section near js_register_scheduler_hook().                        */
+static JSValue _scheduler_hook;
 static JSValue js_sleep(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
     int32_t ms = 0; JS_ToInt32(c, &ms, argv[0]);
-    timer_sleep((uint32_t)ms); return JS_UNDEFINED;
+    uint32_t target    = timer_get_ms() + (uint32_t)ms;
+    uint32_t last_tick = timer_get_ticks();
+    while (timer_get_ms() < target) {
+        uint32_t now = timer_get_ticks();
+        if (now != last_tick) {
+            last_tick = now;
+            /* Cooperatively yield to the TypeScript scheduler on each tick. */
+            if (!JS_IsUndefined(_scheduler_hook)) {
+                JSValue r = JS_Call(c, _scheduler_hook, JS_UNDEFINED, 0, NULL);
+                JS_FreeValue(c, r);
+            }
+        }
+        __asm__ volatile ("hlt");
+    }
+    return JS_UNDEFINED;
 }
 
 /*  Memory  */
@@ -793,8 +811,8 @@ static JSValue js_get_page_fault_addr(JSContext *c, JSValueConst this_val,
  * TypeScript's ThreadManager registers its tick() here so C can invoke it
  * in future phases via js_scheduler_tick() when proper per-thread C stacks
  * are in place.
+ * (_scheduler_hook is forward-declared near js_sleep above.)
  */
-static JSValue _scheduler_hook;
 
 static JSValue js_register_scheduler_hook(JSContext *c, JSValueConst this_val,
                                            int argc, JSValueConst *argv) {
@@ -803,6 +821,31 @@ static JSValue js_register_scheduler_hook(JSContext *c, JSValueConst this_val,
     if (!JS_IsUndefined(_scheduler_hook)) JS_FreeValue(c, _scheduler_hook);
     _scheduler_hook = JS_DupValue(c, argv[0]);
     return JS_UNDEFINED;
+}
+
+/* kernel.yield() — immediately invoke the TypeScript scheduler hook from a
+ * safe JS context (i.e. not inside a C interrupt handler).  Call this at
+ * known-safe points (top of WM loop, etc.) so the cooperative thread manager
+ * gets a chance to run even without a sleep.                                 */
+static JSValue js_yield(JSContext *c, JSValueConst this_val,
+                        int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    if (!JS_IsUndefined(_scheduler_hook)) {
+        JSValue r = JS_Call(c, _scheduler_hook, JS_UNDEFINED, 0, NULL);
+        JS_FreeValue(c, r);
+    }
+    return JS_UNDEFINED;
+}
+
+/* kernel.schedTick() — returns the number of IRQ0 ticks that fired since the
+ * last call and resets the counter to zero.  JS can poll this to decide when
+ * to call kernel.yield() without a hard sleep.                               */
+static JSValue js_sched_tick(JSContext *c, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    uint32_t n = _preempt_counter;
+    _preempt_counter = 0;
+    return JS_NewUint32(c, n);
 }
 
 static JSValue js_tss_set_esp0(JSContext *c, JSValueConst this_val,
@@ -943,6 +986,8 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("enablePaging",  0, js_enable_paging),
     /* Scheduler hook + TSS (Phase 5) */
     JS_CFUNC_DEF("registerSchedulerHook", 1, js_register_scheduler_hook),
+    JS_CFUNC_DEF("yield",                 0, js_yield),
+    JS_CFUNC_DEF("schedTick",             0, js_sched_tick),
     JS_CFUNC_DEF("tssSetESP0",            1, js_tss_set_esp0),
     /* Process primitives (Phase 6) */
     JS_CFUNC_DEF("cloneAddressSpace",  0, js_clone_address_space),
