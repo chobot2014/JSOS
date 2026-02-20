@@ -191,17 +191,35 @@ export class TerminalApp implements App {
     const term = this._term;
 
     // Temporarily redirect the global terminal singleton → this CanvasTerminal
-    // so commands like help(), ls() etc. print here instead of invisible VGA memory.
+    // so commands like help(), ls(), clear() etc. print here instead of VGA memory.
     const saved = {
       print:        (terminal as any).print.bind(terminal),
       println:      (terminal as any).println.bind(terminal),
       colorPrint:   (terminal as any).colorPrint.bind(terminal),
       colorPrintln: (terminal as any).colorPrintln.bind(terminal),
+      setColor:     (terminal as any).setColor.bind(terminal),
+      clear:        (terminal as any).clear.bind(terminal),
     };
-    (terminal as any).print        = (s: string)            => { term.setColor(Colors.LIGHT_GREY); term.print(s); };
-    (terminal as any).println      = (s: string = '')       => { term.setColor(Colors.LIGHT_GREY); term.println(s); };
-    (terminal as any).colorPrint   = (s: string, c: number) => { term.setColor(VGA_TO_ARGB[c & 15] ?? Colors.LIGHT_GREY); term.print(s); };
-    (terminal as any).colorPrintln = (s: string, c: number) => { term.setColor(VGA_TO_ARGB[c & 15] ?? Colors.LIGHT_GREY); term.println(s); };
+
+    // Track the "persistent" foreground colour (set by setColor / reset after colorPrint).
+    // Mirrors the VGA terminal's push/pop colour behaviour.
+    let curColor = Colors.LIGHT_GREY;
+
+    (terminal as any).print        = (s: string)             => { term.setColor(curColor); term.print(s); };
+    (terminal as any).println      = (s: string = '')        => { term.setColor(curColor); term.println(s); };
+    (terminal as any).colorPrint   = (s: string, c: number)  => {
+      term.setColor(VGA_TO_ARGB[c & 15] ?? Colors.LIGHT_GREY); term.print(s);
+      term.setColor(curColor);   // restore persistent colour after, like the VGA terminal does
+    };
+    (terminal as any).colorPrintln = (s: string, c: number)  => {
+      term.setColor(VGA_TO_ARGB[c & 15] ?? Colors.LIGHT_GREY); term.println(s);
+      term.setColor(curColor);   // restore persistent colour after
+    };
+    (terminal as any).setColor     = (fg: number, _bg?: number) => {
+      curColor = VGA_TO_ARGB[fg & 15] ?? Colors.LIGHT_GREY;
+      term.setColor(curColor);
+    };
+    (terminal as any).clear        = () => { term.clear(); };
 
     // Same IIFE-sentinel eval as evalAndPrint() in repl.ts
     const exprWrapped =
@@ -228,6 +246,8 @@ export class TerminalApp implements App {
       (terminal as any).println      = saved.println;
       (terminal as any).colorPrint   = saved.colorPrint;
       (terminal as any).colorPrintln = saved.colorPrintln;
+      (terminal as any).setColor     = saved.setColor;
+      (terminal as any).clear        = saved.clear;
     }
 
     if (result === '__JSOS_PRINTED__') return;                        // pretty-printer ran
