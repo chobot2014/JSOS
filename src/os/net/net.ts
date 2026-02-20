@@ -187,6 +187,8 @@ function parseIPv4(raw: number[]): IPv4Packet | null {
   if (raw.length < 20) return null;
   var ihl = (raw[0] & 0x0f) * 4;
   if (raw.length < ihl) return null;
+  // Clip to IP total length to discard Ethernet zero-padding on short frames.
+  var totalLen = u16be(raw, 2);
   return {
     ihl,
     dscp:     (raw[1] >> 2) & 0x3f,
@@ -198,7 +200,7 @@ function parseIPv4(raw: number[]): IPv4Packet | null {
     protocol:  raw[9],
     src:       bytesToIp(raw, 12),
     dst:       bytesToIp(raw, 16),
-    payload:   raw.slice(ihl),
+    payload:   raw.slice(ihl, totalLen),
   };
 }
 function buildIPv4(pkt: IPv4Packet): number[] {
@@ -508,7 +510,6 @@ export class NetworkStack {
         break;
       case 'ESTABLISHED':
         if (seg.payload.length > 0) {
-          kernel.serialPut('TCP rx ' + ip.src + ':' + seg.srcPort + ' len=' + seg.payload.length + ' b0=' + seg.payload[0].toString(16) + '\n');
           conn.recvBuf = conn.recvBuf.concat(seg.payload);
           conn.recvSeq = (conn.recvSeq + seg.payload.length) >>> 0;
           // Deliver to socket's recvQueue

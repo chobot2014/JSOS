@@ -144,6 +144,9 @@ export class TLSSocket {
   private clientAppSeq = 0;
   private handshakeDone = false;
 
+  // Decrypted but not yet parsed handshake bytes (handles multi-message records)
+  private _hsDataBuf: number[] = [];
+
   constructor(hostname: string) {
     this.hostname = hostname;
     this.sock = net.createSocket('tcp');
@@ -162,26 +165,18 @@ export class TLSSocket {
 
     // Read ServerHello
     var sh = this._readHandshakeMsg(true);
-    if (!sh || sh.type !== HS_SERVER_HELLO) {
-      kernel.serialPut('TLS: no ServerHello (sh=' + (sh ? sh.type : 'null') + ' rxBuf=' + this.rxBuf.length + ')\n');
-      return false;
-    }
+    if (!sh || sh.type !== HS_SERVER_HELLO) return false;
     var serverPublic = this._parseServerHello(sh.data);
-    if (!serverPublic) {
-      kernel.serialPut('TLS: ServerHello parse failed\n');
-      return false;
-    }
+    if (!serverPublic) return false;
 
     // Derive handshake keys
     if (!this._deriveHandshakeKeys(serverPublic)) return false;
-    kernel.serialPut('TLS: handshake keys derived\n');
 
     // Read encrypted server handshake messages
     var finishedOk = false;
     for (var attempt = 0; attempt < 20; attempt++) {
       var msg = this._readEncryptedHandshakeMsg();
-      if (!msg) { kernel.serialPut('TLS: no encrypted msg at attempt=' + attempt + '\n'); break; }
-      kernel.serialPut('TLS: encrypted msg type=' + msg.type + '\n');
+      if (!msg) break;
       if (msg.type === HS_FINISHED) {
         // Verify server Finished, send client Finished
         finishedOk = this._processServerFinished(msg.data);
@@ -191,8 +186,8 @@ export class TLSSocket {
     }
     if (!finishedOk) return false;
 
-    // Derive application keys
-    this._deriveAppKeys();
+    // App keys already derived inside _processServerFinished with the correct
+    // pre-ClientFinished transcript hash.
     this.handshakeDone = true;
     return true;
   }
@@ -211,19 +206,27 @@ export class TLSSocket {
   read(timeoutTicks: number = 200): number[] | null {
     var deadline = kernel.getTicks() + timeoutTicks;
     while (kernel.getTicks() < deadline) {
-      var raw = this._readRaw(50);
-      if (!raw || raw.length < 5) continue;
-      // Could be application data or alerts
-      var rec = this._consumeRecord(raw);
-      if (!rec) continue;
-      if (rec.outerType === TLS_APPLICATION_DATA) {
+      // Always poll for more data to ensure rxBuf grows when partial records exist
+      var more = net.recvBytes(this.sock, 10);
+      if (more) this.rxBuf = this.rxBuf.concat(more);
+
+      if (this.rxBuf.length < 5) continue;
+      var outerType = u8(this.rxBuf, 0);
+      var recLen    = u16(this.rxBuf, 3);
+      if (this.rxBuf.length < 5 + recLen) continue;  // accumulate more
+
+      var record    = this.rxBuf.slice(0, 5 + recLen);
+      this.rxBuf    = this.rxBuf.slice(5 + recLen);
+
+      if (outerType === TLS_APPLICATION_DATA) {
         var dec = tlsDecryptRecord(
-            this.serverAppKey, this.serverAppIV, this.serverAppSeq, rec.raw);
+            this.serverAppKey, this.serverAppIV, this.serverAppSeq, record);
         if (dec) {
           this.serverAppSeq++;
           if (dec.type === TLS_APPLICATION_DATA) return dec.data;
         }
       }
+      // Alert or other record type — skip and keep polling
     }
     return null;
   }
@@ -326,12 +329,7 @@ export class TLSSocket {
       var chunk = net.recvBytes(this.sock, 30);
       if (chunk) this.rxBuf = this.rxBuf.concat(chunk);
     }
-    if (this.rxBuf.length < 5) {
-      kernel.serialPut('TLS: _readHandshakeMsg rxBuf=' + this.rxBuf.length + ' byte0=' + (this.rxBuf.length > 0 ? this.rxBuf[0].toString(16) : 'n/a') + '\n');
-      return null;
-    }
-    var rawHdr = this.rxBuf.slice(0, 5).map(function(b: number) { return b.toString(16); }).join(',');
-    kernel.serialPut('TLS: header=[' + rawHdr + ']\n');
+    if (this.rxBuf.length < 5) return null;
     var recType = u8(this.rxBuf, 0);
     var recLen  = u16(this.rxBuf, 3);
     // Wait for full record
@@ -343,8 +341,6 @@ export class TLSSocket {
     if (this.rxBuf.length < 5 + recLen) return null;
     var recData = this.rxBuf.slice(5, 5 + recLen);
     this.rxBuf  = this.rxBuf.slice(5 + recLen);
-    var firstBytes = this.rxBuf.slice(0, 5).map(function(b: number) { return b.toString(16); }).join(',');
-    kernel.serialPut('TLS: record type=' + recType + ' len=' + recLen + ' msgType=' + (recData.length > 0 ? recData[0] : -1) + ' rxRemain=[' + firstBytes + ']\n');
     if (recType !== TLS_HANDSHAKE) return null;
     if (recData.length < 4) return null;
     var msgType = u8(recData, 0);
@@ -417,7 +413,20 @@ export class TLSSocket {
   }
 
   private _readEncryptedHandshakeMsg(): { type: number; data: number[] } | null {
-    // Skip ChangeCipherSpec records
+    // If we have leftover decrypted handshake bytes from a multi-message record,
+    // extract the next message from there before reading a new TLS record.
+    if (this._hsDataBuf.length >= 4) {
+      var msgType0 = u8(this._hsDataBuf, 0);
+      var msgLen0  = u24(this._hsDataBuf, 1);
+      if (this._hsDataBuf.length >= 4 + msgLen0) {
+        var msgData0 = this._hsDataBuf.slice(4, 4 + msgLen0);
+        this.transcript = this.transcript.concat(this._hsDataBuf.slice(0, 4 + msgLen0));
+        this._hsDataBuf = this._hsDataBuf.slice(4 + msgLen0);
+        return { type: msgType0, data: msgData0 };
+      }
+    }
+
+    // Read a new encrypted TLS record, skipping ChangeCipherSpec records
     for (var skip = 0; skip < 5; skip++) {
       var deadline = kernel.getTicks() + 400;
       while (this.rxBuf.length < 5 && kernel.getTicks() < deadline) {
@@ -443,36 +452,38 @@ export class TLSSocket {
       if (!dec) return null;
       this.serverHsSeq++;
       if (dec.type !== TLS_HANDSHAKE) return null;
-      // May contain multiple handshake messages
+      // Extract first handshake message; save remainder in _hsDataBuf
       var msgType = u8(dec.data, 0);
       var msgLen  = u24(dec.data, 1);
       var msgData = dec.data.slice(4, 4 + msgLen);
-      // Add to transcript (skip EncryptedExtensions for cert messages)
       this.transcript = this.transcript.concat(dec.data.slice(0, 4 + msgLen));
+      // Any remaining bytes in this record may be more handshake messages
+      this._hsDataBuf = dec.data.slice(4 + msgLen);
       return { type: msgType, data: msgData };
     }
     return null;
   }
 
   private _processServerFinished(data: number[]): boolean {
-    // Server Finished: HMAC-SHA-256 over transcript  
-    var sHsTraffic = (this as any)._sHsTrafficForFinished;
-    // Re-derive for verification (we don't store it above, so redo)
-    // For simplicity, accept any server Finished (no cert validation phase)
-    // Build client Finished message
+    // transcript at this point = ClientHello..ServerFinished (correct for both
+    // app-key derivation and the ClientFinished verify_data per RFC 8446 §7.1)
     var txHash = sha256(this.transcript);
-    var cHsTrafficSaved = (this as any)._cHsTrafficForFinished;
+
+    // Derive application traffic keys NOW (transcript hash must NOT include ClientFinished)
+    this._deriveAppKeys(txHash);
+
+    // Build client Finished verify_data
     var finishedKey = hkdfExpandLabel(
         (this as any)._cHsTrafficSaved || this.clientHsKey, 'finished', [], 32);
     var verifyData = hmacSha256(finishedKey, txHash);
-    // Add server Finished to transcript
-    // transcript already updated in _readEncryptedHandshakeMsg
-    // Build and send Client Finished
+
+    // Build and send Client Finished handshake message
     var msgBody: number[] = [];
     putU8(msgBody, HS_FINISHED);
     putU24(msgBody, verifyData.length);
     msgBody = msgBody.concat(verifyData);
-    this.transcript = this.transcript.concat(msgBody);
+    this.transcript = this.transcript.concat(msgBody);  // add AFTER key derivation
+
     // Encrypt with client HS key
     var record = tlsEncryptRecord(
         this.clientHsKey, this.clientHsIV, this.clientHsSeq,
@@ -482,10 +493,9 @@ export class TLSSocket {
     return true;
   }
 
-  private _deriveAppKeys(): void {
+  private _deriveAppKeys(txHash: number[]): void {
     var handshakeSecret: number[] = (this as any)._handshakeSecret;
     var zeros32 = new Array(32).fill(0);
-    var txHash  = sha256(this.transcript);
     // master_secret
     var derivedSecret  = hkdfExpandLabel(handshakeSecret, 'derived', sha256([]), 32);
     var masterSecret   = hkdfExtract(derivedSecret, zeros32);
