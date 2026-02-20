@@ -133,11 +133,21 @@ export interface KernelAPI {
    */
   fbInfo(): { width: number; height: number; pitch: number; bpp: number } | null;
   /**
-   * Copy a flat BGRA pixel array to the framebuffer at (x, y).
-   * pixels.length must equal w * h.
+   * Copy pixel data to the framebuffer at (x, y).
+   * Fast path: pass a Uint32Array.buffer (ArrayBuffer) for zero-copy memcpy.
+   * Legacy path: a plain number[] also works but is ~1000× slower.
+   * pixels byte-length (or array length) must equal w * h * 4 (or w * h).
    * No-op if no framebuffer available.
    */
-  fbBlit(pixels: number[], x: number, y: number, w: number, h: number): void;
+  fbBlit(pixels: ArrayBuffer | number[], x: number, y: number, w: number, h: number): void;
+
+  /**
+   * Inject and execute raw x86 machine code.
+   * hexBytes: space/comma-separated hex bytes, e.g. "B8 2A 00 00 00 C3" (mov eax,42; ret).
+   * Runs as a cdecl void→uint32_t function in ring-0; returns the EAX result.
+   * WARNING: no sandboxing — you are executing kernel-mode machine code.
+   */
+  volatileAsm(hexBytes: string): number;
 
   // ─ Mouse (Phase 3) ───────────────────────────────────────────────────────
   /**

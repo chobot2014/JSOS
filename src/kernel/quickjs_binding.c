@@ -312,8 +312,12 @@ static JSValue js_fb_info(JSContext *c, JSValueConst this_val, int argc, JSValue
 
 /*
  * kernel.fbBlit(pixels, x, y, w, h)
- * pixels: flat JS Array of 32-bit BGRA values, length = w*h
- * C side: copies to physical framebuffer at (x,y).
+ *
+ * Fast path  (preferred): pixels is an ArrayBuffer / Uint32Array.buffer
+ *   → JS_GetArrayBuffer() gives a raw C pointer; single platform_fb_blit() call.
+ *
+ * Slow/legacy path: pixels is a plain JS number[].
+ *   → kept for compatibility but ~1000× slower; avoid in hot paths.
  */
 static JSValue js_fb_blit(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
@@ -326,8 +330,19 @@ static JSValue js_fb_blit(JSContext *c, JSValueConst this_val, int argc, JSValue
     if (w <= 0 || h <= 0) return JS_UNDEFINED;
 
     int total = w * h;
-    /* Allocate a temporary C buffer for the pixel data */
-    static uint32_t fb_blit_buf[1024 * 768]; /* max 3 MB, in BSS */
+
+    /* ── Fast path: ArrayBuffer → zero-copy blit ────────────────────────── */
+    size_t byte_len = 0;
+    uint8_t *ab_data = JS_GetArrayBuffer(c, &byte_len, argv[0]);
+    if (ab_data) {
+        /* Sanity: buffer must be large enough for w*h 32-bit pixels */
+        if ((size_t)total * 4 <= byte_len)
+            platform_fb_blit((const uint32_t *)ab_data, x, y, w, h);
+        return JS_UNDEFINED;
+    }
+
+    /* ── Slow path: plain JS Array (legacy / fallback) ──────────────────── */
+    static uint32_t fb_blit_buf[1024 * 768]; /* 3 MB in BSS */
     if (total > 1024 * 768) total = 1024 * 768;
     for (int i = 0; i < total; i++) {
         JSValue v = JS_GetPropertyUint32(c, argv[0], (uint32_t)i);
@@ -338,6 +353,64 @@ static JSValue js_fb_blit(JSContext *c, JSValueConst this_val, int argc, JSValue
     }
     platform_fb_blit(fb_blit_buf, x, y, w, h);
     return JS_UNDEFINED;
+}
+
+/* ── Volatile ASM ────────────────────────────────────────────────────────── */
+
+/*
+ * kernel.volatileAsm(hexBytes) — inject and execute raw x86 machine code.
+ *
+ * hexBytes: space/comma-separated hex bytes, e.g.
+ *   "B8 2A 00 00 00 C3"   →  mov eax, 42; ret  → returns 42
+ *
+ * The code runs as a cdecl void* → uint32_t function in ring-0.
+ * A static 4 KB buffer in BSS is used as the code page; on bare metal
+ * all BSS is mapped execute-readable so no mprotect is needed.
+ *
+ * Returns the EAX value set by the code, or 0 on parse error.
+ */
+static int _hex_nibble(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+static JSValue js_volatile_asm(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewInt32(c, 0);
+    const char *hex = JS_ToCString(c, argv[0]);
+    if (!hex) return JS_NewInt32(c, 0);
+
+    /* Static code buffer in BSS — bare-metal: all pages are RWX */
+    static uint8_t __attribute__((aligned(16))) _asm_buf[4096];
+
+    int len = 0;
+    const char *p = hex;
+    while (*p && len < (int)sizeof(_asm_buf)) {
+        /* skip whitespace, commas, semicolons */
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == ',' || *p == ';') p++;
+        /* skip optional 0x / 0X prefix */
+        if (*p == '0' && (*(p+1) == 'x' || *(p+1) == 'X')) p += 2;
+        if (!*p) break;
+        int hi = _hex_nibble(*p);
+        if (hi < 0) { p++; continue; }   /* skip non-hex char */
+        p++;
+        int lo = _hex_nibble(*p);
+        if (lo < 0) {
+            _asm_buf[len++] = (uint8_t)hi;  /* single-nibble byte */
+        } else {
+            _asm_buf[len++] = (uint8_t)((hi << 4) | lo);
+            p++;
+        }
+    }
+    JS_FreeCString(c, hex);
+    if (len == 0) return JS_NewInt32(c, 0);
+
+    /* Execute — treats buffer as  uint32_t fn(void)  cdecl */
+    typedef uint32_t (*asm_fn_t)(void);
+    uint32_t result = ((asm_fn_t)(void *)_asm_buf)();
+    return JS_NewUint32(c, result);
 }
 
 /* ── Phase 4 — Memory map ──────────────────────────────────────────────── */
@@ -855,10 +928,12 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("ataRead",    2, js_ata_read),
     JS_CFUNC_DEF("ataWrite",   3, js_ata_write),
     /* Framebuffer (Phase 3) */
-    JS_CFUNC_DEF("fbInfo",     0, js_fb_info),
-    JS_CFUNC_DEF("fbBlit",     5, js_fb_blit),
+    JS_CFUNC_DEF("fbInfo",       0, js_fb_info),
+    JS_CFUNC_DEF("fbBlit",       5, js_fb_blit),
+    /* Volatile ASM execution */
+    JS_CFUNC_DEF("volatileAsm",  1, js_volatile_asm),
     /* Mouse (Phase 3) */
-    JS_CFUNC_DEF("readMouse",  0, js_read_mouse),
+    JS_CFUNC_DEF("readMouse",    0, js_read_mouse),
     /* Memory map + paging (Phase 4) */
     JS_CFUNC_DEF("getRamBytes",    0, js_get_ram_bytes),
     JS_CFUNC_DEF("getMemoryMap",  0, js_get_memory_map),

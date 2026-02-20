@@ -270,10 +270,11 @@ void platform_fb_blit(const uint32_t *src, int x, int y, int w, int h) {
     if (w <= 0 || h <= 0) return;
 
     uint32_t pitch_words = _fb.pitch / 4; /* pitch in 32-bit words */
+    size_t row_bytes = (size_t)w * sizeof(uint32_t);
     for (int row = 0; row < h; row++) {
-        uint32_t *dst_row = _fb.address + (uint32_t)(y + row) * pitch_words + (uint32_t)x;
+        uint32_t       *dst_row = _fb.address + (uint32_t)(y + row) * pitch_words + (uint32_t)x;
         const uint32_t *src_row = src + row * w;
-        for (int col = 0; col < w; col++) dst_row[col] = src_row[col];
+        __builtin_memcpy(dst_row, src_row, row_bytes);
     }
 }
 

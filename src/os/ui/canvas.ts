@@ -402,24 +402,23 @@ export class Canvas {
    * For sub-canvases, blits at the registered (fb_x, fb_y) offset.
    */
   flip(): void {
-    // Convert Uint32Array to plain number[] for kernel.fbBlit
-    var pixels: number[] = new Array(this._buf.length);
-    for (var i = 0; i < this._buf.length; i++) pixels[i] = this._buf[i];
-    kernel.fbBlit(pixels, this._fb_x, this._fb_y, this.width, this.height);
+    // Zero-copy fast path: pass the Uint32Array's backing ArrayBuffer directly.
+    // C side detects it via JS_GetArrayBuffer() and calls a single memcpy.
+    (kernel.fbBlit as any)(this._buf.buffer, this._fb_x, this._fb_y, this.width, this.height);
   }
 
   /**
    * Partial update — blit a sub-region of this canvas to the framebuffer.
+   * Builds a compact typed-array region copy (one pass) then hands off
+   * its backing ArrayBuffer to C for a single memcpy.
    */
   flipRegion(x: number, y: number, w: number, h: number): void {
-    var pixels: number[] = new Array(w * h);
-    var i = 0;
-    for (var row = y; row < y + h; row++) {
-      for (var col = x; col < x + w; col++) {
-        pixels[i++] = this._buf[row * this.width + col];
-      }
+    var region = new Uint32Array(w * h);
+    for (var row = 0; row < h; row++) {
+      var srcOff = (y + row) * this.width + x;
+      region.set(this._buf.subarray(srcOff, srcOff + w), row * w);
     }
-    kernel.fbBlit(pixels, this._fb_x + x, this._fb_y + y, w, h);
+    (kernel.fbBlit as any)(region.buffer, this._fb_x + x, this._fb_y + y, w, h);
   }
 
   /** Get raw Uint32Array buffer (BGRA) for compositing without allocation */

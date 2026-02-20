@@ -458,6 +458,26 @@ function setupGlobals(): void {
   g.halt   = function() { kernel.halt(); };
   g.reboot = function() { kernel.reboot(); };
 
+  /**
+   * Execute raw x86 machine code from a hex string.
+   * Usage:  __asm("B8 2A 00 00 00 C3")  // mov eax, 42; ret  → returns 42
+   * Also available as a tagged template: __asm`B8 2A 00 00 00 C3`
+   */
+  g.__asm = function(hexOrStrings: TemplateStringsArray | string, ...vals: any[]): number {
+    var hex: string;
+    if (typeof hexOrStrings === 'string') {
+      hex = hexOrStrings;
+    } else {
+      // Tagged template: __asm`...${expr}...`
+      hex = '';
+      for (var _i = 0; _i < hexOrStrings.length; _i++) {
+        hex += hexOrStrings[_i];
+        if (_i < vals.length) hex += String(vals[_i]);
+      }
+    }
+    return kernel.volatileAsm(hex);
+  };
+
   // ── User & identity ───────────────────────────────────────────────────────
   g.whoami = function() {
     var u = users.getCurrentUser();
@@ -1016,11 +1036,12 @@ function main(): void {
       kernel.serialPut('Terminal app launched\n');
       kernel.serialPut('REPL ready (windowed mode)\n');
 
-      // WM event loop — runs forever (tick 30 fps at 100 Hz PIT)
+      // WM event loop — cap at ~60 fps (2 PIT ticks @ 100 Hz = 20 ms/frame)
+      // Record start BEFORE tick so we cap on total frame time, not sleep-only.
       for (;;) {
+        var _t0 = kernel.getTicks();
         wmInst.tick();
-        var start = kernel.getTicks();
-        while (kernel.getTicks() - start < 3) { /* ~30 fps */ }
+        while (kernel.getTicks() - _t0 < 2) { /* spin until 20 ms elapsed */ }
       }
     }
   }
