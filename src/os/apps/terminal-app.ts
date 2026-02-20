@@ -13,6 +13,7 @@
 
 import { Canvas, Colors, defaultFont } from '../ui/canvas.js';
 import type { App, WMWindow, KeyEvent, MouseEvent } from '../ui/wm.js';
+import terminal from '../ui/terminal.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -106,6 +107,14 @@ class CanvasTerminal {
   }
 }
 
+// VGA colour-index (0-15) → ARGB pixel colour for CanvasTerminal
+const VGA_TO_ARGB: number[] = [
+  Colors.BLACK,     0xFF0000AA,        Colors.GREEN,       Colors.CYAN,
+  Colors.RED,       Colors.MAGENTA,    Colors.ORANGE,      Colors.LIGHT_GREY,
+  Colors.DARK_GREY, 0xFF5555FF,        Colors.LIGHT_GREEN, Colors.LIGHT_CYAN,
+  Colors.LIGHT_RED, 0xFFFF55FF,        Colors.YELLOW,      Colors.WHITE,
+];
+
 // ── TerminalApp ────────────────────────────────────────────────────────────
 
 export class TerminalApp implements App {
@@ -179,16 +188,63 @@ export class TerminalApp implements App {
 
   private _eval(code: string): void {
     if (!this._term || !code) return;
+    const term = this._term;
+
+    // Temporarily redirect the global terminal singleton → this CanvasTerminal
+    // so commands like help(), ls() etc. print here instead of invisible VGA memory.
+    const saved = {
+      print:        (terminal as any).print.bind(terminal),
+      println:      (terminal as any).println.bind(terminal),
+      colorPrint:   (terminal as any).colorPrint.bind(terminal),
+      colorPrintln: (terminal as any).colorPrintln.bind(terminal),
+    };
+    (terminal as any).print        = (s: string)            => { term.setColor(Colors.LIGHT_GREY); term.print(s); };
+    (terminal as any).println      = (s: string = '')       => { term.setColor(Colors.LIGHT_GREY); term.println(s); };
+    (terminal as any).colorPrint   = (s: string, c: number) => { term.setColor(VGA_TO_ARGB[c & 15] ?? Colors.LIGHT_GREY); term.print(s); };
+    (terminal as any).colorPrintln = (s: string, c: number) => { term.setColor(VGA_TO_ARGB[c & 15] ?? Colors.LIGHT_GREY); term.println(s); };
+
+    // Same IIFE-sentinel eval as evalAndPrint() in repl.ts
+    const exprWrapped =
+      '(function(){' +
+      'var __r=(' + code + ');' +
+      'if(__r===undefined)return"__JSOS_UNDEF__";' +
+      'if(__r===null)return"null";' +
+      'if(__r instanceof Error)return String(__r);' +
+      'if(__r&&typeof __r.__jsos_print__==="function"){__r.__jsos_print__();return"__JSOS_PRINTED__";}' +
+      'if(typeof __r==="object")return JSON.stringify(__r,null,2);' +
+      'return String(__r);' +
+      '})()';
+
+    let result = '';
     try {
-      var result = kernel.eval(code);
-      this._term.setColor(Colors.YELLOW);
-      this._term.println(result || 'undefined');
-      this._term.setColor(Colors.LIGHT_GREY);
-    } catch (e) {
-      this._term.setColor(Colors.LIGHT_RED);
-      this._term.println('Error: ' + String(e));
-      this._term.setColor(Colors.LIGHT_GREY);
+      result = kernel.eval(exprWrapped);
+      // Statement syntax (var/function/for/if …) — re-eval directly
+      if (result.indexOf('SyntaxError') === 0) {
+        result = kernel.eval(code);
+      }
+    } finally {
+      // Always restore — even if eval throws
+      (terminal as any).print        = saved.print;
+      (terminal as any).println      = saved.println;
+      (terminal as any).colorPrint   = saved.colorPrint;
+      (terminal as any).colorPrintln = saved.colorPrintln;
     }
+
+    if (result === '__JSOS_PRINTED__') return;                        // pretty-printer ran
+    if (result === '__JSOS_UNDEF__' || result === 'undefined') return; // void return
+
+    // Colour-code the result the same way the text-mode REPL does
+    term.setColor(
+      result === 'null'                                                      ? Colors.DARK_GREY   :
+      result === 'true' || result === 'false'                                ? Colors.YELLOW      :
+      result.indexOf('Error:') !== -1                                        ? Colors.LIGHT_RED   :
+      result.length > 0 && result[0] === '"'                                 ? Colors.LIGHT_GREEN :
+      result !== 'Infinity' && result !== '-Infinity' &&
+        result !== 'NaN' && !isNaN(Number(result))                           ? Colors.LIGHT_CYAN  :
+      Colors.WHITE
+    );
+    term.println(result);
+    term.setColor(Colors.LIGHT_GREY);
   }
 }
 
