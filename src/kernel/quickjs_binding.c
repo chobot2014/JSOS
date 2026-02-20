@@ -934,6 +934,15 @@ static JSValue js_ata_present(JSContext *c, JSValueConst this_val,
     return JS_NewBool(c, ata_present());
 }
 
+/* kernel.ataSectorCount() → number
+ * Returns the total LBA28 addressable sector count from IDENTIFY.
+ * Each sector is 512 bytes.  Returns 0 if no drive detected. */
+static JSValue js_ata_sector_count(JSContext *c, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewUint32(c, ata_sector_count());
+}
+
 static JSValue js_ata_read(JSContext *c, JSValueConst this_val,
                            int argc, JSValueConst *argv) {
     (void)this_val;
@@ -1020,9 +1029,10 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     /* Eval */
     JS_CFUNC_DEF("eval",   1, js_eval),
     /* ATA block device */
-    JS_CFUNC_DEF("ataPresent", 0, js_ata_present),
-    JS_CFUNC_DEF("ataRead",    2, js_ata_read),
-    JS_CFUNC_DEF("ataWrite",   3, js_ata_write),
+    JS_CFUNC_DEF("ataPresent",     0, js_ata_present),
+    JS_CFUNC_DEF("ataSectorCount", 0, js_ata_sector_count),
+    JS_CFUNC_DEF("ataRead",        2, js_ata_read),
+    JS_CFUNC_DEF("ataWrite",       3, js_ata_write),
     /* Framebuffer (Phase 3) */
     JS_CFUNC_DEF("fbInfo",       0, js_fb_info),
     JS_CFUNC_DEF("fbBlit",       5, js_fb_blit),

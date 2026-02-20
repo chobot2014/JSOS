@@ -20,12 +20,12 @@ if (-not (Test-Path "build/jsos.iso")) {
 # Create a blank 64 MiB disk image if one doesn't exist.
 # JSOS will auto-format it as FAT16 on first boot.
 if (-not (Test-Path "build/disk.img")) {
-    Write-Host "Creating blank 64 MiB disk.img for persistent storage..." -ForegroundColor Cyan
+    Write-Host "Creating blank 4 GiB disk.img for persistent storage..." -ForegroundColor Cyan
     New-Item -ItemType Directory -Path "build" -Force | Out-Null
     $diskStream = [System.IO.File]::Create("$PWD\build\disk.img")
-    $diskStream.SetLength(67108864)
+    $diskStream.SetLength(4294967296)   # 4 GiB — auto-formats as FAT32 on first boot
     $diskStream.Close()
-    Write-Host "disk.img created - JSOS will format it on first boot." -ForegroundColor Cyan
+    Write-Host "disk.img created (4 GiB sparse) - JSOS will format it as FAT32 on first boot." -ForegroundColor Cyan
 }
 
 # Check if QEMU is installed
@@ -83,7 +83,7 @@ if ($Headless) {
         "-cdrom", "build/jsos.iso",
         "-drive", "file=build/disk.img,format=raw,media=disk",
         "-boot", "order=d",
-        "-m", "512M",
+        "-m", "4G",
         "-no-reboot",
         "-display", "none",
         "-serial", "file:test-output/serial.log",
@@ -120,7 +120,7 @@ if ($Headless) {
         -cdrom "build/jsos.iso" `
         -drive "file=build/disk.img,format=raw,media=disk" `
         -boot order=d `
-        -m 512M `
+        -m 4G `
         -no-reboot `
         -netdev "user,id=n0" `
         -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on"

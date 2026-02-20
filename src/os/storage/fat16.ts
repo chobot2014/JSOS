@@ -268,6 +268,9 @@ export class FAT16 implements VFSMount {
 
     if (bps !== 512 || spc === 0) return false; // sanity check
 
+    // FAT32 volumes have FATSz16 == 0 — refuse so fat32.ts handles them
+    if (fss === 0) return false;
+
     var fatStart     = rsv;
     var rootDirStart = fatStart + nf * fss;
     var rootDirSecs  = ceilDiv(rec * DIR_ENTRY_SIZE, bps);

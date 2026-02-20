@@ -33,10 +33,19 @@ echo "Note: Make sure you have an X server running on Windows (like VcXsrv, X410
 echo "Or install one if you don't have it already."
 echo ""
 
+# Create 4 GiB sparse disk image if absent
+if [ ! -f "build/disk.img" ]; then
+    mkdir -p build
+    truncate -s 4G build/disk.img
+fi
+
 # Run QEMU with our ISO in a graphical window
 qemu-system-x86_64 \
     -cdrom build/jsos.iso \
-    -m 512M \
+    -drive file=build/disk.img,format=raw,media=disk \
+    -m 4G \
     -no-reboot \
     -display gtk \
+    -netdev user,id=n0 \
+    -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on \
     -serial mon:stdio

@@ -17,7 +17,10 @@
 void ata_initialize(void);
 
 /** Returns 1 if a drive was detected during ata_initialize(), 0 otherwise. */
-int  ata_present(void);
+int      ata_present(void);
+
+/** Returns the total number of LBA28 addressable sectors (from IDENTIFY). */
+uint32_t ata_sector_count(void);
 
 /**
  * Read `count` contiguous 512-byte sectors starting at LBA28 address `lba`

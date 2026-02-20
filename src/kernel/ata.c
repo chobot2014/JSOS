@@ -42,7 +42,8 @@
 #define ATA_CMD_CACHE_FLUSH 0xE7
 #define ATA_CMD_IDENTIFY   0xEC
 
-static int ata_drive_present = 0;
+static int      ata_drive_present  = 0;
+static uint32_t ata_total_sectors  = 0;
 
 /* ── Internal helpers ───────────────────────────────────────────────────── */
 
@@ -106,11 +107,13 @@ void ata_initialize(void) {
         return;
     }
 
-    /* Wait for BSY to clear; read and discard IDENTIFY data */
+    /* Wait for BSY to clear; read IDENTIFY data */
     uint8_t st = ata_wait(1);
     if ((st & (ATA_SR_ERR | ATA_SR_BSY)) == 0 && (st & ATA_SR_DRQ)) {
-        /* Consume the 256-word IDENTIFY response */
-        for (int i = 0; i < 256; i++) inw(ATA_DATA);
+        uint16_t id[256];
+        for (int i = 0; i < 256; i++) id[i] = inw(ATA_DATA);
+        /* Words 60-61: LBA28 addressable sector count (little-endian pair) */
+        ata_total_sectors = ((uint32_t)id[61] << 16) | (uint32_t)id[60];
         ata_drive_present = 1;
     } else {
         ata_drive_present = 0;
@@ -119,6 +122,10 @@ void ata_initialize(void) {
 
 int ata_present(void) {
     return ata_drive_present;
+}
+
+uint32_t ata_sector_count(void) {
+    return ata_total_sectors;
 }
 
 int ata_read28(uint32_t lba, uint8_t count, uint16_t *buf) {

@@ -114,8 +114,11 @@ export interface KernelAPI {
   // ─ ATA block device ─────────────────────────────────────────────────────
   /** Returns true if an ATA drive was detected at boot */
   ataPresent(): boolean;
-  /**
-   * Read `sectors` (1-8) sectors starting at `lba`.
+  /**   * Returns the total number of 512-byte sectors reported by the ATA IDENTIFY
+   * command (LBA28 addressable count).  Returns 0 if no drive is present.
+   */
+  ataSectorCount(): number;
+  /**   * Read `sectors` (1-8) sectors starting at `lba`.
    * Returns a flat byte array of length `sectors * 512`, or null on error.
    */
   ataRead(lba: number, sectors: number): number[] | null;

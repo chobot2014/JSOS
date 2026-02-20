@@ -18,10 +18,12 @@ declare var kernel: import('../core/kernel.js').KernelAPI;
 const PAGE_SIZE = 4096;
 
 /**
- * First allocatable frame (32 MB / 4 KB = 8192).
- * Covers kernel binary, BSS, paging_pd, and system heap.
+ * First allocatable frame.
+ * Must be above the entire kernel binary + 256 MB BSS heap in linker.ld.
+ * kernel loads at 1 MB; code/data ~16 MB max; heap 256 MB → top ~273 MB.
+ * We reserve 320 MB (81920 frames) to give a comfortable margin.
  */
-const KERNEL_END_FRAME = 8192;
+const KERNEL_END_FRAME = 81920;
 
 export class PhysicalAllocator {
   _bitmap: Uint8Array = new Uint8Array(0);
@@ -34,7 +36,7 @@ export class PhysicalAllocator {
     // avoiding the problematic JS array-of-objects iteration.
     var ramBytes = kernel.getRamBytes();
     if (!ramBytes || ramBytes < 1) {
-      ramBytes = 64 * 1024 * 1024;  // fallback: 64 MB
+      ramBytes = 3 * 1024 * 1024 * 1024;  // fallback: 3 GB (conservative for a consumer PC)
     }
 
     // Round up to the nearest MB boundary so page counts are clean multiples.

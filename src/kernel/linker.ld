@@ -27,7 +27,7 @@ SECTIONS
         *(.bss.*)
         . = ALIGN(4K);
         _heap_start = .;
-        . += 0x4000000; /* 64 MB heap (Phase 3+) */
-        _heap_end = .;
+        . += 0x10000000; /* 256 MB heap — large enough for QuickJS + OS + user space */
+        _heap_end = .;;
     }
 }

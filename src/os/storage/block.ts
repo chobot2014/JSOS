@@ -36,8 +36,13 @@ interface CacheLine {
 }
 
 class AtaBlockDevice implements BlockDevice {
-  readonly sectorSize  = SECTOR_SIZE;
-  readonly sectorCount = 131072; // default 64 MiB / 512
+  readonly sectorSize = SECTOR_SIZE;
+
+  /** Total sectors: read from ATA IDENTIFY at runtime, fallback to 8 GiB. */
+  get sectorCount(): number {
+    var n = kernel.ataSectorCount ? kernel.ataSectorCount() : 0;
+    return n > 0 ? n : 16777216; // fallback: 8 GiB / 512
+  }
 
   private _cache: (CacheLine | null)[] = new Array<CacheLine | null>(CACHE_SIZE).fill(null);
   private _clock = 0;

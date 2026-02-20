@@ -21,6 +21,7 @@ import { users } from '../users/users.js';
 import { ipc } from '../ipc/ipc.js';
 import { net } from '../net/net.js';
 import { fat16 } from '../storage/fat16.js';
+import { fat32 } from '../storage/fat32.js';
 import { physAlloc } from '../process/physalloc.js';
 import { threadManager } from '../process/threads.js';
 import { Mutex } from '../process/sync.js';
@@ -126,11 +127,11 @@ function setupGlobals(): void {
   g.ipc   = ipc;
   g.net   = net;
 
-  // ── Persistent disk (FAT16) ───────────────────────────────────────────
+  // ── Persistent disk (FAT32 / FAT16) ───────────────────────────────────
   g.disk = {
     ls: function(path?: string) {
       var p = path || '/';
-      var items = fat16.list(p);
+      var items = (g._diskFS as any) ? (g._diskFS as any).list(p) : [];
       return printableArray(items, function(arr) {
         terminal.colorPrintln('  [disk] ' + p, Color.DARK_GREY);
         if (arr.length === 0) { terminal.colorPrintln('  (empty)', Color.DARK_GREY); return; }
@@ -143,26 +144,28 @@ function setupGlobals(): void {
         }
       });
     },
-    read:   function(path: string) { return fat16.read(path); },
-    write:  function(path: string, content: string) { return fat16.writeFile(path, content); },
-    mkdir:  function(path: string) { return fat16.mkdir(path); },
-    rm:     function(path: string) { return fat16.remove(path); },
-    exists: function(path: string) { return fat16.exists(path); },
-    isDir:  function(path: string) { return fat16.isDirectory(path); },
+    read:   function(path: string) { return (g._diskFS as any) ? (g._diskFS as any).read(path) : null; },
+    write:  function(path: string, content: string) { return (g._diskFS as any) ? (g._diskFS as any).writeFile(path, content) : false; },
+    mkdir:  function(path: string) { return (g._diskFS as any) ? (g._diskFS as any).mkdir(path) : false; },
+    rm:     function(path: string) { return (g._diskFS as any) ? (g._diskFS as any).remove(path) : false; },
+    exists: function(path: string) { return (g._diskFS as any) ? (g._diskFS as any).exists(path) : false; },
+    isDir:  function(path: string) { return (g._diskFS as any) ? (g._diskFS as any).isDirectory(path) : false; },
     stat:   function(path: string) {
-      var items = fat16.list(path.substring(0, path.lastIndexOf('/')) || '/');
+      if (!(g._diskFS as any)) return null;
+      var items = (g._diskFS as any).list(path.substring(0, path.lastIndexOf('/')) || '/');
       var name  = path.substring(path.lastIndexOf('/') + 1);
       for (var i = 0; i < items.length; i++) if (items[i].name.toUpperCase() === name.toUpperCase()) return items[i];
       return null;
     },
-    stats: function() { return fat16.getStats(); },
+    stats: function() { return (g._diskFS as any) ? (g._diskFS as any).getStats() : null; },
     cp: function(src: string, dst: string) {
-      var data = fat16.read(src);
+      if (!(g._diskFS as any)) return false;
+      var data = (g._diskFS as any).read(src);
       if (data === null) { terminal.println('cp: ' + src + ': not found'); return false; }
-      return fat16.writeFile(dst, data);
+      return (g._diskFS as any).writeFile(dst, data);
     },
     format: function(label?: string) {
-      var ok = fat16.format(label || 'JSDISK');
+      var ok = (g._diskFS as any) ? (g._diskFS as any).format(label || 'JSDISK') : false;
       terminal.println(ok ? '[disk] Formatted and mounted' : '[disk] Format failed');
       return ok;
     },
@@ -932,20 +935,30 @@ function main(): void {
   fs.mountVFS('/proc', procFS);
   fs.mountVFS('/dev',  devFSMount);  // Phase 6: /dev device nodes
 
-  // Mount persistent FAT16 disk (non-fatal if not present)
-  if (fat16.mount()) {
+  // Mount persistent disk — try FAT32 first (large disks), fall back to FAT16
+  // diskFS is whichever driver successfully mounts; exposed to all REPL helpers.
+  var diskFS: any = null;
+  if (fat32.mount()) {
+    diskFS = fat32;
+    if (fat32.wasAutoFormatted) {
+      kernel.serialPut('Blank disk detected. Formatting as FAT32...\n');
+    }
+    kernel.serialPut('FAT32 mounted at /disk\n');
+    fs.mountVFS('/disk', fat32);
+  } else if (fat16.mount()) {
+    diskFS = fat16;
     if (fat16.wasAutoFormatted) {
       kernel.serialPut('Blank disk detected. Formatting as FAT16...\n');
     }
     kernel.serialPut('FAT16 mounted at /disk\n');
     fs.mountVFS('/disk', fat16);
   } else if (kernel.ataPresent()) {
-    kernel.serialPut('[disk] Disk present but not FAT16 - run disk.format() to initialize\n');
+    kernel.serialPut('[disk] Disk present but unrecognised — run disk.format() to initialize\n');
   } else {
     kernel.serialPut('[disk] No disk attached\n');
   }
-
-  // Initialize OS subsystems synchronously (bare metal — no event loop)
+  // Make the active driver available to setupGlobals() / REPL via globalThis._diskFS
+  (globalThis as any)._diskFS = diskFS;
   init.initialize();   // registers and starts services up to runlevel 3
   kernel.serialPut('OS kernel started\n');
   kernel.serialPut('Init system ready\n');

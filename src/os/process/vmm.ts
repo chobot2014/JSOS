@@ -38,7 +38,10 @@ export class VirtualMemoryManager {
   private pageTable = new Map<number, PageTableEntry>();
   private memoryRegions: MemoryRegion[] = [];
   private nextVirtualAddress = 0x100000; // Start after kernel space
-  private physicalMemorySize = 16 * 1024 * 1024; // 16MB
+  private get physicalMemorySize(): number {
+    // Dynamically read from the multiboot2 RAM report instead of a hardcoded value.
+    return (kernel.getRamBytes && kernel.getRamBytes()) || (4 * 1024 * 1024 * 1024);
+  }
   private allocatedPhysicalPages = new Set<number>();
 
   constructor() {
