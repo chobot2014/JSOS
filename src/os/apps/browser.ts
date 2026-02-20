@@ -482,6 +482,13 @@ export class BrowserApp implements App {
   private _dirty        = true;
   private _hoverHref    = '';
 
+  // Deferred load: set in onKey(), consumed in render()
+  private _pendingLoad:      string | null = null;
+  private _pendingLoadReady  = false;
+
+  // Redirect tracking — reset on each user-initiated navigation
+  private _redirectDepth = 0;
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   onMount(win: WMWindow): void {
@@ -511,7 +518,13 @@ export class BrowserApp implements App {
 
     if (ch === '\n' || ch === '\r') {
       var url = this._urlInput.trim();
-      if (url) this._navigate(url);
+      if (url) {
+        // Queue a deferred load so render() can show "Loading..." before blocking
+        this._pendingLoad      = url;
+        this._pendingLoadReady = false;
+        this._loading          = true;
+        this._dirty            = true;
+      }
       return;
     }
     if (ch === '\b') {
@@ -573,6 +586,28 @@ export class BrowserApp implements App {
   render(canvas: Canvas): void {
     this._cursorBlink++;
     if ((this._cursorBlink & 31) === 0) this._dirty = true;
+
+    // Two-frame deferred load: Frame 1 draws "Loading…" and returns so WM flips
+    // the frame to the screen; Frame 2 executes the blocking fetch.
+    if (this._pendingLoad !== null) {
+      if (!this._pendingLoadReady) {
+        // Frame 1 — paint Loading screen now; signal that Frame 2 may fetch
+        this._pendingLoadReady = true;
+        this._dirty = true;   // ensure we get a Frame 2 render call
+        this._drawToolbar(canvas);
+        this._drawContent(canvas);
+        this._drawStatusBar(canvas);
+        return;
+      } else {
+        // Frame 2 — screen already shows "Loading…", now we can block.
+        var pendingURL = this._pendingLoad;
+        this._pendingLoad      = null;
+        this._pendingLoadReady = false;
+        this._navigate(pendingURL);
+        // fall through to normal render below
+      }
+    }
+
     if (!this._dirty) return;
     this._dirty = false;
 
@@ -688,6 +723,7 @@ export class BrowserApp implements App {
   // ── Navigation ────────────────────────────────────────────────────────────
 
   private _navigate(url: string): void {
+    this._redirectDepth = 0;   // reset on every user-initiated navigation
     this._histIdx++;
     this._history.splice(this._histIdx);
     this._history.push({ url, title: url });
@@ -821,10 +857,17 @@ export class BrowserApp implements App {
 
     kernel.serialPut('[browser] HTTP ' + resp.status + ' ' + resp.body.length + 'B\n');
 
-    // Follow 3xx redirects (single level)
+    // Follow 3xx redirects (up to 5 hops)
     if (resp.status >= 300 && resp.status < 400) {
       var loc = resp.headers.get('location') || '';
-      if (loc) { this._load(this._resolveHref(loc)); return; }
+      if (loc && this._redirectDepth < 5) {
+        this._redirectDepth++;
+        kernel.serialPut('[browser] redirect ' + this._redirectDepth + ' -> ' + loc + '\n');
+        this._load(this._resolveHref(loc));
+        return;
+      } else if (loc) {
+        this._showError(rawURL, 'Too many redirects'); return;
+      }
     }
 
     if (resp.status < 200 || resp.status >= 400) {

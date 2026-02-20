@@ -74,7 +74,42 @@ function parseHttpResponse(data: number[]): HttpResponse | null {
   }
 
   var body = data.slice(bodyStart);
+
+  // Decode chunked Transfer-Encoding
+  var te = headers.get('transfer-encoding') || '';
+  if (te.toLowerCase().indexOf('chunked') >= 0) {
+    body = decodeChunked(body);
+  }
+
   return { status, headers, body };
+}
+
+// ── Chunked Transfer-Encoding decoder ────────────────────────────────────────
+
+function decodeChunked(body: number[]): number[] {
+  var result: number[] = [];
+  var i = 0;
+  while (i < body.length) {
+    // Read hex chunk-size up to CRLF (skip chunk extensions after ';')
+    var sizeStr = '';
+    while (i < body.length) {
+      if (body[i] === 13 /* CR */ && i + 1 < body.length && body[i + 1] === 10 /* LF */) {
+        i += 2; break;
+      }
+      if (body[i] === 10 /* bare LF */) { i++; break; }
+      sizeStr += String.fromCharCode(body[i++] & 0x7f);
+    }
+    var semiIdx = sizeStr.indexOf(';');
+    if (semiIdx >= 0) sizeStr = sizeStr.slice(0, semiIdx);
+    var chunkSize = parseInt(sizeStr.trim(), 16);
+    if (isNaN(chunkSize) || chunkSize === 0) break;  // last-chunk
+    // Copy chunk data
+    for (var j = 0; j < chunkSize && i < body.length; j++) result.push(body[i++]);
+    // Skip trailing CRLF after chunk data
+    if (i < body.length && body[i] === 13) i++;
+    if (i < body.length && body[i] === 10) i++;
+  }
+  return result;
 }
 
 // ── Plain HTTP GET ────────────────────────────────────────────────────────────
