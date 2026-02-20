@@ -36,4 +36,7 @@ void irq_uninstall_handler(int irq);
 /* Send End-Of-Interrupt signal to PIC */
 void irq_send_eoi(int irq);
 
+/* Phase 9: int 0x80 syscall dispatcher (called from ring-3 via gate) */
+int syscall_dispatch(int num, int arg1, int arg2, int arg3);
+
 #endif /* IRQ_H */

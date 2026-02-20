@@ -1,6 +1,63 @@
 #include "irq.h"
 #include "io.h"
+#include "keyboard.h"
+#include "mouse.h"
 #include <stddef.h>
+
+/* ── Phase 9: int 0x80 syscall dispatcher ───────────────────────────────── */
+
+/* JSOS syscall numbers used by Chromium's JsosEventSource (ring-3). */
+#define JSOS_SYS_KEY_READ    0x50
+#define JSOS_SYS_MOUSE_READ  0x51
+
+/* Multi-value output struct for syscalls that return more than one register.
+ * Single-threaded OS — a global is fine. */
+struct {
+    int ebx_out;
+    int ecx_out;
+    int edx_out;
+} syscall_out;
+
+/*
+ * syscall_dispatch() — called from syscall_asm (irq_asm.s) when ring-3
+ * code executes 'int 0x80'.  Returns the primary result in EAX.
+ * Additional return values are placed in syscall_out for the assembly stub
+ * to load into EBX/ECX/EDX before iretd.
+ */
+int syscall_dispatch(int num, int arg1, int arg2, int arg3)
+{
+    (void)arg1; (void)arg2; (void)arg3;
+    syscall_out.ebx_out = 0;
+    syscall_out.ecx_out = 0;
+    syscall_out.edx_out = 0;
+
+    switch (num) {
+        case JSOS_SYS_KEY_READ: {
+            /* Return the next key from the keyboard buffer.
+             * keyboard_poll() returns 0 if the queue is empty.
+             * For special/extended keys, OR in the extended code. */
+            char ch = keyboard_poll();
+            if (ch == 0) {
+                int ext = keyboard_get_extended();
+                return ext;   /* 0 = empty, >0 = special key code */
+            }
+            return (int)(unsigned char)ch;
+        }
+        case JSOS_SYS_MOUSE_READ: {
+            /* Return 1 if a packet is available; set EBX/ECX/EDX to dx/dy/buttons. */
+            mouse_packet_t pkt;
+            if (mouse_read(&pkt)) {
+                syscall_out.ebx_out = (int)pkt.dx;
+                syscall_out.ecx_out = -(int)pkt.dy; /* PS/2 y-axis is inverted */
+                syscall_out.edx_out = (int)pkt.buttons;
+                return 1;
+            }
+            return 0;
+        }
+        default:
+            return -1;
+    }
+}
 
 /* PIC ports */
 #define PIC1_COMMAND 0x20
@@ -115,9 +172,16 @@ void irq_initialize(void) {
     idt_set_gate(46, (uint32_t)irq14, 0x08, 0x8E);
     idt_set_gate(47, (uint32_t)irq15, 0x08, 0x8E);
     
+    /* Phase 9: install int 0x80 syscall gate with DPL=3 so ring-3 can call it.
+     * Flags 0xEE = Present(1) | DPL(11) | StorageSeg(0) | GateType(1110 = 32-bit int).
+     * The selector is 0x08 (kernel code segment) — the CPU switches to ring-0
+     * automatically and loads ESP0 from the TSS for the kernel stack. */
+    extern void syscall_asm(void);
+    idt_set_gate(0x80, (uint32_t)syscall_asm, 0x08, 0xEE);
+
     /* Load IDT */
     __asm__ volatile ("lidt (%0)" : : "r"(&idtp));
-    
+
     /* Enable only IRQ 0 (timer) and IRQ 1 (keyboard), mask the rest */
     outb(PIC1_DATA, 0xFC);  /* 11111100 - enable IRQ0 and IRQ1 */
     outb(PIC2_DATA, 0xFF);  /* Mask all on slave PIC */

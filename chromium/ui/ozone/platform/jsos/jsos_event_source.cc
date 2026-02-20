@@ -70,37 +70,72 @@ static JsosMousePacket jsos_read_mouse(void) {
   return pkt;
 }
 
-// Minimal PS/2 scan-code to Chromium KeyboardCode mapping.
-static ui::KeyboardCode ScanCodeToKeyCode(int scancode) {
-  if (scancode >= 0x02 && scancode <= 0x0B)
-    return static_cast<ui::KeyboardCode>(ui::VKEY_1 + scancode - 0x02);
-  if (scancode >= 0x10 && scancode <= 0x19)
-    return static_cast<ui::KeyboardCode>(ui::VKEY_Q + scancode - 0x10);
-  if (scancode >= 0x1E && scancode <= 0x26)
-    return static_cast<ui::KeyboardCode>(ui::VKEY_A + scancode - 0x1E);
-  if (scancode >= 0x2C && scancode <= 0x32)
-    return static_cast<ui::KeyboardCode>(ui::VKEY_Z + scancode - 0x2C);
-  switch (scancode) {
-    case 0x01: return ui::VKEY_ESCAPE;
-    case 0x0E: return ui::VKEY_BACK;
-    case 0x0F: return ui::VKEY_TAB;
-    case 0x1C: return ui::VKEY_RETURN;
-    case 0x1D: return ui::VKEY_CONTROL;
-    case 0x2A: return ui::VKEY_SHIFT;
-    case 0x36: return ui::VKEY_SHIFT;
-    case 0x38: return ui::VKEY_MENU;
-    case 0x39: return ui::VKEY_SPACE;
-    case 0x3B: return ui::VKEY_F1;
-    case 0x3C: return ui::VKEY_F2;
-    case 0x3D: return ui::VKEY_F3;
-    case 0x3E: return ui::VKEY_F4;
-    case 0x3F: return ui::VKEY_F5;
-    case 0x40: return ui::VKEY_F6;
-    case 0x41: return ui::VKEY_F7;
-    case 0x42: return ui::VKEY_F8;
-    case 0x43: return ui::VKEY_F9;
-    case 0x44: return ui::VKEY_F10;
-    default:   return ui::VKEY_UNKNOWN;
+// JSOS extended key code definitions (must match keyboard.h).
+// Returned by JSOS_SYS_KEY_READ when keyboard_poll() == 0 but
+// keyboard_get_extended() is non-zero.
+#define JSOS_KEY_UP       0x80
+#define JSOS_KEY_DOWN     0x81
+#define JSOS_KEY_LEFT     0x82
+#define JSOS_KEY_RIGHT    0x83
+#define JSOS_KEY_HOME     0x84
+#define JSOS_KEY_END      0x85
+#define JSOS_KEY_PAGEUP   0x86
+#define JSOS_KEY_PAGEDOWN 0x87
+#define JSOS_KEY_DELETE   0x88
+#define JSOS_KEY_F1       0x90
+#define JSOS_KEY_F2       0x91
+#define JSOS_KEY_F3       0x92
+#define JSOS_KEY_F4       0x93
+#define JSOS_KEY_F5       0x94
+#define JSOS_KEY_F6       0x95
+#define JSOS_KEY_F7       0x96
+#define JSOS_KEY_F8       0x97
+#define JSOS_KEY_F9       0x98
+#define JSOS_KEY_F10      0x99
+#define JSOS_KEY_F11      0x9A
+#define JSOS_KEY_F12      0x9B
+
+// Convert a JSOS key code (from JSOS_SYS_KEY_READ) to a Chromium KeyboardCode.
+// The JSOS kernel returns either:
+//   1-127  : ASCII character from the translated keyboard buffer.
+//   0x80+  : JSOS extended key code for special keys (arrows, F-keys, …).
+static ui::KeyboardCode JsosKeyToVKey(int code) {
+  // ASCII printable characters and common control keys.
+  if (code >= 'a' && code <= 'z')
+    return static_cast<ui::KeyboardCode>(ui::VKEY_A + code - 'a');
+  if (code >= 'A' && code <= 'Z')
+    return static_cast<ui::KeyboardCode>(ui::VKEY_A + code - 'A');
+  if (code >= '0' && code <= '9')
+    return static_cast<ui::KeyboardCode>(ui::VKEY_0 + code - '0');
+  switch (code) {
+    case '\r': case '\n': return ui::VKEY_RETURN;
+    case '\b':            return ui::VKEY_BACK;
+    case '\t':            return ui::VKEY_TAB;
+    case ' ':             return ui::VKEY_SPACE;
+    case 0x1B:            return ui::VKEY_ESCAPE;
+    // Extended keys.
+    case JSOS_KEY_UP:     return ui::VKEY_UP;
+    case JSOS_KEY_DOWN:   return ui::VKEY_DOWN;
+    case JSOS_KEY_LEFT:   return ui::VKEY_LEFT;
+    case JSOS_KEY_RIGHT:  return ui::VKEY_RIGHT;
+    case JSOS_KEY_HOME:   return ui::VKEY_HOME;
+    case JSOS_KEY_END:    return ui::VKEY_END;
+    case JSOS_KEY_PAGEUP: return ui::VKEY_PRIOR;
+    case JSOS_KEY_PAGEDOWN: return ui::VKEY_NEXT;
+    case JSOS_KEY_DELETE: return ui::VKEY_DELETE;
+    case JSOS_KEY_F1:     return ui::VKEY_F1;
+    case JSOS_KEY_F2:     return ui::VKEY_F2;
+    case JSOS_KEY_F3:     return ui::VKEY_F3;
+    case JSOS_KEY_F4:     return ui::VKEY_F4;
+    case JSOS_KEY_F5:     return ui::VKEY_F5;
+    case JSOS_KEY_F6:     return ui::VKEY_F6;
+    case JSOS_KEY_F7:     return ui::VKEY_F7;
+    case JSOS_KEY_F8:     return ui::VKEY_F8;
+    case JSOS_KEY_F9:     return ui::VKEY_F9;
+    case JSOS_KEY_F10:    return ui::VKEY_F10;
+    case JSOS_KEY_F11:    return ui::VKEY_F11;
+    case JSOS_KEY_F12:    return ui::VKEY_F12;
+    default:              return ui::VKEY_UNKNOWN;
   }
 }
 
@@ -126,17 +161,18 @@ void JsosEventSource::Poll() {
 
   // Drain keyboard queue.
   for (int i = 0; i < 16; i++) {
-    int sc = jsos_read_key();
-    if (!sc) break;
+    int code = jsos_read_key();
+    if (!code) break;
 
-    bool key_up   = (sc & 0x80) != 0;
-    int  raw_sc   = sc & 0x7F;
-    auto kc       = ScanCodeToKeyCode(raw_sc);
+    // JSOS keyboard buffer only queues key-press events (no key-up).
+    // Generate a paired press+release so Chromium's input state stays consistent.
+    auto kc = JsosKeyToVKey(code);
+    if (kc == ui::VKEY_UNKNOWN) continue;
 
-    ui::KeyEvent event(
-        key_up ? ui::ET_KEY_RELEASED : ui::ET_KEY_PRESSED,
-        kc, ui::EF_NONE);
-    DispatchEventToObservers(&event);
+    ui::KeyEvent press(ui::ET_KEY_PRESSED,  kc, ui::EF_NONE);
+    DispatchEventToObservers(&press);
+    ui::KeyEvent release(ui::ET_KEY_RELEASED, kc, ui::EF_NONE);
+    DispatchEventToObservers(&release);
   }
 
   // Drain mouse queue.
@@ -145,7 +181,7 @@ void JsosEventSource::Poll() {
     if (!pkt.valid) break;
 
     mouse_x_ += pkt.dx;
-    mouse_y_ -= pkt.dy;  // PS/2: positive dy = up → screen: y decreases
+    mouse_y_ += pkt.dy;  // syscall_dispatch already inverts PS/2 y-axis
     if (mouse_x_ < 0)    mouse_x_ = 0;
     if (mouse_y_ < 0)    mouse_y_ = 0;
 

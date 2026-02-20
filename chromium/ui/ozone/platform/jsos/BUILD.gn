@@ -7,6 +7,7 @@
 # ozone_platform_* sources list and register CreateOzonePlatformJsos()
 # in src/ui/ozone/ozone_platform.cc.
 
+import("//build/config/jsos/platform.gni")
 import("//ui/ozone/ozone.gni")
 
 ozone_platform("jsos") {
@@ -22,10 +23,18 @@ ozone_platform("jsos") {
     "ozone_platform_jsos.h",
   ]
 
+  # Use the bare-metal JSOS compiler settings from platform.gni.
+  configs = [ "//build/config/jsos:jsos_platform" ]
+
+  # POSIX headers compiled against the JSOS sysroot.
+  include_dirs = [ "//third_party/jsos_sysroot/include" ]
+
   deps = [
     "//base",
+    "//ui/display",
     "//ui/events",
     "//ui/events/ozone",
+    "//ui/events/ozone/evdev",
     "//ui/events/platform",
     "//ui/gfx",
     "//ui/gfx/geometry",
@@ -37,4 +46,8 @@ ozone_platform("jsos") {
   defines = [
     "OZONE_PLATFORM_JSOS",
   ]
+
+  # Factory entry: Chromium auto-generates the platform list from this.
+  factory = "CreateOzonePlatformJsos"
+  factory_function = "//ui/ozone/platform/jsos:jsos"
 }

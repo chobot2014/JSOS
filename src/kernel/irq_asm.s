@@ -78,6 +78,41 @@ gdtr:
     dw gdt_end - gdt_start - 1 ; Size
     dd gdt_start                ; Offset
 
+; ── Phase 9: int 0x80 syscall gate ─────────────────────────────────────────
+; Ring-3 Chromium code calls `int $0x80` with:
+;   eax = syscall number  (0x50 = KEY_READ, 0x51 = MOUSE_READ)
+;   ebx = arg1, ecx = arg2, edx = arg3
+; On return: eax = result; ebx/ecx/edx may hold additional output values
+;            (e.g. mouse dx/dy/buttons).
+;
+; The IDT gate is installed with DPL=3 (0xEE) so ring-3 can invoke it.
+; The kernel stack switch (ring-0 ESP from TSS.esp0) is automatic on the
+; ring-change crossing.
+
+extern syscall_dispatch
+extern syscall_out      ; struct { int ebx_out, ecx_out, edx_out; }
+
+global syscall_asm
+syscall_asm:
+    ; Push args right-to-left (cdecl) from the live registers.
+    ; The CPU has already switched to the kernel stack and pushed
+    ; SS, ESP, EFLAGS, CS, EIP before our stub runs.
+    push edx            ; arg3
+    push ecx            ; arg2
+    push ebx            ; arg1
+    push eax            ; syscall number
+    call syscall_dispatch
+    add esp, 16         ; clean cdecl args
+    ; eax now holds the primary return value.
+    ; Load output regs from the syscall_out global (set by C for multi-value
+    ; syscalls like MOUSE_READ).
+    mov ebx, [syscall_out]
+    mov ecx, [syscall_out + 4]
+    mov edx, [syscall_out + 8]
+    ; iretd pops EIP, CS, EFLAGS (and SS, ESP for ring change) restoring ring-3.
+    ; eax/ebx/ecx/edx are not touched by iretd — they are the return values.
+    iretd
+
 section .text
 gdt_flush:
     lgdt [gdtr]
