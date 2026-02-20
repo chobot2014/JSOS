@@ -72,6 +72,9 @@ export interface KernelAPI {
   //  Keyboard (raw, no echo) 
   /** Non-blocking poll; returns '' when nothing is ready */
   readKey(): string;
+  /** Non-blocking extended poll; checks arrow/special keys first, then char buffer.
+   *  Returns {ch, ext} or null when nothing is queued. Use this in WM event loops. */
+  readKeyEx(): { ch: string; ext: number } | null;
   /** Blocking; waits for next printable character */
   waitKey(): string;
   /** Blocking; returns {ch, ext}  ext != 0 for special/extended keys */

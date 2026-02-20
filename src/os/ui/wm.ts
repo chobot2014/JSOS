@@ -278,13 +278,13 @@ export class WindowManager {
       this._prevButtons = pkt.buttons;
     }
 
-    // Drain keyboard to focused window
+    // Drain keyboard to focused window (readKeyEx checks ext keys + chars)
     for (var k = 0; k < 32; k++) {
-      var ch = kernel.readKey();
-      if (!ch) break;
+      var kev = kernel.readKeyEx();
+      if (!kev) break;
       var focused = this.getFocused();
       if (focused) {
-        focused.app.onKey({ ch: ch, ext: 0 });
+        focused.app.onKey(kev);
         this._wmDirty = true;
       }
     }

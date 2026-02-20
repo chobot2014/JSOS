@@ -193,6 +193,30 @@ static JSValue js_read_key(JSContext *c, JSValueConst this_val, int argc, JSValu
     return JS_NewString(c, buf);
 }
 
+/**
+ * readKeyEx() — non-blocking; checks extended-key slot first, then char buffer.
+ * Returns {ch, ext} or JS_NULL when nothing is queued.
+ * Use this in event loops (WM tick) instead of readKey() so arrow keys work.
+ */
+static JSValue js_read_key_ex(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    int ext = keyboard_get_extended();
+    if (ext != 0) {
+        JSValue obj = JS_NewObject(c);
+        JS_SetPropertyStr(c, obj, "ch",  JS_NewString(c, ""));
+        JS_SetPropertyStr(c, obj, "ext", JS_NewInt32(c, ext));
+        return obj;
+    }
+    char ch = keyboard_poll();
+    if (ch) {
+        char buf[2] = { ch, 0 };
+        JSValue obj = JS_NewObject(c);
+        JS_SetPropertyStr(c, obj, "ch",  JS_NewString(c, buf));
+        JS_SetPropertyStr(c, obj, "ext", JS_NewInt32(c, 0));
+        return obj;
+    }
+    return JS_NULL;
+}
+
 static JSValue js_wait_key(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
     char ch = keyboard_getchar();
     char buf[2] = { ch, 0 };
@@ -1430,10 +1454,11 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("vgaShowCursor", 0, js_vga_show_cursor),
     JS_CFUNC_DEF("getScreenSize", 0, js_get_screen_size),
     /* Keyboard */
-    JS_CFUNC_DEF("readKey",   0, js_read_key),
-    JS_CFUNC_DEF("waitKey",   0, js_wait_key),
-    JS_CFUNC_DEF("waitKeyEx", 0, js_wait_key_ex),
-    JS_CFUNC_DEF("hasKey",    0, js_has_key),
+    JS_CFUNC_DEF("readKey",    0, js_read_key),
+    JS_CFUNC_DEF("readKeyEx",  0, js_read_key_ex),
+    JS_CFUNC_DEF("waitKey",    0, js_wait_key),
+    JS_CFUNC_DEF("waitKeyEx",  0, js_wait_key_ex),
+    JS_CFUNC_DEF("hasKey",     0, js_has_key),
     /* Timer */
     JS_CFUNC_DEF("getTicks",  0, js_get_ticks),
     JS_CFUNC_DEF("getUptime", 0, js_get_uptime),

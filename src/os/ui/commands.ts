@@ -19,6 +19,8 @@ import terminal from './terminal.js';
 import { Color } from '../core/kernel.js';
 import fs from '../fs/filesystem.js';
 import { openEditor } from './editor.js';
+import { EditorApp } from '../apps/editor-app.js';
+import { wm } from '../ui/wm.js';
 import { scheduler } from '../process/scheduler.js';
 import { vmm } from '../process/vmm.js';
 import { init } from '../process/init.js';
@@ -870,8 +872,16 @@ export function registerCommands(g: any): void {
     return printableObject(data, printer);
   };
 
-  // Text editor
-  g.edit = function(path?: string) { openEditor(path); };
+  // Text editor — opens windowed EditorApp in WM mode, VGA editor in text mode
+  g.edit = function(path?: string) {
+    if (wm !== null) {
+      var app = new EditorApp(path);
+      var title = path ? 'Edit: ' + path.split('/').pop() : 'Editor';
+      wm.createWindow({ title: title, width: 640, height: 200, app: app, closeable: true });
+    } else {
+      openEditor(path);
+    }
+  };
 
   // ──────────────────────────────────────────────────────────────────────────
   // 9.  HELP
