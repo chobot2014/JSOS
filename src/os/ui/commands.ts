@@ -673,6 +673,84 @@ export function registerCommands(g: any): void {
   // 7.  LOW-LEVEL / POWER-USER COMMANDS
   // ──────────────────────────────────────────────────────────────────────────
 
+  /** test() — run built-in OS self-tests */
+  g.test = function() {
+    terminal.colorPrintln('Running JSOS self-tests...', Color.WHITE);
+    terminal.colorPrintln(pad('', 42).replace(/ /g, '-'), Color.DARK_GREY);
+
+    var passed = 0;
+    var failed = 0;
+
+    function check(name: string, fn: () => boolean) {
+      var label = name + ' '; while (label.length < 30) label += '.';
+      terminal.print('  ' + label + ' ');
+      try {
+        if (fn()) {
+          terminal.colorPrintln('PASS', Color.LIGHT_GREEN);
+          passed++;
+        } else {
+          throw new Error('returned false');
+        }
+      } catch (e) {
+        terminal.colorPrintln('FAIL: ' + e, Color.LIGHT_RED);
+        failed++;
+      }
+    }
+
+    check('filesystem read/write', function() {
+      fs.writeFile('/tmp/_test', 'hello');
+      var c = fs.readFile('/tmp/_test');
+      fs.rm('/tmp/_test');
+      return c === 'hello';
+    });
+
+    check('filesystem mkdir/exists', function() {
+      fs.mkdir('/tmp/_testdir');
+      var ok = fs.isDirectory('/tmp/_testdir');
+      fs.rm('/tmp/_testdir');
+      return ok;
+    });
+
+    check('memory info', function() {
+      var m = kernel.getMemoryInfo();
+      return m.total > 0 && m.free >= 0 && m.used >= 0;
+    });
+
+    check('timer advancing', function() {
+      var t1 = kernel.getUptime();
+      kernel.sleep(50);
+      return kernel.getUptime() > t1;
+    });
+
+    check('process list', function() {
+      var procs = scheduler.getAllProcesses();
+      return Array.isArray(procs) && procs.length > 0;
+    });
+
+    check('screen size', function() {
+      var sc = kernel.getScreenSize();
+      return sc.width > 0 && sc.height > 0;
+    });
+
+    check('eval', function() {
+      var r = kernel.eval('2 + 2');
+      return r === '4';
+    });
+
+    check('VFS /proc mounts', function() {
+      var c = fs.readFile('/proc/meminfo');
+      return c !== null;
+    });
+
+    terminal.println('');
+    terminal.colorPrintln(pad('', 42).replace(/ /g, '-'), Color.DARK_GREY);
+    if (failed === 0) {
+      terminal.colorPrintln('All ' + (passed + failed) + ' tests passed!', Color.LIGHT_GREEN);
+    } else {
+      terminal.println(passed + '/' + (passed + failed) + ' passed, ' + failed + ' failed.');
+    }
+  };
+
   /**
    * Execute raw x86 machine code from a hex string.
    * Usage:  __asm("B8 2A 00 00 00 C3")  // mov eax, 42; ret  → returns 42
@@ -842,6 +920,7 @@ export function registerCommands(g: any): void {
     terminal.println('  halt()               power off');
     terminal.println('  shutdown()           power off (graceful)');
     terminal.println('  reboot()             reboot');
+    terminal.println('  test()               run OS self-tests');
     terminal.println('  edit(path?)          fullscreen text editor  (^S save  ^Q quit)');
     terminal.println('');
 
