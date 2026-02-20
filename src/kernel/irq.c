@@ -129,6 +129,20 @@ void irq_initialize(void) {
 void irq_install_handler(int irq, irq_handler_t handler) {
     if (irq >= 0 && irq < IRQ_COUNT) {
         irq_handlers[irq] = handler;
+        /* Unmask the IRQ in the PIC so it can actually fire */
+        if (irq < 8) {
+            uint8_t mask = inb(PIC1_DATA);
+            mask &= ~(uint8_t)(1u << irq);
+            outb(PIC1_DATA, mask);
+        } else {
+            /* Slave PIC IRQs also require IRQ2 (cascade) on master to be unmasked */
+            uint8_t master = inb(PIC1_DATA);
+            master &= ~(uint8_t)(1u << 2);   /* unmask IRQ2 cascade */
+            outb(PIC1_DATA, master);
+            uint8_t slave = inb(PIC2_DATA);
+            slave &= ~(uint8_t)(1u << (irq - 8));
+            outb(PIC2_DATA, slave);
+        }
     }
 }
 

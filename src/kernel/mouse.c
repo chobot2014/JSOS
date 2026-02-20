@@ -119,6 +119,19 @@ void mouse_initialize(void) {
     ps2_wait_write();
     outb(PS2_CMD, PS2_CMD_ENABLE_AUX);
 
+    /* Enable IRQ12 in the PS/2 Controller Configuration Byte (CCB).
+     * Bit 1 = Auxiliary interrupt enable; bit 5 = disable aux clock (clear it). */
+    ps2_wait_write();
+    outb(PS2_CMD, 0x20);          /* Read CCB */
+    ps2_wait_read();
+    uint8_t ccb = inb(PS2_DATA);
+    ccb |=  0x02;                 /* Set bit 1: enable aux (mouse) IRQ12 */
+    ccb &= ~0x20;                 /* Clear bit 5: enable aux port clock */
+    ps2_wait_write();
+    outb(PS2_CMD, 0x60);          /* Write CCB */
+    ps2_wait_write();
+    outb(PS2_DATA, ccb);
+
     /* Set defaults and enable packet streaming */
     mouse_write(MOUSE_SET_DEFAULTS);
     mouse_read_byte(); /* ACK */
@@ -126,7 +139,7 @@ void mouse_initialize(void) {
     mouse_write(MOUSE_ENABLE_REPORT);
     mouse_read_byte(); /* ACK */
 
-    /* Register IRQ12 handler */
+    /* Register IRQ12 handler (also unmasks IRQ12 in the PIC) */
     irq_install_handler(12, mouse_irq_handler);
 }
 
