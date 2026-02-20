@@ -113,10 +113,12 @@ export class TerminalApp implements App {
   private _term: CanvasTerminal | null = null;
   private _win:  WMWindow | null = null;
   private _inputBuf = '';
+  private _dirty = true;   // track whether canvas has been modified
 
   onMount(win: WMWindow): void {
     this._win  = win;
     this._term = new CanvasTerminal(win.canvas);
+    this._dirty = true;
     this._printWelcome();
     this._printPrompt();
   }
@@ -130,6 +132,7 @@ export class TerminalApp implements App {
     if (!this._term) return;
     var ch = event.ch;
     if (!ch || ch.length === 0) return;
+    this._dirty = true;   // any keystroke modifies the canvas
 
     if (ch === '\n' || ch === '\r') {
       this._term.print('\n');
@@ -149,8 +152,12 @@ export class TerminalApp implements App {
 
   onMouse(_event: MouseEvent): void { /* no-op for terminal */ }
 
-  render(_canvas: Canvas): void {
-    // Terminal renders directly into win.canvas on key events — no-op here
+  render(_canvas: Canvas): boolean {
+    // Terminal writes directly into win.canvas during onKey() / print().
+    // Here we just signal whether it's been modified since the last frame.
+    if (!this._dirty) return false;
+    this._dirty = false;
+    return true;
   }
 
   private _printWelcome(): void {

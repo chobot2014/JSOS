@@ -597,7 +597,7 @@ export class BrowserApp implements App {
 
   // ── Rendering ─────────────────────────────────────────────────────────────
 
-  render(canvas: Canvas): void {
+  render(canvas: Canvas): boolean {
     this._cursorBlink++;
     if ((this._cursorBlink & 31) === 0) this._dirty = true;
 
@@ -611,7 +611,7 @@ export class BrowserApp implements App {
         this._drawToolbar(canvas);
         this._drawContent(canvas);
         this._drawStatusBar(canvas);
-        return;
+        return true;
       } else {
         // Frame 2 — screen already shows "Loading…", now we can block.
         var pendingURL = this._pendingLoad!;
@@ -628,12 +628,13 @@ export class BrowserApp implements App {
       }
     }
 
-    if (!this._dirty) return;
+    if (!this._dirty) return false;
     this._dirty = false;
 
     this._drawToolbar(canvas);
     this._drawContent(canvas);
     this._drawStatusBar(canvas);
+    return true;
   }
 
   private _drawToolbar(canvas: Canvas): void {

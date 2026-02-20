@@ -41,7 +41,8 @@ export interface App {
   onUnmount(): void;
   onKey(event: KeyEvent): void;
   onMouse(event: MouseEvent): void;
-  render(canvas: Canvas): void;
+  /** Render into canvas.  Return true if anything was redrawn, false to skip composite. */
+  render(canvas: Canvas): boolean;
 }
 
 // ── Window ─────────────────────────────────────────────────────────────────
@@ -105,6 +106,10 @@ export class WindowManager {
   private _cursorX = 0;
   private _cursorY = 0;
   private _prevButtons = 0;
+
+  // Dirty tracking — skip composite+flip when nothing has changed
+  private _wmDirty     = true;   // set on cursor move, input, drag, clock change
+  private _lastClockMin = -1;    // track minute for clock redraw
 
   // Drag state
   private _dragging: number | null = null;
@@ -203,7 +208,8 @@ export class WindowManager {
     this._pollInput();
     this._composite();
   }
-
+  /** Mark the WM as needing a repaint (call from app code or external events). */
+  markDirty(): void { this._wmDirty = true; }
   // ── Input dispatch ─────────────────────────────────────────────────────
 
   private _pollInput(): void {
@@ -211,8 +217,11 @@ export class WindowManager {
     for (var i = 0; i < 8; i++) {
       var pkt = kernel.readMouse();
       if (!pkt) break;
+      var prevX = this._cursorX;
+      var prevY = this._cursorY;
       this._cursorX = Math.max(0, Math.min(this._screen.width  - 1, this._cursorX + pkt.dx));
       this._cursorY = Math.max(0, Math.min(this._screen.height - 1, this._cursorY + pkt.dy));
+      if (this._cursorX !== prevX || this._cursorY !== prevY) this._wmDirty = true;
 
       // Handle drag
       if (pkt.buttons & 1) {
@@ -221,6 +230,7 @@ export class WindowManager {
           if (dw) {
             dw.x = this._cursorX - this._dragOffX;
             dw.y = this._cursorY - this._dragOffY;
+            this._wmDirty = true;
           }
         } else if (!(this._prevButtons & 1)) {
           // Mouse down — check title bar hit
@@ -241,6 +251,7 @@ export class WindowManager {
                 this._dragging = w.id;
                 this._dragOffX = this._cursorX - w.x;
                 this._dragOffY = this._cursorY - w.y;
+                this._wmDirty = true;
               }
               break;
             }
@@ -260,6 +271,7 @@ export class WindowManager {
       var focused = this.getFocused();
       if (focused) {
         focused.app.onKey({ ch: ch, ext: 0 });
+        this._wmDirty = true;
       }
     }
 
@@ -272,6 +284,21 @@ export class WindowManager {
   private _composite(): void {
     var s = this._screen;
 
+    // Check clock — dirty on minute boundary
+    var ticks = kernel.getTicks();
+    var mins = Math.floor(ticks / 6000) % 60;
+    if (mins !== this._lastClockMin) { this._lastClockMin = mins; this._wmDirty = true; }
+
+    // Let apps render; if any redrew OR WM has pending changes, do a full composite.
+    var anyDirty = this._wmDirty;
+    for (var ai = 0; ai < this._windows.length; ai++) {
+      var wi = this._windows[ai];
+      if (!wi.minimised && wi.app.render(wi.canvas)) anyDirty = true;
+    }
+
+    if (!anyDirty) return;   // ★ nothing changed — skip expensive composite+flip
+    this._wmDirty = false;
+
     // 1. Desktop background
     s.clear(Colors.DESKTOP_BG);
 
@@ -282,9 +309,7 @@ export class WindowManager {
 
       var focused = (win.id === this._focused);
 
-      // Let app render into its sub-canvas
-      win.app.render(win.canvas);
-
+      // Let app render into its sub-canvas (already called above for dirty check)
       // Title bar
       s.fillRect(win.x, win.y, win.width, TITLE_H,
                  focused ? FOCUSED_TITLE_COLOR : TITLE_COLOR);

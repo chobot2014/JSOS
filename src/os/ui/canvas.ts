@@ -256,15 +256,8 @@ export class BitmapFont {
   renderChar(canvas: Canvas, x: number, y: number, ch: string, color: PixelColor): void {
     var code = ch.charCodeAt(0);
     if (code < 0x20 || code > 0x7E) return;
-    var base = (code - 0x20) * 8;
-    for (var row = 0; row < 8; row++) {
-      var byte = FONT_DATA_8x8[base + row];
-      for (var col = 0; col < 8; col++) {
-        if (byte & (0x80 >> col)) {
-          canvas.setPixel(x + col, y + row, color);
-        }
-      }
-    }
+    // Delegate to Canvas.drawGlyph — color converted once for all 64 pixels
+    canvas.drawGlyph(x, y, FONT_DATA_8x8, (code - 0x20) * 8, color);
   }
 }
 
@@ -329,16 +322,18 @@ export class Canvas {
   }
 
   fillRect(x: number, y: number, w: number, h: number, color: PixelColor): void {
-    var c = Canvas._bgra(color);
-    var x2 = Math.min(x + w, this.width);
-    var y2 = Math.min(y + h, this.height);
+    var c  = Canvas._bgra(color);
     var x1 = Math.max(x, 0);
     var y1 = Math.max(y, 0);
+    var x2 = Math.min(x + w, this.width);
+    var y2 = Math.min(y + h, this.height);
+    var rowW = x2 - x1;
+    if (rowW <= 0) return;
+    // Use TypedArray.fill() per row — native bulk operation, far faster than
+    // an explicit inner for-col loop which generates individual array writes.
     for (var row = y1; row < y2; row++) {
-      var base = row * this.width;
-      for (var col = x1; col < x2; col++) {
-        this._buf[base + col] = c;
-      }
+      var base = row * this.width + x1;
+      this._buf.fill(c, base, base + rowW);
     }
   }
 
@@ -376,6 +371,30 @@ export class Canvas {
 
   measureText(text: string, font = defaultFont): { width: number; height: number } {
     return font.measureText(text);
+  }
+
+  // ── Compositing ───────────────────────────────────────────────────────
+
+  /**
+   * Fast glyph renderer: converts `color` once then writes directly into
+   * _buf — no per-pixel color conversion or bounds-check call overhead.
+   * `data` is the font bitmap array; `base` is the byte offset for the glyph.
+   */
+  drawGlyph(x: number, y: number, data: Uint8Array, base: number, color: PixelColor): void {
+    var bgraColor = Canvas._bgra(color);   // convert ONCE, not 64 times
+    for (var row = 0; row < 8; row++) {
+      var py = y + row;
+      if (py < 0 || py >= this.height) continue;
+      var byte = data[base + row];
+      if (!byte) continue;                  // skip blank rows early
+      var rowBase = py * this.width;
+      for (var col = 0; col < 8; col++) {
+        if (byte & (0x80 >> col)) {
+          var px = x + col;
+          if (px >= 0 && px < this.width) this._buf[rowBase + px] = bgraColor;
+        }
+      }
+    }
   }
 
   // ── Compositing ───────────────────────────────────────────────────────
