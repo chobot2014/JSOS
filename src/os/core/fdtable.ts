@@ -29,6 +29,8 @@ export interface FileDescription {
   write(data: number[]): number;
   seek(offset: number, whence: number): number;
   close(): void;
+  /** Optional device-control call (e.g. DRM ioctls). */
+  ioctl?(request: number, arg: number): number;
 }
 
 /** Terminal stdin/stdout/stderr shim. */
@@ -318,6 +320,27 @@ export class FDTable {
   /** Return the underlying FileDescription for an fd, or null. */
   getDesc(fd: number): FileDescription | null {
     return this._fds.get(fd) || null;
+  }
+
+  /**
+   * Register any FileDescription directly as a new fd and return that fd.
+   * Used by DRM, future character devices, etc. to install typed descs
+   * without going through the VFS string-content path.
+   */
+  openDesc(desc: FileDescription): number {
+    return this.insert(desc);
+  }
+
+  /**
+   * Dispatch an ioctl to the FileDescription for `fd`.
+   * Returns -EBADF if the fd does not exist, or -ENOTTY if the
+   * description does not implement ioctl.
+   */
+  ioctl(fd: number, request: number, arg: number): number {
+    var d = this._fds.get(fd);
+    if (!d) return -9;  // -EBADF
+    if (!d.ioctl) return -25; // -ENOTTY
+    return d.ioctl(request, arg);
   }
 }
 

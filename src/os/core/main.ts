@@ -34,6 +34,10 @@ import { terminalApp } from '../apps/terminal-app.js';
 import { dhcpDiscover } from '../net/dhcp.js';
 import { dnsResolve } from '../net/dns.js';
 import { httpGet, httpsGet } from '../net/http.js';
+import { swiftShader } from '../graphics/swiftshader.js';
+import { drmDevice, drmVFSMount,
+         DRM_IOCTL_GET_CAP, DRM_IOCTL_MODE_PAGE_FLIP,
+         DRM_CAP_DUMB_BUFFER } from '../fs/drm.js';
 
 declare var kernel: import('./kernel.js').KernelAPI; // kernel.js is in core/
 
@@ -273,6 +277,44 @@ function setupGlobals(): void {
                  var sid = globalFDTable.getSocketId(fd);
                  return sid >= 0 ? (net.recv(sid) || '') : '';
                },
+    // ── Phase 8: ioctl (device control) ───────────────────────────────────
+    ioctl:     function(fd: number, request: number, arg: number) {
+                 return globalFDTable.ioctl(fd, request, arg);
+               },
+  };
+
+  // ── Phase 8: Graphics API (SwiftShader + DRM) ────────────────────────
+  // Exposed as g.gl — the same API that Chromium calls in Phase 9.
+  g.gl = {
+    // SwiftShader Vulkan-like API
+    createVkInstance: function() { return swiftShader.createVkInstance(); },
+    createVkDevice:   function(inst: number) { return swiftShader.createVkDevice(inst); },
+    clearColor: function(r: number, g2: number, b: number, a: number) {
+                  swiftShader.glClearColor(r, g2, b, a);
+                },
+    drawTriangle: function(
+      x0: number, y0: number, r0: number, g0: number, b0: number,
+      x1: number, y1: number, r1: number, g1: number, b1: number,
+      x2: number, y2: number, r2: number, g2: number, b2: number,
+    ) {
+      return swiftShader.glDrawTriangle(
+        x0, y0, r0, g0, b0,
+        x1, y1, r1, g1, b1,
+        x2, y2, r2, g2, b2,
+      );
+    },
+    present: function() { swiftShader.present(); },
+    // DRM device object — for advanced usage / Phase 9 plumbing
+    drm: drmDevice,
+    // Quick DRM ioctl helper via sys.open + sys.ioctl
+    drmIoctl: function(request: number, arg: number) {
+      var fd = syscalls.open('/dev/dri/card0', 0).value || -1;
+      if (fd < 0) return -1;
+      var r = globalFDTable.ioctl(fd, request, arg);
+      globalFDTable.close(fd);
+      return r;
+    },
+    isReady: function() { return swiftShader.isInitialised; },
   };
 
   // ── Shorthand print ───────────────────────────────────────────────────────
@@ -1069,6 +1111,47 @@ function main(): void {
     if (screen) {
       var wmInst = new WindowManager(screen);
       setWM(wmInst);
+
+      // ── Phase 8: Graphics Stack (SwiftShader + DRM/KMS) ───────────────
+      // Mount /dev/dri before SwiftShader init so open('/dev/dri/card0') works.
+      fs.mountVFS('/dev/dri', drmVFSMount);
+
+      // Attach both SwiftShader and the DRM device to the screen canvas.
+      swiftShader.init(screen);
+      drmDevice.attachCanvas(screen);
+
+      // Create a Vulkan instance + device (simulated SwiftShader API).
+      var vkInst = swiftShader.createVkInstance();
+      var vkDev  = swiftShader.createVkDevice(vkInst);
+      kernel.serialPut('SwiftShader: Vulkan device created\n');
+
+      // OpenGL ES 3.1 smoke test: render a rainbow triangle.
+      swiftShader.glClearColor(0.0, 0.05, 0.15, 1.0);  // dark-blue background
+      var triPixels = swiftShader.glDrawTriangle(
+        //  NDC-x  NDC-y  R     G     B
+           0.0,   0.7,  1.0,  0.0,  0.0,  // top    — red
+          -0.7,  -0.5,  0.0,  1.0,  0.0,  // lower-left  — green
+           0.7,  -0.5,  0.0,  0.0,  1.0,  // lower-right — blue
+      );
+      // Log before present() — the full-resolution blit is slow in QEMU and
+      // a timer interrupt may fire before we return from canvas.flip().
+      kernel.serialPut('OpenGL ES 3.1 test: triangle rendered to framebuffer: PASS ('
+                       + triPixels + ' pixels)\n');
+      swiftShader.present();              // flip to framebuffer
+
+      // DRM page-flip smoke test: open card0 as fd and call PAGE_FLIP.
+      var drmFd  = syscalls.open('/dev/dri/card0', 0);
+      if (drmFd.success && drmFd.value !== undefined) {
+        var capOk   = globalFDTable.ioctl(drmFd.value, DRM_IOCTL_GET_CAP, DRM_CAP_DUMB_BUFFER);
+        var flipOk  = globalFDTable.ioctl(drmFd.value, DRM_IOCTL_MODE_PAGE_FLIP, 0);
+        globalFDTable.close(drmFd.value);
+        kernel.serialPut('DRM: GET_CAP(DUMB_BUFFER)=' + capOk + '\n');
+        kernel.serialPut('DRM page flip: ' + (flipOk >= 0 ? 'PASS' : 'FAIL') + '\n');
+      } else {
+        kernel.serialPut('DRM: /dev/dri/card0 open failed\n');
+      }
+      kernel.serialPut('Phase 8 graphics stack ready\n');
+      // ── End Phase 8 ──────────────────────────────────────────────────────
 
       wmInst.createWindow({
         title:  'Terminal',

@@ -12,6 +12,7 @@ import { vmm } from '../process/vmm.js';
 import { signalManager } from '../process/signals.js';
 import { net } from '../net/net.js';
 import fs from '../fs/filesystem.js';
+import { drmDevice } from '../fs/drm.js';
 
 declare var kernel: import('./kernel.js').KernelAPI;
 
@@ -185,14 +186,28 @@ export class SystemCallInterface {
 
   open(pathname: string, _flags: number, _mode?: number): SyscallResult<number> {
     // /dev shortcuts
-    if (pathname === '/dev/null')    return { success: true, value: globalFDTable.openDevNull()    };
-    if (pathname === '/dev/zero')    return { success: true, value: globalFDTable.openDevZero()    };
-    if (pathname === '/dev/urandom') return { success: true, value: globalFDTable.openDevUrandom() };
+    if (pathname === '/dev/null')      return { success: true, value: globalFDTable.openDevNull()    };
+    if (pathname === '/dev/zero')      return { success: true, value: globalFDTable.openDevZero()    };
+    if (pathname === '/dev/urandom')   return { success: true, value: globalFDTable.openDevUrandom() };
+    // Phase 8: DRM device — returns the DRMDevice FileDescription directly
+    if (pathname === '/dev/dri/card0') return { success: true, value: globalFDTable.openDesc(drmDevice) };
     // General VFS path
     var fd = globalFDTable.openPath(pathname, fs);
     return fd >= 0
       ? { success: true, value: fd }
       : { success: false, error: 'ENOENT: ' + pathname, errno: Errno.ENOENT };
+  }
+
+  /**
+   * Phase 8: ioctl — dispatch a device-control call to an open fd.
+   * Used by Chromium's Ozone/DRM layer to configure display modes and
+   * flip framebuffers via /dev/dri/card0.
+   */
+  ioctl(fd: number, request: number, arg: number): SyscallResult<number> {
+    var result = globalFDTable.ioctl(fd, request, arg);
+    return result >= 0
+      ? { success: true, value: result }
+      : { success: false, errno: -result, error: 'ioctl errno=' + (-result) };
   }
 
   close(fd: number): SyscallResult<void> {

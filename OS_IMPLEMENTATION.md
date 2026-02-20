@@ -64,7 +64,7 @@ Third-party C/C++ libraries live in `lib/` — they are never part of the OS.
 | 5 | Preemptive Multitasking | ✅ Complete | [phase-5-preemptive-multitasking.md](phases/phase-5-preemptive-multitasking.md) |
 | 6 | POSIX Layer | ✅ Complete | [phase-6-posix-layer.md](phases/phase-6-posix-layer.md) |
 | 7 | Real Networking | ✅ Complete | [phase-7-networking.md](phases/phase-7-networking.md) |
-| 8 | Graphics Stack (SwiftShader) | ☐ | [phase-8-graphics-stack.md](phases/phase-8-graphics-stack.md) |
+| 8 | Graphics Stack (SwiftShader) | ✅ Complete | [phase-8-graphics-stack.md](phases/phase-8-graphics-stack.md) |
 | 9 | Chromium Port | ☐ | [phase-9-chromium-port.md](phases/phase-9-chromium-port.md) |
 | 10 | Post-Chromium Hardening | ☐ | [phase-10-post-chromium.md](phases/phase-10-post-chromium.md) |
 

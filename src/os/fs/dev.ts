@@ -117,27 +117,37 @@ export class DevFSMount {
     return s;
   }
 
-  /** List entries beneath a /dev path. */
+  exists(path: string): boolean {
+    if (path === '/dev/dri' || path === '/dev/dri/' || path === '/dev/dri/card0') return true;
+    return devFS.exists(path);
+  }
+
+  isDirectory(path: string): boolean {
+    return path === '/dev' || path === '/dev/' ||
+           path === '/dev/input' ||
+           path === '/dev/dri'   || path === '/dev/dri/';
+  }
+
+  /** Override list() to include /dev/dri sub-directory. */
   list(path: string): Array<{ name: string; type: 'file' | 'directory'; size: number }> {
     if (path === '/dev' || path === '/dev/') {
-      return devFS.list().map(function(name) {
+      var base = devFS.list().map(function(name) {
         return {
           name: name,
           type: name === 'input' ? 'directory' as const : 'file' as const,
           size: 0,
         };
       });
+      base.push({ name: 'dri', type: 'directory' as const, size: 0 });
+      return base;
     }
     if (path === '/dev/input') {
       return [{ name: 'mouse0', type: 'file' as const, size: 0 }];
     }
+    if (path === '/dev/dri' || path === '/dev/dri/') {
+      return [{ name: 'card0', type: 'file' as const, size: 0 }];
+    }
     return [];
-  }
-
-  exists(path: string): boolean { return devFS.exists(path); }
-
-  isDirectory(path: string): boolean {
-    return path === '/dev' || path === '/dev/' || path === '/dev/input';
   }
 }
 
