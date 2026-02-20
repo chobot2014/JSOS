@@ -24,7 +24,7 @@ import { processManager } from '../process/process.js';
 import { elfLoader } from '../process/elf.js';
 import { Pipe } from '../core/fdtable.js';
 import { devFSMount } from '../fs/dev.js';
-import { romFS } from '../fs/romfs.js';
+import { installRomFiles } from '../fs/romfs.js';
 import { createScreenCanvas } from '../ui/canvas.js';
 import { WindowManager, setWM } from '../ui/wm.js';
 import { terminalApp } from '../apps/terminal-app.js';
@@ -102,7 +102,9 @@ function main(): void {
   // Mount virtual filesystems before any code reads them
   fs.mountVFS('/proc', procFS);
   fs.mountVFS('/dev',  devFSMount);  // Phase 6: /dev device nodes
-  fs.mountVFS('/rom',  romFS);       // Read-only ROM: /rom/bible.txt etc.
+
+  // Install bundled resource files (bible.txt etc.) into the regular filesystem
+  installRomFiles(fs);
 
   // Mount persistent disk — try FAT32 first (large disks), fall back to FAT16
   // diskFS is whichever driver successfully mounts; exposed to all REPL helpers.
