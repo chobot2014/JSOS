@@ -5,11 +5,12 @@
   "scripts": {
     "info": "echo \"JSOS - JavaScript Operating System\" && echo \"====================================\" && echo \"\" && echo \"Available commands:\" && echo \"  npm run build           - Build the OS ISO\" && echo \"  npm run test            - Test in QEMU (automated)\" && echo \"  npm run test:interactive - Test in QEMU (interactive)\" && echo \"  npm run dev             - Build and test (development)\" && echo \"  npm run clean           - Clean build artifacts\" && echo \"  npm run docker:build    - Build Docker images\" && echo \"\" && echo \"Requirements: Docker and npm\"",
     "build": "docker rm -f temp-jsos 2>nul & docker build -f docker/build.Dockerfile -t jsos-build . && docker create --name temp-jsos jsos-build /bin/true && if exist build\\jsos.iso del /f build\\jsos.iso && docker cp temp-jsos:/jsos.iso build/jsos.iso && docker rm temp-jsos",
-    "build:local": "npm run build:ts && npm run embed:js && echo \"TypeScript build complete\"",
+    "build:local": "npm run embed:rom && npm run build:ts && npm run embed:js && echo \"TypeScript build complete\"",
     "build:ts": "npm run bundle",
     "transpile": "tsc -p src/os/tsconfig.json",
     "bundle": "node scripts/bundle-hybrid.js",
     "embed:js": "node scripts/embed-js.js",
+    "embed:rom": "node scripts/embed-rom.js",
     "test": "docker-compose run --rm test",
     "test:interactive": "docker-compose run --rm test-interactive",
     "test:wsl": "wsl bash test-wsl.sh",

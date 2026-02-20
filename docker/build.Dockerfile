@@ -81,6 +81,11 @@ COPY . .
 RUN find . -name "*.sh" -exec sed -i 's/\r$//' {} + && \
     chmod +x scripts/*.sh
 
+# Download public domain King James Bible (Project Gutenberg #10) into resources/
+RUN mkdir -p resources && \
+    wget -q "https://www.gutenberg.org/files/10/10-0.txt" -O resources/bible.txt && \
+    echo "Bible downloaded: $(wc -c < resources/bible.txt) bytes"
+
 # Build TypeScript to ES5 JavaScript with modern tooling
 RUN npm run build:local
 
