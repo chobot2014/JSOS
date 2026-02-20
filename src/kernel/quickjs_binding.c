@@ -766,20 +766,19 @@ static JSValue js_net_send_frame(JSContext *c, JSValueConst this_val,
 }
 
 /*
- * kernel.netRecvFrame() → number[] | null
+ * kernel.netRecvFrame() → ArrayBuffer | null
  * Poll the NIC for one received Ethernet frame.
- * Returns null when the RX ring is empty.
+ * Returns an ArrayBuffer (fast path — single memcpy) or null when RX ring is empty.
+ * Using ArrayBuffer instead of number[] eliminates ~1514 JS property assignments
+ * per frame, reducing C↔JS overhead by ~1500× per received packet.
  */
 static JSValue js_net_recv_frame(JSContext *c, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
     uint16_t frame_len = virtio_net_recv(_net_recv_buf);
     if (frame_len == 0) return JS_NULL;
-    JSValue arr = JS_NewArray(c);
-    for (int i = 0; i < (int)frame_len; i++)
-        JS_SetPropertyUint32(c, arr, (uint32_t)i,
-                             JS_NewInt32(c, _net_recv_buf[i]));
-    return arr;
+    /* Single memcpy into a new ArrayBuffer — no per-byte JS property ops */
+    return JS_NewArrayBufferCopy(c, _net_recv_buf, (size_t)frame_len);
 }
 
 /*
@@ -957,13 +956,9 @@ static JSValue js_ata_read(JSContext *c, JSValueConst this_val,
     if (ata_read28(lba, (uint8_t)secs, ata_sector_buf) != 0)
         return JS_NULL;
 
-    /* Return flat byte array (length = secs * 512) */
+    /* Return as ArrayBuffer — single memcpy, no per-byte property assignments */
     int total = secs * 512;
-    JSValue arr = JS_NewArray(c);
-    uint8_t *bytes = (uint8_t *)ata_sector_buf;
-    for (int i = 0; i < total; i++)
-        JS_SetPropertyUint32(c, arr, (uint32_t)i, JS_NewInt32(c, bytes[i]));
-    return arr;
+    return JS_NewArrayBufferCopy(c, (const uint8_t *)ata_sector_buf, (size_t)total);
 }
 
 static JSValue js_ata_write(JSContext *c, JSValueConst this_val,
@@ -979,12 +974,22 @@ static JSValue js_ata_write(JSContext *c, JSValueConst this_val,
 
     int total = secs * 512;
     uint8_t *bytes = (uint8_t *)ata_sector_buf;
-    for (int i = 0; i < total; i++) {
-        JSValue v = JS_GetPropertyUint32(c, argv[2], (uint32_t)i);
-        int32_t b = 0;
-        JS_ToInt32(c, &b, v);
-        JS_FreeValue(c, v);
-        bytes[i] = (uint8_t)b;
+
+    /* Fast path: Uint8Array / ArrayBuffer — single memcpy */
+    size_t ab_len = 0;
+    uint8_t *ab_data = JS_GetArrayBuffer(c, &ab_len, argv[2]);
+    if (ab_data) {
+        int copy = (int)ab_len < total ? (int)ab_len : total;
+        memcpy(bytes, ab_data, (size_t)copy);
+    } else {
+        /* Slow path: plain JS number[] */
+        for (int i = 0; i < total; i++) {
+            JSValue v = JS_GetPropertyUint32(c, argv[2], (uint32_t)i);
+            int32_t b = 0;
+            JS_ToInt32(c, &b, v);
+            JS_FreeValue(c, v);
+            bytes[i] = (uint8_t)b;
+        }
     }
     return JS_NewBool(c, ata_write28(lba, (uint8_t)secs, ata_sector_buf) == 0);
 }

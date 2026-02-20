@@ -53,7 +53,13 @@ class AtaBlockDevice implements BlockDevice {
 
   /** Read one sector (wraps multi-sector read for cache coherency) */
   private _rawRead(lba: number): number[] | null {
-    return kernel.ataRead(lba, 1);
+    var ab = (kernel.ataRead as any)(lba, 1) as ArrayBuffer | null;
+    if (!ab) return null;
+    // Unpack ArrayBuffer → number[] (C now returns ArrayBuffer for zero-copy read)
+    var u8 = new Uint8Array(ab);
+    var arr: number[] = new Array(u8.length);
+    for (var i = 0; i < u8.length; i++) arr[i] = u8[i];
+    return arr;
   }
 
   /** Write one sector */

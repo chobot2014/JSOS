@@ -611,9 +611,9 @@ export class NetworkStack {
     this.stats.txBytes += raw.length;
 
     if (this.nicReady) {
-      // Real hardware path: send every frame out the virtio-net NIC.
-      // QEMU SLIRP will reflect broadcast/unicast replies back to us.
-      kernel.netSendFrame(raw);
+      // Pass a Uint8Array so C hits the JS_GetArrayBuffer() fast path:
+      // one memcpy instead of 1514 individual JS_GetPropertyUint32 calls.
+      kernel.netSendFrame(new Uint8Array(raw) as any);
       // Also push self-addressed frames to the local RX queue immediately
       // (for any intra-stack loopback still needed while NIC is active).
       if (frame.dst === this.mac) {
@@ -637,8 +637,13 @@ export class NetworkStack {
     if (!this.nicReady) return 0;
     var count = 0;
     for (var i = 0; i < 32; i++) {   // drain at most 32 frames per call
-      var raw = kernel.netRecvFrame();
-      if (!raw) break;
+      var ab = kernel.netRecvFrame() as any;
+      if (!ab) break;
+      // C now returns an ArrayBuffer.  Unpack once here with a fast typed-array
+      // loop — far cheaper than 1514 individual JS_SetPropertyUint32 calls in C.
+      var u8view = new Uint8Array(ab);
+      var raw: number[] = new Array(u8view.length);
+      for (var j = 0; j < u8view.length; j++) raw[j] = u8view[j];
       this.receive(raw);
       count++;
     }

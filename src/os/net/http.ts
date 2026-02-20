@@ -127,20 +127,26 @@ export function httpGet(
   var req = buildGetRequest(host, path);
   if (!net.sendBytes(sock, req)) { net.close(sock); return null; }
 
-  // Accumulate response body with timeout
-  var buf: number[] = [];
+  // Accumulate response into a chunk list — avoid O(n²) concat on every packet
+  var chunks: number[][] = [];
   var deadline = kernel.getTicks() + 500;  // 5 seconds
   while (kernel.getTicks() < deadline) {
     if (net.nicReady) net.pollNIC();
     var chunk = net.recvBytes(sock, 50);
     if (chunk && chunk.length > 0) {
-      buf = buf.concat(chunk);
+      chunks.push(chunk);
       deadline = kernel.getTicks() + 100;  // reset on new data
     }
   }
   net.close(sock);
 
-  if (buf.length === 0) return null;
+  if (chunks.length === 0) return null;
+  // Flatten once at the end — single O(n) pass, no intermediate copies
+  var buf: number[] = [];
+  for (var ci = 0; ci < chunks.length; ci++) {
+    var ch = chunks[ci];
+    for (var cj = 0; cj < ch.length; cj++) buf.push(ch[cj]);
+  }
   return parseHttpResponse(buf);
 }
 
@@ -168,19 +174,24 @@ export function httpsGet(
     return { tlsOk: true, response: null };
   }
 
-  // Receive and accumulate response
-  var buf: number[] = [];
-  var deadline = kernel.getTicks() + 500;  // 5 seconds
-  while (kernel.getTicks() < deadline) {
-    var chunk = tls.read(100);
-    if (chunk && chunk.length > 0) {
-      buf = buf.concat(chunk);
-      deadline = kernel.getTicks() + 100;  // reset on new data
+  // Receive and accumulate response — chunk list avoids O(n²) concat
+  var tlsChunks: number[][] = [];
+  var tlsDeadline = kernel.getTicks() + 500;  // 5 seconds
+  while (kernel.getTicks() < tlsDeadline) {
+    var chunk2 = tls.read(100);
+    if (chunk2 && chunk2.length > 0) {
+      tlsChunks.push(chunk2);
+      tlsDeadline = kernel.getTicks() + 100;  // reset on new data
     }
   }
   tls.close();
 
-  if (buf.length === 0) return { tlsOk: true, response: null };
-  var resp = parseHttpResponse(buf);
+  if (tlsChunks.length === 0) return { tlsOk: true, response: null };
+  var tlsBuf: number[] = [];
+  for (var tci = 0; tci < tlsChunks.length; tci++) {
+    var tch = tlsChunks[tci];
+    for (var tcj = 0; tcj < tch.length; tcj++) tlsBuf.push(tch[tcj]);
+  }
+  var resp = parseHttpResponse(tlsBuf);
   return { tlsOk: true, response: resp };
 }

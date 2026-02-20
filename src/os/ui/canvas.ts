@@ -382,15 +382,18 @@ export class Canvas {
 
   blit(src: Canvas, sx: number, sy: number, dx: number, dy: number,
        w: number, h: number): void {
+    // Use TypedArray.set() per-row instead of a per-pixel loop.
+    // For a 800×550 window this is ~550 bulk copies vs ~440,000 individual assignments.
     for (var row = 0; row < h; row++) {
-      for (var col = 0; col < w; col++) {
-        var srcPx = src._buf[(sy + row) * src.width + (sx + col)];
-        var dstX = dx + col;
-        var dstY = dy + row;
-        if (dstX >= 0 && dstX < this.width && dstY >= 0 && dstY < this.height) {
-          this._buf[dstY * this.width + dstX] = srcPx;
-        }
-      }
+      var dstY = dy + row;
+      if (dstY < 0 || dstY >= this.height) continue;
+      // Clamp column range to destination bounds
+      var colStart = dx < 0 ? -dx : 0;
+      var colEnd   = (dx + w > this.width) ? (this.width - dx) : w;
+      if (colStart >= colEnd) continue;
+      var srcOff = (sy + row) * src.width + sx + colStart;
+      var dstOff =       dstY * this.width     + dx + colStart;
+      this._buf.set(src._buf.subarray(srcOff, srcOff + (colEnd - colStart)), dstOff);
     }
   }
 
