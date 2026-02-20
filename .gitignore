@@ -22,8 +22,7 @@ package-lock.json
 src/kernel/embedded_js.h
 src/os/fs/romfs.ts
 
-# Downloaded resources (fetched during Docker build, not committed)
-resources/bible.txt
+# resources/ is source-controlled — no ignores needed here
 
 # IDE
 .vscode/
