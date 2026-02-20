@@ -98,3 +98,47 @@ export class DevFS {
 }
 
 export const devFS = new DevFS();
+
+/**
+ * VFSMount adapter — exposes DevFS to the filesystem.ts VFS mount table.
+ * Mounted at '/dev' by main.ts during Phase 6 boot:
+ *   fs.mountVFS('/dev', devFSMount)
+ *
+ * Implements the VFSMount interface (read/list/exists/isDirectory) that the
+ * in-memory VFS expects from any mounted subsystem.
+ */
+export class DevFSMount {
+  /** Read a /dev device path as a text string (up to 512 bytes). */
+  read(path: string): string | null {
+    var bytes = devFS.read(path, 512);
+    if (bytes === null) return null;
+    var s = '';
+    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return s;
+  }
+
+  /** List entries beneath a /dev path. */
+  list(path: string): Array<{ name: string; type: 'file' | 'directory'; size: number }> {
+    if (path === '/dev' || path === '/dev/') {
+      return devFS.list().map(function(name) {
+        return {
+          name: name,
+          type: name === 'input' ? 'directory' as const : 'file' as const,
+          size: 0,
+        };
+      });
+    }
+    if (path === '/dev/input') {
+      return [{ name: 'mouse0', type: 'file' as const, size: 0 }];
+    }
+    return [];
+  }
+
+  exists(path: string): boolean { return devFS.exists(path); }
+
+  isDirectory(path: string): boolean {
+    return path === '/dev' || path === '/dev/' || path === '/dev/input';
+  }
+}
+
+export const devFSMount = new DevFSMount();

@@ -26,7 +26,8 @@ import { threadManager } from '../process/threads.js';
 import { Mutex } from '../process/sync.js';
 import { processManager } from '../process/process.js';
 import { elfLoader } from '../process/elf.js';
-import { Pipe } from '../core/fdtable.js';
+import { Pipe, globalFDTable } from '../core/fdtable.js';
+import { devFSMount } from '../fs/dev.js';
 import { createScreenCanvas } from '../ui/canvas.js';
 import { WindowManager, setWM } from '../ui/wm.js';
 import { terminalApp } from '../apps/terminal-app.js';
@@ -227,6 +228,51 @@ function setupGlobals(): void {
     net:       net,
     users:     users,
     ipc:       ipc,
+    processManager: processManager,
+    // ── Phase 6: POSIX file-descriptor API ────────────────────────────────
+    getpid:    function() { return processManager.getpid(); },
+    getppid:   function() { return processManager.getppid(); },
+    open:      function(path: string, flags?: number) {
+                 return syscalls.open(path, flags || 0);
+               },
+    read:      function(fd: number, count?: number) {
+                 var bytes = globalFDTable.read(fd, count !== undefined ? count : 4096);
+                 var s = '';
+                 for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+                 return s;
+               },
+    readBytes: function(fd: number, count?: number) {
+                 return globalFDTable.read(fd, count !== undefined ? count : 4096);
+               },
+    write:     function(fd: number, data: string | number[]) {
+                 var bytes: number[] = typeof data === 'string'
+                   ? (data as string).split('').map(function(c: string) { return c.charCodeAt(0); })
+                   : (data as number[]);
+                 return globalFDTable.write(fd, bytes);
+               },
+    close:     function(fd: number) { globalFDTable.close(fd); },
+    pipe:      function() { var p = globalFDTable.pipe(); return { read: p[0], write: p[1] }; },
+    dup:       function(fd: number) { return globalFDTable.dup(fd); },
+    fdtable:   globalFDTable,
+    // ── Phase 7: socket fd integration ────────────────────────────────────
+    // Sockets are full POSIX fds: sys.read/write/close work on them.
+    // Use sys.getSocketId(fd) to get the raw socket ID for net.connect etc.
+    socket:    function(type?: string) {
+                 return globalFDTable.openSocket(net, (type === 'udp' ? 'udp' : 'tcp') as 'tcp' | 'udp');
+               },
+    getSocketId: function(fd: number) { return globalFDTable.getSocketId(fd); },
+    connect:   function(fd: number, ip: string, port: number) {
+                 var sid = globalFDTable.getSocketId(fd);
+                 return sid >= 0 ? net.connect(sid, ip, port) : false;
+               },
+    send:      function(fd: number, data: string) {
+                 var sid = globalFDTable.getSocketId(fd);
+                 if (sid >= 0) net.send(sid, data);
+               },
+    recv:      function(fd: number) {
+                 var sid = globalFDTable.getSocketId(fd);
+                 return sid >= 0 ? (net.recv(sid) || '') : '';
+               },
   };
 
   // ── Shorthand print ───────────────────────────────────────────────────────
@@ -832,6 +878,7 @@ function main(): void {
 
   // Mount virtual filesystems before any code reads them
   fs.mountVFS('/proc', procFS);
+  fs.mountVFS('/dev',  devFSMount);  // Phase 6: /dev device nodes
 
   // Mount persistent FAT16 disk (non-fatal if not present)
   if (fat16.mount()) {
@@ -912,7 +959,7 @@ function main(): void {
   } catch(e) { mutexOk = false; }
   kernel.serialPut('Mutex contention test: ' + (mutexOk ? 'PASS' : 'FAIL') + '\n');
   // ── Phase 6: POSIX layer ──────────────────────────────────────────────────
-  kernel.serialPut('POSIX layer initialised\n');
+  kernel.serialPut('POSIX layer ready: devFS mounted, FDTable wired, syscalls active\n');
 
   // fork/exec test: fork a child (PID 2), run it, wait for exit code 0.
   var forkOk = false;

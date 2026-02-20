@@ -113,6 +113,93 @@ class DevUrandomDescription implements FileDescription {
 }
 
 /**
+ * Wraps a VFS string buffer as a seekable, writable POSIX file description.
+ * Created by FDTable.openPath() to give fd semantics to in-memory FS files.
+ */
+export class VFSFileDescription implements FileDescription {
+  private _data: number[];
+  private _pos: number = 0;
+  private _writeback: ((data: number[]) => void) | null;
+
+  constructor(content: string, writeback?: (data: number[]) => void) {
+    this._data = [];
+    for (var i = 0; i < content.length; i++) this._data.push(content.charCodeAt(i) & 0xff);
+    this._writeback = writeback || null;
+  }
+
+  read(count: number): number[] {
+    var chunk = this._data.slice(this._pos, this._pos + count);
+    this._pos += chunk.length;
+    return chunk;
+  }
+
+  write(data: number[]): number {
+    for (var i = 0; i < data.length; i++) {
+      if (this._pos + i < this._data.length) this._data[this._pos + i] = data[i];
+      else this._data.push(data[i]);
+    }
+    this._pos += data.length;
+    if (this._writeback) this._writeback(this._data);
+    return data.length;
+  }
+
+  seek(offset: number, whence: number): number {
+    if      (whence === 0) this._pos = offset;               // SEEK_SET
+    else if (whence === 1) this._pos += offset;              // SEEK_CUR
+    else if (whence === 2) this._pos = this._data.length + offset; // SEEK_END
+    if (this._pos < 0) this._pos = 0;
+    if (this._pos > this._data.length) this._pos = this._data.length;
+    return this._pos;
+  }
+
+  close(): void { if (this._writeback) this._writeback(this._data); }
+
+  /** Return current content as a string (for debugging / write-through). */
+  toString(): string {
+    var s = '';
+    for (var i = 0; i < this._data.length; i++) s += String.fromCharCode(this._data[i]);
+    return s;
+  }
+}
+
+/**
+ * Wraps a net.ts socket (by socket ID) as a streaming FileDescription.
+ * Uses `net: any` to avoid a heavy circular import of net.ts into fdtable.ts.
+ * Obtained via FDTable.openSocket(net, type).
+ */
+export class SocketDescription implements FileDescription {
+  private _net: any;
+  private _sockId: number;
+
+  constructor(net: any, sockId: number) {
+    this._net   = net;
+    this._sockId = sockId;
+  }
+
+  /** Expose the raw socket ID so callers can pass it to net.connect etc. */
+  get sockId(): number { return this._sockId; }
+
+  read(count: number): number[] {
+    var s: string | null = this._net.recv(this._sockId);
+    if (!s) return [];
+    var bytes: number[] = [];
+    for (var i = 0; i < s.length && bytes.length < count; i++)
+      bytes.push(s.charCodeAt(i) & 0xff);
+    return bytes;
+  }
+
+  write(data: number[]): number {
+    var s = '';
+    for (var i = 0; i < data.length; i++) s += String.fromCharCode(data[i]);
+    this._net.send(this._sockId, s);
+    return data.length;
+  }
+
+  seek(_offset: number, _whence: number): number { return -1; } // not seekable
+  close(): void { this._net.close(this._sockId); }
+}
+
+/**
  * Pipe: a pair of connected read/write file descriptions.
  * Used both as a standalone object and inserted into an FDTable.
  */
@@ -194,6 +281,44 @@ export class FDTable {
   }
 
   has(fd: number): boolean { return this._fds.has(fd); }
+
+  /**
+   * Open a VFS path through `fsInst` (a FileSystem instance) and return its fd.
+   * The underlying content is read into a VFSFileDescription buffer; writes are
+   * flushed back to the FS on close().  Returns -1 if the path does not exist.
+   */
+  openPath(path: string, fsInst: any): number {
+    var content: string | null = fsInst.readFile(path);
+    if (content === null) return -1;
+    return this.insert(new VFSFileDescription(content, function(data: number[]) {
+      var s = '';
+      for (var i = 0; i < data.length; i++) s += String.fromCharCode(data[i]);
+      fsInst.writeFile(path, s);
+    }));
+  }
+
+  /**
+   * Create a network socket via `netInst` of the given type and insert it.
+   * Returns the new fd number.  The raw socket ID is accessible via getSocketId().
+   */
+  openSocket(netInst: any, type: 'tcp' | 'udp'): number {
+    var sockId: number = netInst.createSocket(type);
+    return this.insert(new SocketDescription(netInst, sockId));
+  }
+
+  /**
+   * Return the raw socket ID for a socket fd, or -1 if fd is not a socket fd.
+   * Use this to obtain the socket ID needed for net.connect/bind/listen etc.
+   */
+  getSocketId(fd: number): number {
+    var d = this._fds.get(fd);
+    return (d instanceof SocketDescription) ? d.sockId : -1;
+  }
+
+  /** Return the underlying FileDescription for an fd, or null. */
+  getDesc(fd: number): FileDescription | null {
+    return this._fds.get(fd) || null;
+  }
 }
 
 export const globalFDTable = new FDTable();

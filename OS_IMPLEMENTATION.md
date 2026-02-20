@@ -59,11 +59,11 @@ Third-party C/C++ libraries live in `lib/` — they are never part of the OS.
 |---|---|---|---|
 | 1 | Core Infrastructure | ✅ Complete | [phase-1-core-infrastructure.md](phases/phase-1-core-infrastructure.md) |
 | 2 | Storage & I/O | ✅ Complete | [phase-2-storage-io.md](phases/phase-2-storage-io.md) |
-| 3 | Graphics, Mouse & Browser | ☐ | [phase-3-graphics-mouse-browser.md](phases/phase-3-graphics-mouse-browser.md) |
-| 4 | Real Memory Management | ☐ | [phase-4-memory-management.md](phases/phase-4-memory-management.md) |
-| 5 | Preemptive Multitasking | ☐ | [phase-5-preemptive-multitasking.md](phases/phase-5-preemptive-multitasking.md) |
-| 6 | POSIX Layer | ☐ | [phase-6-posix-layer.md](phases/phase-6-posix-layer.md) |
-| 7 | Real Networking | ☐ | [phase-7-networking.md](phases/phase-7-networking.md) |
+| 3 | Graphics, Mouse & Browser | ✅ Complete | [phase-3-graphics-mouse-browser.md](phases/phase-3-graphics-mouse-browser.md) |
+| 4 | Real Memory Management | ✅ Complete | [phase-4-memory-management.md](phases/phase-4-memory-management.md) |
+| 5 | Preemptive Multitasking | ✅ Complete | [phase-5-preemptive-multitasking.md](phases/phase-5-preemptive-multitasking.md) |
+| 6 | POSIX Layer | ✅ Complete | [phase-6-posix-layer.md](phases/phase-6-posix-layer.md) |
+| 7 | Real Networking | ✅ Complete | [phase-7-networking.md](phases/phase-7-networking.md) |
 | 8 | Graphics Stack (SwiftShader) | ☐ | [phase-8-graphics-stack.md](phases/phase-8-graphics-stack.md) |
 | 9 | Chromium Port | ☐ | [phase-9-chromium-port.md](phases/phase-9-chromium-port.md) |
 | 10 | Post-Chromium Hardening | ☐ | [phase-10-post-chromium.md](phases/phase-10-post-chromium.md) |
