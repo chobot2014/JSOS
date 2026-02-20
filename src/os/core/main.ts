@@ -40,6 +40,7 @@ import { swiftShader } from '../graphics/swiftshader.js';
 import { drmDevice, drmVFSMount,
          DRM_IOCTL_GET_CAP, DRM_IOCTL_MODE_PAGE_FLIP,
          DRM_CAP_DUMB_BUFFER } from '../fs/drm.js';
+import { registerCommands } from '../ui/commands.js';
 
 declare var kernel: import('./kernel.js').KernelAPI; // kernel.js is in core/
 
@@ -296,39 +297,7 @@ function setupGlobals(): void {
                },
   };
 
-  // ── Phase 8: Graphics API (SwiftShader + DRM) ────────────────────────
-  // Exposed as g.gl — software rasterizer API used by the WM and browser.
-  g.gl = {
-    // SwiftShader Vulkan-like API
-    createVkInstance: function() { return swiftShader.createVkInstance(); },
-    createVkDevice:   function(inst: number) { return swiftShader.createVkDevice(inst); },
-    clearColor: function(r: number, g2: number, b: number, a: number) {
-                  swiftShader.glClearColor(r, g2, b, a);
-                },
-    drawTriangle: function(
-      x0: number, y0: number, r0: number, g0: number, b0: number,
-      x1: number, y1: number, r1: number, g1: number, b1: number,
-      x2: number, y2: number, r2: number, g2: number, b2: number,
-    ) {
-      return swiftShader.glDrawTriangle(
-        x0, y0, r0, g0, b0,
-        x1, y1, r1, g1, b1,
-        x2, y2, r2, g2, b2,
-      );
-    },
-    present: function() { swiftShader.present(); },
-    // DRM device object — for advanced usage / Phase 9 plumbing
-    drm: drmDevice,
-    // Quick DRM ioctl helper via sys.open + sys.ioctl
-    drmIoctl: function(request: number, arg: number) {
-      var fd = syscalls.open('/dev/dri/card0', 0).value || -1;
-      if (fd < 0) return -1;
-      var r = globalFDTable.ioctl(fd, request, arg);
-      globalFDTable.close(fd);
-      return r;
-    },
-    isReady: function() { return swiftShader.isInitialised; },
-  };
+  // g.gl is set up by setupGl(), called from main() after registerCommands()
 
   // ── Shorthand print ───────────────────────────────────────────────────────
 
@@ -906,6 +875,39 @@ function setupGlobals(): void {
   };
 }
 
+/** Expose the graphics / DRM API as g.gl (Phase 8) */
+function setupGl(): void {
+  var g = globalThis as any;
+  g.gl = {
+    createVkInstance: function() { return swiftShader.createVkInstance(); },
+    createVkDevice:   function(inst: number) { return swiftShader.createVkDevice(inst); },
+    clearColor: function(r: number, g2: number, b: number, a: number) {
+                  swiftShader.glClearColor(r, g2, b, a);
+                },
+    drawTriangle: function(
+      x0: number, y0: number, r0: number, g0: number, b0: number,
+      x1: number, y1: number, r1: number, g1: number, b1: number,
+      x2: number, y2: number, r2: number, g2: number, b2: number,
+    ) {
+      return swiftShader.glDrawTriangle(
+        x0, y0, r0, g0, b0,
+        x1, y1, r1, g1, b1,
+        x2, y2, r2, g2, b2,
+      );
+    },
+    present: function() { swiftShader.present(); },
+    drm: drmDevice,
+    drmIoctl: function(request: number, arg: number) {
+      var fd = syscalls.open('/dev/dri/card0', 0).value || -1;
+      if (fd < 0) return -1;
+      var r = globalFDTable.ioctl(fd, request, arg);
+      globalFDTable.close(fd);
+      return r;
+    },
+    isReady: function() { return swiftShader.isInitialised; },
+  };
+}
+
 /** Boot banner */
 function printBanner(): void {
   terminal.clear();
@@ -963,7 +965,8 @@ function main(): void {
   kernel.serialPut('OS kernel started\n');
   kernel.serialPut('Init system ready\n');
 
-  setupGlobals();
+  registerCommands(globalThis as any);
+  setupGl();
   printBanner();
 
   // ── Phase 4: Physical memory manager + hardware paging ───────────────────
