@@ -14,7 +14,6 @@ import { elfLoader } from '../process/elf.js';
 import { signalManager } from '../process/signals.js';
 import { net } from '../net/net.js';
 import fs from '../fs/filesystem.js';
-import { drmDevice } from '../fs/drm.js';
 
 declare var kernel: import('./kernel.js').KernelAPI;
 
@@ -228,8 +227,6 @@ export class SystemCallInterface {
     if (pathname === '/dev/null')      return { success: true, value: globalFDTable.openDevNull()    };
     if (pathname === '/dev/zero')      return { success: true, value: globalFDTable.openDevZero()    };
     if (pathname === '/dev/urandom')   return { success: true, value: globalFDTable.openDevUrandom() };
-    // Phase 8: DRM device — returns the DRMDevice FileDescription directly
-    if (pathname === '/dev/dri/card0') return { success: true, value: globalFDTable.openDesc(drmDevice) };
     // General VFS path
     var fd = globalFDTable.openPath(pathname, fs);
     return fd >= 0
