@@ -482,11 +482,14 @@ export class BrowserApp implements App {
   private _dirty        = true;
   private _hoverHref    = '';
 
-  // Deferred load: set in onKey(), consumed in render()
+  // Deferred load: set in onKey()/onMouse()/_goBack()/_goForward()/_reload(),
+  // consumed in render(). _pendingNavPush=true → _navigate() (push history);
+  // false → _load() directly (back/forward/reload, no new history entry).
   private _pendingLoad:      string | null = null;
   private _pendingLoadReady  = false;
+  private _pendingNavPush    = false;
 
-  // Redirect tracking — reset on each user-initiated navigation
+  // Redirect tracking — reset at the start of every new load sequence
   private _redirectDepth = 0;
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -521,6 +524,7 @@ export class BrowserApp implements App {
       if (url) {
         // Queue a deferred load so render() can show "Loading..." before blocking
         this._pendingLoad      = url;
+        this._pendingNavPush   = true;
         this._pendingLoadReady = false;
         this._loading          = true;
         this._dirty            = true;
@@ -564,7 +568,17 @@ export class BrowserApp implements App {
       if (event.y >= contentY0 && event.y < contentY1) {
         var cy = event.y - contentY0 + this._scrollY;
         var href = this._hitTestLink(event.x, cy);
-        if (href) { this._navigateLink(href); return; }
+        if (href) {
+          var resolved = this._resolveHref(href);
+          this._visited.add(resolved);   // mark visited immediately for colour change
+          this._urlBarFocus      = false;
+          this._pendingLoad      = resolved;
+          this._pendingNavPush   = true;
+          this._pendingLoadReady = false;
+          this._loading          = true;
+          this._dirty            = true;
+          return;
+        }
         this._urlBarFocus = false;
         this._dirty = true;
       }
@@ -600,10 +614,16 @@ export class BrowserApp implements App {
         return;
       } else {
         // Frame 2 — screen already shows "Loading…", now we can block.
-        var pendingURL = this._pendingLoad;
+        var pendingURL = this._pendingLoad!;
+        var pushHist   = this._pendingNavPush;
         this._pendingLoad      = null;
         this._pendingLoadReady = false;
-        this._navigate(pendingURL);
+        if (pushHist) {
+          this._navigate(pendingURL);    // resets _redirectDepth, pushes history
+        } else {
+          this._redirectDepth = 0;       // reset budget for back/forward/reload
+          this._load(pendingURL);
+        }
         // fall through to normal render below
       }
     }
@@ -730,17 +750,14 @@ export class BrowserApp implements App {
     this._load(url);
   }
 
-  private _navigateLink(href: string): void {
-    var resolved = this._resolveHref(href);
-    this._visited.add(resolved);
-    this._navigate(resolved);
-  }
-
   private _resolveHref(href: string): string {
     if (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('about:')) {
       return href;
     }
-    if (href.startsWith('//')) return 'http:' + href;
+    if (href.startsWith('//')) {
+      var proto = this._pageURL.startsWith('https://') ? 'https' : 'http';
+      return proto + ':' + href;
+    }
     if (href.startsWith('/')) {
       var p = parseURL(this._pageURL);
       if (!p) return href;
@@ -754,17 +771,29 @@ export class BrowserApp implements App {
   private _goBack(): void {
     if (this._histIdx <= 0) return;
     this._histIdx--;
-    this._load(this._history[this._histIdx].url);
+    this._pendingLoad      = this._history[this._histIdx].url;
+    this._pendingNavPush   = false;
+    this._pendingLoadReady = false;
+    this._loading          = true;
+    this._dirty            = true;
   }
 
   private _goForward(): void {
     if (this._histIdx >= this._history.length - 1) return;
     this._histIdx++;
-    this._load(this._history[this._histIdx].url);
+    this._pendingLoad      = this._history[this._histIdx].url;
+    this._pendingNavPush   = false;
+    this._pendingLoadReady = false;
+    this._loading          = true;
+    this._dirty            = true;
   }
 
   private _reload(): void {
-    this._load(this._pageURL);
+    this._pendingLoad      = this._pageURL;
+    this._pendingNavPush   = false;
+    this._pendingLoadReady = false;
+    this._loading          = true;
+    this._dirty            = true;
   }
 
   private _scrollBy(delta: number): void {
