@@ -700,12 +700,39 @@ export function registerCommands(g: any): void {
   g.JSProcess = JSProcess;
 
   /**
+   * Allocate a shared BSS buffer accessible from both parent and child runtimes.
+   * Returns an id (0-7) that both sides pass to openSharedBuffer().
+   * Max size 256 KB.  Up to 8 concurrent shared buffers.
+   *
+   * Example (zero-copy float array):
+   *   var id = createSharedBuffer(4096);
+   *   var arr = new Float32Array(openSharedBuffer(id));
+   *   arr[0] = 3.14;
+   *   // Pass id to child via message, child reads same bytes:
+   *   // kernel.sharedBufferOpen(id) → same physical memory
+   */
+  g.createSharedBuffer = function(size?: number): number {
+    return kernel.sharedBufferCreate(size || 4096);
+  };
+
+  /** Get an ArrayBuffer view onto a shared buffer slot. Zero-copy. */
+  g.openSharedBuffer = function(id: number): ArrayBuffer | null {
+    return kernel.sharedBufferOpen(id);
+  };
+
+  /** Release a shared buffer slot (frees the id for reuse). */
+  g.releaseSharedBuffer = function(id: number): void {
+    kernel.sharedBufferRelease(id);
+  };
+
+  /**
    * Spawn a new isolated QuickJS runtime and run `code` inside it.
    * Returns a JSProcess handle for IPC and lifecycle management.
    *
    * Child runtime API (available as `kernel` inside spawned code):
    *   kernel.postMessage(JSON.stringify(data))  → sends to parent
    *   kernel.pollMessage()                      → receives from parent (null if empty)
+   *   kernel.sharedBufferOpen(id)               → zero-copy ArrayBuffer view
    *   kernel.serialPut(s)   kernel.getTicks()   kernel.sleep(ms)
    *
    * Example:
@@ -819,23 +846,27 @@ export function registerCommands(g: any): void {
     terminal.println('');
 
     terminal.colorPrintln('Multi-process:', Color.YELLOW);
-    terminal.println('  spawn(code, name?)   spawn isolated JS runtime → JSProcess');
-    terminal.println('  procs()              list live child processes');
-    terminal.println('  p.eval(code)         run code in child process');
-    terminal.println('  p.send(msg)          send JSON value to child inbox');
-    terminal.println('  p.recv()             receive JSON value from child outbox');
-    terminal.println('  p.tick()             pump child async/Promise job queue');
-    terminal.println('  p.recvAll()          drain all pending messages → array');
-    terminal.println('  p.stats()            queue depths + alive status');
-    terminal.println('  p.terminate()        kill process, free runtime');
-    terminal.println('  JSProcess.spawn(c)   same as spawn() — class form');
+    terminal.println('  spawn(code, name?)        spawn isolated JS runtime → JSProcess');
+    terminal.println('  procs()                   list live child processes');
+    terminal.println('  p.eval(code)              run code in child process');
+    terminal.println('  p.evalSlice(code, ms?)    time-limited eval (default 10ms max)');
+    terminal.println('  p.send(msg)               send JSON value to child inbox');
+    terminal.println('  p.recv()                  receive JSON value from child outbox');
+    terminal.println('  p.onMessage(cb)           callback fired by tick() on new messages');
+    terminal.println('  p.offMessage(cb)          remove a callback');
+    terminal.println('  p.tick()                  pump child async/Promise job queue');
+    terminal.println('  p.recvAll()               drain all pending messages → array');
+    terminal.println('  p.stats()                 queue depths + alive status');
+    terminal.println('  p.terminate()             kill process, free runtime');
+    terminal.println('  createSharedBuffer(size?) allocate BSS slab → id  (max 256 KB)');
+    terminal.println('  openSharedBuffer(id)      → ArrayBuffer (zero-copy, any runtime)');
+    terminal.println('  releaseSharedBuffer(id)   free the slot');
     terminal.println('');
     terminal.colorPrintln('  Child kernel API (inside spawned code):', Color.DARK_GREY);
-    terminal.println('    kernel.postMessage(s)   push string to parent outbox');
-    terminal.println('    kernel.pollMessage()    pop string from parent inbox (null=empty)');
-    terminal.println('    kernel.serialPut(s)     serial debug output');
-    terminal.println('    kernel.sleep(ms)        sleep');
-    terminal.println('    kernel.getTicks()       timer ticks');
+    terminal.println('    kernel.postMessage(s)        push string to parent outbox');
+    terminal.println('    kernel.pollMessage()         pop string from parent inbox');
+    terminal.println('    kernel.sharedBufferOpen(id)  zero-copy ArrayBuffer — no stringify');
+    terminal.println('    kernel.serialPut(s)  kernel.sleep(ms)  kernel.getTicks()');
     terminal.println('');
 
     terminal.colorPrintln('Users:', Color.YELLOW);

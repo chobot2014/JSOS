@@ -66,6 +66,37 @@ typedef struct {
 static JSProc_t _procs[JSPROC_MAX];
 static int      _cur_proc = -1;   /* -1 = main runtime; ≥0 = child slot index */
 
+/* ── Phase 10: Shared memory buffers ──────────────────────────────────────
+ * Static BSS slabs mapped as ArrayBuffers into any runtime that calls
+ * sharedBufferOpen(id).  Because the memory is BSS (stable address, never
+ * moved by QuickJS GC), both parent and child see the same physical bytes
+ * with zero serialisation overhead.
+ */
+#define SHARED_BUF_MAX    8
+#define SHARED_BUF_BYTES  (256 * 1024)   /* 256 KB per slot; 8 slots = 2 MB BSS */
+
+static uint8_t  _sbufs[SHARED_BUF_MAX][SHARED_BUF_BYTES] __attribute__((aligned(4096)));
+static uint8_t  _sbuf_used[SHARED_BUF_MAX];
+static uint32_t _sbuf_sizes[SHARED_BUF_MAX];
+
+/* No-op free: BSS is never heap-freed — QuickJS must not touch the pointer. */
+static void _sbuf_no_free(JSRuntime *rt, void *opaque, void *ptr) {
+    (void)rt; (void)opaque; (void)ptr;
+}
+
+/* ── Phase 10: Time-slice interrupt handler ──────────────────────────────
+ * Set on every child runtime.  When _proc_slice_deadline is non-zero and
+ * the PIT tick counter reaches it, QuickJS throws "InternalError: interrupted"
+ * which procEvalSlice() catches and returns as "timeout".
+ */
+static volatile uint32_t _proc_slice_deadline = 0;   /* 0 = disabled */
+
+static int _proc_interrupt_cb(JSRuntime *rt, void *opaque) {
+    (void)rt; (void)opaque;
+    if (_proc_slice_deadline == 0) return 0;
+    return (timer_get_ticks() >= _proc_slice_deadline) ? 1 : 0;
+}
+
 /*  VGA raw access  */
 
 static JSValue js_vga_put(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -1060,15 +1091,44 @@ static JSValue js_proc_poll_msg(JSContext *c, JSValueConst this_val,
     return ret;
 }
 
+/* ── Shared buffer accessors (callable from both parent and child) ──────── */
+
+/* kernel.sharedBufferOpen(id) → ArrayBuffer backed by BSS (zero-copy).
+ * Works from any runtime — the same physical bytes are visible everywhere. */
+static JSValue js_shared_buf_open(JSContext *c, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    int32_t id = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= SHARED_BUF_MAX || !_sbuf_used[id]) return JS_NULL;
+    return JS_NewArrayBuffer(c, _sbufs[id], (size_t)_sbuf_sizes[id],
+                             _sbuf_no_free, NULL, 0);
+}
+
+/* kernel.sharedBufferSize(id) → byte length of the slot, or 0. */
+static JSValue js_shared_buf_size(JSContext *c, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewInt32(c, 0);
+    int32_t id = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= SHARED_BUF_MAX || !_sbuf_used[id]) return JS_NewInt32(c, 0);
+    return JS_NewUint32(c, _sbuf_sizes[id]);
+}
+
 /* Minimal kernel API exposed inside child runtimes */
 static const JSCFunctionListEntry js_child_kernel_funcs[] = {
-    JS_CFUNC_DEF("serialPut",     1, js_serial_put),
-    JS_CFUNC_DEF("getTicks",      0, js_get_ticks),
-    JS_CFUNC_DEF("getUptime",     0, js_get_uptime),
-    JS_CFUNC_DEF("sleep",         1, js_sleep),
-    JS_CFUNC_DEF("getMemoryInfo", 0, js_mem_info),
-    JS_CFUNC_DEF("postMessage",   1, js_proc_post_msg),
-    JS_CFUNC_DEF("pollMessage",   0, js_proc_poll_msg),
+    JS_CFUNC_DEF("serialPut",       1, js_serial_put),
+    JS_CFUNC_DEF("getTicks",        0, js_get_ticks),
+    JS_CFUNC_DEF("getUptime",       0, js_get_uptime),
+    JS_CFUNC_DEF("sleep",           1, js_sleep),
+    JS_CFUNC_DEF("getMemoryInfo",   0, js_mem_info),
+    JS_CFUNC_DEF("postMessage",     1, js_proc_post_msg),
+    JS_CFUNC_DEF("pollMessage",     0, js_proc_poll_msg),
+    /* Shared memory — same physical bytes as parent */
+    JS_CFUNC_DEF("sharedBufferOpen", 1, js_shared_buf_open),
+    JS_CFUNC_DEF("sharedBufferSize", 1, js_shared_buf_size),
 };
 
 /* kernel.procCreate() → id (0-7) or -1 if all slots are occupied */
@@ -1094,6 +1154,10 @@ static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
         sizeof(js_child_kernel_funcs) / sizeof(js_child_kernel_funcs[0]));
     JS_SetPropertyStr(p->ctx, global, "kernel", kobj);
     JS_FreeValue(p->ctx, global);
+    /* Arm the time-slice interrupt handler on the child runtime.
+     * _proc_interrupt_cb fires periodically during JS_Eval and returns 1
+     * when _proc_slice_deadline (a PIT tick count) has been reached.       */
+    JS_SetInterruptHandler(p->rt, _proc_interrupt_cb, NULL);
     p->used = 1;
     return JS_NewInt32(c, id);
 }
@@ -1235,6 +1299,124 @@ static JSValue js_proc_list(JSContext *c, JSValueConst this_val,
     return arr;
 }
 
+/* ── Phase 10: Time-sliced eval ──────────────────────────────────────────
+ *
+ * kernel.procEvalSlice(id, code, maxMs)
+ *
+ * Like procEval() but aborts the child after maxMs milliseconds using the
+ * PIT-tick interrupt handler registered at procCreate() time.
+ *
+ * Returns one of:
+ *   "done:<result>"   — eval completed within the time budget
+ *   "timeout"         — child was interrupted; its eval state is gone,
+ *                       but previously committed globals are intact
+ *   "error:<message>" — child threw a JS exception
+ *
+ * maxMs ≤ 0 disables the deadline (equivalent to procEval).
+ */
+static JSValue js_proc_eval_slice(JSContext *c, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_NewString(c, "done:undefined");
+    int32_t id = 0, max_ms = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    if (argc >= 3) JS_ToInt32(c, &max_ms, argv[2]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used)
+        return JS_NewString(c, "error:invalid process id");
+    const char *code = JS_ToCString(c, argv[1]);
+    if (!code) return JS_NewString(c, "error:null code");
+    /* Arm deadline: timer_get_ticks() runs at 100 Hz (10 ms/tick) */
+    if (max_ms > 0)
+        _proc_slice_deadline = timer_get_ticks() + (uint32_t)(max_ms / 10u + 1u);
+    else
+        _proc_slice_deadline = 0;
+    _cur_proc = id;
+    JSValue result = JS_Eval(_procs[id].ctx, code, strlen(code),
+                             "<slice>", JS_EVAL_TYPE_GLOBAL);
+    _proc_slice_deadline = 0;   /* always clear immediately after eval */
+    _cur_proc = -1;
+    JS_FreeCString(c, code);
+    if (JS_IsException(result)) {
+        JSValue exc = JS_GetException(_procs[id].ctx);
+        const char *err = JS_ToCString(_procs[id].ctx, exc);
+        int is_timeout = (err && strstr(err, "interrupted") != NULL);
+        JSValue ret;
+        if (is_timeout) {
+            ret = JS_NewString(c, "timeout");
+        } else {
+            static char _es[JSPROC_MSGSIZE + 8];
+            _es[0]='e';_es[1]='r';_es[2]='r';_es[3]='o';_es[4]='r';_es[5]=':';
+            int n = 6;
+            if (err) {
+                int el = (int)strlen(err);
+                if (el > JSPROC_MSGSIZE) el = JSPROC_MSGSIZE;
+                memcpy(_es + 6, err, (size_t)el); n += el;
+            }
+            _es[n] = '\0';
+            ret = JS_NewString(c, _es);
+        }
+        if (err) JS_FreeCString(_procs[id].ctx, err);
+        JS_FreeValue(_procs[id].ctx, exc);
+        JS_FreeValue(_procs[id].ctx, result);
+        return ret;
+    }
+    if (JS_IsUndefined(result)) {
+        JS_FreeValue(_procs[id].ctx, result);
+        return JS_NewString(c, "done:undefined");
+    }
+    const char *str = JS_ToCString(_procs[id].ctx, result);
+    static char _rs[JSPROC_MSGSIZE + 8];
+    _rs[0]='d';_rs[1]='o';_rs[2]='n';_rs[3]='e';_rs[4]=':';
+    int sn = 5;
+    if (str) {
+        int sl = (int)strlen(str);
+        if (sl > JSPROC_MSGSIZE) sl = JSPROC_MSGSIZE;
+        memcpy(_rs + 5, str, (size_t)sl); sn += sl;
+        JS_FreeCString(_procs[id].ctx, str);
+    }
+    _rs[sn] = '\0';
+    JS_FreeValue(_procs[id].ctx, result);
+    return JS_NewString(c, _rs);
+}
+
+/* ── Phase 10: Shared buffer create / release (parent only) ──────────────
+ *
+ * kernel.sharedBufferCreate(size?) → id (0-7) or -1
+ * Allocates a BSS slab.  size is clamped to SHARED_BUF_BYTES (256 KB).
+ * Both parent and child call sharedBufferOpen(id) to get their ArrayBuffer.
+ */
+static JSValue js_shared_buf_create(JSContext *c, JSValueConst this_val,
+                                     int argc, JSValueConst *argv) {
+    (void)this_val;
+    int32_t size = SHARED_BUF_BYTES;
+    if (argc >= 1) JS_ToInt32(c, &size, argv[0]);
+    if (size <= 0) size = 4;
+    if (size > SHARED_BUF_BYTES) size = SHARED_BUF_BYTES;
+    for (int i = 0; i < SHARED_BUF_MAX; i++) {
+        if (!_sbuf_used[i]) {
+            memset(_sbufs[i], 0, (size_t)size);
+            _sbuf_used[i]  = 1;
+            _sbuf_sizes[i] = (uint32_t)size;
+            return JS_NewInt32(c, i);
+        }
+    }
+    return JS_NewInt32(c, -1);
+}
+
+/* kernel.sharedBufferRelease(id) — free the slot; the bytes stay in BSS. */
+static JSValue js_shared_buf_release(JSContext *c, JSValueConst this_val,
+                                      int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 1) return JS_UNDEFINED;
+    int32_t id = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    if (id >= 0 && id < SHARED_BUF_MAX) {
+        _sbuf_used[id]  = 0;
+        _sbuf_sizes[id] = 0;
+    }
+    return JS_UNDEFINED;
+}
+
 static const JSCFunctionListEntry js_kernel_funcs[] = {
     /* VGA raw access */
     JS_CFUNC_DEF("vgaPut",        4, js_vga_put),
@@ -1313,14 +1495,20 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("netDebugStatus", 0, js_net_debug_status),
     JS_CFUNC_DEF("netDebugQueues", 0, js_net_debug_queues),
     /* Multi-process (Phase 10) */
-    JS_CFUNC_DEF("procCreate",  0, js_proc_create),
-    JS_CFUNC_DEF("procEval",    2, js_proc_eval),
-    JS_CFUNC_DEF("procTick",    1, js_proc_tick),
-    JS_CFUNC_DEF("procSend",    2, js_proc_send),
-    JS_CFUNC_DEF("procRecv",    1, js_proc_recv),
-    JS_CFUNC_DEF("procDestroy", 1, js_proc_destroy),
-    JS_CFUNC_DEF("procAlive",   1, js_proc_alive),
-    JS_CFUNC_DEF("procList",    0, js_proc_list),
+    JS_CFUNC_DEF("procCreate",    0, js_proc_create),
+    JS_CFUNC_DEF("procEval",      2, js_proc_eval),
+    JS_CFUNC_DEF("procEvalSlice", 3, js_proc_eval_slice),
+    JS_CFUNC_DEF("procTick",      1, js_proc_tick),
+    JS_CFUNC_DEF("procSend",      2, js_proc_send),
+    JS_CFUNC_DEF("procRecv",      1, js_proc_recv),
+    JS_CFUNC_DEF("procDestroy",   1, js_proc_destroy),
+    JS_CFUNC_DEF("procAlive",     1, js_proc_alive),
+    JS_CFUNC_DEF("procList",      0, js_proc_list),
+    /* Shared memory (Phase 10) */
+    JS_CFUNC_DEF("sharedBufferCreate",  1, js_shared_buf_create),
+    JS_CFUNC_DEF("sharedBufferOpen",    1, js_shared_buf_open),
+    JS_CFUNC_DEF("sharedBufferRelease", 1, js_shared_buf_release),
+    JS_CFUNC_DEF("sharedBufferSize",    1, js_shared_buf_size),
 };
 
 /*  Initialization  */

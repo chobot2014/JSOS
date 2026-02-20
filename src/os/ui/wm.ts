@@ -206,10 +206,24 @@ export class WindowManager {
 
   tick(): void {
     this._pollInput();
+    this._tickChildProcs();
     this._composite();
   }
   /** Mark the WM as needing a repaint (call from app code or external events). */
   markDirty(): void { this._wmDirty = true; }
+
+  /**
+   * Pump every live child JS process each frame.
+   * This drives Promise/async resolution and fires onMessage callbacks
+   * without any user code needing to manually call p.tick().
+   * Cost is negligible when no processes are running (empty procList).
+   */
+  private _tickChildProcs(): void {
+    var list = kernel.procList();
+    for (var i = 0; i < list.length; i++) {
+      kernel.procTick(list[i].id);
+    }
+  }
   // ── Input dispatch ─────────────────────────────────────────────────────
 
   private _pollInput(): void {

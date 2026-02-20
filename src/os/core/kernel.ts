@@ -269,6 +269,46 @@ export interface KernelAPI {
   netDebugStatus(): number;
   netDebugQueues(): number;
 
+  // ─ Multi-process pool (Phase 10) ───────────────────────────────────
+  /** Allocate a new isolated QuickJS runtime slot. Returns id 0-7, or -1 if all 8 are taken. */
+  procCreate(): number;
+  /** Evaluate code in child runtime synchronously. Returns result string or 'Error:...'. */
+  procEval(id: number, code: string): string;
+  /**
+   * Time-limited eval. Aborts after maxMs milliseconds via QuickJS interrupt handler.
+   * Returns: 'done:<result>' | 'timeout' | 'error:<message>'.  maxMs ≤ 0 = unlimited.
+   */
+  procEvalSlice(id: number, code: string, maxMs: number): string;
+  /** Pump the child's pending async/Promise job queue. Returns jobs-run count. */
+  procTick(id: number): number;
+  /** Push a string message into child inbox ring buffer. Returns false if full (8 slots). */
+  procSend(id: number, msg: string): boolean;
+  /** Pop a string message from child outbox. Returns null when empty. */
+  procRecv(id: number): string | null;
+  /** Free a child runtime and release the slot. */
+  procDestroy(id: number): void;
+  /** Returns true if the slot is live. */
+  procAlive(id: number): boolean;
+  /** List all live child process slots: [{id, inboxCount, outboxCount}]. */
+  procList(): Array<{ id: number; inboxCount: number; outboxCount: number }>;
+
+  // ─ Shared memory buffers (Phase 10) ────────────────────────────────
+  /**
+   * Allocate a shared BSS buffer (max 256 KB). Returns id 0-7, or -1 if all 8 slots are taken.
+   * The same physical memory is accessible from any runtime via sharedBufferOpen(id).
+   */
+  sharedBufferCreate(size: number): number;
+  /**
+   * Get an ArrayBuffer view of shared slot id. Zero-copy — same physical bytes.
+   * Callable from both parent runtime and child kernel.sharedBufferOpen(id).
+   * Returns null if the id is invalid or unallocated.
+   */
+  sharedBufferOpen(id: number): ArrayBuffer | null;
+  /** Release a shared buffer slot (bytes stay in BSS until reused). */
+  sharedBufferRelease(id: number): void;
+  /** Returns the byte size allocated for a shared buffer slot, or 0. */
+  sharedBufferSize(id: number): number;
+
   //  Constants 
   colors: KernelColors;
   KEY_UP: number;    KEY_DOWN: number;   KEY_LEFT: number;  KEY_RIGHT: number;

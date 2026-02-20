@@ -45,6 +45,47 @@
  *   p.send({ hello: 'world' });
  *   p.eval('kernel.pollMessage()');   // → '{"hello":"world"}'
  *   p.terminate();
+ *
+ * ─── Shared memory (zero-copy, no JSON) ─────────────────────────────────────────────
+ *
+ * JS object references CANNOT be shared between runtimes — each QuickJS
+ * runtime has its own GC heap.  Passing an object pointer across runtimes
+ * would corrupt both heaps.
+ *
+ * Binary memory CAN be shared.  A BSS slab (stable physical address, never
+ * moved by any GC) is mapped as an ArrayBuffer into every runtime that calls
+ * sharedBufferOpen(id).  Both sides see the same bytes instantly:
+ *
+ *   // Parent
+ *   var id = kernel.sharedBufferCreate(1024);
+ *   var view = new Uint32Array(kernel.sharedBufferOpen(id)!);
+ *   view[0] = 0xDEADBEEF;
+ *
+ *   // Child (pass id via JSON message)
+ *   p.send({ sharedId: id });
+ *   p.eval(`
+ *     var msg = JSON.parse(kernel.pollMessage());
+ *     var v = new Uint32Array(kernel.sharedBufferOpen(msg.sharedId));
+ *     v[0]; // → 0xDEADBEEF — same physical bytes, zero copy
+ *   `);
+ *
+ * ─── Non-blocking execution ─────────────────────────────────────────────────────
+ *
+ * p.evalSlice(code, maxMs) aborts the child after maxMs milliseconds using
+ * QuickJS's interrupt handler.  The WM calls kernel.procTick(id) for every
+ * live process each frame, so Promise callbacks run even without explicit
+ * p.tick() calls.  Design CPU-bound children to work in steps:
+ *
+ *   var p = spawn(`
+ *     var i = 0, results = [];
+ *     function step() {              // called each WM frame via p.eval()
+ *       var end = Math.min(i + 500, data.length);
+ *       while (i < end) results.push(crunch(data[i++]));
+ *       if (i >= data.length) kernel.postMessage(JSON.stringify(results));
+ *     }
+ *   `);
+ *   // WM loop: each frame calls p.evalSlice('step()', 5)
+ *   // Mouse stays smooth — each step takes at most 5 ms
  */
 
 declare var kernel: any;   // extended with proc* by C runtime
@@ -53,6 +94,7 @@ export class JSProcess {
   readonly id:   number;
   readonly name: string;
   private _alive: boolean;
+  private _onMessageCbs: Array<(msg: any) => void> = [];
 
   private constructor(id: number, name: string) {
     this.id     = id;
@@ -112,12 +154,59 @@ export class JSProcess {
 
   /**
    * Pump the child's pending job queue (Promise .then callbacks, async functions).
-   * Call this after sending messages or after spawning code that uses Promises.
-   * Returns the number of jobs that ran.
+   * Also drains the outbox and fires any registered onMessage() callbacks.
+   * The WM calls this automatically for every live process each frame.
+   * Returns the number of async jobs that ran.
    */
   tick(): number {
     if (!this._alive) return 0;
-    return kernel.procTick(this.id);
+    var jobs = kernel.procTick(this.id);
+    // Drain outbox and fire callbacks (only if anyone is listening)
+    if (this._onMessageCbs.length > 0) {
+      var msg: any;
+      while ((msg = this.recv()) !== null) {
+        for (var i = 0; i < this._onMessageCbs.length; i++) {
+          try { this._onMessageCbs[i](msg); } catch (_) {}
+        }
+      }
+    }
+    return jobs;
+  }
+
+  /**
+   * Time-limited eval: run `code` in the child but abort after `maxMs` ms.
+   * Returns { status, result } where status is 'done' | 'timeout' | 'error'.
+   *
+   * Use this instead of eval() for code that might run long, so the WM frame
+   * (mouse, keyboard, compositing) is never blocked for more than maxMs ms.
+   *
+   * Design child code to work in fixed-size steps:
+   *   p.evalSlice('step()', 5);  // ≤ 5 ms per frame → smooth 60fps mouse
+   */
+  evalSlice(code: string, maxMs: number = 10): { status: 'done' | 'timeout' | 'error'; result: string } {
+    if (!this._alive) return { status: 'error', result: 'process not alive' };
+    var raw = kernel.procEvalSlice(this.id, code, maxMs);
+    if (raw === 'timeout') return { status: 'timeout', result: '' };
+    if (raw.indexOf('done:')  === 0) return { status: 'done',  result: raw.slice(5) };
+    if (raw.indexOf('error:') === 0) return { status: 'error', result: raw.slice(6) };
+    return { status: 'done', result: raw };
+  }
+
+  /**
+   * Register a callback fired each time a message arrives from the child.
+   * Called automatically inside tick() after draining the outbox.
+   * Returns `this` for chaining:  spawn(code).onMessage(handler).send(init)
+   */
+  onMessage(cb: (msg: any) => void): this {
+    this._onMessageCbs.push(cb);
+    return this;
+  }
+
+  /** Remove a previously registered onMessage callback. */
+  offMessage(cb: (msg: any) => void): this {
+    var idx = this._onMessageCbs.indexOf(cb);
+    if (idx >= 0) this._onMessageCbs.splice(idx, 1);
+    return this;
   }
 
   // ── Message passing ────────────────────────────────────────────────────────
