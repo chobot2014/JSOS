@@ -42,6 +42,23 @@ function buildGetRequest(host: string, path: string): number[] {
   return strToBytes(req);
 }
 
+function buildPostRequest(
+    host: string, path: string, body: number[],
+    contentType = 'application/x-www-form-urlencoded'): number[] {
+  var header = 'POST ' + path + ' HTTP/1.1\r\n' +
+               'Host: ' + host + '\r\n' +
+               'Connection: close\r\n' +
+               'User-Agent: JSOS/1.0\r\n' +
+               'Content-Type: ' + contentType + '\r\n' +
+               'Content-Length: ' + body.length + '\r\n' +
+               '\r\n';
+  var h = strToBytes(header);
+  var out = new Array(h.length + body.length);
+  for (var i = 0; i < h.length; i++)    out[i]            = h[i];
+  for (var j = 0; j < body.length; j++) out[h.length + j] = body[j];
+  return out;
+}
+
 // ── HTTP response parser ──────────────────────────────────────────────────────
 
 function parseHttpResponse(data: number[]): HttpResponse | null {
@@ -192,6 +209,65 @@ export function httpsGet(
     var tch = tlsChunks[tci];
     for (var tcj = 0; tcj < tch.length; tcj++) tlsBuf.push(tch[tcj]);
   }
-  var resp = parseHttpResponse(tlsBuf);
-  return { tlsOk: true, response: resp };
+  return { tlsOk: true, response: parseHttpResponse(tlsBuf) };
+}
+
+// ── Plain HTTP POST ───────────────────────────────────────────────────────────
+
+export function httpPost(
+    host: string, ip: string, port: number = 80, path: string = '/',
+    body: number[] = [],
+    contentType = 'application/x-www-form-urlencoded'): HttpResponse | null {
+  var sock = net.createSocket('tcp');
+  if (!net.connect(sock, ip, port)) { net.close(sock); return null; }
+
+  var req = buildPostRequest(host, path, body, contentType);
+  if (!net.sendBytes(sock, req)) { net.close(sock); return null; }
+
+  var chunks: number[][] = [];
+  var deadline = kernel.getTicks() + 500;
+  while (kernel.getTicks() < deadline) {
+    if (net.nicReady) net.pollNIC();
+    var chunk = net.recvBytes(sock, 50);
+    if (chunk && chunk.length > 0) { chunks.push(chunk); deadline = kernel.getTicks() + 100; }
+  }
+  net.close(sock);
+
+  if (chunks.length === 0) return null;
+  var buf: number[] = [];
+  for (var ci = 0; ci < chunks.length; ci++) {
+    var ch = chunks[ci];
+    for (var cj = 0; cj < ch.length; cj++) buf.push(ch[cj]);
+  }
+  return parseHttpResponse(buf);
+}
+
+// ── HTTPS POST ────────────────────────────────────────────────────────────────
+
+export function httpsPost(
+    host: string, ip: string, port: number = 443, path: string = '/',
+    body: number[] = [],
+    contentType = 'application/x-www-form-urlencoded'):
+    { tlsOk: boolean; response: HttpResponse | null } {
+  var tls = new TLSSocket(host);
+  if (!tls.handshake(ip, port)) { tls.close(); return { tlsOk: false, response: null }; }
+
+  var req = buildPostRequest(host, path, body, contentType);
+  if (!tls.write(req)) { tls.close(); return { tlsOk: true, response: null }; }
+
+  var tlsChunks: number[][] = [];
+  var tlsDeadline = kernel.getTicks() + 500;
+  while (kernel.getTicks() < tlsDeadline) {
+    var chunk2 = tls.read(100);
+    if (chunk2 && chunk2.length > 0) { tlsChunks.push(chunk2); tlsDeadline = kernel.getTicks() + 100; }
+  }
+  tls.close();
+
+  if (tlsChunks.length === 0) return { tlsOk: true, response: null };
+  var tlsBuf: number[] = [];
+  for (var tci = 0; tci < tlsChunks.length; tci++) {
+    var tch = tlsChunks[tci];
+    for (var tcj = 0; tcj < tch.length; tcj++) tlsBuf.push(tch[tcj]);
+  }
+  return { tlsOk: true, response: parseHttpResponse(tlsBuf) };
 }
