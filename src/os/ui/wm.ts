@@ -115,6 +115,8 @@ export class WindowManager {
   private _dragging: number | null = null;
   private _dragOffX = 0;
   private _dragOffY = 0;
+  // Mouse capture — app window that receives all events while button is held
+  private _mouseCapture: number | null = null;
 
   constructor(screen: Canvas) {
     this._screen  = screen;
@@ -237,7 +239,10 @@ export class WindowManager {
       this._cursorY = Math.max(0, Math.min(this._screen.height - 1, this._cursorY + pkt.dy));
       if (this._cursorX !== prevX || this._cursorY !== prevY) this._wmDirty = true;
 
-      // Handle drag
+      var btn1     = pkt.buttons & 1;
+      var prevBtn1 = this._prevButtons & 1;
+
+      // ── Title bar drag ────────────────────────────────────────────────────
       if (pkt.buttons & 1) {
         if (this._dragging !== null) {
           var dw = this._findWindow(this._dragging);
@@ -273,6 +278,56 @@ export class WindowManager {
         }
       } else {
         this._dragging = null;
+      }
+
+      // ── Dispatch mouse events to app content area ─────────────────────────
+      if (this._dragging === null) {
+        // Find topmost non-minimised window whose content area is under cursor
+        var hitWin: WMWindow | null = null;
+        for (var hj = this._windows.length - 1; hj >= 0; hj--) {
+          var hw = this._windows[hj];
+          if (hw.minimised) continue;
+          if (this._cursorX >= hw.x && this._cursorX < hw.x + hw.width &&
+              this._cursorY >= hw.y + TITLE_H && this._cursorY < hw.y + hw.height) {
+            hitWin = hw; break;
+          }
+        }
+
+        // Button down in content area: focus window + start capture
+        if (btn1 && !prevBtn1 && hitWin) {
+          this._mouseCapture = hitWin.id;
+          this.focusWindow(hitWin.id);
+        }
+
+        // Determine dispatch target: captured window, or window under cursor
+        var dispWin: WMWindow | null = hitWin;
+        if (this._mouseCapture !== null) {
+          var cw = this._findWindow(this._mouseCapture);
+          if (cw) dispWin = cw;
+        }
+
+        // Release capture after recording dispatch target
+        if (!btn1 && prevBtn1) {
+          this._mouseCapture = null;
+        }
+
+        if (dispWin) {
+          var evType: 'move' | 'down' | 'up';
+          if      (btn1 && !prevBtn1)  evType = 'down';
+          else if (!btn1 && prevBtn1)  evType = 'up';
+          else                         evType = 'move';
+          dispWin.app.onMouse({
+            x:       this._cursorX - dispWin.x,
+            y:       this._cursorY - (dispWin.y + TITLE_H),
+            dx:      this._cursorX - prevX,
+            dy:      this._cursorY - prevY,
+            buttons: pkt.buttons,
+            type:    evType,
+          });
+          this._wmDirty = true;
+        }
+      } else {
+        this._mouseCapture = null;   // dragging window — cancel any app capture
       }
 
       this._prevButtons = pkt.buttons;

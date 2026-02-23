@@ -1130,7 +1130,11 @@ export class BrowserApp implements App {
   private _win:           WMWindow | null = null;
   private _urlInput       = 'about:jsos';
   private _urlBarFocus    = true;
+  private _urlCursorPos   = 0;       // caret index into _urlInput
+  private _urlScrollOff   = 0;       // first visible char (horizontal scroll)
+  private _urlAllSelected = false;   // select-all: next printable key replaces all
   private _cursorBlink    = 0;
+  private _hoverBtn       = -1;      // 0=back 1=fwd 2=reload, -1=none
 
   private _history:       HistoryEntry[] = [];
   private _histIdx        = -1;
@@ -1162,6 +1166,9 @@ export class BrowserApp implements App {
   private _findQuery      = '';
   private _findHits:      Array<{ lineIdx: number; spanIdx: number }> = [];
   private _findCur        = 0;
+
+  // Scrollbar drag
+  private _scrollbarDragging = false;
 
   // Deferred load
   private _pendingLoad:      string | null = null;
@@ -1207,18 +1214,51 @@ export class BrowserApp implements App {
 
     // ── URL bar ──────────────────────────────────────────────────────────────
     if (this._urlBarFocus) {
-      if (ch === '\x0c') { this._urlInput = ''; this._dirty = true; return; }
+      if (ch === '\x0c') {
+        this._urlInput = ''; this._urlCursorPos = 0; this._urlScrollOff = 0;
+        this._urlAllSelected = false; this._dirty = true; return;
+      }
       if (ch === '\n' || ch === '\r') {
         var raw = this._urlInput.trim();
+        this._urlAllSelected = false;
         if (raw) {
           this._pendingLoad = raw; this._pendingNavPush = true;
           this._pendingLoadReady = false; this._loading = true; this._dirty = true;
         }
         return;
       }
-      if (ch === '\b')   { this._urlInput = this._urlInput.slice(0, -1); this._dirty = true; return; }
-      if (ch === '\x1b') { this._urlBarFocus = false; this._dirty = true; return; }
-      if (ch >= ' ')     { this._urlInput += ch; this._dirty = true; return; }
+      if (ch === '\x1b') {
+        this._urlBarFocus = false; this._urlAllSelected = false; this._dirty = true; return;
+      }
+      if (ext) {
+        this._urlAllSelected = false;
+        if (ext === 0x4B) { this._urlCursorPos = Math.max(0, this._urlCursorPos - 1); }
+        else if (ext === 0x4D) { this._urlCursorPos = Math.min(this._urlInput.length, this._urlCursorPos + 1); }
+        else if (ext === 0x47) { this._urlCursorPos = 0; this._urlScrollOff = 0; }
+        else if (ext === 0x4F) { this._urlCursorPos = this._urlInput.length; }
+        this._dirty = true; return;
+      }
+      if (ch === '\b') {
+        if (this._urlAllSelected) {
+          this._urlInput = ''; this._urlCursorPos = 0;
+          this._urlScrollOff = 0; this._urlAllSelected = false;
+        } else if (this._urlCursorPos > 0) {
+          this._urlInput    = this._urlInput.slice(0, this._urlCursorPos - 1) + this._urlInput.slice(this._urlCursorPos);
+          this._urlCursorPos--;
+          this._urlScrollOff = Math.min(this._urlScrollOff, this._urlCursorPos);
+        }
+        this._dirty = true; return;
+      }
+      if (ch >= ' ') {
+        if (this._urlAllSelected) {
+          this._urlInput = ch; this._urlCursorPos = 1;
+          this._urlScrollOff = 0; this._urlAllSelected = false;
+        } else {
+          this._urlInput = this._urlInput.slice(0, this._urlCursorPos) + ch + this._urlInput.slice(this._urlCursorPos);
+          this._urlCursorPos++;
+        }
+        this._dirty = true; return;
+      }
       return;
     }
 
@@ -1239,7 +1279,11 @@ export class BrowserApp implements App {
       if (ext === 0x4F) { this._scrollBy( this._maxScrollY);    return; }
     }
 
-    if (ch === '\x0c') { this._urlBarFocus = true; this._urlInput = this._pageURL; this._dirty = true; return; }
+    if (ch === '\x0c') {
+      this._urlBarFocus = true; this._urlInput = this._pageURL;
+      this._urlCursorPos = this._urlInput.length; this._urlScrollOff = 0;
+      this._urlAllSelected = true; this._dirty = true; return;
+    }
     if (ch === '\x12') { this._reload(); return; }
     if (ch === '\x04') { this._addBookmark(); return; }
     if (ch === '\x06') { this._openFind(); return; }
@@ -1248,7 +1292,11 @@ export class BrowserApp implements App {
     if (ch === 'b' || ch === 'B') { this._goBack();    return; }
     if (ch === 'f' || ch === 'F') { this._goForward(); return; }
     if (ch === 'r' || ch === 'R') { this._reload();    return; }
-    if (ch === '/' || ch === 'l') { this._urlBarFocus = true; this._dirty = true; return; }
+    if (ch === '/' || ch === 'l') {
+      this._urlBarFocus = true; this._urlInput = this._pageURL;
+      this._urlCursorPos = this._urlInput.length; this._urlScrollOff = 0;
+      this._urlAllSelected = true; this._dirty = true; return;
+    }
   }
 
   onMouse(event: MouseEvent): void {
@@ -1256,6 +1304,30 @@ export class BrowserApp implements App {
 
     var contentY0 = TOOLBAR_H;
     var contentY1 = this._win.height - STATUSBAR_H - (this._findMode ? FINDBAR_H : 0);
+    var sbX       = this._win.width - 12;   // scrollbar left edge
+
+    // ── Toolbar hover tracking (all event types) ──────────────────────────
+    if (event.y >= 5 && event.y <= 24) {
+      var hb = -1;
+      if      (event.x >= 4  && event.x <= 25) hb = 0;
+      else if (event.x >= 28 && event.x <= 49) hb = 1;
+      else if (event.x >= 52 && event.x <= 73) hb = 2;
+      if (hb !== this._hoverBtn) { this._hoverBtn = hb; this._dirty = true; }
+    } else if (this._hoverBtn !== -1) {
+      this._hoverBtn = -1; this._dirty = true;
+    }
+
+    // ── Scrollbar drag: continue on move, release on up ───────────────────
+    if (event.type === 'up') {
+      this._scrollbarDragging = false;
+    }
+    if (this._scrollbarDragging && event.type === 'move') {
+      var chh0  = contentY1 - contentY0;
+      var frac0 = (event.y - contentY0) / chh0;
+      this._scrollY = Math.round(frac0 * this._maxScrollY);
+      this._scrollY = Math.max(0, Math.min(this._maxScrollY, this._scrollY));
+      this._dirty = true; return;
+    }
 
     if (event.type === 'down') {
       // Toolbar buttons
@@ -1263,12 +1335,24 @@ export class BrowserApp implements App {
         if (event.x >= 4  && event.x <= 25) { this._goBack();    return; }
         if (event.x >= 28 && event.x <= 49) { this._goForward(); return; }
         if (event.x >= 52 && event.x <= 73) { this._reload();    return; }
-        if (event.x > 76) { this._urlBarFocus = true; this._dirty = true; return; }
+        // URL bar click — select-all focus with click cursor position
+        if (event.x > 76) {
+          var urlX   = 76;
+          var urlW   = this._win!.width - urlX - 4;
+          var maxCh  = Math.max(1, Math.floor((urlW - 8) / CHAR_W));
+          this._urlInput       = this._pageURL;
+          this._urlBarFocus    = true;
+          this._urlAllSelected = true;
+          this._urlCursorPos   = this._urlInput.length;
+          this._urlScrollOff   = Math.max(0, this._urlInput.length - maxCh);
+          this._dirty = true; return;
+        }
       }
 
-      // Scrollbar click
-      if (this._maxScrollY > 0 && event.x >= this._win.width - 10 &&
+      // Scrollbar click — start drag
+      if (this._maxScrollY > 0 && event.x >= sbX &&
           event.y >= contentY0 && event.y < contentY1) {
+        this._scrollbarDragging = true;
         var chh  = contentY1 - contentY0;
         var frac = (event.y - contentY0) / chh;
         this._scrollY = Math.round(frac * this._maxScrollY);
@@ -1297,9 +1381,13 @@ export class BrowserApp implements App {
           return;
         }
 
-        // Defocus widget on empty click
+        // Defocus widget and URL bar on empty content click
         if (this._focusedWidget >= 0) { this._focusedWidget = -1; this._dirty = true; }
-        this._urlBarFocus = false; this._dirty = true;
+        if (this._urlBarFocus) {
+          this._urlBarFocus = false; this._urlAllSelected = false; this._dirty = true;
+        } else {
+          this._dirty = true;
+        }
       }
     }
 
@@ -1356,15 +1444,19 @@ export class BrowserApp implements App {
     canvas.fillRect(0, 0, w, TOOLBAR_H, CLR_TOOLBAR_BG);
     canvas.drawLine(0, TOOLBAR_H - 1, w, TOOLBAR_H - 1, CLR_TOOLBAR_BD);
 
-    canvas.fillRect(4, 5, 22, 20, CLR_BTN_BG);
+    // Back button (hoverBtn=0)
+    canvas.fillRect(4, 5, 22, 20, this._hoverBtn === 0 ? 0xFFC4C6CA : CLR_BTN_BG);
     canvas.drawText(10, 11, '<', this._histIdx > 0 ? CLR_BTN_TXT : CLR_HR);
 
-    canvas.fillRect(28, 5, 22, 20, CLR_BTN_BG);
+    // Forward button (hoverBtn=1)
+    canvas.fillRect(28, 5, 22, 20, this._hoverBtn === 1 ? 0xFFC4C6CA : CLR_BTN_BG);
     canvas.drawText(35, 11, '>', this._histIdx < this._history.length - 1 ? CLR_BTN_TXT : CLR_HR);
 
-    canvas.fillRect(52, 5, 22, 20, CLR_BTN_BG);
+    // Reload/Stop button (hoverBtn=2)
+    canvas.fillRect(52, 5, 22, 20, this._hoverBtn === 2 ? 0xFFC4C6CA : CLR_BTN_BG);
     canvas.drawText(58, 11, this._loading ? 'X' : 'R', CLR_BTN_TXT);
 
+    // URL bar
     var urlX = 76;
     var urlW = w - urlX - 4;
     canvas.fillRect(urlX, 5, urlW, 20, CLR_URL_BG);
@@ -1372,12 +1464,35 @@ export class BrowserApp implements App {
 
     var display  = this._urlBarFocus ? this._urlInput : this._pageURL;
     var maxChars = Math.max(1, Math.floor((urlW - 8) / CHAR_W));
-    var showTxt  = display.length > maxChars ? display.slice(display.length - maxChars) : display;
-    canvas.drawText(urlX + 4, 12, showTxt, CLR_BODY);
 
-    if (this._urlBarFocus && (this._cursorBlink >> 4) % 2 === 0) {
-      var ccx = urlX + 4 + showTxt.length * CHAR_W;
-      if (ccx <= urlX + urlW - 4) canvas.fillRect(ccx, 10, 1, CHAR_H, CLR_BODY);
+    if (this._urlBarFocus) {
+      // Keep cursor in view — adjust horizontal scroll offset
+      if (this._urlCursorPos < this._urlScrollOff) {
+        this._urlScrollOff = this._urlCursorPos;
+      } else if (this._urlCursorPos > this._urlScrollOff + maxChars) {
+        this._urlScrollOff = this._urlCursorPos - maxChars;
+      }
+      var showTxt = display.slice(this._urlScrollOff, this._urlScrollOff + maxChars);
+
+      if (this._urlAllSelected) {
+        // Blue selection highlight, white text
+        canvas.fillRect(urlX + 2, 7, urlW - 4, 16, CLR_URL_FOCUS);
+        canvas.drawText(urlX + 4, 12, showTxt, 0xFFFFFFFF);
+      } else {
+        canvas.drawText(urlX + 4, 12, showTxt, CLR_BODY);
+      }
+
+      // Blinking cursor at caret position
+      if ((this._cursorBlink >> 4) % 2 === 0) {
+        var ccx = urlX + 4 + (this._urlCursorPos - this._urlScrollOff) * CHAR_W;
+        if (ccx >= urlX + 2 && ccx <= urlX + urlW - 4) {
+          canvas.fillRect(ccx, 10, 1, CHAR_H, this._urlAllSelected ? 0xFFFFFFFF : CLR_BODY);
+        }
+      }
+    } else {
+      var showTxt2 = display.length > maxChars
+        ? display.slice(display.length - maxChars) : display;
+      canvas.drawText(urlX + 4, 12, showTxt2, CLR_BODY);
     }
   }
 
@@ -1442,12 +1557,14 @@ export class BrowserApp implements App {
 
     // Scrollbar
     if (this._maxScrollY > 0 && ch > 0) {
+      var sbW     = 10;
+      var sbXd    = w - sbW - 2;
       var trackH  = ch - 4;
       var thumbH  = Math.max(12, Math.floor(trackH * ch / (ch + this._maxScrollY)));
       var thumbY0 = Math.floor((trackH - thumbH) * this._scrollY / this._maxScrollY);
-      canvas.fillRect(w - 8, y0 + 2, 6, trackH, CLR_TOOLBAR_BG);
-      canvas.fillRect(w - 8, y0 + 2 + thumbY0, 6, thumbH, CLR_BTN_BG);
-      canvas.drawRect(w - 8, y0 + 2 + thumbY0, 6, thumbH, CLR_TOOLBAR_BD);
+      canvas.fillRect(sbXd, y0 + 2, sbW, trackH, 0xFFDDDDDD);
+      canvas.fillRect(sbXd, y0 + 2 + thumbY0, sbW, thumbH, CLR_BTN_BG);
+      canvas.drawRect(sbXd, y0 + 2 + thumbY0, sbW, thumbH, CLR_TOOLBAR_BD);
     }
   }
 
@@ -1660,12 +1777,20 @@ export class BrowserApp implements App {
     switch (w.kind) {
       case 'text':
       case 'password':
-      case 'textarea':
-        this._focusedWidget = idx;
-        this._urlBarFocus   = false;
-        w.cursorPos = w.curValue.length;
+      case 'textarea': {
+        this._focusedWidget  = idx;
+        this._urlBarFocus    = false;
+        this._urlAllSelected = false;
+        // Position cursor at the clicked character
+        var maxCw2    = Math.max(1, Math.floor((w.pw - 8) / CHAR_W));
+        var dispLen2  = Math.min(w.curValue.length, maxCw2);
+        var scrollOff2 = w.curValue.length - dispLen2;
+        var relX2      = cx - (w.px + 4);
+        var clickChar2 = Math.max(0, Math.min(dispLen2, Math.round(relX2 / CHAR_W)));
+        w.cursorPos    = scrollOff2 + clickChar2;
         this._dirty = true;
         break;
+      }
 
       case 'submit':
       case 'button':
