@@ -197,6 +197,17 @@ const WIDGET_INPUT_W  = 180;  // default text input width
 const WIDGET_AREA_H   = 60;   // default textarea height
 const WIDGET_SELECT_H = 18;
 
+// ── Byte array → string (chunked, avoids O(n²) concat) ───────────────────────
+function bytesArrToStr(b: number[]): string {
+  var CHUNK = 8192;
+  if (b.length <= CHUNK) return String.fromCharCode.apply(null, b);
+  var parts: string[] = [];
+  for (var i = 0; i < b.length; i += CHUNK) {
+    parts.push(String.fromCharCode.apply(null, b.slice(i, i + CHUNK)));
+  }
+  return parts.join('');
+}
+
 // ── URL parser ────────────────────────────────────────────────────────────────
 
 function parseURL(raw: string): ParsedURL | null {
@@ -322,6 +333,39 @@ interface HtmlToken {
   attrs: Map<string, string>;
 }
 
+// ── HTML entity decoder (single-pass, avoids 20+ sequential string copies) ───
+function decodeHTMLEntities(raw: string): string {
+  if (raw.indexOf('&') < 0) return raw;
+  return raw.replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|([a-zA-Z]+));/g,
+    function(_m: string, dec: string, hex: string, name: string): string {
+      if (dec)  return String.fromCharCode(parseInt(dec, 10));
+      if (hex)  return String.fromCharCode(parseInt(hex, 16));
+      switch (name) {
+        case 'amp':    return '&';
+        case 'lt':     return '<';
+        case 'gt':     return '>';
+        case 'quot':   return '"';
+        case 'apos':   return "'";
+        case 'nbsp':   return ' ';
+        case 'mdash':  return '-';
+        case 'ndash':  return '-';
+        case 'hellip': return '...';
+        case 'laquo':  return '<<';
+        case 'raquo':  return '>>';
+        case 'copy':   return '(c)';
+        case 'reg':    return '(R)';
+        case 'trade':  return '(TM)';
+        case 'ldquo':  return '"';
+        case 'rdquo':  return '"';
+        case 'lsquo':  return "'";
+        case 'rsquo':  return "'";
+        case 'bull':   return '*';
+        case 'middot': return '*';
+        default:       return _m;
+      }
+    });
+}
+
 function tokenise(html: string): HtmlToken[] {
   var tokens: HtmlToken[] = [];
   var n = html.length;
@@ -334,15 +378,17 @@ function tokenise(html: string): HtmlToken[] {
   function readAttrValue(): string {
     if (i >= n) return '';
     if (html[i] === '"' || html[i] === "'") {
-      var q = html[i++]; var v = '';
-      while (i < n && html[i] !== q) v += html[i++];
+      var q = html[i++];
+      var vs = i;
+      while (i < n && html[i] !== q) i++;
+      var v = html.slice(vs, i);
       if (i < n) i++;
       return v;
     }
-    var v2 = '';
+    var vs2 = i;
     while (i < n && html[i] !== '>' && html[i] !== ' ' &&
-           html[i] !== '\t' && html[i] !== '\n') v2 += html[i++];
-    return v2;
+           html[i] !== '\t' && html[i] !== '\n') i++;
+    return html.slice(vs2, i);
   }
   function readTag(): HtmlToken | null {
     i++;
@@ -353,19 +399,19 @@ function tokenise(html: string): HtmlToken[] {
       if (i < n) i++;
       return null;
     }
-    var tag = '';
+    var tagS = i;
     while (i < n && html[i] !== '>' && html[i] !== '/' &&
            html[i] !== ' ' && html[i] !== '\t' && html[i] !== '\n')
-      tag += html[i++];
-    tag = tag.toLowerCase();
+      i++;
+    var tag = html.slice(tagS, i).toLowerCase();
     var attrs = new Map<string, string>();
     skipWS();
     while (i < n && html[i] !== '>' && html[i] !== '/') {
-      var nm = '';
+      var nmS = i;
       while (i < n && html[i] !== '=' && html[i] !== '>' &&
              html[i] !== '/' && html[i] !== ' ' &&
-             html[i] !== '\t' && html[i] !== '\n') nm += html[i++];
-      nm = nm.toLowerCase().trim();
+             html[i] !== '\t' && html[i] !== '\n') i++;
+      var nm = html.slice(nmS, i).toLowerCase().trim();
       skipWS();
       var vl = '';
       if (i < n && html[i] === '=') { i++; skipWS(); vl = readAttrValue(); }
@@ -387,21 +433,7 @@ function tokenise(html: string): HtmlToken[] {
       var start = i;
       while (i < n && html[i] !== '<') i++;
       var raw = html.slice(start, i);
-      var dec = raw
-        .replace(/&amp;/g,    '&')   .replace(/&lt;/g,  '<')
-        .replace(/&gt;/g,     '>')   .replace(/&quot;/g, '"')
-        .replace(/&#39;/g,    "'")   .replace(/&apos;/g, "'")
-        .replace(/&nbsp;/g,   ' ')   .replace(/&mdash;/g, '-')
-        .replace(/&ndash;/g,  '-')   .replace(/&hellip;/g, '...')
-        .replace(/&laquo;/g,  '<<')  .replace(/&raquo;/g, '>>')
-        .replace(/&copy;/g,   '(c)') .replace(/&reg;/g, '(R)')
-        .replace(/&trade;/g,  '(TM)').replace(/&ldquo;/g, '"')
-        .replace(/&rdquo;/g,  '"')   .replace(/&lsquo;/g, "'")
-        .replace(/&rsquo;/g,  "'")   .replace(/&bull;/g, '*')
-        .replace(/&middot;/g, '*')
-        .replace(/&#(\d+);/g,     (_m: string, nc: string) => String.fromCharCode(parseInt(nc, 10)))
-        .replace(/&#x([0-9a-f]+);/gi, (_m: string, nc: string) => String.fromCharCode(parseInt(nc, 16)));
-      tokens.push({ kind: 'text', tag: '', text: dec, attrs: new Map() });
+      tokens.push({ kind: 'text', tag: '', text: decodeHTMLEntities(raw), attrs: new Map() });
     }
   }
   return tokens;
@@ -1393,12 +1425,20 @@ export class BrowserApp implements App {
       return;
     }
 
-    // Draw text lines
-    for (var i = 0; i < this._pageLines.length; i++) {
+    // Draw text lines — binary-search for the first line that intersects the viewport
+    // (lines are laid out top-to-bottom with monotonically increasing y values).
+    var _bsLo = 0, _bsHi = this._pageLines.length;
+    while (_bsLo < _bsHi) {
+      var _bsMid = (_bsLo + _bsHi) >> 1;
+      if (this._pageLines[_bsMid].y + this._pageLines[_bsMid].lineH <= this._scrollY)
+        _bsLo = _bsMid + 1;
+      else
+        _bsHi = _bsMid;
+    }
+    for (var i = _bsLo; i < this._pageLines.length; i++) {
       var line  = this._pageLines[i];
       var lineY = line.y - this._scrollY;
-      if (lineY + line.lineH < 0) continue;
-      if (lineY > ch)             break;
+      if (lineY > ch) break;
 
       var absY = y0 + lineY;
 
@@ -1587,14 +1627,9 @@ export class BrowserApp implements App {
     }
 
     if (w.imgData) {
-      // Render decoded BMP pixels
-      for (var row = 0; row < w.ph; row++) {
-        var srcRow = Math.floor(row * w.ph / w.ph);   // 1:1 (no scaling, fits)
-        for (var col = 0; col < w.pw; col++) {
-          var px = w.imgData[srcRow * w.pw + col];
-          canvas.setPixel(w.px + col, wy + row, px);
-        }
-      }
+      // Fast path: bulk Uint32Array.set() per row — imgData is already in
+      // native canvas format (0xAARRGGBB), no per-pixel conversion needed.
+      canvas.blitPixelsDirect(w.imgData, w.pw, w.ph, w.px, wy);
     } else {
       // Failed fetch placeholder
       canvas.fillRect(w.px, wy, w.pw, w.ph, CLR_IMG_PH_BG);
@@ -1901,8 +1936,7 @@ export class BrowserApp implements App {
     this._history.splice(this._histIdx);
     this._history.push({ url, title: url });
 
-    var bodyStr = '';
-    for (var bi = 0; bi < resp.body.length; bi++) bodyStr += String.fromCharCode(resp.body[bi] & 0xFF);
+    var bodyStr = bytesArrToStr(resp.body);
     this._pageSource = bodyStr;
     this._showHTML(bodyStr, '', url);
     this._status = 'POST ' + resp.status + '  ' + ip;
@@ -2047,15 +2081,24 @@ export class BrowserApp implements App {
   }
 
   private _hitTestLink(x: number, cy: number): string {
-    for (var i = 0; i < this._pageLines.length; i++) {
-      var line = this._pageLines[i];
-      if (cy >= line.y && cy < line.y + line.lineH) {
+    // Binary search — lines are sorted by ascending y (layout is top-to-bottom).
+    var lo = 0, hi = this._pageLines.length - 1;
+    while (lo <= hi) {
+      var mid = (lo + hi) >> 1;
+      var line = this._pageLines[mid];
+      if (cy < line.y) {
+        hi = mid - 1;
+      } else if (cy >= line.y + line.lineH) {
+        lo = mid + 1;
+      } else {
+        // cy falls inside this line — check spans
         for (var j = 0; j < line.nodes.length; j++) {
           var span = line.nodes[j];
           if (span.href && x >= span.x && x <= span.x + span.text.length * CHAR_W) {
             return span.href;
           }
         }
+        return '';
       }
     }
     return '';
@@ -2210,8 +2253,7 @@ export class BrowserApp implements App {
       this._showError(rawURL, 'HTTP ' + resp.status + ' error'); return;
     }
 
-    var bodyStr = '';
-    for (var bi = 0; bi < resp.body.length; bi++) bodyStr += String.fromCharCode(resp.body[bi] & 0xFF);
+    var bodyStr = bytesArrToStr(resp.body);
     this._pageSource = bodyStr;
 
     var ct = resp.headers.get('content-type') || 'text/html';

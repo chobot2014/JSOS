@@ -26,9 +26,31 @@ function strToBytes(s: string): number[] {
 }
 
 function bytesToStr(b: number[]): string {
+  // Process in fixed-size chunks: one native call per chunk instead of one
+  // String allocation per byte.  8 KB is safe for QuickJS's call stack.
+  var CHUNK = 8192;
+  if (b.length <= CHUNK) return String.fromCharCode.apply(null, b);
   var parts: string[] = [];
-  for (var i = 0; i < b.length; i++) parts.push(String.fromCharCode(b[i]));
+  for (var i = 0; i < b.length; i += CHUNK) {
+    parts.push(String.fromCharCode.apply(null, b.slice(i, i + CHUNK)));
+  }
   return parts.join('');
+}
+
+/**
+ * Flatten a list of byte-array chunks into a single pre-allocated buffer.
+ * Pre-calculates total length so the output array is never resized.
+ */
+function flattenChunks(chunks: number[][]): number[] {
+  var total = 0;
+  for (var ci = 0; ci < chunks.length; ci++) total += chunks[ci].length;
+  var buf = new Array(total);
+  var off = 0;
+  for (var ci = 0; ci < chunks.length; ci++) {
+    var c = chunks[ci];
+    for (var cj = 0; cj < c.length; cj++) buf[off++] = c[cj];
+  }
+  return buf;
 }
 
 // ── HTTP request builder ──────────────────────────────────────────────────────
@@ -120,8 +142,10 @@ function decodeChunked(body: number[]): number[] {
     if (semiIdx >= 0) sizeStr = sizeStr.slice(0, semiIdx);
     var chunkSize = parseInt(sizeStr.trim(), 16);
     if (isNaN(chunkSize) || chunkSize === 0) break;  // last-chunk
-    // Copy chunk data
-    for (var j = 0; j < chunkSize && i < body.length; j++) result.push(body[i++]);
+    // Copy chunk data — bulk slice instead of per-byte push
+    var avail = Math.min(chunkSize, body.length - i);
+    Array.prototype.push.apply(result, body.slice(i, i + avail));
+    i += avail;
     // Skip trailing CRLF after chunk data
     if (i < body.length && body[i] === 13) i++;
     if (i < body.length && body[i] === 10) i++;
@@ -158,13 +182,7 @@ export function httpGet(
   net.close(sock);
 
   if (chunks.length === 0) return null;
-  // Flatten once at the end — single O(n) pass, no intermediate copies
-  var buf: number[] = [];
-  for (var ci = 0; ci < chunks.length; ci++) {
-    var ch = chunks[ci];
-    for (var cj = 0; cj < ch.length; cj++) buf.push(ch[cj]);
-  }
-  return parseHttpResponse(buf);
+  return parseHttpResponse(flattenChunks(chunks));
 }
 
 // ── HTTPS GET ─────────────────────────────────────────────────────────────────
@@ -204,12 +222,7 @@ export function httpsGet(
   tls.close();
 
   if (tlsChunks.length === 0) return { tlsOk: true, response: null };
-  var tlsBuf: number[] = [];
-  for (var tci = 0; tci < tlsChunks.length; tci++) {
-    var tch = tlsChunks[tci];
-    for (var tcj = 0; tcj < tch.length; tcj++) tlsBuf.push(tch[tcj]);
-  }
-  return { tlsOk: true, response: parseHttpResponse(tlsBuf) };
+  return { tlsOk: true, response: parseHttpResponse(flattenChunks(tlsChunks)) };
 }
 
 // ── Plain HTTP POST ───────────────────────────────────────────────────────────
@@ -234,12 +247,7 @@ export function httpPost(
   net.close(sock);
 
   if (chunks.length === 0) return null;
-  var buf: number[] = [];
-  for (var ci = 0; ci < chunks.length; ci++) {
-    var ch = chunks[ci];
-    for (var cj = 0; cj < ch.length; cj++) buf.push(ch[cj]);
-  }
-  return parseHttpResponse(buf);
+  return parseHttpResponse(flattenChunks(chunks));
 }
 
 // ── HTTPS POST ────────────────────────────────────────────────────────────────
@@ -264,10 +272,5 @@ export function httpsPost(
   tls.close();
 
   if (tlsChunks.length === 0) return { tlsOk: true, response: null };
-  var tlsBuf: number[] = [];
-  for (var tci = 0; tci < tlsChunks.length; tci++) {
-    var tch = tlsChunks[tci];
-    for (var tcj = 0; tcj < tch.length; tcj++) tlsBuf.push(tch[tcj]);
-  }
-  return { tlsOk: true, response: parseHttpResponse(tlsBuf) };
+  return { tlsOk: true, response: parseHttpResponse(flattenChunks(tlsChunks)) };
 }

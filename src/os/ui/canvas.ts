@@ -416,6 +416,27 @@ export class Canvas {
     }
   }
 
+  /**
+   * Blit external pixel data (already in canvas-native 0xAARRGGBB format) directly
+   * into this canvas using Uint32Array.set() per row — zero per-pixel overhead.
+   * Used by the image renderer: BMP data decoded by decodeBMP() is already in the
+   * correct format so no conversion is needed, just bulk memory copies.
+   */
+  blitPixelsDirect(src: Uint32Array, srcW: number, srcH: number,
+                   dx: number, dy: number): void {
+    var cols = Math.min(srcW, this.width  - dx);
+    var rows = Math.min(srcH, this.height - dy);
+    if (cols <= 0 || rows <= 0) return;
+    for (var row = 0; row < rows; row++) {
+      var dstY = dy + row;
+      if (dstY < 0 || dstY >= this.height) continue;
+      this._buf.set(
+        src.subarray(row * srcW, row * srcW + cols),
+        dstY * this.width + dx,
+      );
+    }
+  }
+
   // ── Framebuffer output ────────────────────────────────────────────────
 
   /**

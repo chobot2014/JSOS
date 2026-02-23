@@ -51,8 +51,14 @@ function strToBytes(s: string): number[] {
   return b;
 }
 function bytesToStr(b: number[]): string {
+  // Process in fixed-size chunks: one native call per chunk rather than one
+  // String allocation per byte.
+  var CHUNK = 8192;
+  if (b.length <= CHUNK) return String.fromCharCode.apply(null, b);
   var parts: string[] = [];
-  for (var i = 0; i < b.length; i++) parts.push(String.fromCharCode(b[i]));
+  for (var i = 0; i < b.length; i += CHUNK) {
+    parts.push(String.fromCharCode.apply(null, b.slice(i, i + CHUNK)));
+  }
   return parts.join('');
 }
 
