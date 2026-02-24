@@ -16,8 +16,11 @@
 
 import { Canvas, Colors, type PixelColor } from '../ui/canvas.js';
 import type { App, WMWindow, KeyEvent, MouseEvent } from '../ui/wm.js';
-import { dnsResolve } from '../net/dns.js';
-import { httpGet, httpsGet, httpPost, httpsPost } from '../net/http.js';
+import { net } from '../net/net.js';
+import { TLSSocket } from '../net/tls.js';
+import { threadManager } from '../process/threads.js';
+import { dnsResolve, dnsResolveCached, dnsSendQueryAsync, dnsPollReplyAsync, dnsCancelAsync } from '../net/dns.js';
+import { httpGet, httpsGet, httpPost, httpsPost, parseHttpResponse } from '../net/http.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -1170,11 +1173,18 @@ export class BrowserApp implements App {
   // Scrollbar drag
   private _scrollbarDragging = false;
 
-  // Deferred load
-  private _pendingLoad:      string | null = null;
-  private _pendingLoadReady  = false;
-  private _pendingNavPush    = false;
-  private _redirectDepth     = 0;
+  // Async fetch state machine (replaces the old "deferred load" two-frame dance)
+  private _redirectDepth   = 0;
+  private _fetchStage      = 'idle' as 'idle'|'dns'|'connecting'|'tls'|'sending'|'receiving'|'parsing';
+  private _fetchParsed:    ParsedURL | null = null;
+  private _fetchIP         = '';
+  private _fetchSock:      any = null;  // net.Socket
+  private _fetchTLS:       any = null;  // TLSSocket
+  private _fetchChunks:    number[][] = [];
+  private _fetchDeadline   = 0;
+  private _fetchDnsPort    = 0;
+  private _fetchDnsId      = 0;
+  private _fetchCoroId     = -1;
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -1222,8 +1232,8 @@ export class BrowserApp implements App {
         var raw = this._urlInput.trim();
         this._urlAllSelected = false;
         if (raw) {
-          this._pendingLoad = raw; this._pendingNavPush = true;
-          this._pendingLoadReady = false; this._loading = true; this._dirty = true;
+          this._urlBarFocus = false; this._urlAllSelected = false;
+          this._navigate(raw);
         }
         return;
       }
@@ -1376,8 +1386,7 @@ export class BrowserApp implements App {
           var resolved = this._resolveHref(href);
           this._visited.add(resolved);
           this._urlBarFocus = false;
-          this._pendingLoad = resolved; this._pendingNavPush = true;
-          this._pendingLoadReady = false; this._loading = true; this._dirty = true;
+          this._navigate(resolved);
           return;
         }
 
@@ -1411,23 +1420,6 @@ export class BrowserApp implements App {
       var prevPhase = (this._cursorBlink >> 4) & 1;
       this._cursorBlink++;
       if (((this._cursorBlink >> 4) & 1) !== prevPhase) this._dirty = true;
-    }
-
-    if (this._pendingLoad !== null) {
-      if (!this._pendingLoadReady) {
-        this._pendingLoadReady = true; this._dirty = true;
-        this._drawToolbar(canvas);
-        this._drawContent(canvas);
-        this._drawStatusBar(canvas);
-        if (this._findMode) this._drawFindBar(canvas);
-        return true;
-      } else {
-        var pu = this._pendingLoad!;
-        var ph = this._pendingNavPush;
-        this._pendingLoad = null; this._pendingLoadReady = false;
-        if (ph) { this._navigate(pu); }
-        else    { this._redirectDepth = 0; this._load(pu); }
-      }
     }
 
     if (!this._dirty) return false;
@@ -2004,8 +1996,7 @@ export class BrowserApp implements App {
       // GET: append query string
       var qs = fields.map(f => urlEncode(f.name) + '=' + urlEncode(f.value)).join('&');
       var url = resolved + (resolved.includes('?') ? '&' : '?') + qs;
-      this._pendingLoad = url; this._pendingNavPush = true;
-      this._pendingLoadReady = false; this._loading = true; this._dirty = true;
+      this._navigate(url);
     }
   }
 
@@ -2137,11 +2128,10 @@ export class BrowserApp implements App {
   // ── Navigation ────────────────────────────────────────────────────────────
 
   private _navigate(url: string): void {
-    this._redirectDepth = 0;
     this._histIdx++;
     this._history.splice(this._histIdx);
     this._history.push({ url, title: url });
-    this._load(url);
+    this._startFetch(url);
   }
 
   private _resolveHref(href: string): string {
@@ -2178,8 +2168,284 @@ export class BrowserApp implements App {
   }
 
   private _scheduleLoad(url: string, push: boolean): void {
-    this._pendingLoad = url; this._pendingNavPush = push;
-    this._pendingLoadReady = false; this._loading = true; this._dirty = true;
+    if (push) {
+      this._navigate(url);
+    } else {
+      this._redirectDepth = 0;
+      this._startFetch(url);
+    }
+  }
+
+  // ── Async fetch coroutine ───────────────────────────────────────────────────────
+
+  private _cancelFetch(): void {
+    if (this._fetchCoroId >= 0) {
+      threadManager.cancelCoroutine(this._fetchCoroId);
+      this._fetchCoroId = -1;
+    }
+    if (this._fetchSock) { try { net.close(this._fetchSock); } catch (_e) {} this._fetchSock = null; }
+    if (this._fetchTLS)  { try { this._fetchTLS.close();  }   catch (_e) {} this._fetchTLS  = null; }
+    if (this._fetchDnsPort > 0) { dnsCancelAsync(this._fetchDnsPort); this._fetchDnsPort = 0; }
+    this._fetchStage  = 'idle';
+    this._fetchChunks = [];
+    this._fetchParsed = null;
+    this._fetchIP     = '';
+  }
+
+  /**
+   * Begin an asynchronous HTTP/HTTPS fetch for rawURL.
+   * about: pages are handled synchronously (no coroutine needed).
+   * For all network URLs a coroutine is registered with threadManager and
+   * _stepFetch() is called once per WM frame until complete.
+   */
+  private _startFetch(rawURL: string): void {
+    this._cancelFetch();
+    this._redirectDepth  = 0;
+    this._pageURL        = rawURL;
+    this._urlInput       = rawURL;
+    this._loading        = true;
+    this._scrollY        = 0;
+    this._hoverHref      = '';
+    this._status         = 'Loading...';
+    this._dirty          = true;
+    this._focusedWidget  = -1;
+
+    if (this._histIdx >= 0 && this._histIdx < this._history.length) {
+      this._history[this._histIdx].url = rawURL;
+    }
+
+    var parsed = parseURL(rawURL);
+    if (!parsed) { this._showError(rawURL, 'Invalid URL'); return; }
+
+    // about: pages are handled inline — no network fetch needed
+    if (parsed.protocol === 'about') {
+      var html = '';
+      switch (parsed.path) {
+        case 'blank':     html = '';                      break;
+        case 'jsos':      html = aboutJsosHTML();         break;
+        case 'history':   html = this._historyHTML();     break;
+        case 'bookmarks': html = this._bookmarksHTML();   break;
+        case 'source':    html = this._sourceHTML();      break;
+        default: html = errorHTML(rawURL, 'Unknown about: page'); break;
+      }
+      this._pageSource = html;
+      this._showHTML(html, parsed.path, rawURL);
+      return;
+    }
+
+    this._fetchParsed = parsed;
+
+    // If the host is already cached / is an IP literal, skip DNS
+    var ip = dnsResolveCached(parsed.host);
+    if (ip) {
+      this._fetchIP        = ip;
+      this._fetchStage     = 'connecting';
+      this._fetchDeadline  = kernel.getTicks() + 200;   // 2 s connect timeout
+      this._fetchSock      = net.createSocket('tcp');
+      net.connectAsync(this._fetchSock, ip, parsed.port);
+      this._status = 'Connecting to ' + ip + '...'; this._dirty = true;
+    } else {
+      this._fetchStage     = 'dns';
+      this._fetchDeadline  = kernel.getTicks() + 300;   // 3 s DNS timeout
+      this._status = 'Resolving ' + parsed.host + '...'; this._dirty = true;
+      var q = dnsSendQueryAsync(parsed.host);
+      this._fetchDnsPort   = q.port;
+      this._fetchDnsId     = q.id;
+    }
+
+    // Register coroutine: _stepFetch called once per WM frame
+    var self = this;
+    this._fetchCoroId = threadManager.runCoroutine('browser-fetch', function () {
+      return self._stepFetch();
+    });
+  }
+
+  /** One-frame advance of the async fetch state machine. */
+  private _stepFetch(): 'done' | 'pending' {
+    var stage  = this._fetchStage;
+    var parsed = this._fetchParsed!;
+
+    // ── DNS stage ───────────────────────────────────────────────────────────
+    if (stage === 'dns') {
+      var ip = dnsPollReplyAsync(parsed.host, this._fetchDnsPort, this._fetchDnsId);
+      if (ip) {
+        this._fetchIP       = ip;
+        this._fetchDnsPort  = 0;
+        this._fetchStage    = 'connecting';
+        this._fetchDeadline = kernel.getTicks() + 200;
+        this._fetchSock     = net.createSocket('tcp');
+        net.connectAsync(this._fetchSock, ip, parsed.port);
+        this._status = 'Connecting to ' + ip + '...'; this._dirty = true;
+        return 'pending';
+      }
+      if (kernel.getTicks() >= this._fetchDeadline) {
+        dnsCancelAsync(this._fetchDnsPort);
+        this._fetchDnsPort = 0;
+        this._fetchStage   = 'idle';
+        this._showError(this._pageURL, 'DNS lookup failed for ' + parsed.host);
+        return 'done';
+      }
+      return 'pending';
+    }
+
+    // ── TCP connect stage ─────────────────────────────────────────────────
+    if (stage === 'connecting') {
+      var status = net.connectPoll(this._fetchSock);
+      if (status === 'connected') {
+        this._fetchStage = (parsed.protocol === 'https') ? 'tls' : 'sending';
+        return 'pending';
+      }
+      if (kernel.getTicks() >= this._fetchDeadline) {
+        this._fetchStage = 'idle';
+        this._showError(this._pageURL, 'Connection timed out: ' + this._fetchIP + ':' + parsed.port);
+        return 'done';
+      }
+      return 'pending';
+    }
+
+    // ── TLS handshake stage (synchronous, typically < 200 ms on QEMU) ─────
+    if (stage === 'tls') {
+      var tls = new TLSSocket(parsed.host);
+      var ok = tls.handshakeOnConnected(this._fetchSock);
+      if (!ok) {
+        this._fetchStage = 'idle';
+        this._showError(this._pageURL, 'TLS handshake failed with ' + this._fetchIP);
+        return 'done';
+      }
+      this._fetchTLS   = tls;
+      this._fetchStage = 'sending';
+      return 'pending';
+    }
+
+    // ── Send HTTP request ───────────────────────────────────────────────
+    if (stage === 'sending') {
+      var path = parsed.path || '/';
+      var req = 'GET ' + path + ' HTTP/1.1\r\nHost: ' + parsed.host +
+                '\r\nConnection: close\r\nAccept: text/html,*/*\r\n\r\n';
+      var reqBytes: number[] = new Array(req.length);
+      for (var ri = 0; ri < req.length; ri++) reqBytes[ri] = req.charCodeAt(ri) & 0xff;
+      if (this._fetchTLS) { this._fetchTLS.write(reqBytes); }
+      else                { net.sendBytes(this._fetchSock, reqBytes); }
+      this._fetchChunks   = [];
+      this._fetchDeadline = kernel.getTicks() + 500;  // 5 s hard timeout
+      this._fetchStage    = 'receiving';
+      this._status = 'Receiving...'; this._dirty = true;
+      return 'pending';
+    }
+
+    // ── Accumulate response bytes ────────────────────────────────────────
+    if (stage === 'receiving') {
+      var chunk: number[] | null = this._fetchTLS
+          ? this._fetchTLS.readNB()
+          : net.recvBytesNB(this._fetchSock);
+      if (chunk && chunk.length > 0) {
+        this._fetchChunks.push(chunk);
+        // Keep reading: reset the silence deadline on each new chunk
+        this._fetchDeadline = kernel.getTicks() + 100;
+      }
+      if (kernel.getTicks() >= this._fetchDeadline) {
+        this._fetchStage = 'parsing';  // timed out — parse whatever arrived
+      }
+      return 'pending';  // revisit next frame (either still receiving or now parsing)
+    }
+
+    // ── Parse response ───────────────────────────────────────────────────
+    if (stage === 'parsing') {
+      // Close the socket/TLS now that we have all the data
+      if (this._fetchSock) { try { net.close(this._fetchSock); }  catch (_e) {} this._fetchSock = null; }
+      if (this._fetchTLS)  { try { this._fetchTLS.close(); }      catch (_e) {} this._fetchTLS  = null; }
+
+      // Flatten received chunks
+      var total = 0;
+      for (var ci = 0; ci < this._fetchChunks.length; ci++) total += this._fetchChunks[ci].length;
+      var flat: number[] = new Array(total);
+      var fOff = 0;
+      for (var ci2 = 0; ci2 < this._fetchChunks.length; ci2++) {
+        var ch = this._fetchChunks[ci2];
+        for (var fj = 0; fj < ch.length; fj++) flat[fOff++] = ch[fj];
+      }
+      this._fetchChunks = [];
+
+      if (flat.length === 0) {
+        this._fetchStage = 'idle';
+        this._showError(this._pageURL, 'No response from ' + this._fetchIP);
+        return 'done';
+      }
+
+      var resp = parseHttpResponse(flat);
+      if (!resp) {
+        this._fetchStage = 'idle';
+        this._showError(this._pageURL, 'Could not parse HTTP response from ' + this._fetchIP);
+        return 'done';
+      }
+
+      kernel.serialPut('[browser] HTTP ' + resp.status + ' ' + resp.body.length + 'B\n');
+
+      // Handle redirect
+      if (resp.status >= 300 && resp.status < 400) {
+        var loc = resp.headers.get('location') || '';
+        if (loc && this._redirectDepth < 5) {
+          this._redirectDepth++;
+          kernel.serialPut('[browser] redirect ' + this._redirectDepth + ' -> ' + loc + '\n');
+          var rURL     = this._resolveHref(loc);
+          var rParsed  = parseURL(rURL);
+          if (!rParsed) {
+            this._fetchStage = 'idle';
+            this._showError(rURL, 'Invalid redirect URL');
+            return 'done';
+          }
+          this._fetchParsed = rParsed;
+          this._pageURL     = rURL;
+          this._urlInput    = rURL;
+          if (this._histIdx >= 0 && this._histIdx < this._history.length) {
+            this._history[this._histIdx].url = rURL;
+          }
+          var rIP = dnsResolveCached(rParsed.host);
+          if (rIP) {
+            this._fetchIP       = rIP;
+            this._fetchStage    = 'connecting';
+            this._fetchDeadline = kernel.getTicks() + 200;
+            this._fetchSock     = net.createSocket('tcp');
+            net.connectAsync(this._fetchSock, rIP, rParsed.port);
+          } else {
+            this._fetchStage    = 'dns';
+            this._fetchDeadline = kernel.getTicks() + 300;
+            var rq = dnsSendQueryAsync(rParsed.host);
+            this._fetchDnsPort  = rq.port;
+            this._fetchDnsId    = rq.id;
+          }
+          this._status = 'Redirecting...'; this._dirty = true;
+          return 'pending';  // continue in the same coroutine
+        } else if (loc) {
+          this._fetchStage = 'idle';
+          this._showError(this._pageURL, 'Too many redirects');
+          return 'done';
+        }
+      }
+
+      if (resp.status < 200 || resp.status >= 400) {
+        this._fetchStage = 'idle';
+        this._showError(this._pageURL, 'HTTP ' + resp.status + ' error');
+        return 'done';
+      }
+
+      var bodyStr = '';
+      for (var bi = 0; bi < resp.body.length; bi++) bodyStr += String.fromCharCode(resp.body[bi] & 0xFF);
+      this._pageSource = bodyStr;
+
+      var ct = resp.headers.get('content-type') || 'text/html';
+      if (ct.indexOf('text/html') >= 0 || ct.indexOf('application/xhtml') >= 0) {
+        this._showHTML(bodyStr, '', this._pageURL);
+      } else {
+        this._showPlainText(bodyStr, this._pageURL);
+      }
+      this._status     = 'HTTP ' + resp.status + '  ' + this._fetchIP + '  ' + resp.body.length + ' B';
+      this._fetchStage = 'idle';
+      this._fetchCoroId = -1;
+      return 'done';
+    }
+
+    return 'done';  // unreachable
   }
 
   private _scrollBy(delta: number): void {

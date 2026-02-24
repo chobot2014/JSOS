@@ -855,6 +855,59 @@ export class NetworkStack {
   }
 
   /**
+   * Initiate a TCP connection without blocking.
+   * Call connectPoll() once per frame until it returns 'connected'.
+   */
+  connectAsync(sock: Socket, remoteIP: IPv4Address, remotePort: number): void {
+    sock.remoteIP   = remoteIP;
+    sock.remotePort = remotePort;
+    if (!sock.localPort) sock.localPort = this.nextEph++;
+    var iss = this._randSeq();
+    var conn: TCPConnection = {
+      id: this.nextConn++, state: 'SYN_SENT',
+      localIP: sock.localIP, localPort: sock.localPort,
+      remoteIP, remotePort,
+      sendSeq: iss, recvSeq: 0,
+      sendBuf: [], recvBuf: [], window: 65535,
+    };
+    this.connections.set(conn.id, conn);
+    this._sendTCPSeg(conn, TCP_SYN, []);
+    conn.sendSeq = (conn.sendSeq + 1) >>> 0;
+    // sock.state stays 'connecting' until connectPoll confirms ESTABLISHED
+  }
+
+  /**
+   * Poll a socket started with connectAsync.
+   * Returns 'connected' once TCP handshake completes, 'pending' otherwise.
+   */
+  connectPoll(sock: Socket): 'connected' | 'pending' {
+    if (this.nicReady) this.pollNIC();
+    this.processRxQueue();
+    var conn = this._connForSock(sock);
+    if (conn && conn.state === 'ESTABLISHED') {
+      sock.state = 'connected';
+      return 'connected';
+    }
+    return 'pending';
+  }
+
+  /**
+   * Non-blocking receive: poll the NIC once and return any buffered TCP data,
+   * or null if nothing is available yet.
+   */
+  recvBytesNB(sock: Socket): number[] | null {
+    if (this.nicReady) this.pollNIC();
+    this.processRxQueue();
+    var conn = this._connForSock(sock);
+    if (conn && conn.recvBuf.length > 0) {
+      var data = conn.recvBuf.slice();
+      conn.recvBuf = [];
+      return data;
+    }
+    return null;
+  }
+
+  /**
    * Send a UDP datagram with raw byte payload.
    */
   sendUDPRaw(localPort: number, dstIP: IPv4Address, dstPort: number, data: number[]): void {
@@ -889,6 +942,20 @@ export class NetworkStack {
       kernel.sleep(1);  // yield to QEMU for virtio BH processing
     }
     this.udpRxMap.delete(localPort);
+    return null;
+  }
+
+  /**
+   * Non-blocking UDP receive on localPort.
+   * Registers the inbox if needed, polls once, returns first datagram or null.
+   * The inbox is NOT removed — caller must call udpRxMap.delete(port) when done.
+   */
+  recvUDPRawNB(localPort: number): { from: IPv4Address; fromPort: number; data: number[] } | null {
+    if (!this.udpRxMap.has(localPort)) this.udpRxMap.set(localPort, []);
+    if (this.nicReady) this.pollNIC();
+    this.processRxQueue();
+    var inbox = this.udpRxMap.get(localPort)!;
+    if (inbox.length > 0) return inbox.shift()!;
     return null;
   }
 

@@ -61,7 +61,7 @@ function buildPostRequest(
 
 // ── HTTP response parser ──────────────────────────────────────────────────────
 
-function parseHttpResponse(data: number[]): HttpResponse | null {
+export function parseHttpResponse(data: number[]): HttpResponse | null {
   var raw = bytesToStr(data);
   var headerEnd = raw.indexOf('\r\n\r\n');
   if (headerEnd < 0) headerEnd = raw.indexOf('\n\n');

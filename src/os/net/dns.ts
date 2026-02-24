@@ -144,3 +144,54 @@ export function dnsResolve(hostname: string, timeoutTicks: number = 300): string
   if (ip) dnsCache.set(hostname, ip);
   return ip;
 }
+
+// ── Async (non-blocking) DNS helpers ─────────────────────────────────────────
+
+const _IP_LITERAL = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+
+/**
+ * Cache-only lookup — never blocks or sends any network packets.
+ * Returns a dotted-decimal IP string if already known, or null.
+ * Callers should proceed to dnsSendQueryAsync() when this returns null.
+ */
+export function dnsResolveCached(hostname: string): string | null {
+  if (_IP_LITERAL.test(hostname)) return hostname;
+  return dnsCache.get(hostname) || null;
+}
+
+/**
+ * Fire-and-forget DNS query.  Registers the UDP inbox and sends the query
+ * without waiting for a reply.  Returns { port, id } for use with
+ * dnsPollReplyAsync() and dnsCancelAsync().
+ */
+export function dnsSendQueryAsync(hostname: string): { port: number; id: number } {
+  var srcPort = (53000 + (kernel.getTicks() & 0xfff));
+  var queryID = (kernel.getTicks() & 0xffff) | 1;
+  // Pre-register the inbox so an early reply is not dropped
+  (net as any).udpRxMap.set(srcPort, []);
+  net.sendUDPRaw(srcPort, net.dns, DNS_PORT, buildQuery(queryID, hostname));
+  return { port: srcPort, id: queryID };
+}
+
+/**
+ * Non-blocking poll for a DNS reply.  Call once per frame.
+ * Returns the resolved IP string on success (and caches it), or null if the
+ * reply has not arrived yet.
+ */
+export function dnsPollReplyAsync(hostname: string, port: number, id: number): string | null {
+  var pkt = net.recvUDPRawNB(port);
+  if (!pkt) return null;
+  var ip = parseResponse(pkt.data, id);
+  if (ip) {
+    dnsCache.set(hostname, ip);
+    (net as any).udpRxMap.delete(port);
+  }
+  return ip;
+}
+
+/**
+ * Cancel an in-flight async DNS query and free the UDP inbox.
+ */
+export function dnsCancelAsync(port: number): void {
+  (net as any).udpRxMap.delete(port);
+}

@@ -14,6 +14,7 @@
 
 import { Canvas, Colors, defaultFont, createScreenCanvas, type PixelColor } from './canvas.js';
 import { net } from '../net/net.js';
+import { threadManager } from '../process/threads.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -209,6 +210,7 @@ export class WindowManager {
   tick(): void {
     this._pollInput();
     this._tickChildProcs();
+    threadManager.tickCoroutines();
     this._composite();
   }
   /** Mark the WM as needing a repaint (call from app code or external events). */
