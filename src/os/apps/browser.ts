@@ -1404,8 +1404,14 @@ export class BrowserApp implements App {
   // ── Rendering ──────────────────────────────────────────────────────────────
 
   render(canvas: Canvas): boolean {
-    this._cursorBlink++;
-    if ((this._cursorBlink & 31) === 0) this._dirty = true;
+    // Only tick the blink counter when an input cursor is actually visible.
+    // Trigger a redraw on BOTH phase transitions (show→hide and hide→show)
+    // so the cursor actually blinks instead of staying permanently on.
+    if (this._urlBarFocus || this._focusedWidget >= 0) {
+      var prevPhase = (this._cursorBlink >> 4) & 1;
+      this._cursorBlink++;
+      if (((this._cursorBlink >> 4) & 1) !== prevPhase) this._dirty = true;
+    }
 
     if (this._pendingLoad !== null) {
       if (!this._pendingLoadReady) {
@@ -1508,12 +1514,22 @@ export class BrowserApp implements App {
       return;
     }
 
-    // Draw text lines
-    for (var i = 0; i < this._pageLines.length; i++) {
-      var line  = this._pageLines[i];
-      var lineY = line.y - this._scrollY;
-      if (lineY + line.lineH < 0) continue;
-      if (lineY > ch)             break;
+    // Draw text lines — binary-search to the first visible line so we skip
+    // the O(n) linear scan of all off-screen lines above the viewport.
+    // This is critical for long pages (e.g. bible.txt with 50k+ lines).
+    var _lines = this._pageLines;
+    var _sv    = this._scrollY;
+    var _lo = 0, _hi = _lines.length;
+    while (_lo < _hi) {
+      var _mid = (_lo + _hi) >> 1;
+      // First visible line: line.y + lineH >= scrollY
+      if (_lines[_mid].y + _lines[_mid].lineH < _sv) _lo = _mid + 1;
+      else _hi = _mid;
+    }
+    for (var i = _lo; i < _lines.length; i++) {
+      var line  = _lines[i];
+      var lineY = line.y - _sv;
+      if (lineY > ch) break;
 
       var absY = y0 + lineY;
 
@@ -2174,12 +2190,14 @@ export class BrowserApp implements App {
   private _hitTestLink(x: number, cy: number): string {
     for (var i = 0; i < this._pageLines.length; i++) {
       var line = this._pageLines[i];
-      if (cy >= line.y && cy < line.y + line.lineH) {
-        for (var j = 0; j < line.nodes.length; j++) {
-          var span = line.nodes[j];
-          if (span.href && x >= span.x && x <= span.x + span.text.length * CHAR_W) {
-            return span.href;
-          }
+      // Lines are Y-sorted: once past cy there can be no more matches.
+      if (line.y > cy) break;
+      // Skip lines entirely above cy.
+      if (line.y + line.lineH <= cy) continue;
+      for (var j = 0; j < line.nodes.length; j++) {
+        var span = line.nodes[j];
+        if (span.href && x >= span.x && x <= span.x + span.text.length * CHAR_W) {
+          return span.href;
         }
       }
     }

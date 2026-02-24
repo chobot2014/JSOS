@@ -82,25 +82,22 @@ export class Terminal {
   //  Scrolling 
 
   private _scroll(): void {
-    // Push evicted top row into scrollback ring
+    // Push evicted top row into scrollback ring — TypedArray.set() is a
+    // single native memcpy vs an 80-iteration JS loop.
     var dst = this._sb[this._sbWrite];
-    var src = this._screen[0];
-    for (var c = 0; c < VGA_W; c++) dst[c] = src[c];
+    dst.set(this._screen[0]);
     this._sbWrite = (this._sbWrite + 1) % SCROLLBACK;
     if (this._sbCount < SCROLLBACK) this._sbCount++;
 
     // Shift screen buffer up and update VGA
     for (var r = 0; r < VGA_H - 1; r++) {
-      var from = this._screen[r + 1];
-      var to   = this._screen[r];
-      for (var c = 0; c < VGA_W; c++) to[c] = from[c];
+      this._screen[r].set(this._screen[r + 1]);  // native memcpy per row
       kernel.vgaCopyRow(r, r + 1);
     }
 
-    // Clear bottom row
+    // Clear bottom row — Uint16Array.fill() vs an 80-iter JS loop
     var blank = ((this._color & 0xFF) << 8) | 0x20;
-    var last = this._screen[VGA_H - 1];
-    for (var c = 0; c < VGA_W; c++) last[c] = blank;
+    this._screen[VGA_H - 1].fill(blank);
     kernel.vgaFillRow(VGA_H - 1, ' ', this._color);
 
     this._row = VGA_H - 1;

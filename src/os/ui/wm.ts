@@ -324,7 +324,9 @@ export class WindowManager {
             buttons: pkt.buttons,
             type:    evType,
           });
-          this._wmDirty = true;
+          // For move events the app's render() return value signals dirty;
+          // only force a WM composite on discrete button state changes.
+          if (evType !== 'move') this._wmDirty = true;
         }
       } else {
         this._mouseCapture = null;   // dragging window — cancel any app capture

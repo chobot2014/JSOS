@@ -51,9 +51,17 @@ function strToBytes(s: string): number[] {
   return b;
 }
 function bytesToStr(b: number[]): string {
-  var parts: string[] = [];
-  for (var i = 0; i < b.length; i++) parts.push(String.fromCharCode(b[i]));
-  return parts.join('');
+  // String.fromCharCode.apply eliminates the intermediate parts[] array and join
+  // call for every byte.  TCP MSS segments are ≤1460 bytes so a single apply
+  // is safe (QuickJS arg-count limit is far above 1460).
+  // For larger buffers (e.g. recvBuf drain) chunk to 4096 to stay stack-safe.
+  if (b.length === 0) return '';
+  if (b.length <= 4096) return String.fromCharCode.apply(null, b as any);
+  var s = '';
+  for (var off = 0; off < b.length; off += 4096) {
+    s += String.fromCharCode.apply(null, b.slice(off, off + 4096) as any);
+  }
+  return s;
 }
 
 // ── Address helpers ──────────────────────────────────────────────────────────
@@ -510,7 +518,9 @@ export class NetworkStack {
         break;
       case 'ESTABLISHED':
         if (seg.payload.length > 0) {
-          conn.recvBuf = conn.recvBuf.concat(seg.payload);
+          // push.apply mutates in-place (O(new)) vs concat which copies the
+          // entire existing buffer into a new array every segment (O(total)).
+          Array.prototype.push.apply(conn.recvBuf, seg.payload);
           conn.recvSeq = (conn.recvSeq + seg.payload.length) >>> 0;
           // Deliver to socket's recvQueue
           var sock = this._findSockForConn(conn);

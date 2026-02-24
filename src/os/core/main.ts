@@ -342,14 +342,14 @@ function main(): void {
       kernel.serialPut('Terminal app launched\n');
       kernel.serialPut('REPL ready (windowed mode)\n');
 
-      // WM event loop — cap at ~60 fps (2 PIT ticks @ 100 Hz = 20 ms/frame)
-      // kernel.yield() at the top lets the cooperative scheduler run all ready
-      // threads before we render, so threads blocked in sleep() get their turn.
+      // WM event loop — target ~50 fps (20 ms/frame at 100 Hz PIT).
+      // kernel.yield() wakes any sleeping JS processes before input/render.
+      // kernel.sleep() uses 'hlt' so the CPU is truly idle between frames
+      // instead of burning 100% on a spin-wait.
       for (;;) {
-        kernel.yield();           // cooperative scheduler tick (Phase 5)
-        var _t0 = kernel.getTicks();
-        wmInst.tick();
-        while (kernel.getTicks() - _t0 < 2) { /* spin until 20 ms elapsed */ }
+        kernel.yield();          // cooperative scheduler tick — unblock sleeping threads
+        wmInst.tick();           // poll input, render, composite, flip
+        kernel.sleep(16);        // halt CPU until next ~2 timer ticks (~20 ms)
       }
     }
   }
