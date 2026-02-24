@@ -36,6 +36,7 @@ import { processManager } from '../process/process.js';
 import { threadManager } from '../process/threads.js';
 import { physAlloc } from '../process/physalloc.js';
 import { JSProcess, listProcesses } from '../process/jsprocess.js';
+import { os } from '../core/sdk.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -779,6 +780,17 @@ export function registerCommands(g: any): void {
   // Make JSProcess available as a global constructor for scripts
   g.JSProcess = JSProcess;
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // 11.  SDK — unified OS abstraction layer
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * The JSOS Application SDK — the recommended API for all app and script code.
+   * os.fs, os.fetchAsync, os.spawn, os.cancel, os.system,
+   * os.process, os.ipc, os.users
+   */
+  g.os = os;
+
   /**
    * Allocate a shared BSS buffer accessible from both parent and child runtimes.
    * Returns an id (0-7) that both sides pass to openSharedBuffer().
@@ -994,6 +1006,25 @@ export function registerCommands(g: any): void {
     terminal.println('  echo(...)            print arguments');
     terminal.println('  print(s)             print a value');
     terminal.println('  printable(d, fn)     wrap data with a custom pretty-printer');
+    terminal.println('');
+
+    terminal.colorPrintln('App SDK  (recommended for all app/script code):', Color.YELLOW);
+    terminal.colorPrint('  os.fs', Color.LIGHT_CYAN);
+    terminal.println('              .read .write .readBytes .list .mkdir .exists .cd .cwd .rm');
+    terminal.colorPrint('  os.fetchAsync', Color.LIGHT_CYAN);
+    terminal.println('       (url, cb, opts?)  non-blocking HTTP/HTTPS → FetchResponse');
+    terminal.colorPrint('  os.process', Color.LIGHT_CYAN);
+    terminal.println('          .spawn(code, name?)  .list()  → isolated JSProcess');
+    terminal.colorPrint('  os.ipc', Color.LIGHT_CYAN);
+    terminal.println('             .createPipe  .signal.send  .mq.send/.recv');
+    terminal.colorPrint('  os.users', Color.LIGHT_CYAN);
+    terminal.println('           .login .logout .whoami .getUser .addUser .passwd');
+    terminal.colorPrint('  os.system', Color.LIGHT_CYAN);
+    terminal.println('          .uptime .ticks .pid .hostname .memory .uname');
+    terminal.colorPrint('  os.spawn', Color.LIGHT_CYAN);
+    terminal.println('           (name, step)  register cooperative coroutine');
+    terminal.colorPrint('  os.cancel', Color.LIGHT_CYAN);
+    terminal.println('          (id)           cancel fetch or coroutine');
     terminal.println('');
 
     terminal.colorPrintln('Scripting APIs (raw data, never print):', Color.YELLOW);

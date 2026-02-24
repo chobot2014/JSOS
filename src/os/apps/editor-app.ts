@@ -10,7 +10,7 @@
  * (event-driven vs. blocking waitKeyEx loop).
  */
 
-import fs from '../fs/filesystem.js';
+import { os } from '../core/sdk.js';
 import { Colors, defaultFont } from '../ui/canvas.js';
 import type { Canvas } from '../ui/canvas.js';
 import type { App, WMWindow, KeyEvent, MouseEvent } from '../ui/wm.js';
@@ -61,7 +61,7 @@ export class EditorApp implements App {
 
   constructor(filePath?: string) {
     this._savedPath = filePath || '';
-    var content = filePath ? (fs.readFile(filePath) || '') : '';
+    var content = filePath ? (os.fs.read(filePath) || '') : '';
     content = content.replace(/\r/g, '');
     this._lines = content.split('\n');
     if (this._lines.length === 0) this._lines = [''];
@@ -310,7 +310,7 @@ export class EditorApp implements App {
   }
 
   private _doSave(): void {
-    if (fs.writeFile(this._savedPath, this._lines.join('\n'))) {
+    if (os.fs.write(this._savedPath, this._lines.join('\n'))) {
       this._modified = false;
       this._message  = 'Saved: ' + this._savedPath;
     } else {
