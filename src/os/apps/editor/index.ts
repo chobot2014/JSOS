@@ -10,13 +10,13 @@
  * (event-driven vs. blocking waitKeyEx loop).
  */
 
-import { os } from '../core/sdk.js';
-import { Colors, defaultFont } from '../ui/canvas.js';
-import type { Canvas } from '../ui/canvas.js';
-import type { App, WMWindow, KeyEvent, MouseEvent } from '../ui/wm.js';
-import { wm } from '../ui/wm.js';
+import { os } from '../../core/sdk.js';
+import { Colors, defaultFont } from '../../ui/canvas.js';
+import type { Canvas } from '../../ui/canvas.js';
+import type { App, WMWindow, KeyEvent, MouseEvent } from '../../ui/wm.js';
+import { wm } from '../../ui/wm.js';
 
-declare var kernel: import('../core/kernel.js').KernelAPI;
+declare var kernel: import('../../core/kernel.js').KernelAPI;
 
 // ── Canvas colour constants (ARGB) ─────────────────────────────────────────
 const C_BG       = 0xFF111111;

@@ -44,6 +44,12 @@ export interface App {
   onMouse(event: MouseEvent): void;
   /** Render into canvas.  Return true if anything was redrawn, false to skip composite. */
   render(canvas: Canvas): boolean;
+  /** Called when this window becomes the focused (active) window. */
+  onFocus?(): void;
+  /** Called when this window loses focus. */
+  onBlur?(): void;
+  /** Called when the window content area is resized. */
+  onResize?(width: number, height: number): void;
 }
 
 // ── Window ─────────────────────────────────────────────────────────────────
@@ -118,6 +124,7 @@ export class WindowManager {
   private _dragOffY = 0;
   // Mouse capture — app window that receives all events while button is held
   private _mouseCapture: number | null = null;
+  private _clipboard: string = '';
 
   constructor(screen: Canvas) {
     this._screen  = screen;
@@ -160,16 +167,26 @@ export class WindowManager {
     this._windows.push(win);
     this._focused = win.id;
     opts.app.onMount(win);
+    if (opts.app.onFocus) opts.app.onFocus();
     return win;
   }
 
   focusWindow(id: number): void {
+    if (this._focused === id) return;
+    var prevId = this._focused;
     for (var i = 0; i < this._windows.length; i++) {
       if (this._windows[i].id === id) {
+        // Notify old focused app
+        if (prevId !== null) {
+          var prev = this._findWindow(prevId);
+          if (prev && prev.app.onBlur) prev.app.onBlur();
+        }
         this._focused = id;
         // Move to top of stack
         var win = this._windows.splice(i, 1)[0];
         this._windows.push(win);
+        if (win.app.onFocus) win.app.onFocus();
+        this._wmDirty = true;
         return;
       }
     }
@@ -195,6 +212,11 @@ export class WindowManager {
     var win = this._findWindow(id);
     if (win) win.minimised = true;
   }
+
+  // ── Clipboard ──────────────────────────────────────────────────────────
+
+  getClipboard(): string { return this._clipboard; }
+  setClipboard(text: string): void { this._clipboard = text; this._wmDirty = true; }
 
   // ── Query ──────────────────────────────────────────────────────────────
 
@@ -476,3 +498,7 @@ export class WindowManager {
 /** Singleton WM instance — created by main.ts after framebuffer detection. */
 export let wm: WindowManager | null = null;
 export function setWM(instance: WindowManager): void { wm = instance; }
+export function getWM(): WindowManager {
+  if (!wm) throw new Error('WindowManager not yet initialised');
+  return wm;
+}

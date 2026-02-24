@@ -19,7 +19,7 @@ import terminal from './terminal.js';
 import { Color } from '../core/kernel.js';
 import fs from '../fs/filesystem.js';
 import { openEditor } from './editor.js';
-import { EditorApp } from '../apps/editor-app.js';
+import { EditorApp } from '../apps/editor/index.js';
 import { wm } from '../ui/wm.js';
 import { scheduler } from '../process/scheduler.js';
 import { vmm } from '../process/vmm.js';
@@ -805,6 +805,64 @@ export function registerCommands(g: any): void {
     check('VFS /proc mounts', function() {
       var c = fs.readFile('/proc/meminfo');
       return c !== null;
+    });
+
+    check('VFS /dev/null', function() {
+      fs.writeFile('/dev/null', 'anything');
+      var r = fs.readFile('/dev/null');
+      return r === '' || r === null;
+    });
+
+    check('VFS /dev/urandom', function() {
+      var r = fs.readFile('/dev/urandom');
+      return typeof r === 'string' && r.length > 0;
+    });
+
+    check('IPC pipe write/read', function() {
+      var p = ipc.fifo();
+      p.write('pipes');
+      var got = p.read(5);
+      ipc.closePipe(p.readFd);
+      return got === 'pipes';
+    });
+
+    check('IPC signal delivery', function() {
+      var fired = false;
+      var SIGUSR1 = 10;
+      ipc.signals.handle(0, SIGUSR1, function() { fired = true; });
+      ipc.signals.send(0, SIGUSR1);
+      return fired;
+    });
+
+    check('scheduler process count', function() {
+      var procs = scheduler.getAllProcesses();
+      return typeof procs.length === 'number';
+    });
+
+    check('physAlloc pages', function() {
+      var before = physAlloc.freePages();
+      var addr   = physAlloc.alloc(1);
+      var during = physAlloc.freePages();
+      physAlloc.free(addr, 1);
+      var after  = physAlloc.freePages();
+      return before === after && during === before - 1;
+    });
+
+    check('init services list', function() {
+      var svcs = init.listServices();
+      return Array.isArray(svcs);
+    });
+
+    check('os.disk.available() returns bool', function() {
+      var v = os.disk.available();
+      return typeof v === 'boolean';
+    });
+
+    check('os.clipboard read/write', function() {
+      os.clipboard.write('_clip_test_');
+      var v = os.clipboard.read();
+      os.clipboard.write('');
+      return v === '_clip_test_';
     });
 
     terminal.println('');

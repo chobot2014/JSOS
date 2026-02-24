@@ -35,6 +35,7 @@ import { parseHttpResponse } from '../net/http.js';
 import { JSProcess, listProcesses } from '../process/jsprocess.js';
 import { ipc } from '../ipc/ipc.js';
 import { users } from '../users/users.js';
+import { wm } from '../ui/wm.js';
 export { Colors, type PixelColor } from '../ui/canvas.js';
 export { JSProcess } from '../process/jsprocess.js';
 
@@ -515,6 +516,64 @@ const sdk = {
    *   os.users.whoami();           // → { uid: 1000, name: 'user', ... }
    */
   users,
+
+  // ── Disk (FAT32/FAT16 persistent storage) ───────────────────────────────
+
+  /**
+   * Persistent disk storage via FAT32/FAT16.  Only available when QEMU
+   * presents a block device; check `os.disk.available()` first.
+   *
+   * Example:
+   *   if (os.disk.available()) {
+   *     os.disk.write('/notes.txt', 'hello');
+   *     os.disk.read('/notes.txt'); // → 'hello'
+   *   }
+   */
+  disk: {
+    /** Returns true when a FAT disk driver has been mounted. */
+    available(): boolean { return !!(globalThis as any)._diskFS; },
+    /** Read a file from disk.  Returns null if unavailable or not found. */
+    read(path: string): string | null {
+      var d = (globalThis as any)._diskFS; return d ? d.read(path) : null;
+    },
+    /** Write (create or overwrite) a file on disk.  Returns false if unavailable. */
+    write(path: string, data: string): boolean {
+      var d = (globalThis as any)._diskFS; return d ? !!d.writeFile(path, data) : false;
+    },
+    /** List directory entries.  Returns [] if unavailable. */
+    list(path?: string): Array<{ name: string; type: 'file' | 'dir'; size: number }> {
+      var d = (globalThis as any)._diskFS; return d ? (d.list(path || '/') ?? []) : [];
+    },
+    /** Create a directory.  Returns false if unavailable. */
+    mkdir(path: string): boolean {
+      var d = (globalThis as any)._diskFS; return d ? !!d.mkdir(path) : false;
+    },
+    /** Check whether a path exists. */
+    exists(path: string): boolean {
+      var d = (globalThis as any)._diskFS; return d ? !!d.exists(path) : false;
+    },
+    /** Remove a file or empty directory. */
+    rm(path: string): boolean {
+      var d = (globalThis as any)._diskFS; return d ? !!d.remove(path) : false;
+    },
+  },
+
+  // ── Clipboard (WM-backed) ───────────────────────────────────────────────
+
+  /**
+   * System clipboard backed by the WindowManager.
+   * Only meaningful once a WM instance is active (windowed mode).
+   *
+   * Example:
+   *   os.clipboard.write('copy me');
+   *   os.clipboard.read(); // → 'copy me'
+   */
+  clipboard: {
+    /** Read the current clipboard text. */
+    read(): string { return wm ? wm.getClipboard() : ''; },
+    /** Write text to the clipboard. */
+    write(text: string): void { if (wm) wm.setClipboard(text); },
+  },
 
 };
 
