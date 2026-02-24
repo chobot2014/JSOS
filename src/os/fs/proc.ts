@@ -12,6 +12,7 @@ import { scheduler } from '../process/scheduler.js';
 import { vmm } from '../process/vmm.js';
 import { init } from '../process/init.js';
 import { FileType } from './filesystem.js';
+import { net } from '../net/net.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -233,26 +234,58 @@ export class ProcFS {
   }
 
   private netDev(): string {
+    var st = net.getStats();
+    function rp(n: number, w: number): string { var s = '' + n; while (s.length < w) s = ' ' + s; return s; }
     return (
       'Inter-|   Receive                                                |  Transmit\n' +
       ' face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n' +
       '    lo:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n' +
-      '  eth0:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n'
+      '  eth0:' + rp(st.rxBytes, 9) + rp(st.rxPackets, 9) + rp(st.rxErrors, 5) +
+      '    0    0     0          0         0' +
+      rp(st.txBytes, 9) + rp(st.txPackets, 9) + '    0    0    0     0       0          0\n'
     );
   }
 
   private netRoute(): string {
+    function ipToHexLE(ip: string): string {
+      var p = ip.split('.').map(Number);
+      function h2(n: number): string { var s = n.toString(16); return s.length < 2 ? '0' + s : s; }
+      return (h2(p[3]) + h2(p[2]) + h2(p[1]) + h2(p[0])).toUpperCase();
+    }
+    var ipParts   = net.ip.split('.').map(Number);
+    var maskParts = net.mask.split('.').map(Number);
+    var netAddr   = ipParts.map(function(b: number, i: number) { return b & maskParts[i]; }).join('.');
     return (
-      'Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n' +
-      'eth0\t00000000\t0202000A\t0003\t0\t0\t100\t00FFFFFF\t0\t0\t0\n' +
-      'eth0\t0F00000A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n'
+      'Iface\tDestination\tGateway\t\tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n' +
+      'eth0\t00000000\t' + ipToHexLE(net.gateway) + '\t0003\t0\t0\t100\t00000000\t0\t0\t0\n' +
+      'eth0\t' + ipToHexLE(netAddr) + '\t00000000\t0001\t0\t0\t0\t' + ipToHexLE(net.mask) + '\t0\t0\t0\n'
     );
   }
 
   private netTcp(): string {
-    return (
-      '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n'
-    );
+    var conns = net.getConnections();
+    function ipPortHex(ip: string, port: number): string {
+      var p = ip.split('.').map(Number);
+      function h2(n: number): string { var s = n.toString(16); return s.length < 2 ? '0' + s : s; }
+      function h4(n: number): string { var s = n.toString(16); while (s.length < 4) s = '0' + s; return s.toUpperCase(); }
+      return (h2(p[3]) + h2(p[2]) + h2(p[1]) + h2(p[0])).toUpperCase() + ':' + h4(port);
+    }
+    var stateCode: { [s: string]: string } = {
+      'ESTABLISHED': '01', 'SYN_SENT': '02', 'SYN_RECEIVED': '03',
+      'FIN_WAIT_1': '04', 'FIN_WAIT_2': '05', 'TIME_WAIT': '06',
+      'CLOSED': '07', 'CLOSE_WAIT': '08', 'LAST_ACK': '09',
+      'LISTEN': '0A', 'CLOSING': '0B',
+    };
+    var lines = ['  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode'];
+    for (var i = 0; i < conns.length; i++) {
+      var c = conns[i];
+      var sl = '' + i; while (sl.length < 4) sl = ' ' + sl;
+      lines.push(sl + ': ' +
+        ipPortHex(c.localIP, c.localPort) + ' ' +
+        ipPortHex(c.remoteIP, c.remotePort) + ' ' +
+        (stateCode[c.state] || '00') + ' 00000000:00000000 00:00000000 00000000     0        0 0');
+    }
+    return lines.join('\n') + '\n';
   }
 
   private processEntry(pid: number, entry: string): string | null {

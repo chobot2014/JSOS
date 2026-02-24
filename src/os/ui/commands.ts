@@ -407,15 +407,33 @@ export function registerCommands(g: any): void {
   // ──────────────────────────────────────────────────────────────────────────
 
   g.ps = function() {
-    var procs = scheduler.getAllProcesses();
-    return printableArray(procs, function(arr: any[]) {
-      terminal.colorPrintln('  ' + lpad('PID', 4) + '  ' + lpad('PPID', 5) + '  ' + pad('NAME', 16) + '  ' + pad('STATE', 12) + 'PRI', Color.LIGHT_CYAN);
-      terminal.colorPrintln('  ' + pad('', 48).replace(/ /g, '-'), Color.DARK_GREY);
+    var results: any[] = [];
+    // Kernel POSIX-facade processes (idle, kernel, init)
+    var sprocs = scheduler.getAllProcesses();
+    for (var _i = 0; _i < sprocs.length; _i++) {
+      var sp = sprocs[_i];
+      results.push({ pid: sp.pid, ppid: sp.ppid, name: sp.name, state: sp.state, priority: sp.priority, type: 'sched', cpuTime: sp.cpuTime });
+    }
+    // Cooperative kernel threads (ThreadManager)
+    var kthreads = threadManager.getThreads();
+    for (var _j = 0; _j < kthreads.length; _j++) {
+      var kt = kthreads[_j];
+      results.push({ pid: kt.tid, ppid: 0, name: '[' + kt.name + ']', state: kt.state, priority: kt.priority, type: 'thread', cpuTime: 0 });
+    }
+    // Active JSProcess child QuickJS runtimes
+    var jsprocs = listProcesses();
+    for (var _k = 0; _k < jsprocs.length; _k++) {
+      var jp = jsprocs[_k];
+      results.push({ pid: jp.id, ppid: 1, name: 'js#' + jp.id, state: 'running', priority: 20, type: 'js', cpuTime: 0 });
+    }
+    return printableArray(results, function(arr: any[]) {
+      terminal.colorPrintln('  TYPE    ' + lpad('PID', 4) + '  ' + lpad('PPID', 5) + '  ' + pad('NAME', 18) + '  ' + pad('STATE', 10) + 'PRI', Color.LIGHT_CYAN);
+      terminal.colorPrintln('  ' + pad('', 56).replace(/ /g, '-'), Color.DARK_GREY);
       for (var i = 0; i < arr.length; i++) {
         var p = arr[i];
-        terminal.println('  ' + lpad('' + p.pid, 4) + '  ' + lpad('' + p.ppid, 5) + '  ' + pad(p.name, 16) + '  ' + pad(p.state, 12) + p.priority);
+        terminal.println('  ' + pad(p.type, 7) + ' ' + lpad('' + p.pid, 4) + '  ' + lpad('' + p.ppid, 5) + '  ' + pad(p.name, 18) + '  ' + pad(p.state, 10) + p.priority);
       }
-      terminal.colorPrintln('  ' + arr.length + ' process(es)', Color.DARK_GREY);
+      terminal.colorPrintln('  ' + arr.length + ' total', Color.DARK_GREY);
     });
   };
 
@@ -496,18 +514,28 @@ export function registerCommands(g: any): void {
       terminal.println(' mem: ' + Math.floor(m.used / 1024) + 'K / ' + Math.floor(m.total / 1024) + 'K   runlevel: ' + init.getCurrentRunlevel() + '   scheduler: ' + scheduler.getAlgorithm());
       terminal.println('');
       terminal.setColor(Color.LIGHT_CYAN, Color.BLACK);
-      terminal.println('  ' + lpad('PID', 4) + '  ' + lpad('PPID', 5) + '  ' + pad('NAME', 16) + '  ' + pad('STATE', 12) + '  PRI  CPU-ms');
+      terminal.println('  TYPE    ' + lpad('PID', 4) + '  ' + lpad('PPID', 5) + '  ' + pad('NAME', 16) + '  ' + pad('STATE', 10) + '  PRI  CPU-ms');
       terminal.setColor(Color.DARK_GREY, Color.BLACK);
       terminal.println('  ' + pad('', 60).replace(/ /g, '-'));
       terminal.setColor(Color.LIGHT_GREY, Color.BLACK);
       var procs = scheduler.getAllProcesses();
+      var kthreadsTop = threadManager.getThreads();
+      var jSprocsTop  = listProcesses();
       for (var i = 0; i < procs.length; i++) {
         var p = procs[i];
-        terminal.println('  ' + lpad('' + p.pid, 4) + '  ' + lpad('' + p.ppid, 5) + '  ' + pad(p.name, 16) + '  ' + pad(p.state, 12) + '  ' + lpad('' + p.priority, 3) + '  ' + p.cpuTime);
+        terminal.println('  ' + pad('sched', 7) + ' ' + lpad('' + p.pid, 4) + '  ' + lpad('' + p.ppid, 5) + '  ' + pad(p.name, 16) + '  ' + pad(p.state, 10) + '  ' + lpad('' + p.priority, 3) + '  ' + p.cpuTime);
+      }
+      for (var _j = 0; _j < kthreadsTop.length; _j++) {
+        var kt = kthreadsTop[_j];
+        terminal.println('  ' + pad('thread', 7) + ' ' + lpad('' + kt.tid, 4) + '      0  ' + pad('[' + kt.name + ']', 16) + '  ' + pad(kt.state, 10) + '  ' + lpad('' + kt.priority, 3) + '  0');
+      }
+      for (var _k = 0; _k < jSprocsTop.length; _k++) {
+        var jpt = jSprocsTop[_k];
+        terminal.println('  ' + pad('js', 7) + ' ' + lpad('' + jpt.id, 4) + '      1  ' + pad('js#' + jpt.id, 16) + '  ' + pad('running', 10) + '   20  0');
       }
       terminal.println('');
       terminal.setColor(Color.DARK_GREY, Color.BLACK);
-      terminal.println('  ' + procs.length + ' process(es)');
+      terminal.println('  ' + (procs.length + kthreadsTop.length + jSprocsTop.length) + ' total');
       terminal.setColor(Color.LIGHT_GREY, Color.BLACK);
       kernel.sleep(500);
       if (kernel.hasKey()) {

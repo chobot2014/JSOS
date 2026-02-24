@@ -156,6 +156,18 @@ export class ThreadManager {
 
   threadCount(): number { return this._threads.length; }
 
+  /** Return a read-only snapshot of all threads (for ps / top display). */
+  getThreads(): Array<{ tid: number; name: string; state: ThreadState; priority: number }> {
+    return this._threads.map(function(t) {
+      return { tid: t.tid, name: t.name, state: t.state, priority: t.priority };
+    });
+  }
+
+  /** Return a read-only snapshot of all active coroutines. */
+  getCoroutines(): Array<{ id: number; name: string }> {
+    return this._coroutines.map(function(c) { return { id: c.id, name: c.name }; });
+  }
+
   private _byTid(tid: number): Thread | null {
     for (var i = 0; i < this._threads.length; i++) {
       if (this._threads[i].tid === tid) return this._threads[i];
