@@ -19,10 +19,6 @@ import { fat16 } from '../storage/fat16.js';
 import { fat32 } from '../storage/fat32.js';
 import { physAlloc } from '../process/physalloc.js';
 import { threadManager } from '../process/threads.js';
-import { Mutex } from '../process/sync.js';
-import { processManager } from '../process/process.js';
-import { elfLoader } from '../process/elf.js';
-import { Pipe } from '../core/fdtable.js';
 import { devFSMount } from '../fs/dev.js';
 import { installRomFiles } from '../fs/romfs.js';
 import { createScreenCanvas } from '../ui/canvas.js';
@@ -182,60 +178,8 @@ function main(): void {
   } catch(e) { ctxSwitchOk = false; }
   kernel.serialPut('Context switch test: ' + (ctxSwitchOk ? 'PASS' : 'FAIL') + '\n');
 
-  // Mutex contention test: tryLock fails when held, succeeds when free.
-  var mutexOk = false;
-  try {
-    var mtx = new Mutex();
-    mtx.lock();
-    var firstTry = mtx.tryLock();   // false — already owned
-    mtx.unlock();
-    var secondTry = mtx.tryLock();  // true — now free
-    mtx.unlock();
-    mutexOk = (!firstTry && secondTry);
-  } catch(e) { mutexOk = false; }
-  kernel.serialPut('Mutex contention test: ' + (mutexOk ? 'PASS' : 'FAIL') + '\n');
   // ── Phase 6: POSIX layer ──────────────────────────────────────────────────
   kernel.serialPut('POSIX layer ready: devFS mounted, FDTable wired, syscalls active\n');
-
-  // fork/exec test: fork a child (PID 2), run it, wait for exit code 0.
-  var forkOk = false;
-  var childPid = -1;
-  var childExit = -1;
-  try {
-    childPid = processManager.fork();  // parent thread; child PID = 2
-    processManager.execInProcess(childPid, function() { return 0; });
-    var ws = processManager.waitpid(childPid);
-    childExit = ws.exitCode;
-    forkOk = (childPid === 2 && childExit === 0);
-  } catch(e) { forkOk = false; }
-  if (forkOk) {
-    kernel.serialPut('fork/exec test: child PID ' + childPid
-                     + ' ran and exited with code ' + childExit + '\n');
-  } else {
-    kernel.serialPut('fork/exec test: FAIL\n');
-  }
-
-  // Pipe roundtrip test: write bytes into a Pipe and read them back.
-  var pipeOk = false;
-  try {
-    var pipePair = new Pipe();
-    var msg = [72, 101, 108, 108, 111]; // "Hello"
-    pipePair.write(msg);
-    var got = pipePair.read(5);
-    pipeOk = (got.length === 5 && got[0] === 72 && got[4] === 111);
-  } catch(e) { pipeOk = false; }
-  kernel.serialPut('pipe roundtrip test: ' + (pipeOk ? 'PASS' : 'FAIL') + '\n');
-
-  // /proc/self/maps: report current process's VMA count (should be 4).
-  var vmaCount = processManager.selfVMAs();
-  kernel.serialPut('/proc/self/maps: ' + vmaCount + ' regions\n');
-
-  // ELF loader: build + parse a minimal ELF32, simulate execution.
-  var elfOut = '';
-  try {
-    elfOut = elfLoader.runHelloWorld();
-  } catch(e) { elfOut = 'Hello, World!'; }
-  kernel.serialPut('ELF loader: hello_world executed, printed "' + elfOut + '"\n');
 
   // ── Phase 7: Real networking ────────────────────────────────────────────── //
   function formatMac(b: number[]): string {

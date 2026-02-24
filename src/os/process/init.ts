@@ -102,7 +102,7 @@ export class InitSystem {
 
       instance.pid = startResult.value;
       instance.state = 'running';
-      instance.startTime = Date.now();
+      instance.startTime = kernel.getUptime();
 
       return { success: true };
     } catch (error) {
@@ -289,11 +289,26 @@ export class InitSystem {
 
   /**
    * Execute a service — on bare metal, JS services are eval'd by the kernel;
-   * native services are just registered and tracked by PID.
+   * native/built-in services (empty executable) are registered and tracked by PID.
    */
   private executeService(service: Service): SyscallResult<number> {
-    // Assign a sequential PID; real execution happens via kernel.eval for JS services
     const pid = this.nextPid++;
+    if (!service.executable) {
+      // Built-in / native service — already wired by the TS boot sequence.
+      return { success: true, value: pid };
+    }
+    try {
+      var code = (globalThis as any).fs && (globalThis as any).fs.readFile
+        ? (globalThis as any).fs.readFile(service.executable)
+        : null;
+      if (code) {
+        kernel.eval(code);
+        kernel.serialPut('[init] started ' + service.name + ' pid=' + pid + '\n');
+      }
+    } catch (e) {
+      // Non-fatal: service registered but code could not run.
+      kernel.serialPut('[init] warn: could not exec ' + service.executable + '\n');
+    }
     return { success: true, value: pid };
   }
 

@@ -22,7 +22,7 @@ import {
   x25519, x25519PublicKey, generateKey32,
   concat,
 } from './crypto.js';
-import { net } from './net.js';
+import { net, strToBytes } from './net.js';
 import type { Socket } from './net.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
@@ -60,12 +60,6 @@ function u24(b: number[], i: number): number {
 function putU8(b: number[], v: number): void  { b.push(v & 0xff); }
 function putU16(b: number[], v: number): void { b.push((v >> 8) & 0xff); b.push(v & 0xff); }
 function putU24(b: number[], v: number): void { b.push((v >> 16) & 0xff); b.push((v >> 8) & 0xff); b.push(v & 0xff); }
-function strToBytes(s: string): number[] {
-  var b: number[] = new Array(s.length);
-  for (var i = 0; i < s.length; i++) b[i] = s.charCodeAt(i) & 0xff;
-  return b;
-}
-
 // ── AEAD helpers ──────────────────────────────────────────────────────────────
 
 function xorIV(baseIV: number[], seq: number): number[] {

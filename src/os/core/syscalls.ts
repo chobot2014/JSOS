@@ -266,8 +266,11 @@ export class SystemCallInterface {
       : { success: false, errno: Errno.EBADF, error: 'EBADF' };
   }
 
-  lseek(_fd: number, _offset: number, _whence: number): SyscallResult<number> {
-    return { success: true, value: 0 }; // Phase 9: full seek via FDTable
+  lseek(fd: number, offset: number, whence: number): SyscallResult<number> {
+    var pos = globalFDTable.seek(fd, offset, whence);
+    return pos >= 0
+      ? { success: true, value: pos }
+      : { success: false, errno: Errno.ESPIPE, error: 'ESPIPE' };
   }
 
   // ── Directory ─────────────────────────────────────────────────────────────

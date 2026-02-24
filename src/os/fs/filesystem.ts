@@ -7,6 +7,13 @@
  * Reads/lists under that prefix are then delegated to the mount handler.
  */
 
+declare var kernel: import('../core/kernel.js').KernelAPI;
+
+/** Bare-metal safe timestamp: kernel uptime ms, or 0 before kernel init. */
+function uptime(): number {
+  return typeof kernel !== 'undefined' ? kernel.getUptime() : 0;
+}
+
 export type FileType = 'file' | 'directory';
 
 /** Interface that any virtual filesystem must implement to be mounted. */
@@ -59,7 +66,7 @@ export class FileSystem {
   }
 
   constructor() {
-    var now = Date.now();
+    var now = uptime();
     this.root = {
       name: '/',
       type: 'directory',
@@ -112,7 +119,7 @@ export class FileSystem {
     this.writeFile('/home/user/.profile', '# User profile — sourced on login\nexport PATH=/bin:/usr/bin\n');
     this.writeFile('/home/user/.history', '');
     this.writeFile('/root/.profile', '# Root profile\nexport PATH=/bin:/usr/bin\n');
-    this.writeFile('/var/log/boot.log', '[' + Date.now() + '] JSOS booted\n');
+    this.writeFile('/var/log/boot.log', '[' + uptime() + '] JSOS booted\n');
     this.writeFile('/var/run/pid1', '1\n');
     this.writeFile('/dev/null', '');
     this.writeFile('/dev/zero', '\x00');
@@ -466,7 +473,7 @@ export class FileSystem {
         if (!isDir(existing)) return false;  // Path component is a file
         current = existing;
       } else {
-        var now = Date.now();
+        var now = uptime();
         var newDir: DirectoryEntry = {
           name: parts[i],
           type: 'directory',
@@ -499,7 +506,7 @@ export class FileSystem {
     var parent = this.navigate(dirPath) || this.root;
     if (!isDir(parent)) return false;
 
-    var now = Date.now();
+    var now = uptime();
     var existing = parent.children.get(fileName);
     
     var file: FileEntry = {

@@ -11,6 +11,8 @@
 import terminal from './terminal.js';
 import fs from '../fs/filesystem.js';
 import { Color } from '../core/kernel.js';
+import { threadManager } from '../process/threads.js';
+import { net } from '../net/net.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -256,6 +258,11 @@ export function startRepl(): void {
   var mlBuffer = '';
 
   for (;;) {
+    // Advance async coroutines (e.g. os.fetchAsync) and poll NIC frames.
+    // Must run before blocking on readline so async work progresses each loop.
+    threadManager.tickCoroutines();
+    net.pollNIC();
+
     var isMulti = mlBuffer.length > 0;
     var line = readline(isMulti ? printContinuePrompt : printShellPrompt);
 

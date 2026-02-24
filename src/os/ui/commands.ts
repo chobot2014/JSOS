@@ -444,6 +444,40 @@ export function registerCommands(g: any): void {
     else terminal.println('kill: PID ' + pid + ': not found or protected');
   };
 
+  g.services = function(name?: string) {
+    if (name !== undefined) {
+      // Show single service detail
+      var svc = init.getServiceStatus(name);
+      if (!svc) { terminal.println('services: ' + name + ': not found'); return; }
+      return printableObject(svc, function(s: any) {
+        terminal.colorPrintln('Service: ' + s.service.name, Color.WHITE);
+        terminal.println('  description : ' + s.service.description);
+        terminal.println('  state       : ' + s.state);
+        terminal.println('  pid         : ' + (s.pid !== undefined ? s.pid : '-'));
+        terminal.println('  runlevel    : ' + s.service.runlevel);
+        terminal.println('  restart     : ' + s.service.restartPolicy);
+        if (s.exitCode !== undefined) terminal.println('  exitCode    : ' + s.exitCode);
+      });
+    }
+    // List all services
+    var all = init.listServices();
+    return printableArray(all, function(arr: any[]) {
+      terminal.colorPrintln('  ' + pad('NAME', 16) + ' ' + pad('STATE', 10) + ' ' + pad('PID', 5) + ' RUNLEVEL', Color.LIGHT_CYAN);
+      terminal.colorPrintln('  ' + pad('', 40).replace(/ /g, '-'), Color.DARK_GREY);
+      for (var i = 0; i < arr.length; i++) {
+        var s = arr[i];
+        var stateColor = s.state === 'running' ? Color.LIGHT_GREEN
+                       : s.state === 'failed'  ? Color.LIGHT_RED
+                       : Color.DARK_GREY;
+        terminal.print('  ' + pad(s.service.name, 16) + ' ');
+        terminal.colorPrint(pad(s.state, 10), stateColor);
+        terminal.println(' ' + lpad(s.pid !== undefined ? '' + s.pid : '-', 5) + ' ' + s.service.runlevel);
+      }
+      terminal.colorPrintln('  ' + arr.length + ' service(s)', Color.DARK_GREY);
+    });
+  };
+
+
   g.mem = function() {
     var m = kernel.getMemoryInfo();
     var kb = { total: Math.floor(m.total / 1024), used: Math.floor(m.used / 1024), free: Math.floor(m.free / 1024) };
@@ -957,6 +991,7 @@ export function registerCommands(g: any): void {
     terminal.println('  ps()                 process list  (PID PPID NAME STATE PRI)');
     terminal.println('  top()                interactive process monitor  (q = quit)');
     terminal.println('  kill(pid)            terminate a process');
+    terminal.println('  services(name?)      list services or show one service detail');
     terminal.println('  mem()                memory usage + bar');
     terminal.println('  uptime()             system uptime');
     terminal.println('  sysinfo()            full system summary');

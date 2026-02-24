@@ -342,6 +342,17 @@ export class FDTable {
     if (!d.ioctl) return -25; // -ENOTTY
     return d.ioctl(request, arg);
   }
+
+  /**
+   * Move the file-position indicator for `fd`.
+   * Delegates to the underlying FileDescription's seek().
+   * Returns the new offset, or a negative errno on error.
+   */
+  seek(fd: number, offset: number, whence: number): number {
+    var d = this._fds.get(fd);
+    if (!d) return -9; // -EBADF
+    return d.seek(offset, whence);
+  }
 }
 
 export const globalFDTable = new FDTable();

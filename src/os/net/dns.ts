@@ -129,8 +129,8 @@ export function dnsResolve(hostname: string, timeoutTicks: number = 300): string
   var srcPort = (53000 + (kernel.getTicks() & 0xfff));
   var queryID = (kernel.getTicks() & 0xffff) | 1;
 
-  // Pre-register inbox
-  (net as any).udpRxMap.set(srcPort, []);
+  // Pre-register inbox so frames arriving before recvUDPRaw are buffered
+  net.openUDPInbox(srcPort);
 
   // Send query
   var query = buildQuery(queryID, hostname);
@@ -168,7 +168,7 @@ export function dnsSendQueryAsync(hostname: string): { port: number; id: number 
   var srcPort = (53000 + (kernel.getTicks() & 0xfff));
   var queryID = (kernel.getTicks() & 0xffff) | 1;
   // Pre-register the inbox so an early reply is not dropped
-  (net as any).udpRxMap.set(srcPort, []);
+  net.openUDPInbox(srcPort);
   net.sendUDPRaw(srcPort, net.dns, DNS_PORT, buildQuery(queryID, hostname));
   return { port: srcPort, id: queryID };
 }
@@ -184,7 +184,7 @@ export function dnsPollReplyAsync(hostname: string, port: number, id: number): s
   var ip = parseResponse(pkt.data, id);
   if (ip) {
     dnsCache.set(hostname, ip);
-    (net as any).udpRxMap.delete(port);
+    net.closeUDPInbox(port);
   }
   return ip;
 }
@@ -193,5 +193,5 @@ export function dnsPollReplyAsync(hostname: string, port: number, id: number): s
  * Cancel an in-flight async DNS query and free the UDP inbox.
  */
 export function dnsCancelAsync(port: number): void {
-  (net as any).udpRxMap.delete(port);
+  net.closeUDPInbox(port);
 }

@@ -175,9 +175,7 @@ export function dhcpDiscover(): DHCPConfig | null {
   var xid = (kernel.getTicks() * 0x9e3779b9) >>> 0;
 
   // Pre-register the UDP inbox so we don't miss the server's broadcast response.
-  // recvUDPRaw will also register if not present, but doing it first prevents
-  // any race between sending and receiving.
-  (net as any).udpRxMap.set(DHCP_CLIENT_PORT, []);
+  net.openUDPInbox(DHCP_CLIENT_PORT);
 
   // Send DHCP Discover
   var discover = buildDHCP(xid, DHCP_DISCOVER, mac, null, null);

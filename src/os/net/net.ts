@@ -45,12 +45,12 @@ function fill(n: number, v: number = 0): number[] {
   for (var i = 0; i < n; i++) a[i] = v;
   return a;
 }
-function strToBytes(s: string): number[] {
+export function strToBytes(s: string): number[] {
   var b: number[] = new Array(s.length);
   for (var i = 0; i < s.length; i++) b[i] = s.charCodeAt(i) & 0xff;
   return b;
 }
-function bytesToStr(b: number[]): string {
+export function bytesToStr(b: number[]): string {
   // String.fromCharCode.apply eliminates the intermediate parts[] array and join
   // call for every byte.  TCP MSS segments are ≤1460 bytes so a single apply
   // is safe (QuickJS arg-count limit is far above 1460).
@@ -1039,18 +1039,24 @@ export class NetworkStack {
     if (opts.mask)    { this.mask    = opts.mask; }
   }
 
+  /** Open (pre-register) a UDP inbox for `port` so frames arriving before
+   *  the first recvUDPRawNB call are buffered, not dropped. */
+  openUDPInbox(port: number): void {
+    if (!this.udpRxMap.has(port)) this.udpRxMap.set(port, []);
+  }
+
+  /** Close and discard the UDP inbox for `port`. */
+  closeUDPInbox(port: number): void {
+    this.udpRxMap.delete(port);
+  }
+
   getStats() { return Object.assign({}, this.stats); }
 
   getConnections(): TCPConnection[] {
     return Array.from(this.connections.values());
   }
 
-  getSockets(): Socket[] {
-    return Array.from(this.sockets.values());
-  }
-
   ifconfig(): string {
-    var m = kernel.getMemoryInfo(); // dummy — not used, just callable
     return (
       'eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500\n' +
       '        inet ' + this.ip + '  netmask ' + this.mask + '  broadcast ' + this._broadcast() + '\n' +

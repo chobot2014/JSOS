@@ -15,27 +15,7 @@
  */
 
 // ── POSIX Signal Numbers ─────────────────────────────────────────────────────
-
-export const Signal = {
-  SIGHUP:  1,   // Hangup
-  SIGINT:  2,   // Interrupt (Ctrl+C)
-  SIGQUIT: 3,   // Quit
-  SIGILL:  4,   // Illegal instruction
-  SIGABRT: 6,   // Abort
-  SIGFPE:  8,   // Floating-point exception
-  SIGKILL: 9,   // Kill (unblockable)
-  SIGSEGV: 11,  // Segmentation fault
-  SIGPIPE: 13,  // Broken pipe
-  SIGALRM: 14,  // Alarm clock
-  SIGTERM: 15,  // Termination
-  SIGCHLD: 17,  // Child stopped or terminated
-  SIGCONT: 18,  // Continue
-  SIGSTOP: 19,  // Stop (unblockable)
-  SIGTSTP: 20,  // Keyboard stop
-  SIGUSR1: 10,  // User-defined signal 1
-  SIGUSR2: 12,  // User-defined signal 2
-  SIGWINCH: 28, // Window size change
-} as const;
+// Use SIG / SignalName from ../process/signals.ts — not duplicated here.
 
 export type SignalNumber = number;
 export type SignalHandler = (signum: SignalNumber) => void;

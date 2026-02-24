@@ -11,6 +11,7 @@
 
 import { SyscallResult } from '../core/syscalls.js';
 import { threadManager } from './threads.js';
+import { signalManager } from './signals.js';
 
 export type ProcessState = 'ready' | 'running' | 'blocked' | 'terminated' | 'waiting';
 
@@ -86,7 +87,7 @@ export class ProcessScheduler {
     memory: ProcessContext['memory'];
   }): ProcessContext {
     const pid = this.nextPid++;
-    const now = Date.now();
+    var now = 0; // kernel.getUptime() not available here; filled in by caller if needed
 
     const context: ProcessContext = {
       pid,
@@ -290,6 +291,9 @@ export class ProcessScheduler {
     threadManager.tick();
 
     if (!this.currentProcess) return;
+
+    // Deliver any pending signals to the currently running process.
+    signalManager.deliverPending(this.currentProcess.pid);
 
     this.currentProcess.cpuTime++;
     this.currentProcess.remainingTime--;
