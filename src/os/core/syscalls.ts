@@ -349,37 +349,37 @@ export class SystemCallInterface {
   }
 
   connect(fd: number, ip: string, port: number): SyscallResult<boolean> {
-    var sockId = globalFDTable.getSocketId(fd);
-    if (sockId < 0) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
-    var ok = net.connect(sockId, ip, port);
+    var sock = globalFDTable.getSocket(fd);
+    if (!sock) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
+    var ok = net.connect(sock, ip, port);
     return { success: ok, value: ok };
   }
 
   bind(fd: number, port: number): SyscallResult<void> {
-    var sockId = globalFDTable.getSocketId(fd);
-    if (sockId < 0) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
-    try { (net as any).bind(sockId, port); } catch (_e) { /* optional in net */ }
+    var sock = globalFDTable.getSocket(fd);
+    if (!sock) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
+    net.bind(sock, port);
     return { success: true };
   }
 
   listen(fd: number): SyscallResult<void> {
-    var sockId = globalFDTable.getSocketId(fd);
-    if (sockId < 0) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
-    try { (net as any).listen(sockId); } catch (_e) { /* optional in net */ }
+    var sock = globalFDTable.getSocket(fd);
+    if (!sock) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
+    net.listen(sock);
     return { success: true };
   }
 
   send(fd: number, data: string): SyscallResult<number> {
-    var sockId = globalFDTable.getSocketId(fd);
-    if (sockId < 0) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
-    net.send(sockId, data);
+    var sock = globalFDTable.getSocket(fd);
+    if (!sock) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
+    net.send(sock, data);
     return { success: true, value: data.length };
   }
 
   recv(fd: number): SyscallResult<string> {
-    var sockId = globalFDTable.getSocketId(fd);
-    if (sockId < 0) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
-    return { success: true, value: net.recv(sockId) || '' };
+    var sock = globalFDTable.getSocket(fd);
+    if (!sock) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
+    return { success: true, value: net.recv(sock) || '' };
   }
 }
 
