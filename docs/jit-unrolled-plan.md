@@ -83,19 +83,80 @@ page. 2 MB gives room for 4000 functions before eviction is needed.
 
 **`src/kernel/jit.c`:**
 
-```c
-// BEFORE:
-#define JIT_POOL_SIZE  (256u * 1024u)
+The pool is expanded to 2 MB and **partitioned** so child runtimes each get
+a fixed region that can be instantly reclaimed on `procDestroy`:
 
-// AFTER:
-#define JIT_POOL_SIZE  (2u * 1024u * 1024u)   /* 2 MB */
+```
+ _jit_pool (2 MB BSS)
+ ├── [0 .. 1 MB)         Main runtime  — main OS code, apps, browser page JS
+ ├── [1MB .. 1MB+128KB)  Child slot 0
+ ├── [1MB+128KB .. +256KB) Child slot 1
+ │   …
+ └── [1MB+7×128KB .. 2MB)  Child slot 7
 ```
 
-No other changes needed. The BSS section in `linker.ld` already allocates
-256 MB of heap (`0x10000000`), so an extra 1.75 MB in BSS is negligible.
+```c
+/* ── Pool layout ─────────────────────────────────────────────────────────── */
+#define JIT_POOL_SIZE     (2u * 1024u * 1024u)   /* 2 MB total              */
+#define JIT_MAIN_SIZE     (1u * 1024u * 1024u)   /* 1 MB for main runtime   */
+#define JIT_PROC_SLOTS    8u
+#define JIT_PROC_SIZE     (128u * 1024u)          /* 128 KB per child proc   */
 
-**`src/kernel/jit.h`:** No changes — `JIT_ALLOC_MAX` (64 KB per allocation)
-stays the same.
+/* Sanity: main + all child slots must fit in pool */
+_Static_assert(JIT_MAIN_SIZE + JIT_PROC_SLOTS * JIT_PROC_SIZE == JIT_POOL_SIZE,
+               "JIT pool partition sizes do not add up");
+
+static uint8_t  __attribute__((aligned(16))) _jit_pool[JIT_POOL_SIZE];
+static uint32_t _jit_main_used = 0;
+static uint32_t _jit_proc_used[JIT_PROC_SLOTS];
+
+/* ── Main runtime allocation (unchanged API) ─────────────────────────────── */
+void *jit_alloc(size_t size) {
+    if (size == 0 || size > JIT_ALLOC_MAX) return NULL;
+    size_t aligned = (size + 15u) & ~15u;
+    if (_jit_main_used + aligned > JIT_MAIN_SIZE) return NULL;
+    void *p = (void *)(_jit_pool + _jit_main_used);
+    _jit_main_used += (uint32_t)aligned;
+    return p;
+}
+
+/* ── Child process allocation ────────────────────────────────────────────── */
+void *jit_proc_alloc(int id, size_t size) {
+    if (id < 0 || (unsigned)id >= JIT_PROC_SLOTS) return NULL;
+    if (size == 0 || size > JIT_ALLOC_MAX) return NULL;
+    size_t aligned = (size + 15u) & ~15u;
+    if (_jit_proc_used[id] + aligned > JIT_PROC_SIZE) return NULL;
+    uint32_t base = JIT_MAIN_SIZE + (uint32_t)id * JIT_PROC_SIZE;
+    void *p = (void *)(_jit_pool + base + _jit_proc_used[id]);
+    _jit_proc_used[id] += (uint32_t)aligned;
+    return p;
+}
+
+/* ── Child process pool reclaim (called by procDestroy) ──────────────────── */
+/* O(1): just reset the write pointer. No fragmentation, no free list needed. */
+void jit_proc_reset(int id) {
+    if (id >= 0 && (unsigned)id < JIT_PROC_SLOTS)
+        _jit_proc_used[id] = 0;
+}
+
+uint32_t jit_used_bytes(void)      { return _jit_main_used; }
+uint32_t jit_proc_used_bytes(int id) {
+    if (id < 0 || (unsigned)id >= JIT_PROC_SLOTS) return 0;
+    return _jit_proc_used[id];
+}
+```
+
+**`src/kernel/jit.h`:** Add declarations for the new functions:
+
+```c
+/* Per-child-process JIT allocation and reclaim */
+void    *jit_proc_alloc(int proc_id, size_t size);
+void     jit_proc_reset(int proc_id);          /* call from procDestroy    */
+uint32_t jit_proc_used_bytes(int proc_id);     /* diagnostic               */
+```
+
+`JIT_ALLOC_MAX` (64 KB per allocation) stays the same — a single function
+is never larger than 64 KB.
 
 ### Verify: BSS Budget
 
@@ -106,7 +167,7 @@ Current BSS occupants:
 - `fb_blit_buf[1024*768]` = 3 MB
 - `_asm_buf[4096]` = 4 KB
 - `_jit_write_buf[JIT_ALLOC_MAX]` = 64 KB
-- `_jit_pool[256KB]` → `_jit_pool[2MB]` = +1.75 MB
+- `_jit_pool[256KB]` → `_jit_pool[2MB]` = +1.75 MB (partitioned: 1MB main + 8×128KB children)
 - Total BSS ≈ 7–8 MB
 
 The 256 MB heap region starts at `_heap_start` in `linker.ld`, well above BSS.
@@ -1096,7 +1157,8 @@ static JSValue _jit_ts_callback = JS_UNDEFINED;
 
 static int _jit_hook_impl(JSContext *ctx, void *bytecode_ptr,
                            JSValue *stack_ptr, int argc) {
-    /* Only fire for the main runtime — child runtimes are excluded from JIT. */
+    /* SAFETY: this hook is only for the main runtime.
+     * Child runtimes use _jit_hook_child (deferred mechanism). */
     if (JS_GetRuntime(ctx) != rt) return 1;
     if (JS_IsUndefined(_jit_ts_callback)) return 1; /* no TS handler → interpreter */
 
@@ -1174,92 +1236,178 @@ Register:
   setJITNative(bytecodeAddr: number, nativeAddr: number): void;
 ```
 
-### Multiple QuickJS Runtimes — Architecture and JIT Scope
+### Multiple QuickJS Runtimes — Full JIT Architecture
 
-**JSOS runs multiple simultaneous QuickJS runtimes.** This must be fully
-understood before touching the hook infrastructure.
+**JSOS uses multiple simultaneous QuickJS runtimes as its process model.**
+Understanding this is essential to getting JIT right.
 
 #### Runtime Tiers
 
 | | Main runtime | Child runtimes |
 |---|---|---|
-| Created by | `quickjs_initialize()` in `quickjs_binding.c` | `kernel.procCreate()` → `_procs[0..7]` |
+| Created by | `quickjs_initialize()` | `kernel.procCreate()` → `_procs[0..7]` |
 | Memory limit | 50 MB | 4 MB each |
-| Max count | 1 (always exists) | 8 concurrent |
-| Lifetime | Boot → OS death | Spawned/destroyed on demand |
-| What runs in it | **ALL TypeScript OS code, ALL apps, browser page JS, REPL** | Isolated background worker scripts |
-| Kernel API | Full (`setJITHook`, `readPhysMem`, VGA, FS, IPC, …) | Minimal (`postMessage`, `pollMessage`, `getTicks`, `sleep`) |
-| Has JIT? | **YES** | **NO** |
+| What runs in it | ALL TypeScript OS code, ALL apps, browser page JS (`new Function`), REPL | Isolated background worker processes |
+| Kernel API | Full | Minimal (`postMessage`, `pollMessage`, `getTicks`, `sleep`) |
+| JIT pool region | First 1 MB | 128 KB slot per index |
+| JIT hook | Direct (synchronous) | Deferred (async via `procPendingJIT`) |
 
-#### Why Browser Page JS Is In the Main Runtime
+**Why child runtimes need JIT too:** JSOS uses cooperative multitasking.
+Each child runtime gets a time slice (typically ~5ms via PIT interrupt). A
+child doing CPU-heavy work (pathfinding, compression, physics, game logic)
+runs at interpreter speed during its slice and accomplishes very little per
+tick. JIT can make that same slice 10–50× more productive. Child runtimes
+ARE the OS's user processes — they absolutely want JIT.
 
-`jsruntime.ts` (`createPageJS`) executes browser scripts using **`new
-Function(...keys, code)`**. `new Function` lives in the current QuickJS
-runtime — the main one. Browser page JS is sandboxed at the JavaScript level
-(controlled scope object passed as parameters) but executes in the main
-runtime's GC heap. Hot functions in a page's JS **will** accumulate
-`call_count` and **will** get JIT-compiled once they reach `JIT_THRESHOLD`.
-This is desirable and requires no special handling.
+#### Why the Main Runtime Hook Cannot Be Used for Children
 
-Similarly, REPL user code is evaluated via `JS_Eval(ctx, ...)` where `ctx` is
-the main context. Repeated REPL call-sites also accumulate `call_count`.
+The main-runtime hook calls `JS_Call(ctx, _jit_ts_callback, …)` where both
+`ctx` and `_jit_ts_callback` belong to the main runtime's GC heap. When a
+child's hook fires, the `ctx` passed in is the **child's** context. Calling
+`JS_Call(child_ctx, main_runtime_callback, …)` mixes GC heaps — undefined
+behavior, almost certainly a crash.
 
-#### Why Child Runtimes Are Excluded From JIT (Phase 4a)
+#### Solution: Deferred JIT for Child Runtimes
 
-Child runtimes are the "processes" of the OS. In principle they benefit from
-JIT just as much as anything else — a CPU-heavy worker (pathfinding, number
-crunching, compression) dispatched to a child runtime eats its entire
-cooperative time slice at interpreter speed. This is a real limitation.
+Child runtimes use a **C-level deferred mechanism** instead of a synchronous
+TypeScript callback:
 
-The Phase 4a exclusion is a **practical constraint, not a design choice**:
+```
+Child function hits JIT_THRESHOLD
+         │
+         ▼
+_jit_hook_child() fires (C, inside JS_Eval / JS_ExecutePendingJob)
+         │  stores _jit_proc_pending[id] = { bytecode_ptr, pending=1 }
+         │  returns 1 → interpreter handles this call
+         ▼
+JS_Eval / procTick returns to TypeScript
+         │
+         ▼
+TypeScript: addr = kernel.procPendingJIT(id)   ← new kernel function
+         │  returns bytecode physical addr, clears pending flag
+         ▼
+TypeScript JIT compiler (main runtime) reads bytecode via readPhysMem()
+         │  readPhysMem is physical memory access — runtime-agnostic
+         ▼
+compiler.compile() → JIT pool partition for this child slot
+         │  kernel.jitProcAlloc(id, size) instead of kernel.jitAlloc(size)
+         ▼
+kernel.setJITNative(bcAddr, nativeAddr)
+         │  writes physical address — runtime-agnostic
+         ▼
+Next call to that function in child runtime hits jit_native_ptr fast path
+         │  native code runs directly
+```
 
-1. **Pool leak**: `_jit_pool` has no free list. When `procDestroy` runs, any
-   bytecode compiled for that child's functions is stranded in the pool
-   forever. Repeated spawn/destroy cycles fragment the pool with dead code.
-
-2. **Cross-heap JSValue hazard**: `_jit_ts_callback` lives in the main
-   runtime's GC heap. Calling it with a child's `ctx` would mix GC heaps —
-   undefined behavior.
-
-3. **`JIT_THRESHOLD` natural filter**: Most child processes finish their
-   work before any function is called 100 times. The counter increments
-   harmlessly and the hot path (`if (b->jit_native_ptr)`) is always
-   branch-not-taken at zero cost.
-
-**Phase 4b should extend JIT to child runtimes by:**
-- Partitioning `_jit_pool` into per-slot regions (e.g. 128 KB × 8 = 1 MB
-  of the 2 MB pool reserved for children)
-- On `procDestroy`, reset that slot's write pointer → instant O(1) reclaim
-- Register `jit_hook` on each child runtime at `procCreate`, routing through
-  a per-child dispatcher that writes into the child's pool partition
-- The TypeScript JIT compiler runs in the main runtime (it always does), but
-  writes compiled code into the child's pool partition
-
-**For Phase 4a**, the JIT hook is ONLY registered on the main runtime. Child
-runtimes have `jit_hook = NULL` (the default) and the hook never fires for
-them.
-
-#### Safety: `_jit_ts_callback` Is a Main-Runtime JSValue
-
-`_jit_ts_callback` is a `JSValue` allocated in the main runtime's GC. If
-`_jit_hook_impl` were ever called with a child runtime's `ctx`, the
-`JS_Call(ctx, _jit_ts_callback, …)` would mix JSValues across GC heaps —
-undefined behavior, likely a crash.
-
-This is prevented by the invariant above: the hook is never registered on
-child runtimes. As a belt-and-suspenders guard, add a runtime identity check:
+#### New C State in `quickjs_binding.c`
 
 ```c
-/* Global: the main runtime pointer, for identity checks */
-extern JSRuntime *rt;   /* defined at top of quickjs_binding.c */
+/* Pending deferred JIT requests from child runtimes.
+ * Set by _jit_hook_child, cleared by js_proc_pending_jit. */
+static struct {
+    void *bytecode_ptr;
+    int   pending;
+} _jit_proc_pending[JSPROC_MAX];
 
+/* Child runtime JIT hook — deferred, no cross-heap calls */
+static int _jit_hook_child(JSContext *ctx, void *bytecode_ptr,
+                            JSValue *stack_ptr, int argc) {
+    (void)stack_ptr; (void)argc;
+    JSRuntime *child_rt = JS_GetRuntime(ctx);
+    for (int i = 0; i < JSPROC_MAX; i++) {
+        if (_procs[i].rt == child_rt) {
+            /* Only record one pending request at a time per slot.
+             * If a previous request hasn't been serviced yet, drop this one —
+             * the function will trigger again on the next JIT_THRESHOLD hit. */
+            if (!_jit_proc_pending[i].pending) {
+                _jit_proc_pending[i].bytecode_ptr = bytecode_ptr;
+                _jit_proc_pending[i].pending = 1;
+            }
+            break;
+        }
+    }
+    return 1; /* always let interpreter handle this call */
+}
+```
+
+Register the child hook in `js_proc_create`, after `JS_SetInterruptHandler`:
+
+```c
+    JS_SetJITHook(p->rt, _jit_hook_child);
+```
+
+Clear pending and reclaim pool in `js_proc_destroy`:
+
+```c
+    _jit_proc_pending[id].pending = 0;
+    _jit_proc_pending[id].bytecode_ptr = NULL;
+    jit_proc_reset(id);   /* O(1) pool reclaim */
+```
+
+#### New Kernel API Functions
+
+**`kernel.procPendingJIT(id)`** — called by TypeScript after each `procTick`:
+
+```c
+/* kernel.procPendingJIT(id) → bytecodeAddr or 0 if no pending request */
+static JSValue js_proc_pending_jit(JSContext *c, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewUint32(c, 0);
+    int32_t id = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used)
+        return JS_NewUint32(c, 0);
+    if (!_jit_proc_pending[id].pending)
+        return JS_NewUint32(c, 0);
+    uint32_t addr = (uint32_t)(uintptr_t)_jit_proc_pending[id].bytecode_ptr;
+    _jit_proc_pending[id].pending = 0;  /* consume the request */
+    return JS_NewUint32(c, addr);
+}
+```
+
+**`kernel.jitProcAlloc(id, size)`** — allocates from child's pool partition:
+
+```c
+/* kernel.jitProcAlloc(id, size) → address in child's JIT pool partition, or 0 */
+static JSValue js_jit_proc_alloc(JSContext *c, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_NewUint32(c, 0);
+    int32_t id = 0, size = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    JS_ToInt32(c, &size, argv[1]);
+    void *p = jit_proc_alloc(id, (size_t)size);
+    return JS_NewUint32(c, (uint32_t)(uintptr_t)p);
+}
+```
+
+Register both:
+```c
+    JS_CFUNC_DEF("procPendingJIT", 1, js_proc_pending_jit),
+    JS_CFUNC_DEF("jitProcAlloc",   2, js_jit_proc_alloc),
+```
+
+Add TypeScript declarations in `kernel.ts`:
+```typescript
+  /** Check if a child runtime has a pending JIT compilation request.
+   *  Returns the bytecodeAddr to compile, or 0 if none. Clears the flag. */
+  procPendingJIT(id: number): number;
+  /** Allocate `size` bytes from child slot `id`'s JIT pool partition. */
+  jitProcAlloc(id: number, size: number): number;
+```
+
+#### Safety: Main Runtime Guard in `_jit_hook_impl`
+
+`_jit_hook_impl` (the main runtime hook) must never fire for a child runtime.
+Since `JS_SetJITHook` is only called with `_jit_hook_child` for child runtimes,
+this cannot happen — but add a guard anyway:
+
+```c
 static int _jit_hook_impl(JSContext *ctx, void *bytecode_ptr,
                            JSValue *stack_ptr, int argc) {
-    /* SAFETY: only handle hook from the main runtime.
-     * Child runtimes (procCreate) have jit_hook=NULL so this should
-     * never fire for them, but guard anyway. */
-    if (JS_GetRuntime(ctx) != rt) return 1;  /* ← ADD THIS LINE */
-
+    /* SAFETY: this hook is only for the main runtime */
+    if (JS_GetRuntime(ctx) != rt) return 1;
     if (JS_IsUndefined(_jit_ts_callback)) return 1;
     /* … rest unchanged … */
 }
@@ -1267,16 +1415,12 @@ static int _jit_hook_impl(JSContext *ctx, void *bytecode_ptr,
 
 #### `call_count` Overhead in Child Runtimes
 
-Adding `call_count` and `jit_native_ptr` to `JSFunctionBytecode` costs **+8
-bytes per function object** in every runtime, including child runtimes. With a
-4 MB child heap and at most a few hundred function objects per child, this is
-a negligible ~2–3 KB overhead. Acceptable.
-
-The `jit_native_ptr` field in child runtimes will always be NULL (the hook
-never fires, so nothing ever calls `kernel.setJITNative` for child functions).
-The hot path check in the interpreter (`if (b->jit_native_ptr)`) will always
-branch-not-taken for child runtimes — one correctly-predicted branch per
-function call, no measurable cost.
+Adding `call_count` + `jit_native_ptr` to `JSFunctionBytecode` costs +8 bytes
+per function in every runtime. A 4 MB child with a few hundred functions
+adds ~2–3 KB overhead — negligible. The `jit_native_ptr` field starts NULL;
+before JIT compilation it will always be NULL for most child functions, so
+the hot-path check (`if (b->jit_native_ptr)`) is a correctly-predicted
+branch-not-taken — no measurable cost until the function is actually compiled.
 
 ---
 
@@ -1939,9 +2083,18 @@ TypeScript QJSJITHook.handle(b_addr, sp_addr, argc)
  * Local variables are allocated on the native stack as int32 slots.
  * The QJS operand stack is simulated using the native x86 stack.
  */
+export interface QJSJITCompilerOptions {
+  /**
+   * Custom pool allocator. Defaults to kernel.jitAlloc (main runtime pool).
+   * Pass kernel.jitProcAlloc.bind(null, procId) for child runtime compilation.
+   */
+  alloc?: (size: number) => number;
+}
+
 export class QJSJITCompiler {
   private _e: _Emit;
   private _reader: QJSBytecodeReader;
+  private _alloc: (size: number) => number;
 
   // Label management: QJS bytecode offset → x86 code offset
   private _labels = new Map<number, number>();
@@ -1958,11 +2111,13 @@ export class QJSJITCompiler {
   // Args: [EBP + 8 + i*4]   (cdecl: first arg at EBP+8)
   // Vars: [EBP - 4 - i*4]    (below saved EBP)
 
-  constructor(reader: QJSBytecodeReader) {
+  constructor(reader: QJSBytecodeReader, opts?: QJSJITCompilerOptions) {
     this._reader = reader;
     this._e = new _Emit();
     this._argCount = reader.argCount;
     this._varCount = reader.varCount;
+    // Default: allocate from main runtime pool
+    this._alloc = opts?.alloc ?? ((size: number) => kernel.jitAlloc(size));
   }
 
   /** EBP-relative offset for argument `i` (0-indexed) */
@@ -2022,8 +2177,9 @@ export class QJSJITCompiler {
     }
 
     // ── Allocate and write to JIT pool ──
+    // Uses this._alloc: main pool for main runtime, child partition for processes.
     const code = e.buf;
-    const addr = kernel.jitAlloc(code.length);
+    const addr = this._alloc(code.length);
     if (!addr) {
       kernel.serialPut('[QJS-JIT] Pool exhausted (' + code.length + ' bytes needed)\n');
       return 0;
@@ -2862,12 +3018,61 @@ import { QJSJITHook } from './qjs-jit.js';
 // Create the global JIT hook instance
 const qjsJit = new QJSJITHook();
 
-// Install it
+// Install it — registers hook on the main runtime only
 qjsJit.install();
 
 // Make stats available for debugging
 (globalThis as any).__qjsJit = qjsJit;
 ```
+
+### Process Scheduler Integration
+
+The cooperative scheduler calls `kernel.procTick(id)` for each child runtime
+on every scheduler tick. **Immediately after each procTick**, check for a
+pending deferred JIT request and service it using the main-runtime JIT
+compiler:
+
+```typescript
+// In the scheduler tick loop (wherever procTick is called):
+function schedulerTick(procId: number): void {
+  // Run the child for one time slice
+  kernel.procTick(procId);
+
+  // Service any deferred JIT compilation request from this child
+  const pendingBC = kernel.procPendingJIT(procId);
+  if (pendingBC !== 0) {
+    _serviceChildJIT(procId, pendingBC);
+  }
+}
+
+/**
+ * Compile a function from a child runtime and install the native code.
+ * Runs entirely in the main runtime's context — no cross-heap issues.
+ * The JIT compiler is runtime-agnostic: it reads bytecode via readPhysMem
+ * (physical address access) so it doesn't care which runtime owns the data.
+ */
+function _serviceChildJIT(procId: number, bcAddr: number): void {
+  try {
+    const reader = new QJSBytecodeReader(bcAddr);
+    const compiler = new QJSJITCompiler(reader, {
+      // Use the child's pool partition instead of the main pool
+      alloc: (size: number) => kernel.jitProcAlloc(procId, size),
+    });
+    const nativeAddr = compiler.compile();
+    if (nativeAddr !== 0) {
+      kernel.setJITNative(bcAddr, nativeAddr);
+    }
+  } catch (e) {
+    // Compilation failed — function stays interpreted; not fatal
+    kernel.serialPut('[QJS-JIT] Child proc ' + procId + ' compile failed: ' + e + '\n');
+  }
+}
+```
+
+The `alloc` option threads through to `_Emit` construction — `QJSJITCompiler`
+needs a small change to accept an optional allocator override so it writes
+into the child's partition rather than the main pool. See Step 9 for
+`QJSJITCompiler` constructor signature.
 
 ### REPL Integration
 
@@ -3274,8 +3479,11 @@ Step 12 (benchmarks)
 ### Constants Reference
 
 ```typescript
-// Pool
-JIT_POOL_SIZE       = 2 * 1024 * 1024   // 2 MB
+// Pool layout (partitioned)
+JIT_POOL_SIZE       = 2 * 1024 * 1024   // 2 MB total BSS
+JIT_MAIN_SIZE       = 1 * 1024 * 1024   // 1 MB — main runtime
+JIT_PROC_SLOTS      = 8                  // JSPROC_MAX child slots
+JIT_PROC_SIZE       = 128 * 1024         // 128 KB per child slot
 JIT_ALLOC_MAX       = 64 * 1024          // 64 KB max single allocation
 
 // Compilation policy
