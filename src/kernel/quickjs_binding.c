@@ -1168,17 +1168,20 @@ static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
     memset(p, 0, sizeof(*p));
     p->rt = JS_NewRuntime();
     if (!p->rt) return JS_NewInt32(c, -1);
-    JS_SetMemoryLimit(p->rt, 256 * 1024 * 1024); /* 256 MB per child process.
-                                                    * Matches a real browser-tab budget
-                                                    * (Chrome allocates 150-500 MB/tab for
-                                                    * complex SPAs, large DOMs, image caches).
-                                                    * Heap window is 2 GB NOLOAD (no boot-time
-                                                    * zeroing). Cooperative scheduler means only
-                                                    * 2-3 runtimes are active at once (~500-800
-                                                    * MB real peak, well inside 2 GB).  If all
-                                                    * 8 slots somehow maxed (~2 GB), later
-                                                    * sbrk() returns ENOMEM for that child —
-                                                    * kernel is unaffected. QEMU has 4 GB. */
+    JS_SetMemoryLimit(p->rt, 1u * 1024u * 1024u * 1024u); /* 1 GB per child.
+                                                    * Covers heavy tabs: Gmail, Google Docs,
+                                                    * Maps, SPAs, video editors (100 MB–1 GB).
+                                                    * Hard ceiling on 32-bit i686: x86 without
+                                                    * PAE can only address ~3 GB physical RAM
+                                                    * (4 GB minus ~1 GB MMIO/PCI hole at
+                                                    * 0xC0000000). 1 GB/child is the practical
+                                                    * maximum for a single runtime; true 4 GB+
+                                                    * tabs require a 64-bit kernel.
+                                                    * Heap window is 2 GB NOLOAD. In cooperative
+                                                    * scheduling only 2-3 runtimes run at once
+                                                    * (~1-1.3 GB real peak). If sbrk exhausts
+                                                    * the window, that child gets ENOMEM —
+                                                    * kernel continues unaffected. */
     JS_SetMaxStackSize(p->rt, 256 * 1024);        /* 256 KB — recursive HTML parser / deeply
                                                     * nested JS eval needs more than 64 KB. */
     p->ctx = JS_NewContext(p->rt);

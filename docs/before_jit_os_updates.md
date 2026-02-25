@@ -55,17 +55,18 @@ Main runtime (50 MB) — kernel only
 ├── Input routing (keyboard/mouse → focused app event queue)
 └── JIT service (deferred child JIT, Step 11 of JIT plan)
 
-Child runtimes (256 MB each, up to 8)
-├── Terminal app    → 3 MB BSS render slab + event queue + 256 MB GC heap
-├── Editor app      → 3 MB BSS render slab + event queue + 256 MB GC heap
-├── File manager    → 3 MB BSS render slab + event queue + 256 MB GC heap
-├── Browser chrome  → 3 MB BSS render slab + event queue + 256 MB GC heap
-│     └── Page JS via new Function() ← browser's own 256 MB GC heap, not kernel
-├── System monitor  → 3 MB BSS render slab + event queue + 256 MB GC heap
+Child runtimes (up to 1 GB each, capped by 32-bit address space)
+├── Terminal app    → 3 MB BSS render slab + event queue + up to 1 GB GC heap
+├── Editor app      → 3 MB BSS render slab + event queue + up to 1 GB GC heap
+├── File manager    → 3 MB BSS render slab + event queue + up to 1 GB GC heap
+├── Browser chrome  → 3 MB BSS render slab + event queue + up to 1 GB GC heap
+│     └── Page JS via new Function() ← browser's 1 GB GC heap, not kernel
+├── System monitor  → 3 MB BSS render slab + event queue + up to 1 GB GC heap
 └── (user-spawned worker processes — no render slab, IPC only)
 
-Heap window (linker.ld): 2 GB NOLOAD — no boot-time zeroing.
-Stack per child runtime: 256 KB.
+Heap window (linker.ld): 2 GB NOLOAD. Stack: 256 KB.
+32-bit i686 hard limit: ~3 GB physical RAM addressable (x86 without PAE).
+True 4 GB+ tab support requires a 64-bit kernel.
 ```
 
 ---
@@ -719,7 +720,7 @@ is updated to use `launchApp()` instead of importing app modules directly.
 | Region | Size | Notes |
 |---|---|---|
 | Main runtime JS heap (`JS_SetMemoryLimit`) | 50 MB | software cap |
-| 8× child app runtimes (`JS_SetMemoryLimit`) | 8× **256 MB** = 2048 MB | software cap — real browser-tab budget; heap window is 2 GB NOLOAD (no boot zeroing); cooperative scheduling means 500-800 MB real peak |
+| 8× child app runtimes (`JS_SetMemoryLimit`) | up to **1 GB each** | practical ceiling on 32-bit i686: x86 without PAE can only address ~3 GB physical RAM (4 GB minus ~1 GB MMIO/PCI hole); covers Gmail, Docs, Maps, heavy SPAs; 4 GB+ tabs require 64-bit kernel |
 | App render buffers BSS (32bpp) (`_app_render_bufs`) | 8× 3 MB = **24 MB** | added by this plan — 3 MB = 1024×768 × 4, covers max window size; 2 MB would overflow browser window (984×688 = 2.71 MB) |
 | Shared memory buffers BSS (`_sbufs`) | 8× 256 KB = **2 MB** | existing |
 | JIT pool BSS (`_jit_pool`) | **12 MB** | expanded by jit-unrolled-plan Step 1 |
@@ -733,8 +734,8 @@ is updated to use `launchApp()` instead of importing app modules directly.
 | `_proc_event_queues[8]` ProcEventQueue_t (`quickjs_binding.c`) | **~32 KB** | 8 × (16 × 260 B + 12 B); added by Phase B4 |
 | Other BSS (stack 32 KB, `paging_pd` 4 KB, `ata_sector_buf` 4 KB, `_asm_buf` 4 KB, net bufs ~3 KB, IPC strings ~4 KB, keyboard ~256 B) | **~52 KB** | |
 | **Total BSS** | **~43.7 MB** | |
-| **Total QuickJS heap reservation (theoretical max)** | **2098 MB** | 50 + 2048; only 2-3 children active simultaneously (cooperative); real peak ~500-800 MB |
-| **Combined (BSS + real peak heap)** | **~844 MB** | 43.7 MB BSS + 800 MB real heap peak, well within 2 GB NOLOAD heap window |
+| **Total QuickJS heap reservation (theoretical max)** | **~8 GB** (uncapped sum) | irrelevant — 32-bit address space caps physical at ~3 GB; cooperative scheduler means 2-3 runtimes active at once; real peak ~1-1.3 GB (browser + 1-2 light children) |
+| **Heap window (`linker.ld`)** | **2 GB NOLOAD** | covers real peak with headroom; if sbrk exhausts window, over-limit child gets ENOMEM, kernel unaffected |
 
 Derivation of BSS total:
 24 + 2 + 12 + 3 + 0.256 + 1 + 0.128 + 1 + 0.064 + 0.006 + 0.032 + 0.052 = **43.538 MB ≈ ~43.7 MB**
@@ -757,7 +758,7 @@ physAlloc range: 2.5 GB – ~3.5 GB = **~1 GB** user-addressable page frames
 `scripts/test-interactive.sh`. There is no memory constraint requiring
 changes to QEMU flags, linker script, or child heap sizes.
 
-The QuickJS memory limits (50 MB main, **256 MB per child**) are software caps
+The QuickJS memory limits (50 MB main, up to **1 GB per child**) are software caps
 enforced by `JS_SetMemoryLimit` — they bound GC heap growth, not physical
 page allocation. All figures above fit trivially within 4 GB.
 

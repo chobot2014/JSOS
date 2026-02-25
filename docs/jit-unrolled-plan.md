@@ -209,11 +209,12 @@ class assembles machine code into a JS ArrayBuffer (QuickJS heap), then
 slot. BSS is stable at **~19.5 MB** through all remaining JIT steps.
 
 > **Cross-reference:** `before_jit_os_updates.md` adds BSS ~43.7 MB more before the JIT lands.
-> Child heaps: **256 MB** each; stack: 256 KB; heap window: **2 GB NOLOAD** (no boot zeroing).
-> Real peak heap (2-3 active children): ~500-800 MB; theoretical max 2098 MB.
+> Child heaps: up to **1 GB** each (32-bit i686 ceiling); stack: 256 KB; heap window: **2 GB NOLOAD**.
+> Real peak (browser + 1-2 light children): ~1-1.3 GB. Heap window covers this with room to spare.
 > `_heap_start` ≈ 46.7 MB; `_heap_end` ≈ 2.05 GB;
 > `KERNEL_END_FRAME` = 655,360 frames = **2.5 GB** — ~450 MB above `_heap_end`.
-> physAlloc returns 2.5 GB – 3.5 GB = ~1 GB user page frames.
+> physAlloc returns 2.5 GB – ~3 GB = ~512 MB user page frames (3 GB is the
+> 32-bit physical RAM ceiling with 4 GB QEMU; top 1 GB is MMIO/PCI).
 
 The 256 MB heap region starts at `_heap_start` in `linker.ld`, well above BSS.
 With QEMU at 4 GB there is no address-space concern.
@@ -1292,7 +1293,7 @@ Understanding this is essential to getting JIT right.
 | | Main runtime | Child runtimes |
 |---|---|---|
 | Created by | `quickjs_initialize()` | `kernel.procCreate()` → `_procs[0..7]` |
-| Memory limit | 50 MB | **256 MB each** — real browser-tab budget; 2 GB NOLOAD heap window; cooperative scheduler means 500-800 MB real peak |
+| Memory limit | 50 MB | up to **1 GB each** — covers Gmail/Docs/Maps/heavy SPAs; 32-bit i686 hard ceiling (~3 GB phys RAM); 4 GB+ tabs need 64-bit kernel; 2 GB NOLOAD heap window; real peak ~1-1.3 GB with cooperative scheduling |
 | Stack limit | 1 MB (QuickJS default) | **256 KB** (recursive HTML parser / deeply nested JS) |
 | What runs in it | OS kernel, WM, services, REPL | **All user apps** (terminal, editor, browser, file manager, monitor) + worker processes |
 | Kernel API | Full | Expanded (FS, timers, events, window commands, render buffer — see before_jit_os_updates.md) |
