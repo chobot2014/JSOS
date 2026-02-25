@@ -69,6 +69,15 @@ typedef struct {
 static JSProc_t _procs[JSPROC_MAX];
 static int      _cur_proc = -1;   /* -1 = main runtime; ≥0 = child slot index */
 
+/* Pending JIT request from a child runtime — stored by _jit_hook_child,
+ * consumed by js_proc_pending_jit() from the TypeScript tick loop.
+ * Declared early because js_proc_create / js_proc_destroy reference it.     */
+typedef struct {
+    uint32_t bc_addr;   /* physical address of JSFunctionBytecode, 0 = none  */
+    int      pending;   /* 1 if a compilation request is outstanding          */
+} JITProcPending_t;
+static JITProcPending_t _jit_proc_pending[JSPROC_MAX];
+
 /* ── Phase A: Per-app BSS render surfaces (3 MB each = 1024×768 @ 32bpp) ──
  * Stable BSS address — both main and child runtimes see the same bytes.
  * Exposed via getRenderBuffer() (child) / getProcRenderBuffer(id) (main). */
@@ -1285,6 +1294,22 @@ static JSValue js_shared_buf_size(JSContext *c, JSValueConst this_val,
     return JS_NewUint32(c, _sbuf_sizes[id]);
 }
 
+/* Forward declarations for child-only APIs defined later in this translation unit */
+static JSValue js_child_get_render_buf(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_get_width(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_get_height(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_fs_read_file(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_fs_write_file(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_fs_read_dir(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_fs_exists(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_fs_stat(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_set_timeout(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_clear_timeout(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_set_interval(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_clear_interval(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_poll_event(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_window_command(JSContext *, JSValueConst, int, JSValueConst *);
+
 /* Minimal kernel API exposed inside child runtimes */
 static const JSCFunctionListEntry js_child_kernel_funcs[] = {
     JS_CFUNC_DEF("serialPut",       1, js_serial_put),
@@ -1809,16 +1834,8 @@ static JSValue js_physaddr_of(JSContext *c, JSValueConst this_val,
  * C→QuickJS glue that references the new API is guarded by the #ifdef.
  * ══════════════════════════════════════════════════════════════════════════ */
 
-/* Pending JIT request from a child runtime — stored by _jit_hook_child,
- * consumed by js_proc_pending_jit() from the TypeScript tick loop.          */
-typedef struct {
-    uint32_t bc_addr;   /* physical address of JSFunctionBytecode, 0 = none  */
-    int      pending;   /* 1 if a compilation request is outstanding          */
-} JITProcPending_t;
-
 static JSValue         _jit_ts_callback = { 0 };   /* initialised in quickjs_initialize */
 static int             _in_jit_hook     = 0;        /* reentrancy guard                  */
-static JITProcPending_t _jit_proc_pending[JSPROC_MAX];
 
 #ifdef JSOS_JIT_HOOK
 /* Forward declarations for QuickJS post-Step-5 API */
