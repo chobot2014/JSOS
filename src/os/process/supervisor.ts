@@ -343,7 +343,6 @@ export class SupervisedProcess {
     this._cpuTicks++;
     this._cpuWindow++;
 
-    var raw: any;
     if (this._opts.sliceBudgetMs > 0) {
       var result = this._proc.evalSlice('', this._opts.sliceBudgetMs);
       if (result.status === 'error') {
@@ -364,12 +363,16 @@ export class SupervisedProcess {
       this._handleMessage(pending[mi]);
     }
 
+    // A message handler may have triggered a crash; bail out early to avoid
+    // a null-deref on this._proc and double-firing crash callbacks.
+    if (this._state !== 'running') return;
+
     // ── Memory sampling ───────────────────────────────────────────────────────
     if (this._opts.memoryBudgetBytes > 0 &&
         this._tickCount - this._memSampleTick >= this._opts.memorySampleIntervalTicks) {
       this._memSampleTick = this._tickCount;
       // Ask child to report its memory asynchronously (result arrives in next tick)
-      if (this._proc.alive) {
+      if (this._proc && this._proc.alive) {
         this._proc.eval('if(typeof sv!=="undefined") sv.memInfo();');
       }
     }
