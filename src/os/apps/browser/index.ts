@@ -14,9 +14,11 @@
  *   • Redirect following 3xx (max 5 hops)
  */
 
-import { Canvas, Colors, type PixelColor } from '../../ui/canvas.js';
-import type { App, WMWindow, KeyEvent, MouseEvent } from '../../ui/wm.js';
-import { os, type FetchResponse } from '../../core/sdk.js';
+import {
+  os, Canvas, Colors,
+  type PixelColor, type App, type WMWindow, type KeyEvent, type MouseEvent,
+  type FetchResponse,
+} from '../../core/sdk.js';
 
 declare var kernel: import('../../core/kernel.js').KernelAPI;
 

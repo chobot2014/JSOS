@@ -6,9 +6,7 @@
  * future phases.
  */
 
-import { os }             from '../../core/sdk.js';
-import { Canvas, Colors } from '../../ui/canvas.js';
-import { type App, type WMWindow, type KeyEvent, type MouseEvent } from '../../ui/wm.js';
+import { os, Canvas, Colors, type App, type WMWindow, type KeyEvent, type MouseEvent } from '../../core/sdk.js';
 
 declare var kernel: import('../../core/kernel.js').KernelAPI;
 

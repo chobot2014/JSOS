@@ -36,7 +36,8 @@ import { JSProcess, listProcesses } from '../process/jsprocess.js';
 import { ipc } from '../ipc/ipc.js';
 import { users } from '../users/users.js';
 import { wm, getWM, type App, type WMWindow } from '../ui/wm.js';
-export { Colors, type PixelColor } from '../ui/canvas.js';
+export { Canvas, Colors, defaultFont, type PixelColor } from '../ui/canvas.js';
+export type { App, WMWindow, KeyEvent, MouseEvent } from '../ui/wm.js';
 export { JSProcess } from '../process/jsprocess.js';
 
 declare var kernel: import('./kernel.js').KernelAPI;

@@ -11,8 +11,7 @@
  * minimised). It serves as the OS escape hatch.
  */
 
-import { Canvas, Colors, defaultFont } from '../../ui/canvas.js';
-import type { App, WMWindow, KeyEvent, MouseEvent } from '../../ui/wm.js';
+import { Canvas, Colors, defaultFont, type App, type WMWindow, type KeyEvent, type MouseEvent } from '../../core/sdk.js';
 import terminal from '../../ui/terminal.js';
 
 declare var kernel: import('../../core/kernel.js').KernelAPI;

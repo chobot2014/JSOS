@@ -10,11 +10,10 @@
  * (event-driven vs. blocking waitKeyEx loop).
  */
 
-import { os } from '../../core/sdk.js';
-import { Colors, defaultFont } from '../../ui/canvas.js';
-import type { Canvas } from '../../ui/canvas.js';
-import type { App, WMWindow, KeyEvent, MouseEvent } from '../../ui/wm.js';
-import { wm } from '../../ui/wm.js';
+import {
+  os, Colors, defaultFont,
+  type Canvas, type App, type WMWindow, type KeyEvent, type MouseEvent,
+} from '../../core/sdk.js';
 
 declare var kernel: import('../../core/kernel.js').KernelAPI;
 
@@ -320,7 +319,7 @@ export class EditorApp implements App {
   }
 
   private _close(): void {
-    if (wm && this._winId !== -1) wm.closeWindow(this._winId);
+    if (this._winId !== -1) os.wm.closeWindow(this._winId);
   }
 
   private _clampCol(): void {
