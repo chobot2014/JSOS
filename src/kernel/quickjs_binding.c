@@ -1168,8 +1168,12 @@ static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
     memset(p, 0, sizeof(*p));
     p->rt = JS_NewRuntime();
     if (!p->rt) return JS_NewInt32(c, -1);
-    JS_SetMemoryLimit(p->rt, 4 * 1024 * 1024);   /* 4 MB per child process */
-    JS_SetMaxStackSize(p->rt, 64 * 1024);
+    JS_SetMemoryLimit(p->rt, 16 * 1024 * 1024);  /* 16 MB per child process — enough for
+                                                    * a real browser page (DOM + page JS +
+                                                    * CSS + network buffers) while keeping
+                                                    * 8×16 + 50 = 178 MB peak < 256 MB heap. */
+    JS_SetMaxStackSize(p->rt, 256 * 1024);        /* 256 KB stack — up from 64 KB; nested
+                                                    * HTML parser / recursive JS needs it. */
     p->ctx = JS_NewContext(p->rt);
     if (!p->ctx) { JS_FreeRuntime(p->rt); p->rt = NULL; return JS_NewInt32(c, -1); }
     /* Inject minimal child kernel API */

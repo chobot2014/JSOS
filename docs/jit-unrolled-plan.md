@@ -213,8 +213,9 @@ slot. BSS is stable at **~19.5 MB** through all remaining JIT steps.
 > more BSS before the JIT lands. (3 MB per slot is required — at 1024×768 the
 > browser window is 984×688 = 2.71 MB which overflows 2 MB.)
 > Combined BSS when both plans are executed: **~43.7 MB**.
-> With 4 GB QEMU, 82 MB QuickJS heaps, and ~43.7 MB BSS the system
-> comfortably fits. `_heap_start` ≈ 46.7 MB; `_heap_end` ≈ 302.7 MB;
+> Child QuickJS heaps raised to 16 MB each (from 4 MB) + stack to 256 KB;
+> peak heap cap: 8×16 + 50 = **178 MB** — well inside 256 MB heap boundary.
+> `_heap_start` ≈ 46.7 MB; `_heap_end` ≈ 302.7 MB;
 > `KERNEL_END_FRAME` = 320 MB — ~17.3 MB safety margin.
 
 The 256 MB heap region starts at `_heap_start` in `linker.ld`, well above BSS.
@@ -1294,10 +1295,11 @@ Understanding this is essential to getting JIT right.
 | | Main runtime | Child runtimes |
 |---|---|---|
 | Created by | `quickjs_initialize()` | `kernel.procCreate()` → `_procs[0..7]` |
-| Memory limit | 50 MB | 4 MB each |
-| What runs in it | ALL TypeScript OS code, ALL apps, browser page JS (`new Function`), REPL | Isolated background worker processes |
-| Kernel API | Full | Minimal (`postMessage`, `pollMessage`, `getTicks`, `sleep`) |
-| JIT pool region | First 1 MB | 128 KB slot per index |
+| Memory limit | 50 MB | **16 MB each** (raised from 4 MB — needed for browser DOM + page JS + buffers; 8×16+50 = 178 MB peak < 256 MB heap) |
+| Stack limit | 1 MB (QuickJS default) | **256 KB** (raised from 64 KB — recursive HTML parser / nested JS eval) |
+| What runs in it | OS kernel, WM, services, REPL | **All user apps** (terminal, editor, browser, file manager, monitor) + worker processes |
+| Kernel API | Full | Expanded (FS, timers, events, window commands, render buffer — see before_jit_os_updates.md) |
+| JIT pool region | First 8 MB | 512 KB slot per index (after Step 1) |
 | JIT hook | Direct (synchronous) | Deferred (async via `procPendingJIT`) |
 
 **Why child runtimes need JIT too:** JSOS uses cooperative multitasking.
