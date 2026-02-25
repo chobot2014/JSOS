@@ -8,8 +8,6 @@
 
 import { os, Canvas, Colors, type App, type WMWindow, type KeyEvent, type MouseEvent } from '../../core/sdk.js';
 
-declare var kernel: import('../../core/kernel.js').KernelAPI;
-
 // ── Module-scope state ───────────────────────────────────────────────────────
 
 var _win:    WMWindow | null = null;
@@ -97,11 +95,11 @@ export const settingsApp: App = {
 
     if (_panel === 0) {
       // Display
-      var mem = os.system.memInfo();
+      var mem = os.system.memory();
       canvas.drawText(cx, cy, 'Screen width:  ' + os.system.screenWidth(),  Colors.WHITE); cy += ROW_H;
       canvas.drawText(cx, cy, 'Screen height: ' + os.system.screenHeight(), Colors.WHITE); cy += ROW_H;
       canvas.drawText(cx, cy, '', 0); cy += ROW_H;
-      canvas.drawText(cx, cy, 'Video memory:  ' + ((mem.totalBytes >> 10) || '?') + ' KB total', Colors.LIGHT_GREY);
+      canvas.drawText(cx, cy, 'Video memory:  ' + ((mem.total >> 10) || '?') + ' KB total', Colors.LIGHT_GREY);
 
     } else if (_panel === 1) {
       // Users

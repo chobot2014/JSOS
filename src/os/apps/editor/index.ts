@@ -15,8 +15,6 @@ import {
   type Canvas, type App, type WMWindow, type KeyEvent, type MouseEvent,
 } from '../../core/sdk.js';
 
-declare var kernel: import('../../core/kernel.js').KernelAPI;
-
 // ── Canvas colour constants (ARGB) ─────────────────────────────────────────
 const C_BG       = 0xFF111111;
 const C_TEXT     = 0xFFCCCCCC;
@@ -81,8 +79,125 @@ export class EditorApp implements App {
   onKey(event: KeyEvent): void {
     this._dirty = true;
     if (this._mode === 'saveas') { this._handleSaveAsKey(event); return; }
-    if (event.ext !== 0) { this._handleExtKey(event.ext); }
-    else                 { this._handleCharKey(event.ch); }
+
+    var wasConfirmQuit = this._confirmQuit;
+    this._confirmQuit = false;
+
+    switch (event.key) {
+      case 'ArrowUp':
+        if (this._curRow > 0) { this._curRow--; this._clampCol(); }
+        break;
+      case 'ArrowDown':
+        if (this._curRow < this._lines.length - 1) { this._curRow++; this._clampCol(); }
+        break;
+      case 'ArrowLeft':
+        if (this._curCol > 0) { this._curCol--; }
+        else if (this._curRow > 0) { this._curRow--; this._curCol = this._lines[this._curRow].length; }
+        break;
+      case 'ArrowRight':
+        if (this._curCol < this._lines[this._curRow].length) { this._curCol++; }
+        else if (this._curRow < this._lines.length - 1) { this._curRow++; this._curCol = 0; }
+        break;
+      case 'Home':
+        this._curCol = 0;
+        break;
+      case 'End':
+        this._curCol = this._lines[this._curRow].length;
+        break;
+      case 'PageUp':
+        this._curRow = Math.max(0, this._curRow - this._editRows);
+        this._clampCol();
+        break;
+      case 'PageDown':
+        this._curRow = Math.min(this._lines.length - 1, this._curRow + this._editRows);
+        this._clampCol();
+        break;
+      case 'Delete':
+        if (this._curCol < this._lines[this._curRow].length) {
+          this._lines[this._curRow] = this._lines[this._curRow].slice(0, this._curCol) +
+                                      this._lines[this._curRow].slice(this._curCol + 1);
+          this._modified = true;
+        } else if (this._curRow < this._lines.length - 1) {
+          this._lines[this._curRow] += this._lines[this._curRow + 1];
+          this._lines.splice(this._curRow + 1, 1);
+          this._modified = true;
+        }
+        break;
+      case 'Enter':
+        var before = this._lines[this._curRow].slice(0, this._curCol);
+        var after  = this._lines[this._curRow].slice(this._curCol);
+        this._lines[this._curRow] = before;
+        this._lines.splice(this._curRow + 1, 0, after);
+        this._curRow++;
+        this._curCol = 0;
+        this._modified = true;
+        break;
+      case 'Backspace':
+        if (this._curCol > 0) {
+          this._lines[this._curRow] = this._lines[this._curRow].slice(0, this._curCol - 1) +
+                                      this._lines[this._curRow].slice(this._curCol);
+          this._curCol--;
+          this._modified = true;
+        } else if (this._curRow > 0) {
+          var prevLen = this._lines[this._curRow - 1].length;
+          this._lines[this._curRow - 1] += this._lines[this._curRow];
+          this._lines.splice(this._curRow, 1);
+          this._curRow--;
+          this._curCol = prevLen;
+          this._modified = true;
+        }
+        break;
+      case 'Tab':
+        var sp = '    ';
+        this._lines[this._curRow] = this._lines[this._curRow].slice(0, this._curCol) +
+                                    sp + this._lines[this._curRow].slice(this._curCol);
+        this._curCol += 4;
+        this._modified = true;
+        break;
+      case 'Escape':
+        // ESC — confirm-quit already reset to false above
+        break;
+      default:
+        if (event.ctrl) {
+          switch (event.key.toUpperCase()) {
+            case 'S':
+              this._save();
+              break;
+            case 'Q':
+              if (this._modified && !wasConfirmQuit) {
+                this._message = 'Unsaved changes! Press ^Q again to quit.';
+                this._isWarn  = true;
+                this._confirmQuit = true;
+              } else {
+                this._close();
+              }
+              break;
+            case 'X':
+              this._close();
+              break;
+            case 'K':
+              this._clipboard = this._lines[this._curRow];
+              this._lines.splice(this._curRow, 1);
+              if (this._lines.length === 0) this._lines = [''];
+              if (this._curRow >= this._lines.length) this._curRow = this._lines.length - 1;
+              this._curCol = 0;
+              this._modified = true;
+              this._message  = 'Cut line';
+              break;
+            case 'U':
+              this._lines.splice(this._curRow, 0, this._clipboard);
+              this._modified = true;
+              this._message  = 'Pasted';
+              break;
+          }
+        } else if (event.ch && event.ch >= ' ') {
+          this._lines[this._curRow] = this._lines[this._curRow].slice(0, this._curCol) +
+                                      event.ch + this._lines[this._curRow].slice(this._curCol);
+          this._curCol++;
+          this._modified = true;
+        }
+        break;
+    }
     this._scrollIntoView();
   }
 
@@ -164,140 +279,31 @@ export class EditorApp implements App {
 
   // ── Key handlers ──────────────────────────────────────────────────────────
 
-  private _handleExtKey(ext: number): void {
-    this._confirmQuit = false;
-    switch (ext) {
-      case 0x80: if (this._curRow > 0)                       { this._curRow--; this._clampCol(); } break;  // Up
-      case 0x81: if (this._curRow < this._lines.length - 1)  { this._curRow++; this._clampCol(); } break;  // Down
-      case 0x82:                                                                                            // Left
-        if (this._curCol > 0) { this._curCol--; }
-        else if (this._curRow > 0) { this._curRow--; this._curCol = this._lines[this._curRow].length; }
-        break;
-      case 0x83:                                                                                            // Right
-        if (this._curCol < this._lines[this._curRow].length) { this._curCol++; }
-        else if (this._curRow < this._lines.length - 1) { this._curRow++; this._curCol = 0; }
-        break;
-      case 0x84: this._curCol = 0; break;                                                                  // Home
-      case 0x85: this._curCol = this._lines[this._curRow].length; break;                                   // End
-      case 0x86: this._curRow = Math.max(0, this._curRow - this._editRows); this._clampCol(); break;       // PgUp
-      case 0x87: this._curRow = Math.min(this._lines.length - 1, this._curRow + this._editRows); this._clampCol(); break; // PgDn
-      case 0x88:  // Delete
-        if (this._curCol < this._lines[this._curRow].length) {
-          this._lines[this._curRow] = this._lines[this._curRow].slice(0, this._curCol) +
-                                      this._lines[this._curRow].slice(this._curCol + 1);
-          this._modified = true;
-        } else if (this._curRow < this._lines.length - 1) {
-          this._lines[this._curRow] += this._lines[this._curRow + 1];
-          this._lines.splice(this._curRow + 1, 1);
-          this._modified = true;
+  private _handleSaveAsKey(event: KeyEvent): void {
+    switch (event.key) {
+      case 'Enter':
+        if (this._promptBuf) {
+          this._savedPath = this._promptBuf;
+          this._promptBuf = '';
+          this._mode = 'edit';
+          this._doSave();
+        } else {
+          this._promptBuf = '';
+          this._mode = 'edit';
+          this._message = 'Save cancelled.';
         }
         break;
-    }
-  }
-
-  private _handleCharKey(ch: string): void {
-    if (!ch) return;
-
-    if (ch === '\x13') {             // Ctrl+S
-      this._save();
-
-    } else if (ch === '\x11') {      // Ctrl+Q
-      if (this._modified && !this._confirmQuit) {
-        this._message = 'Unsaved changes! Press ^Q again to quit.';
-        this._isWarn  = true;
-        this._confirmQuit = true;
-      } else {
-        this._close();
-      }
-
-    } else if (ch === '\x18') {      // Ctrl+X
-      this._close();
-
-    } else if (ch === '\x0b') {      // Ctrl+K  cut line
-      this._clipboard = this._lines[this._curRow];
-      this._lines.splice(this._curRow, 1);
-      if (this._lines.length === 0) this._lines = [''];
-      if (this._curRow >= this._lines.length) this._curRow = this._lines.length - 1;
-      this._curCol = 0;
-      this._modified = true;
-      this._message  = 'Cut line';
-      this._confirmQuit = false;
-
-    } else if (ch === '\x15') {      // Ctrl+U  paste
-      this._lines.splice(this._curRow, 0, this._clipboard);
-      this._modified = true;
-      this._message  = 'Pasted';
-      this._confirmQuit = false;
-
-    } else if (ch === '\n' || ch === '\r') {
-      var before = this._lines[this._curRow].slice(0, this._curCol);
-      var after  = this._lines[this._curRow].slice(this._curCol);
-      this._lines[this._curRow] = before;
-      this._lines.splice(this._curRow + 1, 0, after);
-      this._curRow++;
-      this._curCol = 0;
-      this._modified = true;
-      this._confirmQuit = false;
-
-    } else if (ch === '\b' || ch === '\x7f') {
-      if (this._curCol > 0) {
-        this._lines[this._curRow] = this._lines[this._curRow].slice(0, this._curCol - 1) +
-                                    this._lines[this._curRow].slice(this._curCol);
-        this._curCol--;
-        this._modified = true;
-      } else if (this._curRow > 0) {
-        var prevLen = this._lines[this._curRow - 1].length;
-        this._lines[this._curRow - 1] += this._lines[this._curRow];
-        this._lines.splice(this._curRow, 1);
-        this._curRow--;
-        this._curCol = prevLen;
-        this._modified = true;
-      }
-      this._confirmQuit = false;
-
-    } else if (ch === '\t') {
-      var sp = '    ';
-      this._lines[this._curRow] = this._lines[this._curRow].slice(0, this._curCol) +
-                                  sp + this._lines[this._curRow].slice(this._curCol);
-      this._curCol += 4;
-      this._modified = true;
-      this._confirmQuit = false;
-
-    } else if (ch >= ' ') {
-      this._lines[this._curRow] = this._lines[this._curRow].slice(0, this._curCol) +
-                                  ch + this._lines[this._curRow].slice(this._curCol);
-      this._curCol++;
-      this._modified = true;
-      this._confirmQuit = false;
-
-    } else {
-      // ESC or unknown control — cancel pending confirm-quit
-      this._confirmQuit = false;
-    }
-  }
-
-  private _handleSaveAsKey(event: KeyEvent): void {
-    if (event.ext !== 0) return;
-    var ch = event.ch;
-    if (ch === '\n' || ch === '\r') {
-      if (this._promptBuf) {
-        this._savedPath = this._promptBuf;
-        this._promptBuf = '';
-        this._mode = 'edit';
-        this._doSave();
-      } else {
+      case 'Escape':
         this._promptBuf = '';
         this._mode = 'edit';
         this._message = 'Save cancelled.';
-      }
-    } else if (ch === '\x1b') {
-      this._promptBuf = '';
-      this._mode = 'edit';
-      this._message = 'Save cancelled.';
-    } else if ((ch === '\b' || ch === '\x7f') && this._promptBuf.length > 0) {
-      this._promptBuf = this._promptBuf.slice(0, -1);
-    } else if (ch && ch >= ' ') {
-      this._promptBuf += ch;
+        break;
+      case 'Backspace':
+        if (this._promptBuf.length > 0) this._promptBuf = this._promptBuf.slice(0, -1);
+        break;
+      default:
+        if (!event.ctrl && event.ch && event.ch >= ' ') this._promptBuf += event.ch;
+        break;
     }
   }
 

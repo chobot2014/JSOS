@@ -7,8 +7,6 @@
 
 import { os, Canvas, Colors, type App, type WMWindow, type KeyEvent, type MouseEvent } from '../../core/sdk.js';
 
-declare var kernel: import('../../core/kernel.js').KernelAPI;
-
 // ── Module-scope state ───────────────────────────────────────────────────────
 
 var _win:    WMWindow | null = null;
@@ -95,47 +93,47 @@ export const systemMonitorApp: App = {
 
     if (_tab === 0) {
       // ── Overview ──────────────────────────────────────────────────────────
-      var ticks  = kernel.getTicks();
+      var ticks  = os.system.ticks();
       var uptime = Math.floor(ticks / 100);
       var hh     = Math.floor(uptime / 3600);
       var mm     = Math.floor((uptime % 3600) / 60);
       var ss     = uptime % 60;
       var pad    = (n: number) => (n < 10 ? '0' : '') + n;
 
-      var mem    = os.system.memInfo();
+      var mem    = os.system.memory();
 
       var y = contentY;
       canvas.drawText(PADDING, y, 'Uptime:   ' + hh + ':' + pad(mm) + ':' + pad(ss), Colors.WHITE); y += ROW_H;
       canvas.drawText(PADDING, y, 'Ticks:    ' + ticks, Colors.LIGHT_GREY); y += ROW_H;
       canvas.drawText(PADDING, y, '', 0); y += ROW_H;
       canvas.drawText(PADDING, y, 'Memory', Colors.YELLOW); y += ROW_H;
-      canvas.drawText(PADDING, y, '  Total:  ' + (mem.totalBytes >> 10) + ' KB', Colors.WHITE); y += ROW_H;
-      canvas.drawText(PADDING, y, '  Used:   ' + (mem.usedBytes  >> 10) + ' KB', Colors.WHITE); y += ROW_H;
-      canvas.drawText(PADDING, y, '  Free:   ' + (mem.freeBytes  >> 10) + ' KB', Colors.WHITE); y += ROW_H;
+      canvas.drawText(PADDING, y, '  Total:  ' + (mem.total >> 10) + ' KB', Colors.WHITE); y += ROW_H;
+      canvas.drawText(PADDING, y, '  Used:   ' + (mem.used  >> 10) + ' KB', Colors.WHITE); y += ROW_H;
+      canvas.drawText(PADDING, y, '  Free:   ' + (mem.free  >> 10) + ' KB', Colors.WHITE); y += ROW_H;
 
       // Memory bar
       var barW = w - 2 * PADDING;
-      var fill = mem.totalBytes > 0 ? Math.floor(barW * mem.usedBytes / mem.totalBytes) : 0;
+      var fill = mem.total > 0 ? Math.floor(barW * mem.used / mem.total) : 0;
       canvas.fillRect(PADDING, y, barW, 10, 0xFF223344);
       canvas.fillRect(PADDING, y, fill,  10, 0xFF3399FF);
       canvas.drawRect(PADDING, y, barW, 10, 0xFF445566);
       y += 16;
 
       canvas.drawText(PADDING, y, '', 0); y += ROW_H;
-      canvas.drawText(PADDING, y, 'Processes: ' + os.process.list().length, Colors.WHITE); y += ROW_H;
+      canvas.drawText(PADDING, y, 'Processes: ' + os.process.all().length, Colors.WHITE); y += ROW_H;
       canvas.drawText(PADDING, y, 'Disk:      ' + (os.disk.available() ? 'available' : 'none'), Colors.WHITE);
 
     } else if (_tab === 1) {
       // ── Processes ─────────────────────────────────────────────────────────
-      canvas.drawText(PADDING, contentY, 'PID   Name', Colors.YELLOW);
+      canvas.drawText(PADDING, contentY, 'PID    Name                 State', Colors.YELLOW);
       canvas.drawLine(PADDING, contentY + ROW_H - 2, w - PADDING, contentY + ROW_H - 2, 0xFF334455);
 
-      var procs = os.process.list();
+      var procs = os.process.all();
       for (var pi = 0; pi < procs.length && contentY + (pi + 2) * ROW_H < h; pi++) {
         var proc = procs[pi];
         var py   = contentY + (pi + 1) * ROW_H + 4;
         canvas.drawText(PADDING, py,
-          String(proc.id).padEnd(6) + (proc.name || '(unnamed)'), Colors.WHITE);
+          String(proc.pid).padEnd(7) + (proc.name || '(unnamed)').padEnd(21) + (proc.state || ''), Colors.WHITE);
       }
       if (procs.length === 0) {
         canvas.drawText(PADDING, contentY + ROW_H + 4, '(no processes)', Colors.DARK_GREY);
