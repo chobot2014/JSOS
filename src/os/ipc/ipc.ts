@@ -18,6 +18,7 @@
 // Use SIG / SignalName from ../process/signals.ts — not duplicated here.
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
+import { SIG } from '../process/signals.js';
 
 export type SignalNumber = number;
 export type SignalHandler = (signum: SignalNumber) => void;
@@ -239,12 +240,12 @@ export class IPCManager {
 
   /** Send SIGINT to a process (Ctrl+C equivalent). */
   interrupt(pid: number): void {
-    this.signals.send(pid, Signal.SIGINT);
+    this.signals.send(pid, SIG.SIGINT);
   }
 
   /** Terminate a process gracefully. */
   terminate(pid: number): void {
-    this.signals.send(pid, Signal.SIGTERM);
+    this.signals.send(pid, SIG.SIGTERM);
   }
 }
 

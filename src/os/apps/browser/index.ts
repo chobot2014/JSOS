@@ -519,7 +519,6 @@ function parseHTML(html: string): ParseResult {
           textareaWip.options   = selectOpts;
           textareaWip.optVals   = selectVals;
           textareaWip.selIdx    = selectSel;
-          textareaWip.curSelIdx = selectSel;
           textareaWip = null;
         }
       }
@@ -621,7 +620,7 @@ function parseHTML(html: string): ParseResult {
             break;
           }
 
-          if (iType === 'image') iType = 'submit';  // treat image buttons as submit
+          if ((iType as string) === 'image') iType = 'submit';  // treat image buttons as submit
 
           var bp: WidgetBlueprint = {
             kind: iType, name: iName, value: iValue,
@@ -2286,85 +2285,9 @@ export class BrowserApp implements App {
 
   // ── HTTP fetch + layout ───────────────────────────────────────────────────
 
+  /** @deprecated Replaced by _startFetch.  Kept as redirect for any stale callers. */
   private _load(rawURL: string): void {
-    this._pageURL    = rawURL;
-    this._urlInput   = rawURL;
-    this._loading    = true;
-    this._scrollY    = 0;
-    this._hoverHref  = '';
-    this._status     = 'Loading...';
-    this._dirty      = true;
-    this._focusedWidget = -1;
-
-    if (this._histIdx >= 0 && this._histIdx < this._history.length) {
-      this._history[this._histIdx].url = rawURL;
-    }
-
-    var parsed = parseURL(rawURL);
-    if (!parsed) { this._showError(rawURL, 'Invalid URL'); return; }
-
-    if (parsed.protocol === 'about') {
-      var html = '';
-      switch (parsed.path) {
-        case 'blank':     html = '';                        break;
-        case 'jsos':      html = aboutJsosHTML();           break;
-        case 'history':   html = this._historyHTML();       break;
-        case 'bookmarks': html = this._bookmarksHTML();     break;
-        case 'source':    html = this._sourceHTML();        break;
-        default:          html = errorHTML(rawURL, 'Unknown about: page'); break;
-      }
-      this._pageSource = html;
-      this._showHTML(html, parsed.path, rawURL);
-      return;
-    }
-
-    this._status = 'Resolving ' + parsed.host + '...'; this._dirty = true;
-    var ip: string | null = null;
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(parsed.host)) { ip = parsed.host; }
-    else { try { ip = dnsResolve(parsed.host); } catch (_e) { ip = null; } }
-    if (!ip) { this._showError(rawURL, 'DNS lookup failed for ' + parsed.host); return; }
-
-    kernel.serialPut('[browser] ' + parsed.host + ' -> ' + ip + '\n');
-    this._status = 'Connecting to ' + ip + '...'; this._dirty = true;
-
-    var resp: import('../net/http.js').HttpResponse | null = null;
-    try {
-      if (parsed.protocol === 'https') {
-        var tr = httpsGet(parsed.host, ip, parsed.port, parsed.path);
-        if (!tr.tlsOk) kernel.serialPut('[browser] TLS handshake failed\n');
-        resp = tr.response;
-      } else {
-        resp = httpGet(parsed.host, ip, parsed.port, parsed.path);
-      }
-    } catch (_e2) { resp = null; }
-
-    if (!resp) { this._showError(rawURL, 'Connection failed: ' + ip + ':' + parsed.port); return; }
-    kernel.serialPut('[browser] HTTP ' + resp.status + ' ' + resp.body.length + 'B\n');
-
-    if (resp.status >= 300 && resp.status < 400) {
-      var loc = resp.headers.get('location') || '';
-      if (loc && this._redirectDepth < 5) {
-        this._redirectDepth++;
-        kernel.serialPut('[browser] redirect ' + this._redirectDepth + ' -> ' + loc + '\n');
-        this._load(this._resolveHref(loc)); return;
-      } else if (loc) { this._showError(rawURL, 'Too many redirects'); return; }
-    }
-
-    if (resp.status < 200 || resp.status >= 400) {
-      this._showError(rawURL, 'HTTP ' + resp.status + ' error'); return;
-    }
-
-    var bodyStr = '';
-    for (var bi = 0; bi < resp.body.length; bi++) bodyStr += String.fromCharCode(resp.body[bi] & 0xFF);
-    this._pageSource = bodyStr;
-
-    var ct = resp.headers.get('content-type') || 'text/html';
-    if (ct.indexOf('text/html') >= 0 || ct.indexOf('application/xhtml') >= 0) {
-      this._showHTML(bodyStr, '', rawURL);
-    } else {
-      this._showPlainText(bodyStr, rawURL);
-    }
-    this._status = 'HTTP ' + resp.status + '  ' + ip + '  ' + resp.body.length + ' B';
+    this._startFetch(rawURL);
   }
 
   private _showHTML(html: string, fallbackTitle: string, url: string): void {

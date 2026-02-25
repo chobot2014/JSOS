@@ -36,6 +36,7 @@ export const Colors = {
   TITLE_BG:    0xFF1A3A5C,
   DESKTOP_BG:  0xFF2D4F6B,
   TASKBAR_BG:  0xFF1A2B3C,
+  EDITOR_BG:   0xFF1E1E2E,  // dark blue-grey editor/terminal background
   TRANSPARENT: 0x00000000,
 };
 

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * JSOS Application SDK
  *
  * The ONLY module that application code should import OS services from.
@@ -25,8 +25,8 @@ import { net }       from '../net/net.js';
 import { TLSSocket } from '../net/tls.js';
 import { threadManager, type CoroutineStep } from '../process/threads.js';
 import { processManager } from '../process/process.js';
-import { scheduler, type ProcessContext, type SchedulingAlgorithm } from '../process/scheduler.js';
-import { signalManager, SIG } from '../process/signals.js';
+import { scheduler, type ProcessContext } from '../process/scheduler.js';
+import { SIG } from '../process/signals.js';
 import {
   dnsResolveCached,
   dnsSendQueryAsync,
@@ -35,9 +35,10 @@ import {
 } from '../net/dns.js';
 import { parseHttpResponse } from '../net/http.js';
 import { JSProcess, listProcesses } from '../process/jsprocess.js';
-import { ipc } from '../ipc/ipc.js';
+import { ipc, Pipe } from '../ipc/ipc.js';
 import { users } from '../users/users.js';
-import { wm, getWM, type App, type WMWindow } from '../ui/wm.js';
+import { wm, type App, type WMWindow, type KeyEvent, type MouseEvent } from '../ui/wm.js';
+import { Canvas } from '../ui/canvas.js';
 import { Mutex, Condvar, Semaphore } from '../process/sync.js';
 import {
   sha256 as _sha256Raw,
@@ -52,6 +53,7 @@ export type { App, WMWindow, KeyEvent, MouseEvent } from '../ui/wm.js';
 export { JSProcess } from '../process/jsprocess.js';
 export { Mutex, Condvar, Semaphore } from '../process/sync.js';
 export type { User, Group } from '../users/users.js';
+export { Pipe } from '../ipc/ipc.js';
 
 declare var kernel: import('./kernel.js').KernelAPI;
 
@@ -60,7 +62,7 @@ declare var kernel: import('./kernel.js').KernelAPI;
 export interface FetchOptions {
   method?:       'GET' | 'POST';
   headers?:      Record<string, string>;
-  body?:         string;
+  body?:         string | number[];
   /** Maximum redirects to follow (default 5). */
   maxRedirects?: number;
 }
@@ -195,7 +197,12 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       if (f.opts.headers) {
         for (var k in f.opts.headers) extraHdrs += k + ': ' + f.opts.headers[k] + '\r\n';
       }
-      var bodyStr = f.opts.body || '';
+      var _rawBody = f.opts.body;
+      var bodyStr = _rawBody
+        ? (typeof _rawBody === 'string'
+          ? _rawBody
+          : (function(b: number[]){ var s=''; for(var _i=0;_i<b.length;_i++) s+=String.fromCharCode(b[_i]); return s; })(_rawBody as number[]))
+        : '';
       var req  = method + ' ' + path + ' HTTP/1.1\r\n' +
                  'Host: ' + f.parsed.host + '\r\n' +
                  'Connection: close\r\n' +
@@ -424,6 +431,243 @@ function _base64Decode(b64: string): number[] {
   return _out;
 }
 
+// ── Module-level state: notifications, app registry, persistent disk ──────────
+
+interface _NotifEntry { id: number; message: string; level: string; until: number; active: boolean; }
+var _notifications: _NotifEntry[] = [];
+var _nextNotifId   = 1;
+
+/** Fire an event directly into the listener map without going through sdk.events. */
+function _emitEvent(event: string, data?: any): void {
+  var list = _evtListeners.get(event);
+  if (!list) return;
+  var copy = list.slice();
+  for (var _xi = 0; _xi < copy.length; _xi++) { try { copy[_xi](data); } catch (_e) {} }
+}
+
+function _notify(message: string, opts?: { level?: 'info'|'success'|'warn'|'error'; durationMs?: number }): number {
+  var id  = _nextNotifId++;
+  var dur = (opts && opts.durationMs !== undefined) ? opts.durationMs : 3000;
+  var lvl: string = (opts && opts.level) ? opts.level : 'info';
+  _notifications.push({ id, message, level: lvl, until: kernel.getUptime() + dur, active: true });
+  _emitEvent('notify:show', { id, message, level: lvl });
+  if (!wm) { (globalThis as any).print('[' + lvl.toUpperCase() + '] ' + message); }
+  _startTimerPump();
+  _timers.push({ id: _nextTimerId++, fn: function() { _notifyDismiss(id); }, deadline: kernel.getUptime() + dur, interval: 0, active: true });
+  return id;
+}
+
+function _notifyDismiss(id: number): void {
+  for (var _nd = 0; _nd < _notifications.length; _nd++) {
+    if (_notifications[_nd].id === id) { _notifications[_nd].active = false; _emitEvent('notify:dismiss', { id }); return; }
+  }
+}
+
+function _notifyDismissAll(): void {
+  for (var _na = 0; _na < _notifications.length; _na++) _notifications[_na].active = false;
+  _emitEvent('notify:dismissAll', {});
+}
+
+export interface AppManifest {
+  name:        string;
+  displayName: string;
+  category?:   'system' | 'utility' | 'game' | 'other';
+  minWidth?:   number;
+  minHeight?:  number;
+  icon?:       string;
+}
+
+interface _AppEntry { manifest: AppManifest; factory: (args?: string[]) => App; }
+var _appRegistry = new Map<string, _AppEntry>();
+
+function _sdkPrint(text: string): void {
+  (globalThis as any).print(text);
+}
+
+// Single disk-storage object — exposed as both os.fs.disk and os.disk (compat alias)
+var _diskStorage = {
+  /** Returns true when a FAT disk driver has been mounted. */
+  available(): boolean { return !!(globalThis as any)._diskFS; },
+  /** Read a file from persistent disk.  Returns null if unavailable or not found. */
+  read(path: string): string | null {
+    var d = (globalThis as any)._diskFS; return d ? d.read(path) : null;
+  },
+  /** Write (create or overwrite) a file on disk.  Returns false if unavailable. */
+  write(path: string, data: string): boolean {
+    var d = (globalThis as any)._diskFS; return d ? !!d.writeFile(path, data) : false;
+  },
+  /** List disk directory entries.  Returns [] if unavailable. */
+  list(path?: string): Array<{ name: string; type: 'file' | 'dir'; size: number }> {
+    var d = (globalThis as any)._diskFS; return d ? (d.list(path || '/') ?? []) : [];
+  },
+  /** Create a directory on disk. */
+  mkdir(path: string): boolean {
+    var d = (globalThis as any)._diskFS; return d ? !!d.mkdir(path) : false;
+  },
+  /** Check whether a path exists on disk. */
+  exists(path: string): boolean {
+    var d = (globalThis as any)._diskFS; return d ? !!d.exists(path) : false;
+  },
+  /** Remove a file or empty directory from disk. */
+  rm(path: string): boolean {
+    var d = (globalThis as any)._diskFS; return d ? !!d.remove(path) : false;
+  },
+};
+
+// ── Modal dialog helpers ──────────────────────────────────────────────────────
+
+function _dlgAlert(message: string, title: string): void {
+  if (!wm) { (globalThis as any).print('[ALERT] ' + title + ': ' + message); return; }
+  var _closed = false;
+  var _winId  = -1;
+  var _close  = function(): void { if (_closed) return; _closed = true; if (wm && _winId >= 0) wm.closeWindow(_winId); };
+  var _dlg: App = {
+    name: 'alert-dlg',
+    onMount(win: WMWindow):  void { _winId = win.id; },
+    onUnmount():             void {},
+    onKey(e: KeyEvent):      void { if (e.key === 'Enter' || e.key === 'Escape') _close(); },
+    onMouse(_e: MouseEvent): void {},
+    render(canvas: Canvas):  boolean {
+      canvas.clear(0xFF1E1E2E);
+      canvas.drawText(12, 14, message, 0xFFCDD6F4);
+      var lbl = '  OK  ';
+      var ox = (canvas.width - lbl.length * 8) >> 1;
+      canvas.fillRect(ox - 4, canvas.height - 25, lbl.length * 8 + 8, 18, 0xFF313244);
+      canvas.drawText(ox, canvas.height - 21, lbl, 0xFF89B4FA);
+      return true;
+    },
+  };
+  wm.createWindow({ title, app: _dlg, width: Math.max(220, message.length * 8 + 24), height: 75, closeable: false });
+}
+
+function _dlgConfirm(message: string, title: string, okLabel: string, cancelLabel: string, cb: (ok: boolean) => void): void {
+  if (!wm) { (globalThis as any).print('[CONFIRM] ' + title + ': ' + message + ' → false'); cb(false); return; }
+  var _closed = false;
+  var _winId  = -1;
+  var _dlgW   = 0;
+  var _dlgH   = 0;
+  var _close  = function(result: boolean): void { if (_closed) return; _closed = true; if (wm && _winId >= 0) wm.closeWindow(_winId); cb(result); };
+  var _dlg: App = {
+    name: 'confirm-dlg',
+    onMount(win: WMWindow):  void { _winId = win.id; },
+    onUnmount():             void {},
+    onKey(e: KeyEvent):      void { if (e.key === 'Enter') _close(true); if (e.key === 'Escape') _close(false); },
+    onMouse(e: MouseEvent):  void {
+      if ((e.type !== 'down' && e.type !== 'click') || e.y < _dlgH - 28) return;
+      _close(e.x < (_dlgW >> 1));
+    },
+    render(canvas: Canvas):  boolean {
+      _dlgW = canvas.width; _dlgH = canvas.height;
+      canvas.clear(0xFF1E1E2E);
+      canvas.drawText(12, 14, message, 0xFFCDD6F4);
+      canvas.drawText(12, _dlgH - 21, okLabel, 0xFF89B4FA);
+      canvas.drawText(_dlgW - cancelLabel.length * 8 - 12, _dlgH - 21, cancelLabel, 0xFFF38BA8);
+      return true;
+    },
+  };
+  wm.createWindow({ title, app: _dlg, width: Math.max(220, message.length * 8 + 24), height: 75, closeable: false });
+}
+
+function _dlgPrompt(question: string, title: string, defaultValue: string, cb: (value: string | null) => void): void {
+  if (!wm) { (globalThis as any).print('[PROMPT] ' + title + ': ' + question); cb(null); return; }
+  var _closed = false;
+  var _winId  = -1;
+  var _input  = defaultValue;
+  var _cursor = defaultValue.length;
+  var _dlgW   = 0;
+  var _dlgH   = 0;
+  var _close  = function(v: string | null): void { if (_closed) return; _closed = true; if (wm && _winId >= 0) wm.closeWindow(_winId); cb(v); };
+  var _dlg: App = {
+    name: 'prompt-dlg',
+    onMount(win: WMWindow):  void { _winId = win.id; },
+    onUnmount():             void {},
+    onKey(e: KeyEvent):      void {
+      if (e.key === 'Enter')     { _close(_input); return; }
+      if (e.key === 'Escape')    { _close(null);   return; }
+      if (e.key === 'Backspace') {
+        if (_cursor > 0) { _input = _input.slice(0, _cursor - 1) + _input.slice(_cursor); _cursor--; if (wm) wm.markDirty(); }
+        return;
+      }
+      if (e.key === 'ArrowLeft')  { if (_cursor > 0)              _cursor--; if (wm) wm.markDirty(); return; }
+      if (e.key === 'ArrowRight') { if (_cursor < _input.length)  _cursor++; if (wm) wm.markDirty(); return; }
+      if (e.key.length === 1) { _input = _input.slice(0, _cursor) + e.key + _input.slice(_cursor); _cursor++; if (wm) wm.markDirty(); }
+    },
+    onMouse(e: MouseEvent):  void {
+      if ((e.type !== 'down' && e.type !== 'click') || e.y < _dlgH - 28) return;
+      _close(e.x < (_dlgW >> 1) ? _input : null);
+    },
+    render(canvas: Canvas):  boolean {
+      _dlgW = canvas.width; _dlgH = canvas.height;
+      canvas.clear(0xFF1E1E2E);
+      canvas.drawText(12, 10, question, 0xFF89DCEB);
+      canvas.fillRect(10, 27, _dlgW - 20, 18, 0xFF313244);
+      canvas.drawText(12, 31, _input, 0xFFCDD6F4);
+      canvas.fillRect(12 + _cursor * 8, 28, 1, 16, 0xFFCDD6F4);
+      canvas.drawText(12,                  _dlgH - 21, 'OK',     0xFF89B4FA);
+      canvas.drawText(_dlgW - 12 - 6 * 8, _dlgH - 21, 'Cancel', 0xFFF38BA8);
+      return true;
+    },
+  };
+  wm.createWindow({ title, app: _dlg, width: 300, height: 95, closeable: false });
+}
+
+// ── Internal fetch function ───────────────────────────────────────────────────
+
+function _doFetch(
+  url: string,
+  callback: (resp: FetchResponse | null, error?: string) => void,
+  opts?: FetchOptions,
+): number {
+  var o      = opts || {};
+  var parsed = _parseURL(url);
+  if (!parsed) {
+    var _deferCoroId = threadManager.runCoroutine('fetch-err', function() {
+      callback(null, 'Invalid URL: ' + url);
+      return 'done';
+    });
+    return _deferCoroId;
+  }
+
+  var f: InFlightFetch = {
+    coroId:       -1,
+    stage:        'dns',
+    originalURL:  url,
+    currentURL:   url,
+    parsed,
+    fetchIP:      '',
+    sock:         null,
+    tls:          null,
+    chunks:       [],
+    deadline:     0,
+    dnsPort:      0,
+    dnsId:        0,
+    redirects:    0,
+    maxRedirects: o.maxRedirects !== undefined ? o.maxRedirects : 5,
+    opts:         o,
+    callback,
+  };
+
+  var cachedIP = dnsResolveCached(parsed.host);
+  if (cachedIP) {
+    f.fetchIP  = cachedIP;
+    f.stage    = 'connecting';
+    f.deadline = kernel.getTicks() + 200;
+    f.sock     = net.createSocket('tcp');
+    net.connectAsync(f.sock, cachedIP, parsed.port);
+  } else {
+    f.stage    = 'dns';
+    f.deadline = kernel.getTicks() + 300;
+    var q      = dnsSendQueryAsync(parsed.host);
+    f.dnsPort  = q.port;
+    f.dnsId    = q.id;
+  }
+
+  var step = _buildFetchCoroutine(f);
+  var id   = threadManager.runCoroutine('fetch:' + parsed.host, step);
+  f.coroId = id;
+  return id;
+}
+
 // ── SDK implementation ────────────────────────────────────────────────────────
 
 const sdk = {
@@ -472,7 +716,7 @@ const sdk = {
     cd(path: string): boolean {
       return fs.cd(path);
     },
-    /** Remove a file or directory. */
+    /** Remove a file or empty directory. */
     rm(path: string): boolean {
       return fs.rm(path);
     },
@@ -492,20 +736,11 @@ const sdk = {
     copy(src: string, dst: string): boolean {
       return fs.cp(src, dst);
     },
-    /**
-     * Stat a path.  Returns null if not found.
-     * `mtime` and `created` are kernel uptime ms values.
-     */
+    /** Stat a path.  Returns null if not found. */
     stat(path: string): { size: number; isDir: boolean; created: number; mtime: number; permissions: string } | null {
       var s = fs.stat(path);
       if (!s) return null;
-      return {
-        size:        s.size,
-        isDir:       (s.type as any) === 'directory',
-        created:     s.created,
-        mtime:       s.modified,
-        permissions: s.permissions,
-      };
+      return { size: s.size, isDir: (s.type as any) === 'directory', created: s.created, mtime: s.modified, permissions: s.permissions };
     },
     /** Returns true if path exists and is a regular file. */
     isFile(path: string): boolean {
@@ -515,10 +750,7 @@ const sdk = {
     isDir(path: string): boolean {
       return fs.isDirectory(path);
     },
-    /**
-     * Glob-style recursive search using * as wildcard.
-     * Example: os.fs.find('/bin', '*.js') → ['/bin/hello.js', …]
-     */
+    /** Glob-style recursive search using * as wildcard. */
     find(basePath: string, pattern: string): string[] {
       return fs.find(basePath, pattern);
     },
@@ -546,101 +778,65 @@ const sdk = {
     writeJSON(path: string, value: unknown, pretty?: boolean): boolean {
       return fs.writeFile(path, pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value));
     },
+
+    /**
+     * Persistent FAT32/FAT16 disk storage.
+     * Only available when a block device is present.
+     * Check os.fs.disk.available() before calling other disk methods.
+     * In-memory VFS and disk are separate — use os.fs.disk for data
+     * that must survive a reboot.
+     */
+    disk: _diskStorage,
+
+    // ── Backward-compat aliases for existing apps ──────────────────────────
+    /** @deprecated Use os.fs.list() instead. */
+    readdir(path: string): string[] { return sdk.fs.list(path); },
+    /** @deprecated Use os.fs.isDir() instead. */
+    isDirectory(path: string): boolean { return sdk.fs.isDir(path); },
   },
 
-  // ── Async network fetch ─────────────────────────────────────────────────────
+  // ── Network ─────────────────────────────────────────────────────────────────
 
   /**
-   * Fetch a URL without blocking the OS.
-   *
-   * The request is driven by the WM coroutine scheduler — one step per frame
-   * (~16 ms).  `callback` is invoked on completion (success or failure).
-   * Returns a coroutine id that can be passed to `os.cancel()` to abort.
+   * Networking — HTTP/HTTPS fetch and IP info.
    *
    * Example:
-   *   var id = os.fetchAsync('https://example.com/', function(resp, err) {
-   *     if (err)  { /* handle error *\/ }
-   *     else      { /* use resp.bodyText *\/ }
+   *   var id = os.net.fetch('https://example.com', function(resp, err) {
+   *     if (err) return;
+   *     os.print(resp.bodyText);
    *   });
+   *   // abort: os.process.cancel(id);
    */
-  fetchAsync(
-    url: string,
-    callback: (resp: FetchResponse | null, error?: string) => void,
-    opts?: FetchOptions,
-  ): number {
-    var o      = opts || {};
-    var parsed = _parseURL(url);
-    if (!parsed) {
-      // Defer callback to next tick so callers can capture the returned id first
-      var deferCoroId = -1;
-      deferCoroId = threadManager.runCoroutine('fetch-err', function () {
-        callback(null, 'Invalid URL: ' + url);
-        return 'done';
-      });
-      return deferCoroId;
-    }
-
-    var f: InFlightFetch = {
-      coroId:       -1,
-      stage:        'dns',
-      originalURL:  url,
-      currentURL:   url,
-      parsed,
-      fetchIP:      '',
-      sock:         null,
-      tls:          null,
-      chunks:       [],
-      deadline:     0,
-      dnsPort:      0,
-      dnsId:        0,
-      redirects:    0,
-      maxRedirects: o.maxRedirects !== undefined ? o.maxRedirects : 5,
-      opts:         o,
-      callback,
-    };
-
-    // If the IP is already cached, skip DNS
-    var cachedIP = dnsResolveCached(parsed.host);
-    if (cachedIP) {
-      f.fetchIP  = cachedIP;
-      f.stage    = 'connecting';
-      f.deadline = kernel.getTicks() + 200;
-      f.sock     = net.createSocket('tcp');
-      net.connectAsync(f.sock, cachedIP, parsed.port);
-    } else {
-      f.stage    = 'dns';
-      f.deadline = kernel.getTicks() + 300;
-      var q      = dnsSendQueryAsync(parsed.host);
-      f.dnsPort  = q.port;
-      f.dnsId    = q.id;
-    }
-
-    var step = _buildFetchCoroutine(f);
-    var id   = threadManager.runCoroutine('fetch:' + parsed.host, step);
-    f.coroId = id;
-    return id;
+  net: {
+    /**
+     * Non-blocking HTTP/HTTPS fetch, driven by the WM scheduler (~16 ms/step).
+     * Returns a coroutine id — pass to os.process.cancel() to abort.
+     */
+    fetch(
+      url: string,
+      callback: (resp: FetchResponse | null, error?: string) => void,
+      opts?: FetchOptions,
+    ): number {
+      return _doFetch(url, callback, opts);
+    },
+    /** DHCP-assigned IP address, or null if the network is not up. */
+    getIP(): string | null {
+      try { return (net as any).getLocalIP ? (net as any).getLocalIP() : null; } catch (_e) { return null; }
+    },
   },
 
-  // ── Coroutine control ───────────────────────────────────────────────────────
+  // ── Output ──────────────────────────────────────────────────────────────────
 
   /**
-   * Register a custom cooperative coroutine.
-   * `step` is called once per WM frame (~16 ms).  Return 'done' to finish.
-   * Returns a coroutine id for use with `os.cancel()`.
+   * Write a line to the active output.
+   * Text mode: terminal.  WM mode: system debug console.
+   * Prefer this over bare print() for portability.
    */
-  spawn(name: string, step: CoroutineStep): number {
-    return threadManager.runCoroutine(name, step);
+  print(text: string): void {
+    _sdkPrint(text);
   },
 
-  /**
-   * Cancel a running coroutine (fetch or custom).
-   * The coroutine's step function will not be called again.
-   */
-  cancel(coroId: number): void {
-    threadManager.cancelCoroutine(coroId);
-  },
-
-  // ── System information ──────────────────────────────────────────────────────
+  // ── System information ───────────────────────────────────────────────────────
 
   system: {
     /** Milliseconds since OS boot. */
@@ -651,7 +847,7 @@ const sdk = {
     ticks(): number {
       return kernel.getTicks();
     },
-    /** Current process ID (from process scheduler). */
+    /** Current process ID. */
     pid(): number {
       return scheduler.getpid();
     },
@@ -668,26 +864,25 @@ const sdk = {
     uname(): { sysname: string; release: string; machine: string } {
       return { sysname: 'JSOS', release: '1.0.0', machine: 'i686' };
     },
+    /** Screen width in pixels (0 in text mode). Use os.wm.screenWidth for WM-specific code. */
+    screenWidth():  number { return wm ? wm.screenWidth  : 0; },
+    /** Screen height in pixels (0 in text mode). Use os.wm.screenHeight for WM-specific code. */
+    screenHeight(): number { return wm ? wm.screenHeight : 0; },
   },
 
-  // ── Multi-process (isolated QuickJS runtimes) ─────────────────────────────
+  // ── Multi-process ────────────────────────────────────────────────────────────
 
   /**
-   * Spawn and manage isolated QuickJS child runtimes.
-   * Each process has its own heap, GC, and global scope.
-   * The WM automatically ticks all live processes every frame (~16 ms).
-   * Communicate via send/recv and kernel.postMessage/pollMessage inside the child.
+   * Process management — spawn child runtimes, signal, cancel coroutines.
    *
    * Example:
-   *   var p = os.process.spawn(`
-   *     var n = 0;
-   *     function tick() { kernel.postMessage(String(++n)); }
-   *   `, 'counter');
-   *   p.eval('tick()');
-   *   p.recv(); // → 1
+   *   var p = os.process.spawn('function step() { kernel.postMessage(String(++n)); }', 'worker');
+   *   p.eval('var n=0');
+   *   p.eval('step()');
+   *   p.recv(); // → '1'
    */
   process: {
-    /** Spawn a new isolated QuickJS runtime.  See JSProcess docs for full API. */
+    /** Spawn a new isolated QuickJS runtime. */
     spawn(code: string, name?: string): JSProcess {
       return JSProcess.spawn(code, name);
     },
@@ -695,130 +890,176 @@ const sdk = {
     list(): Array<{ id: number; inboxCount: number; outboxCount: number }> {
       return listProcesses();
     },
-    /**
-     * All OS-level processes known to the scheduler (idle, kernel, init,
-     * and any forked children).  Equivalent to `ps aux`.
-     */
+    /** All OS-level processes known to the scheduler (like `ps aux`). */
     all(): ProcessContext[] {
       return scheduler.getLiveProcesses();
     },
-    /**
-     * Send a signal to a process by PID.
-     * Fatal signals (SIGKILL, SIGTERM, SIGINT, …) terminate the process.
-     * Ignored by default: SIGCHLD, SIGCONT.
-     *
-     * Example:
-     *   os.process.kill(5, os.process.SIG.SIGTERM); // graceful
-     *   os.process.kill(5, os.process.SIG.SIGKILL);  // hard kill
-     */
+    /** Send a POSIX signal to a process.  Example: os.process.kill(5, os.process.SIG.SIGTERM). */
     kill(pid: number, sig: number): boolean {
       return processManager.kill(pid, sig);
     },
-    /** POSIX signal numbers (e.g. os.process.SIG.SIGTERM). */
+    /** POSIX signal number constants. */
     SIG,
-    /** Change the scheduling algorithm for the process scheduler. */
-    setAlgorithm(alg: SchedulingAlgorithm): void {
-      scheduler.setAlgorithm(alg);
+    /**
+     * Cancel a running coroutine or in-flight os.net.fetch by id.
+     * Safe to call even if the coroutine has already finished.
+     */
+    cancel(coroId: number): void {
+      threadManager.cancelCoroutine(coroId);
     },
-    /** Get the current scheduling algorithm. */
-    getAlgorithm(): SchedulingAlgorithm {
-      return scheduler.getAlgorithm();
+    /**
+     * Register a named cooperative coroutine.
+     * step() is called once per WM frame (~16 ms).  Return 'done' to stop.
+     * Returns an id for os.process.cancel().
+     */
+    coroutine(name: string, step: () => 'done' | 'pending'): number {
+      return threadManager.runCoroutine(name, step);
+    },
+    /**
+     * Zero-copy shared memory between parent and a child JSProcess.
+     * Eliminates JSON serialisation for large data transfers.
+     */
+    sharedBuffer: {
+      /** Allocate bytes of shared memory. Returns a buffer id. */
+      create(bytes: number): number {
+        return (kernel as any).sharedBufferCreate ? (kernel as any).sharedBufferCreate(bytes) : -1;
+      },
+      /** Map a shared buffer into the current JS runtime by id. */
+      open(id: number): ArrayBuffer | null {
+        return (kernel as any).sharedBufferOpen ? (kernel as any).sharedBufferOpen(id) : null;
+      },
     },
   },
 
-  // ── IPC (pipes, signals, message queues between JS coroutines) ────────────
+  // ── IPC ──────────────────────────────────────────────────────────────────────
 
   /**
-   * Inter-process communication primitives.
-   * Provides pipes, POSIX signals, and named message queues that work
-   * across scheduler contexts and coroutines.
+   * Inter-process communication: pipes, signals, typed message queues.
    *
-   * Example:
-   *   var pipe = os.ipc.createPipe(3, 4);
-   *   pipe.write('hello');
-   *   pipe.read(5); // → 'hello'
+   * Example (pipe):
+   *   var [r, w] = os.ipc.pipe();
+   *   w.write('hello');
+   *   r.read(); // → 'hello'
+   *
+   * Example (signals):
+   *   os.ipc.signal.on('SIGTERM', function() { cleanup(); });
+   *
+   * Example (messages):
+   *   os.ipc.message.subscribe();
+   *   os.ipc.message.send(0, 'ping', { ts: os.system.uptime() }); // broadcast
+   *   var msg = os.ipc.message.recv('ping'); // → { type, from, payload }
    */
-  ipc,
+  ipc: {
+    /** Create a pipe.  Both ends of the returned pair are the same buffer. */
+    pipe(): [Pipe, Pipe] { return ipc.pipe(); },
+    /** Create a bidirectional FIFO (single Pipe object for both ends). */
+    fifo(): Pipe { return ipc.fifo(); },
+    /** Look up a pipe by its file descriptor number. */
+    getPipe(fd: number): Pipe | null { return ipc.getPipe(fd); },
+    /** Close one end of a pipe by its file descriptor. */
+    closePipe(fd: number): void { ipc.closePipe(fd); },
 
-  // ── User accounts and authentication ─────────────────────────────────────
+    /** Signal handling for the current process. */
+    signal: {
+      /** Register a handler for a named signal on the current process. */
+      on(sigName: string, handler: (sig: number) => void): void {
+        var num = (SIG as any)[sigName];
+        if (num !== undefined) ipc.signals.handle(scheduler.getpid(), num, handler);
+      },
+      /** Remove a registered signal handler from the current process. */
+      off(sigName: string): void {
+        var num = (SIG as any)[sigName];
+        if (num !== undefined) ipc.signals.ignore(scheduler.getpid(), num);
+      },
+      /** Send a named signal to another process by PID. */
+      send(pid: number, sigName: string): void {
+        var num = (SIG as any)[sigName];
+        if (num !== undefined) ipc.signals.send(pid, num);
+      },
+      /** Dequeue all pending (unhandled) signals for the current process. */
+      poll(): number[] {
+        return ipc.signals.poll(scheduler.getpid());
+      },
+    },
+
+    /** Typed message passing between processes. */
+    message: {
+      /** Send a typed message to a process (toPid=0 = broadcast). */
+      send(toPid: number, type: string, payload: unknown): void {
+        ipc.mq.send({ type, from: scheduler.getpid(), to: toPid, payload });
+      },
+      /** Receive the next message for the current process, optionally filtered by type. */
+      recv(type?: string): { type: string; from: number; payload: unknown } | null {
+        var m = ipc.mq.recv(scheduler.getpid(), type);
+        return m ? { type: m.type, from: m.from, payload: m.payload } : null;
+      },
+      /** Count pending messages for the current process. */
+      available(type?: string): number {
+        return ipc.mq.available(scheduler.getpid(), type);
+      },
+      /** Subscribe to broadcast (toPid=0) messages. */
+      subscribe(): void { ipc.mq.subscribe(scheduler.getpid()); },
+      /** Unsubscribe from broadcasts and clear the message queue. */
+      unsubscribe(): void { ipc.mq.unsubscribe(scheduler.getpid()); },
+    },
+
+    /** Send SIGINT (Ctrl+C) to a process. */
+    interrupt(pid: number): void { ipc.interrupt(pid); },
+    /** Send SIGTERM to a process. */
+    terminate(pid: number): void { ipc.terminate(pid); },
+  },
+
+  // ── User accounts ────────────────────────────────────────────────────────────
 
   /**
    * User account management and authentication.
-   * Reads/writes /etc/passwd and /etc/group.
-   *
-   * Exposes the full UserManager — all methods below are available:
-   *   os.users.login(name, pw)          login as a user
-   *   os.users.logout()                 return to root session
-   *   os.users.whoami()                 get current user (alias for getCurrentUser)
-   *   os.users.su(nameOrUid)            switch user (root only)
-   *   os.users.isRoot()                 → boolean
-   *   os.users.listUsers()              → User[]
-   *   os.users.listGroups()             → Group[]
-   *   os.users.getUser(nameOrUid)       → User | null
-   *   os.users.getGroup(nameOrGid)      → Group | null
-   *   os.users.getGroupsForUser(name)   → Group[]
-   *   os.users.addUser(name, pw, opts)  → User | null  (root only)
-   *   os.users.removeUser(name)         → boolean      (root only)
-   *   os.users.passwd(name, newPw)      → boolean
-   *   os.users.idString(user?)          → 'uid=…(name) gid=…(group) groups=…'
-   */
-  users: Object.assign(users, {
-    /** Alias for getCurrentUser() — returns the currently logged-in User. */
-    whoami(): User | null {
-      return users.getCurrentUser();
-    },
-  }),  
-
-  // ── Disk (FAT32/FAT16 persistent storage) ───────────────────────────────
-
-  /**
-   * Persistent disk storage via FAT32/FAT16.  Only available when QEMU
-   * presents a block device; check `os.disk.available()` first.
    *
    * Example:
-   *   if (os.disk.available()) {
-   *     os.disk.write('/notes.txt', 'hello');
-   *     os.disk.read('/notes.txt'); // → 'hello'
-   *   }
+   *   os.users.login('user', '');
+   *   os.users.whoami()?.name;   // → 'user'
+   *   os.users.isRoot();         // → false
    */
-  disk: {
-    /** Returns true when a FAT disk driver has been mounted. */
-    available(): boolean { return !!(globalThis as any)._diskFS; },
-    /** Read a file from disk.  Returns null if unavailable or not found. */
-    read(path: string): string | null {
-      var d = (globalThis as any)._diskFS; return d ? d.read(path) : null;
+  users: {
+    /** Returns the currently logged-in user. */
+    whoami(): User | null { return users.getCurrentUser(); },
+    /** Log in as user (returns false on bad password). */
+    login(name: string, pw: string): boolean { return users.login(name, pw); },
+    /** Log out and return to the root session. */
+    logout(): void { users.logout(); },
+    /** Switch user context (root only, or matching credentials). */
+    su(nameOrUid: string | number): boolean { return users.su(nameOrUid); },
+    /** Returns true when current user is root (uid 0). */
+    isRoot(): boolean { return users.isRoot(); },
+    /** List all non-system user accounts. */
+    list(): User[] { return users.listUsers(); },
+    /** List all groups. */
+    listGroups(): Group[] { return users.listGroups(); },
+    /** Look up a user by name or uid. */
+    getUser(nameOrUid: string | number): User | null { return users.getUser(nameOrUid); },
+    /** Look up a group by name or gid. */
+    getGroup(nameOrGid: string | number): Group | null { return users.getGroup(nameOrGid); },
+    /** Get all groups a user belongs to. */
+    getGroupsForUser(name: string): Group[] { return users.getGroupsForUser(name); },
+    /** Add a new user account.  Requires root. Returns null on failure. */
+    addUser(name: string, pw: string, opts?: { displayName?: string; home?: string; shell?: string; uid?: number; gid?: number }): User | null {
+      return users.addUser(name, pw, opts);
     },
-    /** Write (create or overwrite) a file on disk.  Returns false if unavailable. */
-    write(path: string, data: string): boolean {
-      var d = (globalThis as any)._diskFS; return d ? !!d.writeFile(path, data) : false;
-    },
-    /** List directory entries.  Returns [] if unavailable. */
-    list(path?: string): Array<{ name: string; type: 'file' | 'dir'; size: number }> {
-      var d = (globalThis as any)._diskFS; return d ? (d.list(path || '/') ?? []) : [];
-    },
-    /** Create a directory.  Returns false if unavailable. */
-    mkdir(path: string): boolean {
-      var d = (globalThis as any)._diskFS; return d ? !!d.mkdir(path) : false;
-    },
-    /** Check whether a path exists. */
-    exists(path: string): boolean {
-      var d = (globalThis as any)._diskFS; return d ? !!d.exists(path) : false;
-    },
-    /** Remove a file or empty directory. */
-    rm(path: string): boolean {
-      var d = (globalThis as any)._diskFS; return d ? !!d.remove(path) : false;
-    },
+    /** Remove a user account.  Requires root. Cannot remove root. */
+    removeUser(name: string): boolean { return users.removeUser(name); },
+    /** Change a user's password. */
+    passwd(name: string, newPw: string): boolean { return users.passwd(name, newPw); },
+    /** Format user/group identity as a string (like `id`). */
+    idString(user?: User): string { return users.idString(user); },
   },
 
-  // ── Clipboard (WM-backed) ───────────────────────────────────────────────
+  // ── Clipboard ────────────────────────────────────────────────────────────────
 
   /**
-   * System clipboard backed by the WindowManager.
-   * Only meaningful once a WM instance is active (windowed mode).
+   * System clipboard backed by the WM.  No-op in text mode.
    *
    * Example:
-   *   os.clipboard.write('copy me');
-   *   os.clipboard.read(); // → 'copy me'
+   *   os.clipboard.write('hello');
+   *   os.clipboard.read(); // → 'hello'
    */
   clipboard: {
     /** Read the current clipboard text. */
@@ -827,24 +1068,20 @@ const sdk = {
     write(text: string): void { if (wm) wm.setClipboard(text); },
   },
 
-  // ── Window Manager ─────────────────────────────────────────────────────
+  // ── Window Manager ───────────────────────────────────────────────────────────
 
   /**
-   * Window manager API for app code that needs to open child windows,
-   * query the window list, or force a repaint.
-   * All methods are no-ops if the WM has not been initialised (text mode).
+   * Window manager API.  All methods are no-ops when the WM is not running
+   * (text mode).  Check os.wm.available() first if in doubt.
    *
-   * Example (app that opens a dialog):
-   *   os.wm.openWindow({ title: 'Alert', width: 300, height: 120, app: myDialog });
+   * Example:
+   *   var win = os.wm.openWindow({ title: 'Demo', app: myApp, width: 400, height: 300 });
    */
   wm: {
-    /** Returns true when the WM is running (framebuffer / windowed mode). */
+    /** Returns true when the WM is running (framebuffer mode). */
     available(): boolean { return wm !== null; },
 
-    /**
-     * Open a new window.  Returns the WMWindow or null in text mode.
-     * `app` must implement the App interface (onMount, render, onKey, onMouse, …)
-     */
+    /** Open a new window.  Returns the WMWindow or null in text mode. */
     openWindow(opts: {
       title: string;
       app: App;
@@ -857,34 +1094,153 @@ const sdk = {
       return wm ? wm.createWindow(opts) : null;
     },
 
-    /** Close a window by its id (triggers app.onUnmount). */
+    /** Close a window by id (triggers app.onUnmount). */
     closeWindow(id: number): void { if (wm) wm.closeWindow(id); },
-
     /** Move keyboard focus to a window. */
     focus(id: number): void { if (wm) wm.focusWindow(id); },
-
-    /** Return a snapshot of all open windows. */
+    /** Snapshot of all open windows. */
     getWindows(): WMWindow[] { return wm ? wm.getWindows() : []; },
-
-    /** Return the currently focused window, or null. */
+    /** The currently focused window, or null. */
     getFocused(): WMWindow | null { return wm ? wm.getFocused() : null; },
-
-    /** Signal the compositor that something changed; force a full redraw. */
+    /** Force a full compositor redraw. */
     markDirty(): void { if (wm) wm.markDirty(); },
-
-    /** Screen dimensions (0 × 0 in text mode). */
+    /** Screen width in pixels (0 in text mode). */
     screenWidth():  number { return wm ? wm.screenWidth  : 0; },
+    /** Screen height in pixels (0 in text mode). */
     screenHeight(): number { return wm ? wm.screenHeight : 0; },
+
+    /** Update a window's title bar text. */
+    setTitle(id: number, title: string): void { if (wm) wm.setTitle(id, title); },
+    /** Minimize a window to the taskbar. */
+    minimize(id: number): void { if (wm) wm.minimiseWindow(id); },
+    /** Restore a minimized window to its normal state. */
+    restore(id: number): void { if (wm) wm.restoreWindow(id); },
+    /** Maximize / restore a window (toggle). */
+    maximize(id: number): void { if (wm) wm.maximiseWindow(id); },
+    /** Returns 'normal', 'minimized', 'maximized', or null if window not found. */
+    getState(id: number): 'normal' | 'minimized' | 'maximized' | null {
+      if (!wm) return null;
+      var wins = wm.getWindows();
+      for (var _wi = 0; _wi < wins.length; _wi++) {
+        var _w = wins[_wi];
+        if (_w.id === id) return _w.minimised ? 'minimized' : _w.maximised ? 'maximized' : 'normal';
+      }
+      return null;
+    },
+
+    /**
+     * Modal dialogs.  Callbacks are called when the dialog closes.
+     * In text mode, dialogs fall back to print() with a default response.
+     *
+     * Example:
+     *   os.wm.dialog.confirm('Delete file?', function(ok) { if (ok) doDelete(); });
+     */
+    dialog: {
+      /** Show an informational alert with an OK button. */
+      alert(message: string, opts?: { title?: string }): void {
+        _dlgAlert(message, (opts && opts.title) ? opts.title : 'Alert');
+      },
+      /** Show a confirm dialog.  callback receives true (OK) or false (Cancel). */
+      confirm(message: string, callback: (ok: boolean) => void, opts?: { title?: string; okLabel?: string; cancelLabel?: string }): void {
+        _dlgConfirm(
+          message,
+          (opts && opts.title)       ? opts.title       : 'Confirm',
+          (opts && opts.okLabel)     ? opts.okLabel     : 'OK',
+          (opts && opts.cancelLabel) ? opts.cancelLabel : 'Cancel',
+          callback
+        );
+      },
+      /** Show a text-input prompt.  callback receives the string or null on Cancel. */
+      prompt(question: string, callback: (value: string | null) => void, opts?: { title?: string; defaultValue?: string }): void {
+        _dlgPrompt(
+          question,
+          (opts && opts.title)        ? opts.title        : 'Input',
+          (opts && opts.defaultValue) ? opts.defaultValue : '',
+          callback
+        );
+      },
+    },
   },
 
-  // ── Sync primitives ────────────────────────────────────────────────────────
+  // ── Notifications ─────────────────────────────────────────────────────────────
 
   /**
-   * Cooperative synchronisation primitives (Mutex / Condvar / Semaphore).
-   * These are cooperative, not preemptive — lock() yields to other coroutines.
-   * Already fully implemented in process/sync.ts; exposed here for app use.
+   * Toast notifications.
+   * In text mode: prints a prefixed line to the terminal.
+   * In WM mode: emits a 'notify:show' event (subscribe with os.events.on).
    *
-   * Note: Semaphore uses .value() (not .count) to read the current count.
+   * Example:
+   *   os.notify('File saved', { level: 'success', durationMs: 2000 });
+   *   var unsub = os.events.on('notify:show', function(n) { renderToast(n); });
+   */
+  notify: Object.assign(
+    function notify_fn(message: string, opts?: { level?: 'info'|'success'|'warn'|'error'; durationMs?: number }): number {
+      return _notify(message, opts);
+    },
+    {
+      /** Dismiss a notification before it auto-expires. */
+      dismiss(id: number): void { _notifyDismiss(id); },
+      /** Dismiss all active notifications. */
+      dismissAll(): void { _notifyDismissAll(); },
+      /** All currently active (not yet dismissed / expired) notifications. */
+      getAll(): Array<{ id: number; message: string; level: string; until: number }> {
+        return _notifications.filter(function(n) { return n.active; }).map(function(n) {
+          return { id: n.id, message: n.message, level: n.level, until: n.until };
+        });
+      },
+    }
+  ),
+
+  // ── App registry ──────────────────────────────────────────────────────────────
+
+  /**
+   * Register and launch named apps.
+   * The shell `open <name>` command uses this registry.
+   *
+   * Example:
+   *   os.apps.register(
+   *     { name: 'my-app', displayName: 'My App', minWidth: 400, minHeight: 300 },
+   *     function() { return new MyApp(); }
+   *   );
+   *   os.apps.launch('my-app');
+   */
+  apps: {
+    /** Register an app with its manifest and factory function. */
+    register(manifest: AppManifest, factory: (args?: string[]) => App): void {
+      _appRegistry.set(manifest.name, { manifest, factory });
+    },
+    /** Unregister an app. */
+    unregister(name: string): void { _appRegistry.delete(name); },
+    /** List all registered app manifests. */
+    list(): AppManifest[] {
+      var out: AppManifest[] = [];
+      _appRegistry.forEach(function(e) { out.push(e.manifest); });
+      return out;
+    },
+    /** Returns true if an app with the given name is registered. */
+    isRegistered(name: string): boolean { return _appRegistry.has(name); },
+    /**
+     * Launch a registered app in a new WM window.
+     * Returns the WMWindow, or null in text mode or if not registered.
+     */
+    launch(name: string, args?: string[]): WMWindow | null {
+      var entry = _appRegistry.get(name);
+      if (!entry) return null;
+      var m = entry.manifest;
+      return sdk.wm.openWindow({
+        title:  m.displayName,
+        app:    entry.factory(args),
+        width:  m.minWidth  || 400,
+        height: m.minHeight || 300,
+      });
+    },
+  },
+
+  // ── Sync primitives ───────────────────────────────────────────────────────────
+
+  /**
+   * Cooperative synchronisation primitives.
+   * These are NOT preemptive — lock() blocks only in a cooperative scheduler sense.
    *
    * Example:
    *   var mtx = new os.sync.Mutex();
@@ -892,7 +1248,7 @@ const sdk = {
    */
   sync: { Mutex, Condvar, Semaphore },
 
-  // ── Environment variables ─────────────────────────────────────────────────
+  // ── Environment variables ─────────────────────────────────────────────────────
 
   /**
    * Environment variables.  Initialised from /etc/environment at first access.
@@ -930,14 +1286,14 @@ const sdk = {
     },
   },
 
-  // ── Path manipulation ─────────────────────────────────────────────────────
+  // ── Path manipulation ─────────────────────────────────────────────────────────
 
   /**
    * Pure-string path utilities — no filesystem access.
    *
    * Example:
-   *   os.path.join('/etc', 'passwd')         // '/etc/passwd'
-   *   os.path.dirname('/etc/passwd')         // '/etc'
+   *   os.path.join('/etc', 'passwd')           // '/etc/passwd'
+   *   os.path.dirname('/etc/passwd')           // '/etc'
    *   os.path.basename('/etc/foo.txt', '.txt') // 'foo'
    */
   path: {
@@ -958,7 +1314,7 @@ const sdk = {
       if (path === '/') return '/';
       var s = path.replace(/\/$/, '');
       var idx = s.lastIndexOf('/');
-      if (idx < 0)  return '.';
+      if (idx < 0)   return '.';
       if (idx === 0) return '/';
       return s.slice(0, idx);
     },
@@ -1014,7 +1370,7 @@ const sdk = {
     },
   },
 
-  // ── Timers ────────────────────────────────────────────────────────────────
+  // ── Timers ────────────────────────────────────────────────────────────────────
 
   /**
    * Coroutine-driven timers (~10 ms granularity on bare metal).
@@ -1025,20 +1381,14 @@ const sdk = {
    *   // in onUnmount: os.timer.clearAll();
    */
   timer: {
-    /**
-     * Call fn once after ms milliseconds.
-     * Returns an id for clearTimeout.
-     */
+    /** Call fn once after ms milliseconds.  Returns an id for clearTimeout. */
     setTimeout(fn: () => void, ms: number): number {
       _startTimerPump();
       var id = _nextTimerId++;
       _timers.push({ id, fn, deadline: kernel.getUptime() + ms, interval: 0, active: true });
       return id;
     },
-    /**
-     * Call fn repeatedly every ms milliseconds.
-     * Returns an id for clearInterval.
-     */
+    /** Call fn repeatedly every ms milliseconds.  Returns an id for clearInterval. */
     setInterval(fn: () => void, ms: number): number {
       _startTimerPump();
       var id = _nextTimerId++;
@@ -1057,13 +1407,13 @@ const sdk = {
         if (_timers[_ci2].id === id) { _timers[_ci2].active = false; break; }
       }
     },
-    /** Cancel all pending timers and intervals. Call this in app.onUnmount. */
+    /** Cancel all pending timers and intervals.  Call this in app.onUnmount. */
     clearAll(): void {
       for (var _ca = 0; _ca < _timers.length; _ca++) _timers[_ca].active = false;
     },
   },
 
-  // ── Event bus ─────────────────────────────────────────────────────────────
+  // ── Event bus ─────────────────────────────────────────────────────────────────
 
   /**
    * Lightweight pub/sub event bus for app-to-app and system-to-app messaging.
@@ -1071,10 +1421,10 @@ const sdk = {
    *
    * System events: 'system:boot', 'wm:ready', 'wm:window:open', 'wm:window:close',
    *                'disk:mounted', 'net:up', 'net:down', 'user:login', 'user:logout',
-   *                'theme:change', 'prefs:change'.
+   *                'notify:show', 'notify:dismiss', 'theme:change', 'prefs:change'.
    *
    * Example:
-   *   var unsub = os.events.on('net:up', function(d) { print('IP: ' + d.ip); });
+   *   var unsub = os.events.on('net:up', function(d) { os.print('IP: ' + d.ip); });
    *   // in onUnmount: unsub();
    */
   events: {
@@ -1099,12 +1449,7 @@ const sdk = {
     },
     /** Publish an event to all subscribers. */
     emit<T = unknown>(event: string, data?: T): void {
-      var list = _evtListeners.get(event);
-      if (!list) return;
-      var copy = list.slice();
-      for (var _evi = 0; _evi < copy.length; _evi++) {
-        try { copy[_evi](data); } catch (_e) {}
-      }
+      _emitEvent(event, data);
     },
     /** Unsubscribe a specific handler from an event. */
     off(event: string, handler: (data: any) => void): void {
@@ -1120,13 +1465,13 @@ const sdk = {
     },
   },
 
-  // ── Text utilities ────────────────────────────────────────────────────────
+  // ── Text utilities ────────────────────────────────────────────────────────────
 
   /**
    * Text encoding, decoding, and formatting helpers.
    *
    * Example:
-   *   os.text.encodeBase64('hello')          // 'aGVsbG8='
+   *   os.text.encodeBase64('hello')           // 'aGVsbG8='
    *   os.text.format('%s: %d ms', 'boot', 42) // 'boot: 42 ms'
    *   os.text.bytes(1048576)                  // '1.0 MB'
    */
@@ -1203,7 +1548,7 @@ const sdk = {
           return s;
         });
     },
-    /** Pad string `s` to at least `width` characters.  Pads right by default. */
+    /** Pad string `s` to at least `width` characters.  right=true to left-pad. */
     pad(s: string, width: number, char?: string, right?: boolean): string {
       var pc = char || ' ';
       var padding = '';
@@ -1243,18 +1588,17 @@ const sdk = {
     },
   },
 
-  // ── Cryptography ──────────────────────────────────────────────────────────
+  // ── Cryptography ──────────────────────────────────────────────────────────────
 
   /**
-   * Cryptographic primitives.  All are pure TypeScript; no C required.
-   * Wraps the existing implementations in net/crypto.ts.
+   * Cryptographic primitives — pure TypeScript, no C required.
    *
    * Example:
-   *   os.crypto.sha256('hello')           // '2cf24dba5fb0…'
-   *   os.crypto.uuid()                    // 'xxxxxxxx-xxxx-4xxx-…'
+   *   os.crypto.sha256('hello')  // '2cf24dba5fb0…'
+   *   os.crypto.uuid()           // 'xxxxxxxx-xxxx-4xxx-…'
    */
   crypto: {
-    /** SHA-256 hash.  Input may be a string (Latin-1) or byte array. Returns hex. */
+    /** SHA-256 hash.  Input may be a string or byte array.  Returns hex. */
     sha256(data: string | number[]): string {
       return _sdkBytesToHex(_sha256Raw(typeof data === 'string' ? _sdkStrToBytes(data) : data));
     },
@@ -1268,7 +1612,7 @@ const sdk = {
       var d = typeof data === 'string' ? _sdkStrToBytes(data) : data;
       return _sdkBytesToHex(_hmacSha256Raw(k, d));
     },
-    /** Generate n random bytes (LCG seeded from kernel.getTicks() + position). */
+    /** Generate n random bytes (LCG seeded from kernel tick counter). */
     randomBytes(n: number): number[] {
       var out: number[] = [];
       var seed = kernel.getTicks() >>> 0;
@@ -1281,21 +1625,21 @@ const sdk = {
     },
     /**
      * AES-128-GCM encrypt.
-     * key: 16 bytes, iv: 12 bytes.  Returns ciphertext + 16-byte auth tag concatenated.
+     * key: 16 bytes, iv: 12 bytes.  Returns ciphertext + 16-byte auth tag.
      */
     aesEncrypt(key: number[], iv: number[], data: number[]): number[] {
-      var r = _gcmEncrypt(key, iv, [], data);   // (key, iv, aad, plaintext)
+      var r = _gcmEncrypt(key, iv, [], data);
       return r.ciphertext.concat(r.tag);
     },
     /**
      * AES-128-GCM decrypt.
      * data: ciphertext + 16-byte auth tag (as returned by aesEncrypt).
-     * Returns plaintext, or null if the authentication tag is invalid.
+     * Returns plaintext, or null if the auth tag is invalid.
      */
     aesDecrypt(key: number[], iv: number[], data: number[]): number[] | null {
       var ciphertext = data.slice(0, data.length - 16);
       var tag        = data.slice(data.length - 16);
-      return _gcmDecrypt(key, iv, [], ciphertext, tag);  // (key, iv, aad, ciphertext, tag)
+      return _gcmDecrypt(key, iv, [], ciphertext, tag);
     },
     /** Generate a random UUID v4 string. */
     uuid(): string {
@@ -1307,16 +1651,15 @@ const sdk = {
     },
   },
 
-  // ── Per-app preferences ───────────────────────────────────────────────────
+  // ── Per-app preferences ───────────────────────────────────────────────────────
 
   /**
    * Per-app persistent preferences stored at /etc/prefs/<appName>.json.
-   * Changes are flushed to the in-memory filesystem immediately.
    *
    * Example:
    *   var prefs = os.prefs.forApp('file-manager');
    *   prefs.set('sortOrder', 'name');
-   *   prefs.get('sortOrder', 'name');  // → 'name'
+   *   prefs.get('sortOrder', 'name'); // → 'name'
    */
   prefs: {
     /** Return a scoped preferences store for the given app name. */
@@ -1371,6 +1714,42 @@ const sdk = {
       };
     },
   },
+
+  // ── Backward-compatibility aliases ────────────────────────────────────────────
+
+  /**
+   * @deprecated Use os.net.fetch() instead.
+   * Kept for backward compatibility with existing apps.
+   */
+  fetchAsync(
+    url: string,
+    callback: (resp: FetchResponse | null, error?: string) => void,
+    opts?: FetchOptions,
+  ): number {
+    return _doFetch(url, callback, opts);
+  },
+
+  /**
+   * @deprecated Use os.process.coroutine() instead.
+   * Kept for backward compatibility with existing apps.
+   */
+  spawn(name: string, step: () => 'done' | 'pending'): number {
+    return threadManager.runCoroutine(name, step);
+  },
+
+  /**
+   * @deprecated Use os.process.cancel() instead.
+   * Kept for backward compatibility with existing apps.
+   */
+  cancel(coroId: number): void {
+    threadManager.cancelCoroutine(coroId);
+  },
+
+  /**
+   * @deprecated Use os.fs.disk instead.
+   * Kept for backward compatibility with existing apps.
+   */
+  disk: _diskStorage,
 
 };
 

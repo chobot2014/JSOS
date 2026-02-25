@@ -95,7 +95,7 @@ export function registerCommands(g: any): void {
         terminal.colorPrintln('  [disk] ' + p, Color.DARK_GREY);
         if (arr.length === 0) { terminal.colorPrintln('  (empty)', Color.DARK_GREY); return; }
         for (var i = 0; i < arr.length; i++) {
-          var item = arr[i];
+          var item = arr[i] as any;
           terminal.print('  ');
           if (item.type === 'directory') terminal.colorPrint(item.name + '/', Color.LIGHT_BLUE);
           else terminal.colorPrint(item.name, Color.WHITE);
@@ -226,15 +226,15 @@ export function registerCommands(g: any): void {
     getSocketId(fd: number)          { return globalFDTable.getSocketId(fd); },
     connect(fd: number, ip: string, port: number) {
       var sid = globalFDTable.getSocketId(fd);
-      return sid >= 0 ? net.connect(sid, ip, port) : false;
+      return sid >= 0 ? net.connect(sid as any, ip, port) : false;
     },
     send(fd: number, data: string) {
       var sid = globalFDTable.getSocketId(fd);
-      if (sid >= 0) net.send(sid, data);
+      if (sid >= 0) net.send(sid as any, data);
     },
     recv(fd: number) {
       var sid = globalFDTable.getSocketId(fd);
-      return sid >= 0 ? (net.recv(sid) || '') : '';
+      return sid >= 0 ? (net.recv(sid as any) || '') : '';
     },
     ioctl(fd: number, request: number, arg: number) {
       return globalFDTable.ioctl(fd, request, arg);

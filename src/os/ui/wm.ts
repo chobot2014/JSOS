@@ -268,6 +268,22 @@ export class WindowManager {
     this._wmDirty = true;
   }
 
+  /** Public wrapper — maximise if normal, restore if already maximised. */
+  maximiseWindow(id: number): void {
+    var win = this._findWindow(id);
+    if (!win) return;
+    this._toggleMaximise(win);
+    this._wmDirty = true;
+  }
+
+  /** Update the title bar text of a window. */
+  setTitle(id: number, title: string): void {
+    var win = this._findWindow(id);
+    if (!win) return;
+    win.title = title;
+    this._wmDirty = true;
+  }
+
   // ── Clipboard ──────────────────────────────────────────────────────────
 
   getClipboard(): string { return this._clipboard; }
