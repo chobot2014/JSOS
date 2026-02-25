@@ -20,7 +20,10 @@ import { Color } from '../core/kernel.js';
 import fs from '../fs/filesystem.js';
 import { openEditor } from './editor.js';
 import { EditorApp } from '../apps/editor/index.js';
-import { wm } from '../ui/wm.js';
+import { fileManagerApp } from '../apps/file-manager/index.js';
+import { systemMonitorApp } from '../apps/system-monitor/index.js';
+import { settingsApp } from '../apps/settings/index.js';
+import { wm, getWM, type App } from '../ui/wm.js';
 import { scheduler } from '../process/scheduler.js';
 import { vmm } from '../process/vmm.js';
 import { init } from '../process/init.js';
@@ -1004,12 +1007,71 @@ export function registerCommands(g: any): void {
     return printableObject(data, printer);
   };
 
+  // ── App registry ─────────────────────────────────────────────────────────
+
+  /** Built-in app registry: name → factory that returns an App instance. */
+  var _appRegistry: Record<string, { factory: () => App; defaultWidth: number; defaultHeight: number }> = {
+    'editor':         { factory: () => new EditorApp(),   defaultWidth: 720,  defaultHeight: 480 },
+    'file-manager':   { factory: () => fileManagerApp,    defaultWidth: 640,  defaultHeight: 480 },
+    'system-monitor': { factory: () => systemMonitorApp,  defaultWidth: 560,  defaultHeight: 400 },
+    'settings':       { factory: () => settingsApp,       defaultWidth: 560,  defaultHeight: 440 },
+  };
+
+  /** List all registered apps. */
+  g.apps = function() {
+    var names = Object.keys(_appRegistry);
+    return printableArray(names, function(arr) {
+      terminal.colorPrintln('  Registered apps:', Color.YELLOW);
+      for (var i = 0; i < arr.length; i++) {
+        terminal.println('    ' + arr[i]);
+      }
+      terminal.colorPrintln('  Use launch(\'name\') to open.', Color.DARK_GREY);
+    });
+  };
+
+  /** Generic app launcher: launch('file-manager') etc. */
+  g.launch = function(name: string, opts?: { width?: number; height?: number; title?: string }) {
+    var reg = _appRegistry[name];
+    if (!reg) {
+      terminal.colorPrintln("Unknown app '" + name + "'. Use apps() to list available apps.", Color.LIGHT_RED);
+      return;
+    }
+    if (wm === null) {
+      terminal.colorPrintln('Window manager not running (text mode).', Color.LIGHT_RED);
+      return;
+    }
+    var app  = reg.factory();
+    var w    = (opts && opts.width)  || reg.defaultWidth;
+    var h    = (opts && opts.height) || reg.defaultHeight;
+    var t    = (opts && opts.title)  || (name.charAt(0).toUpperCase() + name.slice(1).replace(/-/g, ' '));
+    wm.createWindow({ title: t, width: w, height: h, app: app, closeable: true });
+    return t + ' opened';
+  };
+
+  /** Open the File Manager app. */
+  g.files = function(path?: string) {
+    if (wm === null) { terminal.colorPrintln('WM not running.', Color.LIGHT_RED); return; }
+    wm.createWindow({ title: 'File Manager', width: 640, height: 480, app: fileManagerApp, closeable: true });
+  };
+
+  /** Open the System Monitor app. */
+  g.sysmon = function() {
+    if (wm === null) { terminal.colorPrintln('WM not running.', Color.LIGHT_RED); return; }
+    wm.createWindow({ title: 'System Monitor', width: 560, height: 400, app: systemMonitorApp, closeable: true });
+  };
+
+  /** Open the Settings app. */
+  g.settings = function() {
+    if (wm === null) { terminal.colorPrintln('WM not running.', Color.LIGHT_RED); return; }
+    wm.createWindow({ title: 'Settings', width: 560, height: 440, app: settingsApp, closeable: true });
+  };
+
   // Text editor — opens windowed EditorApp in WM mode, VGA editor in text mode
   g.edit = function(path?: string) {
     if (wm !== null) {
       var app = new EditorApp(path);
       var title = path ? 'Edit: ' + path.split('/').pop() : 'Editor';
-      wm.createWindow({ title: title, width: 640, height: 200, app: app, closeable: true });
+      wm.createWindow({ title: title, width: 720, height: 480, app: app, closeable: true });
     } else {
       openEditor(path);
     }
@@ -1121,6 +1183,15 @@ export function registerCommands(g: any): void {
     terminal.println('  net.createSocket(t)  UDP or TCP socket');
     terminal.println('');
 
+    terminal.colorPrintln('Apps:', Color.YELLOW);
+    terminal.println('  apps()               list all registered apps');
+    terminal.println('  launch(name, opts?)  open any registered app by name');
+    terminal.println('  files()              File Manager  (browse VFS + disk)');
+    terminal.println('  sysmon()             System Monitor  (CPU/mem/procs/net)');
+    terminal.println('  settings()           Settings  (display/users/network/disk)');
+    terminal.println('  edit(path?)          text editor  (^S save  ^Q quit)');
+    terminal.println('');
+
     terminal.colorPrintln('REPL:', Color.YELLOW);
     terminal.println('  history()            show input history');
     terminal.println('  env()                pseudo-environment variables');
@@ -1137,11 +1208,17 @@ export function registerCommands(g: any): void {
     terminal.colorPrint('  os.process', Color.LIGHT_CYAN);
     terminal.println('          .spawn(code, name?)  .list()  → isolated JSProcess');
     terminal.colorPrint('  os.ipc', Color.LIGHT_CYAN);
-    terminal.println('             .createPipe  .signal.send  .mq.send/.recv');
+    terminal.println('             .pipe()  .signals.handle/send  .mq.send/recv');
     terminal.colorPrint('  os.users', Color.LIGHT_CYAN);
     terminal.println('           .login .logout .whoami .getUser .addUser .passwd');
     terminal.colorPrint('  os.system', Color.LIGHT_CYAN);
-    terminal.println('          .uptime .ticks .pid .hostname .memory .uname');
+    terminal.println('          .uptime .ticks .pid .hostname .memInfo .screenWidth/Height');
+    terminal.colorPrint('  os.disk', Color.LIGHT_CYAN);
+    terminal.println('            .available .read .write .list .mkdir .exists .rm');
+    terminal.colorPrint('  os.clipboard', Color.LIGHT_CYAN);
+    terminal.println('       .read()  .write(text)');
+    terminal.colorPrint('  os.wm', Color.LIGHT_CYAN);
+    terminal.println('             .openWindow .closeWindow .getWindows .focus .markDirty');
     terminal.colorPrint('  os.spawn', Color.LIGHT_CYAN);
     terminal.println('           (name, step)  register cooperative coroutine');
     terminal.colorPrint('  os.cancel', Color.LIGHT_CYAN);

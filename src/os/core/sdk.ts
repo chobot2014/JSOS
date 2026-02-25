@@ -35,7 +35,7 @@ import { parseHttpResponse } from '../net/http.js';
 import { JSProcess, listProcesses } from '../process/jsprocess.js';
 import { ipc } from '../ipc/ipc.js';
 import { users } from '../users/users.js';
-import { wm } from '../ui/wm.js';
+import { wm, getWM, type App, type WMWindow } from '../ui/wm.js';
 export { Colors, type PixelColor } from '../ui/canvas.js';
 export { JSProcess } from '../process/jsprocess.js';
 
@@ -573,6 +573,56 @@ const sdk = {
     read(): string { return wm ? wm.getClipboard() : ''; },
     /** Write text to the clipboard. */
     write(text: string): void { if (wm) wm.setClipboard(text); },
+  },
+
+  // ── Window Manager ─────────────────────────────────────────────────────
+
+  /**
+   * Window manager API for app code that needs to open child windows,
+   * query the window list, or force a repaint.
+   * All methods are no-ops if the WM has not been initialised (text mode).
+   *
+   * Example (app that opens a dialog):
+   *   os.wm.openWindow({ title: 'Alert', width: 300, height: 120, app: myDialog });
+   */
+  wm: {
+    /** Returns true when the WM is running (framebuffer / windowed mode). */
+    available(): boolean { return wm !== null; },
+
+    /**
+     * Open a new window.  Returns the WMWindow or null in text mode.
+     * `app` must implement the App interface (onMount, render, onKey, onMouse, …)
+     */
+    openWindow(opts: {
+      title: string;
+      app: App;
+      width: number;
+      height: number;
+      x?: number;
+      y?: number;
+      closeable?: boolean;
+    }): WMWindow | null {
+      return wm ? wm.createWindow(opts) : null;
+    },
+
+    /** Close a window by its id (triggers app.onUnmount). */
+    closeWindow(id: number): void { if (wm) wm.closeWindow(id); },
+
+    /** Move keyboard focus to a window. */
+    focus(id: number): void { if (wm) wm.focusWindow(id); },
+
+    /** Return a snapshot of all open windows. */
+    getWindows(): WMWindow[] { return wm ? wm.getWindows() : []; },
+
+    /** Return the currently focused window, or null. */
+    getFocused(): WMWindow | null { return wm ? wm.getFocused() : null; },
+
+    /** Signal the compositor that something changed; force a full redraw. */
+    markDirty(): void { if (wm) wm.markDirty(); },
+
+    /** Screen dimensions (0 × 0 in text mode). */
+    screenWidth():  number { return wm ? wm.screenWidth  : 0; },
+    screenHeight(): number { return wm ? wm.screenHeight : 0; },
   },
 
 };
