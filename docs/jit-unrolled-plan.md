@@ -2403,16 +2403,14 @@ export class QJSJITCompiler {
       case OP_put_arg: {
         const idx = ops[pc] | (ops[pc+1] << 8);
         if (idx >= this._argCount) return -1;
-        e.popEcx();
-        e.movEaxEcx();
+        e.buf.push(0x58);           // POP EAX — value to store
         e.store(this._argSlot(idx));
         return pc + 2;
       }
       case OP_put_arg0: case OP_put_arg1: case OP_put_arg2: case OP_put_arg3: {
         const idx = op - OP_put_arg0;
         if (idx >= this._argCount) return -1;
-        e.popEcx();
-        e.movEaxEcx();
+        e.buf.push(0x58);           // POP EAX — value to store
         e.store(this._argSlot(idx));
         return pc;
       }
@@ -2446,24 +2444,21 @@ export class QJSJITCompiler {
       case OP_put_loc: {
         const idx = ops[pc] | (ops[pc+1] << 8);
         if (idx >= this._varCount) return -1;
-        e.popEcx();
-        e.movEaxEcx();
+        e.buf.push(0x58);           // POP EAX — value to store
         e.store(this._varSlot(idx));
         return pc + 2;
       }
       case OP_put_loc8: {
         const idx = ops[pc];
         if (idx >= this._varCount) return -1;
-        e.popEcx();
-        e.movEaxEcx();
+        e.buf.push(0x58);           // POP EAX — value to store
         e.store(this._varSlot(idx));
         return pc + 1;
       }
       case OP_put_loc0: case OP_put_loc1: case OP_put_loc2: case OP_put_loc3: {
         const idx = op - OP_put_loc0;
         if (idx >= this._varCount) return -1;
-        e.popEcx();
-        e.movEaxEcx();
+        e.buf.push(0x58);           // POP EAX — value to store
         e.store(this._varSlot(idx));
         return pc;
       }
@@ -2525,6 +2520,16 @@ export class QJSJITCompiler {
         e.peekTOS();  // MOV EAX, [ESP] — peek, do not pop (n_push=1)
         e.store(this._varSlot(idx));
         return pc;
+      }
+
+      // ── set_arg: full 3-byte form (2-byte uint16 index) ──
+
+      case OP_set_arg: {
+        const idx = ops[pc] | (ops[pc+1] << 8);
+        if (idx >= this._argCount) return -1;
+        e.peekTOS();  // MOV EAX, [ESP] — peek, do not pop (n_push=1)
+        e.store(this._argSlot(idx));
+        return pc + 2;
       }
 
       // ── set_arg zero-operand forms (index baked in, DEF: n_pop=1 n_push=1 = peek+store) ──
