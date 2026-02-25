@@ -374,6 +374,180 @@ export class Canvas {
     return font.measureText(text);
   }
 
+  // ── Extended drawing primitives ───────────────────────────────────────
+
+  /** Filled circle using scanline approach. */
+  fillCircle(cx: number, cy: number, r: number, color: PixelColor): void {
+    for (var dy = -r; dy <= r; dy++) {
+      var dx2 = Math.floor(Math.sqrt(r * r - dy * dy));
+      this.fillRect(cx - dx2, cy + dy, 2 * dx2 + 1, 1, color);
+    }
+  }
+
+  /** Circle outline using Bresenham midpoint algorithm. */
+  drawCircle(cx: number, cy: number, r: number, color: PixelColor): void {
+    var x = 0, y = r, d = 3 - 2 * r;
+    while (y >= x) {
+      this.setPixel(cx + x, cy - y, color); this.setPixel(cx - x, cy - y, color);
+      this.setPixel(cx + x, cy + y, color); this.setPixel(cx - x, cy + y, color);
+      this.setPixel(cx + y, cy - x, color); this.setPixel(cx - y, cy - x, color);
+      this.setPixel(cx + y, cy + x, color); this.setPixel(cx - y, cy + x, color);
+      if (d < 0) d += 4 * x + 6;
+      else { d += 4 * (x - y) + 10; y--; }
+      x++;
+    }
+  }
+
+  /** Filled rounded rectangle. */
+  fillRoundRect(x: number, y: number, w: number, h: number, r: number, color: PixelColor): void {
+    r = Math.min(r, w >> 1, h >> 1);
+    // Centre horizontal slab
+    this.fillRect(x, y + r, w, h - 2 * r, color);
+    // Top + bottom slabs (between corners)
+    this.fillRect(x + r, y, w - 2 * r, r, color);
+    this.fillRect(x + r, y + h - r, w - 2 * r, r, color);
+    // Four quarter-disc corners
+    for (var row = 0; row < r; row++) {
+      var xoff = Math.floor(Math.sqrt(r * r - (r - 1 - row) * (r - 1 - row)));
+      var col = r - xoff;
+      // top-left
+      this.fillRect(x + col, y + row, xoff, 1, color);
+      // top-right
+      this.fillRect(x + w - r, y + row, xoff, 1, color);
+      // bottom-left
+      this.fillRect(x + col, y + h - 1 - row, xoff, 1, color);
+      // bottom-right
+      this.fillRect(x + w - r, y + h - 1 - row, xoff, 1, color);
+    }
+  }
+
+  /** Rounded rectangle outline. */
+  drawRoundRect(x: number, y: number, w: number, h: number, r: number, color: PixelColor): void {
+    r = Math.min(r, w >> 1, h >> 1);
+    // Straight edges
+    this.fillRect(x + r,     y,         w - 2 * r, 1, color);
+    this.fillRect(x + r,     y + h - 1, w - 2 * r, 1, color);
+    this.fillRect(x,         y + r,     1, h - 2 * r, color);
+    this.fillRect(x + w - 1, y + r,     1, h - 2 * r, color);
+    // Corner arcs via Bresenham
+    var bx = 0, by = r, bd = 3 - 2 * r;
+    while (by >= bx) {
+      // top-left
+      this.setPixel(x + r - bx, y + r - by, color);
+      this.setPixel(x + r - by, y + r - bx, color);
+      // top-right
+      this.setPixel(x + w - r - 1 + bx, y + r - by, color);
+      this.setPixel(x + w - r - 1 + by, y + r - bx, color);
+      // bottom-left
+      this.setPixel(x + r - bx, y + h - r - 1 + by, color);
+      this.setPixel(x + r - by, y + h - r - 1 + bx, color);
+      // bottom-right
+      this.setPixel(x + w - r - 1 + bx, y + h - r - 1 + by, color);
+      this.setPixel(x + w - r - 1 + by, y + h - r - 1 + bx, color);
+      if (bd < 0) bd += 4 * bx + 6;
+      else { bd += 4 * (bx - by) + 10; by--; }
+      bx++;
+    }
+  }
+
+  // ── Gradient fills ────────────────────────────────────────────────────
+
+  /** Linear gradient fill. `stops` are {stop:0..1, color} in order. Direction defaults to vertical. */
+  drawLinearGradient(
+    x: number, y: number, w: number, h: number,
+    stops: Array<{ stop: number; color: PixelColor }>,
+    direction: 'horizontal' | 'vertical' | 'diagonal' = 'vertical',
+  ): void {
+    if (stops.length === 0) return;
+    if (stops.length === 1) { this.fillRect(x, y, w, h, stops[0].color); return; }
+    var len = direction === 'horizontal' ? w : direction === 'vertical' ? h : Math.max(w, h);
+    for (var i = 0; i < len; i++) {
+      var t = len <= 1 ? 0 : i / (len - 1);
+      var c = Canvas._lerpStops(stops, t);
+      if (direction === 'horizontal') this.fillRect(x + i, y, 1, h, c);
+      else if (direction === 'vertical') this.fillRect(x, y + i, w, 1, c);
+      else { // diagonal
+        var frac = i / len;
+        var cx2 = Math.round(x + w * frac);
+        var cy2 = Math.round(y + h * frac);
+        this.setPixel(cx2, cy2, c);
+      }
+    }
+  }
+
+  /** Radial gradient fill from centre outward. `stops` are {stop:0..1, color} in order. */
+  drawRadialGradient(
+    cx: number, cy: number, r: number,
+    stops: Array<{ stop: number; color: PixelColor }>,
+  ): void {
+    if (stops.length === 0 || r <= 0) return;
+    var x0 = Math.max(0, cx - r), x1 = Math.min(this.width,  cx + r + 1);
+    var y0 = Math.max(0, cy - r), y1 = Math.min(this.height, cy + r + 1);
+    for (var py = y0; py < y1; py++) {
+      var dy2 = py - cy;
+      for (var px = x0; px < x1; px++) {
+        var dx2 = px - cx;
+        var dist = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+        if (dist > r) continue;
+        var t = dist / r;
+        this.setPixel(px, py, Canvas._lerpStops(stops, t));
+      }
+    }
+  }
+
+  private static _lerpStops(stops: Array<{ stop: number; color: PixelColor }>, t: number): PixelColor {
+    if (t <= stops[0].stop)            return stops[0].color;
+    if (t >= stops[stops.length - 1].stop) return stops[stops.length - 1].color;
+    for (var si = 0; si < stops.length - 1; si++) {
+      var s0 = stops[si], s1 = stops[si + 1];
+      if (t >= s0.stop && t <= s1.stop) {
+        var lt = (s1.stop === s0.stop) ? 0 : (t - s0.stop) / (s1.stop - s0.stop);
+        return Canvas._lerpColor(s0.color, s1.color, lt);
+      }
+    }
+    return stops[stops.length - 1].color;
+  }
+
+  private static _lerpColor(a: PixelColor, b: PixelColor, t: number): PixelColor {
+    var ia = 1 - t;
+    var aa = ((a >>> 24) & 0xFF) * ia + ((b >>> 24) & 0xFF) * t;
+    var rr = ((a >>> 16) & 0xFF) * ia + ((b >>> 16) & 0xFF) * t;
+    var gg = ((a >>>  8) & 0xFF) * ia + ((b >>>  8) & 0xFF) * t;
+    var bb = ((a >>>  0) & 0xFF) * ia + ((b >>>  0) & 0xFF) * t;
+    return ((aa & 0xFF) << 24) | ((rr & 0xFF) << 16) | ((gg & 0xFF) << 8) | (bb & 0xFF);
+  }
+
+  // ── Sprite rendering ──────────────────────────────────────────────────
+
+  /**
+   * Render an indexed-colour sprite.
+   * `pixels` is a flat row-major array of palette indices.
+   * `palette[0]` is transparent by convention (alpha=0 → skip).
+   * `scale` repeats each pixel N×N times (default 1).
+   */
+  drawSprite(
+    x: number, y: number,
+    pixels: number[], pw: number, ph: number,
+    palette: PixelColor[],
+    scale = 1,
+  ): void {
+    for (var row = 0; row < ph; row++) {
+      for (var col = 0; col < pw; col++) {
+        var idx = pixels[row * pw + col];
+        if (idx < 0 || idx >= palette.length) continue;
+        var c = palette[idx];
+        if ((c >>> 24) === 0) continue; // transparent
+        var px = x + col * scale;
+        var py = y + row * scale;
+        if (scale === 1) {
+          this.setPixel(px, py, c);
+        } else {
+          this.fillRect(px, py, scale, scale, c);
+        }
+      }
+    }
+  }
+
   // ── Compositing ───────────────────────────────────────────────────────
 
   /**
@@ -414,6 +588,33 @@ export class Canvas {
       var srcOff = (sy + row) * src.width + sx + colStart;
       var dstOff =       dstY * this.width     + dx + colStart;
       this._buf.set(src._buf.subarray(srcOff, srcOff + (colEnd - colStart)), dstOff);
+    }
+  }
+
+  /**
+   * Alpha-blended blit: composite `src` onto this canvas with the given
+   * alpha value (0=transparent, 255=opaque).  Slower than `blit()` — use
+   * only when opacity < 255.  Both buffers are BGRA so channel order matches.
+   */
+  blitAlpha(src: Canvas, sx: number, sy: number, dx: number, dy: number,
+            w: number, h: number, alpha: number): void {
+    var ia = 255 - alpha;
+    for (var row = 0; row < h; row++) {
+      var dstY = dy + row;
+      if (dstY < 0 || dstY >= this.height) continue;
+      var srcRowBase = (sy + row) * src.width + sx;
+      var dstRowBase =        dstY * this.width + dx;
+      for (var col = 0; col < w; col++) {
+        var dstX = dx + col;
+        if (dstX < 0 || dstX >= this.width) continue;
+        var sp = src._buf[srcRowBase + col];
+        var dp = this._buf[dstRowBase + col];
+        var b = (( sp        & 0xFF) * alpha + ( dp        & 0xFF) * ia) >> 8;
+        var g = (((sp >>  8) & 0xFF) * alpha + ((dp >>  8) & 0xFF) * ia) >> 8;
+        var r = (((sp >> 16) & 0xFF) * alpha + ((dp >> 16) & 0xFF) * ia) >> 8;
+        var a = (((sp >> 24) & 0xFF) * alpha + ((dp >> 24) & 0xFF) * ia) >> 8;
+        this._buf[dstRowBase + col] = (a << 24) | (r << 16) | (g << 8) | b;
+      }
     }
   }
 

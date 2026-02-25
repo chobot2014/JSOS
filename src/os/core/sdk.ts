@@ -49,11 +49,73 @@ import {
 } from '../net/crypto.js';
 import type { User, Group } from '../users/users.js';
 export { Canvas, Colors, defaultFont, type PixelColor } from '../ui/canvas.js';
-export type { App, WMWindow, KeyEvent, MouseEvent } from '../ui/wm.js';
+export type { App, WMWindow, KeyEvent, MouseEvent, MenuItem } from '../ui/wm.js';
 export { JSProcess } from '../process/jsprocess.js';
 export { Mutex, Condvar, Semaphore } from '../process/sync.js';
 export type { User, Group } from '../users/users.js';
 export { Pipe } from '../ipc/ipc.js';
+export type { ProcessContext } from '../process/scheduler.js';
+
+// ── SDK-defined public types ──────────────────────────────────────────────────
+
+/**
+ * A live TCP connection returned by os.net.connect().
+ */
+export interface RawSocket {
+  readonly id: number;
+  readonly connected: boolean;
+  /** Send a string or byte array. */
+  write(data: string | number[]): void;
+  /** Receive buffered data as a string (Latin-1). Returns '' if empty. */
+  read(maxBytes?: number): string;
+  /** Receive buffered data as bytes. Returns [] if empty. */
+  readBytes(maxBytes?: number): number[];
+  /** Number of bytes currently in the receive buffer. */
+  available(): number;
+  /** Close the connection. */
+  close(): void;
+}
+
+/** A named color theme. See os.theme for usage. */
+export interface Theme {
+  name:       string;
+  bg:         number;   // ARGB — main background
+  fg:         number;   // foreground text
+  accent:     number;   // primary accent (buttons, focus rings)
+  titleBg:    number;   // window title bar background
+  titleFg:    number;   // title bar text
+  taskbarBg:  number;   // taskbar background
+  selBg:      number;   // selection background
+  selFg:      number;   // selection foreground
+  warnFg:     number;   // warning text
+  errorFg:    number;   // error text
+  successFg:  number;   // success text
+  mutedFg:    number;   // muted/disabled text
+  border:     number;   // widget border color
+}
+
+/** Fluent drawing surface returned by os.canvas.painter(). */
+export interface CanvasPainter {
+  readonly canvas: import('../ui/canvas.js').Canvas;
+  fill(color: number): void;
+  fillRect(x: number, y: number, w: number, h: number, color: number): void;
+  strokeRect(x: number, y: number, w: number, h: number, color: number): void;
+  fillRoundRect(x: number, y: number, w: number, h: number, r: number, color: number): void;
+  strokeRoundRect(x: number, y: number, w: number, h: number, r: number, color: number): void;
+  fillCircle(cx: number, cy: number, r: number, color: number): void;
+  strokeCircle(cx: number, cy: number, r: number, color: number): void;
+  drawLine(x0: number, y0: number, x1: number, y1: number, color: number): void;
+  drawText(x: number, y: number, text: string, color: number): void;
+  drawTextWrap(x: number, y: number, maxW: number, text: string, color: number, lineH?: number): number;
+  measureText(text: string): { width: number; height: number };
+  drawScrollbar(x: number, y: number, h: number, total: number, visible: number, offset: number, color?: number): void;
+  drawProgressBar(x: number, y: number, w: number, h: number, fraction: number, fgColor?: number, bgColor?: number): void;
+  drawButton(x: number, y: number, w: number, h: number, label: string, pressed?: boolean, fgColor?: number, bgColor?: number): void;
+  drawCheckbox(x: number, y: number, checked: boolean, label?: string, color?: number): void;
+  linearGradient(x: number, y: number, w: number, h: number, stops: Array<{stop: number; color: number}>, dir?: 'horizontal'|'vertical'|'diagonal'): void;
+  radialGradient(cx: number, cy: number, r: number, stops: Array<{stop: number; color: number}>): void;
+  drawSprite(x: number, y: number, pixels: number[], pw: number, ph: number, palette: number[], scale?: number): void;
+}
 
 declare var kernel: import('./kernel.js').KernelAPI;
 
@@ -670,6 +732,121 @@ function _doFetch(
 
 // ── SDK implementation ────────────────────────────────────────────────────────
 
+// ── New module-level state ────────────────────────────────────────────────────
+
+/** Cached CMOS RTC read at first call: Unix epoch ms at that moment. */
+var _rtcBootEpoch: number | null = null;
+var _rtcBootUptime = 0;
+
+/** Animation registry: id → { cb, duration, startUptime } */
+var _animRegistry = new Map<number, { cb: (elapsed: number, total: number) => boolean; duration: number; startUptime: number; coroId: number }>();
+var _nextAnimId = 1;
+
+/** Theme registry */
+var _themeMap = new Map<string, Theme>();
+var _activeThemeName = 'dark';
+
+/** fs.watch registry: path prefix → array of callbacks */
+type _WatchCb = (ev: 'change'|'delete'|'create', path: string) => void;
+var _fsWatchMap = new Map<string, _WatchCb[]>();
+var _fsWatchPatched = false;
+
+/** Raw socket receive buffers: socket.id → { sock, buf } */
+var _netSockBufs = new Map<number, { sock: import('../net/net.js').Socket; buf: number[] }>();
+
+// ── Built-in themes ───────────────────────────────────────────────────────────
+
+function _makeTheme(
+  name: string, bg: number, fg: number, accent: number,
+  titleBg: number, titleFg: number, taskbarBg: number,
+  selBg: number, selFg: number,
+  warnFg: number, errorFg: number, successFg: number, mutedFg: number, border: number,
+): Theme {
+  return { name, bg, fg, accent, titleBg, titleFg, taskbarBg,
+           selBg, selFg, warnFg, errorFg, successFg, mutedFg, border };
+}
+
+_themeMap.set('dark',   _makeTheme('dark',   0xFF1E1E2E, 0xFFDDDDEE, 0xFF2255AA, 0xFF1A3A5C, 0xFFFFFFFF, 0xFF1A2B3C, 0xFF2255AA, 0xFFFFFFFF, 0xFFFFB900, 0xFFFF4444, 0xFF44CC44, 0xFF888899, 0xFF445566));
+_themeMap.set('light',  _makeTheme('light',  0xFFF5F5F5, 0xFF222222, 0xFF0078D7, 0xFF0078D7, 0xFFFFFFFF, 0xFFE0E0E0, 0xFF0078D7, 0xFFFFFFFF, 0xFFFFB900, 0xFFCC1111, 0xFF007700, 0xFF888888, 0xFFCCCCCC));
+_themeMap.set('hacker', _makeTheme('hacker', 0xFF000000, 0xFF00FF00, 0xFF00CC00, 0xFF001100, 0xFF00FF00, 0xFF000800, 0xFF003300, 0xFF00FF00, 0xFFFFFF00, 0xFFFF0000, 0xFF00FF00, 0xFF005500, 0xFF003300));
+_themeMap.set('retro',  _makeTheme('retro',  0xFF0000AA, 0xFFAAAAAA, 0xFFFF5555, 0xFFAA0000, 0xFFFFFFFF, 0xFF000055, 0xFFAA0000, 0xFFFFFFFF, 0xFFFFFF55, 0xFFFF5555, 0xFF55FF55, 0xFF5555AA, 0xFF5555AA));
+
+// ── RTC helpers ───────────────────────────────────────────────────────────────
+
+function _rtcCmosRead(reg: number): number {
+  kernel.outb(0x70, reg);
+  var v = kernel.inb(0x71);
+  return ((v >> 4) * 10) + (v & 0xF); // BCD → decimal
+}
+
+function _rtcGetUnixMs(): number {
+  // Read CMOS RTC registers
+  var sec = _rtcCmosRead(0x00);
+  var min = _rtcCmosRead(0x02);
+  var hr  = _rtcCmosRead(0x04);
+  var day = _rtcCmosRead(0x07);
+  var mon = _rtcCmosRead(0x08);
+  var yr2 = _rtcCmosRead(0x09);
+  var cen = _rtcCmosRead(0x32) || 20; // century register (may be 0)
+  var year = cen * 100 + yr2;
+  if (year < 2000) year += 2000;
+  // Days from 1970-01-01 to this date via a simple formula
+  var m = mon, y = year;
+  if (m <= 2) { m += 12; y--; }
+  var jdn = Math.floor(365.25 * (y + 4716)) + Math.floor(30.6001 * (m + 1)) + day - 1524;
+  var epoch1970 = 2440588; // JDN of 1970-01-01
+  var daysSinceEpoch = jdn - epoch1970;
+  return (daysSinceEpoch * 86400 + hr * 3600 + min * 60 + sec) * 1000;
+}
+
+function _sdkTimeNow(): number {
+  if (_rtcBootEpoch === null) {
+    try {
+      _rtcBootEpoch  = _rtcGetUnixMs();
+      _rtcBootUptime = kernel.getUptime();
+    } catch (_e) {
+      // Fallback: treat boot as 2026-01-01T00:00:00Z
+      _rtcBootEpoch  = 1735689600000;
+      _rtcBootUptime = kernel.getUptime();
+    }
+  }
+  return _rtcBootEpoch + (kernel.getUptime() - _rtcBootUptime);
+}
+
+// ── fs.watch patcher ──────────────────────────────────────────────────────────
+
+function _fireWatch(path: string, ev: 'change'|'delete'|'create'): void {
+  _fsWatchMap.forEach(function(cbs: _WatchCb[], prefix: string) {
+    if (path.startsWith(prefix)) {
+      for (var i = 0; i < cbs.length; i++) { try { cbs[i](ev, path); } catch (_e) {} }
+    }
+  });
+}
+
+function _patchFsWatch(): void {
+  if (_fsWatchPatched) return;
+  _fsWatchPatched = true;
+  var origWrite = fs.writeFile.bind(fs);
+  var origRm    = fs.rm.bind(fs);
+  var origMkdir = fs.mkdir.bind(fs);
+  (fs as any).writeFile = function(p: string, d: string) {
+    var existed = fs.readFile(p) !== null;
+    var r = origWrite(p, d);
+    _fireWatch(p, existed ? 'change' : 'create');
+    return r;
+  };
+  (fs as any).rm = function(p: string) {
+    var r = origRm(p);
+    if (r) _fireWatch(p, 'delete');
+    return r;
+  };
+  (fs as any).mkdir = function(p: string) {
+    var r = origMkdir(p);
+    if (r) _fireWatch(p, 'create');
+    return r;
+  };
+}
+
 const sdk = {
 
   // ── Filesystem ─────────────────────────────────────────────────────────────
@@ -788,6 +965,30 @@ const sdk = {
      */
     disk: _diskStorage,
 
+    /**
+     * Watch a path (or prefix) for changes.
+     * Returns an unsubscribe function.
+     *
+     * Example:
+     *   var unsub = os.fs.watch('/home', function(ev, path) {
+     *     os.print(ev + ': ' + path);
+     *   });
+     *   // in onUnmount: unsub();
+     */
+    watch(path: string, callback: (event: 'change'|'delete'|'create', path: string) => void): () => void {
+      _patchFsWatch();
+      var prefix = path.endsWith('/') ? path : path + '/';
+      // Also match exact path
+      var key = path;
+      if (!_fsWatchMap.has(key)) _fsWatchMap.set(key, []);
+      var list = _fsWatchMap.get(key)!;
+      list.push(callback);
+      return function() {
+        var idx = list.indexOf(callback);
+        if (idx >= 0) list.splice(idx, 1);
+      };
+    },
+
     // ── Backward-compat aliases for existing apps ──────────────────────────
     /** @deprecated Use os.fs.list() instead. */
     readdir(path: string): string[] { return sdk.fs.list(path); },
@@ -822,6 +1023,134 @@ const sdk = {
     /** DHCP-assigned IP address, or null if the network is not up. */
     getIP(): string | null {
       try { return (net as any).getLocalIP ? (net as any).getLocalIP() : null; } catch (_e) { return null; }
+    },
+    /** Device MAC address, or null if not available. */
+    getMACAddress(): string | null {
+      try { return (net as any).mac || null; } catch (_e) { return null; }
+    },
+    /** True when a DHCP lease has been obtained. */
+    online(): boolean {
+      try { return !!(net as any).leased || !!(net as any).nicReady; } catch (_e) { return false; }
+    },
+    /**
+     * Open a raw TCP connection.  The callback is called with a RawSocket
+     * when connected (or null on error).  Returns a coroutine id.
+     *
+     * Example:
+     *   var id = os.net.connect('93.184.216.34', 80, function(sock, err) {
+     *     if (!sock) return;
+     *     sock.write('GET / HTTP/1.0\r\nHost: example.com\r\n\r\n');
+     *     os.timer.setInterval(function() {
+     *       var data = sock.read();
+     *       if (data) os.print(data);
+     *     }, 100);
+     *   });
+     */
+    connect(
+      host: string,
+      port: number,
+      callback: (sock: RawSocket | null, error?: string) => void,
+      opts?: { timeoutMs?: number },
+    ): number {
+      var timeoutTicks = ((opts && opts.timeoutMs) ? opts.timeoutMs : 5000) / 10;
+      var netSock: import('../net/net.js').Socket | null = null;
+      var done   = false;
+      var deadline = kernel.getTicks() + timeoutTicks;
+      var resolvedIP: string | null = dnsResolveCached(host);
+      if (!resolvedIP && /^\d+\.\d+\.\d+\.\d+$/.test(host)) resolvedIP = host;
+
+      // If DNS needed, start async query
+      if (!resolvedIP) {
+        var q = dnsSendQueryAsync(host);
+        threadManager.runCoroutine('rawsock-dns:' + host, function(): 'done'|'pending' {
+          var r = dnsPollReplyAsync(q.port, q.id);
+          if (r) { resolvedIP = r; return 'done'; }
+          return 'pending';
+        });
+      }
+
+      var step: () => 'done' | 'pending' = function() {
+        if (done) return 'done';
+        if (kernel.getTicks() > deadline) {
+          done = true;
+          try { callback(null, 'timeout'); } catch (_e) {}
+          return 'done';
+        }
+        if (!resolvedIP) return 'pending';
+
+        if (!netSock) {
+          netSock = net.createSocket('tcp');
+          _netSockBufs.set(netSock.id, { sock: netSock, buf: [] });
+          net.connectAsync(netSock, resolvedIP!, port);
+          return 'pending';
+        }
+
+        var state = net.connectPoll(netSock);
+        if (state === 'pending') return 'pending';
+        if (state !== 'connected') {
+          done = true;
+          _netSockBufs.delete(netSock.id);
+          try { callback(null, 'connection refused'); } catch (_e) {}
+          return 'done';
+        }
+
+        done = true;
+        var entry = _netSockBufs.get(netSock.id)!;
+        var nSock = netSock; // capture
+        var _closed = false;
+        var sock: RawSocket = {
+          get id()        { return nSock.id; },
+          get connected() { return !_closed; },
+          write(data: string | number[]): void {
+            if (_closed) return;
+            var bytes: number[];
+            if (typeof data === 'string') {
+              bytes = [];
+              for (var _i = 0; _i < data.length; _i++) bytes.push(data.charCodeAt(_i) & 0xFF);
+            } else { bytes = data; }
+            net.send(nSock, bytes);
+          },
+          read(maxBytes?: number): string {
+            var bytes = sock.readBytes(maxBytes);
+            var s = '';
+            for (var _ri = 0; _ri < bytes.length; _ri++) s += String.fromCharCode(bytes[_ri]);
+            return s;
+          },
+          readBytes(maxBytes?: number): number[] {
+            if (!_closed) {
+              var fresh = net.recvBytesNB(nSock);
+              if (fresh && fresh.length > 0) {
+                for (var _bi = 0; _bi < fresh.length; _bi++) entry.buf.push(fresh[_bi]);
+              }
+            }
+            if (maxBytes !== undefined && maxBytes < entry.buf.length) {
+              return entry.buf.splice(0, maxBytes);
+            }
+            var out = entry.buf.slice();
+            entry.buf.length = 0;
+            return out;
+          },
+          available(): number {
+            if (!_closed) {
+              var fresh2 = net.recvBytesNB(nSock);
+              if (fresh2 && fresh2.length > 0) {
+                for (var _bi2 = 0; _bi2 < fresh2.length; _bi2++) entry.buf.push(fresh2[_bi2]);
+              }
+            }
+            return entry.buf.length;
+          },
+          close(): void {
+            if (_closed) return;
+            _closed = true;
+            net.close(nSock);
+            _netSockBufs.delete(nSock.id);
+          },
+        };
+        try { callback(sock); } catch (_e) {}
+        return 'done';
+      };
+
+      return threadManager.runCoroutine('rawsock:' + host + ':' + port, step);
     },
   },
 
@@ -928,6 +1257,62 @@ const sdk = {
       open(id: number): ArrayBuffer | null {
         return (kernel as any).sharedBufferOpen ? (kernel as any).sharedBufferOpen(id) : null;
       },
+    },
+
+    /** Return the ProcessContext for the current process, or null. */
+    current(): ProcessContext | null {
+      var pid = scheduler.getpid();
+      var live = scheduler.getLiveProcesses();
+      for (var _pi = 0; _pi < live.length; _pi++) {
+        if (live[_pi].pid === pid) return live[_pi];
+      }
+      return null;
+    },
+
+    /**
+     * Wait for a process to finish, then call callback with its exit code.
+     * Returns a coroutine id (cancel with os.process.cancel()).
+     *
+     * Example:
+     *   os.process.wait(childPid, function(code) { print('exit ' + code); });
+     */
+    wait(pid: number, callback: (exitCode: number) => void): number {
+      return threadManager.runCoroutine('wait:' + pid, function(): 'done' | 'pending' {
+        var live = scheduler.getLiveProcesses();
+        for (var _wi = 0; _wi < live.length; _wi++) {
+          if (live[_wi].pid === pid) return 'pending';
+        }
+        try { callback(0); } catch (_e) {}
+        return 'done';
+      });
+    },
+
+    /** Rename the current process (visible in os.process.all()). */
+    setName(name: string): void {
+      if ((scheduler as any).setProcessName) (scheduler as any).setProcessName(scheduler.getpid(), name);
+    },
+
+    /**
+     * Set the scheduling priority of the current process.
+     * Higher numbers = higher priority (range 0–19, like UNIX nice inverted).
+     * No-op on kernels that don't support priorities.
+     */
+    setPriority(priority: number): void {
+      if ((scheduler as any).setPriority) (scheduler as any).setPriority(scheduler.getpid(), priority);
+    },
+
+    /**
+     * Handle a POSIX signal by number for the current process.
+     * Returns an unsubscribe function.
+     *
+     * Example:
+     *   var unsub = os.process.onSignal(os.process.SIG.SIGTERM, cleanup);
+     *   // Later: unsub();
+     */
+    onSignal(sig: number, handler: () => void): () => void {
+      var pid = scheduler.getpid();
+      ipc.signals.handle(pid, sig, handler);
+      return function() { ipc.signals.ignore(pid, sig); };
     },
   },
 
@@ -1128,6 +1513,46 @@ const sdk = {
       return null;
     },
 
+    /** Move a window to absolute screen coordinates. */
+    move(id: number, x: number, y: number): void { if (wm) wm.moveWindow(id, x, y); },
+    /** Resize a window (pixel dimensions). */
+    resize(id: number, w: number, h: number): void { if (wm) wm.resizeWindow(id, w, h); },
+    /** Bring a window to the front of the Z-order. */
+    bringToFront(id: number): void { if (wm) wm.bringToFront(id); },
+    /** Show or hide the close button on a window. */
+    setCloseable(id: number, closeable: boolean): void { if (wm) wm.setCloseable(id, closeable); },
+    /** Set per-window opacity (0=transparent … 255=opaque). */
+    setOpacity(id: number, opacity: number): void { if (wm) wm.setWindowOpacity(id, opacity); },
+    /** Change the mouse cursor shape: 'default', 'pointer', 'text', 'crosshair', 'none'. */
+    setCursor(shape: string): void { if (wm) wm.setCursorShape(shape); },
+    /** Height of the WM taskbar in pixels (0 in text mode). */
+    getTaskbarHeight(): number { return wm ? wm.taskbarH : 0; },
+    /**
+     * Open a window as a modal (dims everything behind it).
+     * Only one modal can be active at a time.
+     * Returns the WMWindow or null in text mode.
+     *
+     * Example:
+     *   os.wm.openModal({ title: 'Settings', app: settingsApp, width: 480, height: 360 });
+     */
+    openModal(opts: { title: string; app: App; width: number; height: number; x?: number; y?: number }): WMWindow | null {
+      return wm ? wm.openModal(opts) : null;
+    },
+    /**
+     * Show a context menu at screen coordinates.
+     *
+     * Example:
+     *   os.wm.showContextMenu(x, y, [
+     *     { label: 'Open',   action: () => openFile() },
+     *     { label: 'Delete', action: () => deleteFile(), disabled: isReadOnly },
+     *     { separator: true },
+     *     { label: 'Cancel' },
+     *   ]);
+     */
+    showContextMenu(x: number, y: number, items: MenuItem[]): void { if (wm) wm.showContextMenu(x, y, items); },
+    /** Close the active context menu without invoking any action. */
+    dismissContextMenu(): void { if (wm) wm.dismissContextMenu(); },
+
     /**
      * Modal dialogs.  Callbacks are called when the dialog closes.
      * In text mode, dialogs fall back to print() with a default response.
@@ -1158,6 +1583,111 @@ const sdk = {
           (opts && opts.defaultValue) ? opts.defaultValue : '',
           callback
         );
+      },
+      /**
+       * Open a file-picker dialog.  callback receives the chosen path or null.
+       *
+       * Example:
+       *   os.wm.dialog.filePicker(function(path) { if (path) openFile(path); });
+       */
+      filePicker(callback: (path: string | null) => void, opts?: { title?: string; startDir?: string }): void {
+        var startDir = (opts && opts.startDir) ? opts.startDir : '/';
+        var title    = (opts && opts.title)    ? opts.title    : 'Open File';
+        if (!wm) { callback(null); return; }
+        var chosen: string | null = null;
+        var _cbFired = false;
+        var entries: string[] = [];
+        try { entries = fs.readdir(startDir) || []; } catch (_e) { entries = []; }
+        var selected = -1;
+        var H = 22;
+        var BG = 0xFF1E1E1E, FG = 0xFFD0D0D0, SEL = 0xFF2060C0;
+        var _win: WMWindow | null = null;
+        var _dirty = true;
+        var dlgApp: App = {
+          name: 'file-picker',
+          onMount(win: WMWindow): void { _win = win; },
+          onUnmount(): void {
+            if (!_cbFired) { _cbFired = true; callback(chosen); }
+          },
+          onKey(_ev: KeyEvent): void {},
+          onMouse(ev: MouseEvent): void {
+            if (ev.type !== 'mousedown' || !_win) return;
+            var row = Math.floor(ev.y / H);
+            if (ev.y >= _win.height - H) {
+              if (ev.x < 50 && selected >= 0) chosen = startDir.replace(/\/$/, '') + '/' + entries[selected];
+              if (!_cbFired) { _cbFired = true; callback(chosen); }
+              wm!.closeWindow(_win.id);
+            } else {
+              selected = (row < entries.length) ? row : -1;
+              _dirty = true;
+            }
+          },
+          render(canvas: import('../ui/canvas.js').Canvas): boolean {
+            if (!_dirty || !_win) return false;
+            _dirty = false;
+            canvas.fillRect(0, 0, _win.width, _win.height, BG);
+            for (var _ei = 0; _ei < entries.length; _ei++) {
+              if (_ei === selected) canvas.fillRect(0, _ei * H, _win.width, H, SEL);
+              canvas.drawText(4, _ei * H + 5, entries[_ei], FG);
+            }
+            canvas.drawText(4,  _win.height - H + 5, 'OK',     FG);
+            canvas.drawText(60, _win.height - H + 5, 'Cancel', FG);
+            return true;
+          },
+        };
+        wm.openModal({ title, app: dlgApp, width: 320, height: 400 });
+      },
+      /**
+       * Open a colour-picker dialog.  callback receives a 0xRRGGBB number or null.
+       *
+       * Example:
+       *   os.wm.dialog.colorPicker(function(color) { if (color !== null) applyColor(color); });
+       */
+      colorPicker(callback: (color: number | null) => void, opts?: { title?: string; initial?: number }): void {
+        var title   = (opts && opts.title)               ? opts.title   : 'Pick Color';
+        var initial = (opts && opts.initial !== undefined) ? opts.initial : 0xFF0000;
+        if (!wm) { callback(null); return; }
+        var sr = (initial >> 16) & 0xFF;
+        var sg = (initial >>  8) & 0xFF;
+        var sb =  initial        & 0xFF;
+        var chosen: number | null = null;
+        var _cbFired = false;
+        var _win: WMWindow | null = null;
+        var _dirty = true;
+        var BG = 0xFF1E1E1E, FG = 0xFFD0D0D0;
+        function clamp(v: number) { return v < 0 ? 0 : v > 255 ? 255 : v; }
+        var dlgApp: App = {
+          name: 'color-picker',
+          onMount(win: WMWindow): void { _win = win; },
+          onUnmount(): void {
+            if (!_cbFired) { _cbFired = true; callback(chosen); }
+          },
+          onKey(_ev: KeyEvent): void {},
+          onMouse(ev: MouseEvent): void {
+            if (ev.type !== 'mousedown' || !_win) return;
+            if (ev.y >= _win.height - 40) {
+              if (ev.x < 50) { chosen = (sr << 16) | (sg << 8) | sb; }
+              if (!_cbFired) { _cbFired = true; callback(chosen); }
+              wm!.closeWindow(_win.id);
+            } else if (ev.y >= 60 && ev.y < 72) { sr = clamp(Math.round((ev.x / _win.width) * 255)); _dirty = true; }
+            else if (ev.y >= 82 && ev.y < 94)   { sg = clamp(Math.round((ev.x / _win.width) * 255)); _dirty = true; }
+            else if (ev.y >= 104 && ev.y < 116) { sb = clamp(Math.round((ev.x / _win.width) * 255)); _dirty = true; }
+          },
+          render(canvas: import('../ui/canvas.js').Canvas): boolean {
+            if (!_dirty || !_win) return false;
+            _dirty = false;
+            canvas.fillRect(0, 0, _win.width, _win.height, BG);
+            var preview = 0xFF000000 | (sr << 16) | (sg << 8) | sb;
+            canvas.fillRect(10, 10, _win.width - 20, 40, preview);
+            canvas.drawText(10, 60,  'R: ' + sr, FG);
+            canvas.drawText(10, 82,  'G: ' + sg, FG);
+            canvas.drawText(10, 104, 'B: ' + sb, FG);
+            canvas.drawText(10,  _win.height - 30, 'OK',     FG);
+            canvas.drawText(60,  _win.height - 30, 'Cancel', FG);
+            return true;
+          },
+        };
+        wm.openModal({ title, app: dlgApp, width: 280, height: 220 });
       },
     },
   },
@@ -1696,6 +2226,7 @@ const sdk = {
         set(key: string, value: unknown): void {
           _load()[key] = value;
           _save();
+          sdk.events.emit('prefs:change', { app: appName, key, value });
         },
         delete(key: string): void {
           delete _load()[key];
@@ -1711,7 +2242,425 @@ const sdk = {
         flush(): void {
           _save();
         },
+        /**
+         * Watch for changes to a specific key.  Returns an unsubscribe function.
+         *
+         * Example:
+         *   var unsub = prefs.onChange('theme', function(v) { applyTheme(v); });
+         */
+        onChange(key: string, cb: (value: unknown) => void): () => void {
+          return sdk.events.on('prefs:change', function(d: any) {
+            if (d && d.app === appName && d.key === key) cb(d.value);
+          });
+        },
       };
+    },
+  },
+
+  // ── Time ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Wall-clock time and duration helpers (backed by CMOS RTC on first call).
+   *
+   * Example:
+   *   var t = os.time.now();          // Unix epoch ms
+   *   os.time.since(t);               // elapsed ms
+   *   os.time.format(t);              // '2026-01-15 09:22:04'
+   *   os.time.duration(90500);        // '1m 30s'
+   */
+  time: {
+    /** Current time as Unix epoch milliseconds. */
+    now(): number { return _sdkTimeNow(); },
+    /** Milliseconds elapsed since epoch value `t`. */
+    since(t: number): number { return _sdkTimeNow() - t; },
+    /** OS uptime in milliseconds since boot. */
+    uptime(): number { return kernel.getUptime ? kernel.getUptime() * 1000 : 0; },
+    /**
+     * Format a Unix epoch ms value as a human-readable string.
+     * fmt tokens: YYYY MM DD HH mm ss.  Default: 'YYYY-MM-DD HH:mm:ss'.
+     */
+    format(epochMs: number, fmt?: string): string {
+      var d = epochMs / 1000;
+      var sec = Math.floor(d) % 60;
+      var min = Math.floor(d / 60) % 60;
+      var hr  = Math.floor(d / 3600) % 24;
+      var days = Math.floor(d / 86400);
+      // Gregorian calendar from epoch days
+      var z  = days + 719468;
+      var era = Math.floor((z >= 0 ? z : z - 146096) / 146097);
+      var doe = z - era * 146097;
+      var yoe = Math.floor((doe - Math.floor(doe/1460) + Math.floor(doe/36524) - Math.floor(doe/146096)) / 365);
+      var y   = yoe + era * 400;
+      var doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+      var mp  = Math.floor((5 * doy + 2) / 153);
+      var dd  = doy - Math.floor((153 * mp + 2) / 5) + 1;
+      var mm  = mp < 10 ? mp + 3 : mp - 9;
+      if (mm <= 2) y++;
+      function p2(n: number) { return (n < 10 ? '0' : '') + n; }
+      var f = fmt || 'YYYY-MM-DD HH:mm:ss';
+      return f.replace('YYYY', '' + y)
+              .replace('MM',   p2(mm))
+              .replace('DD',   p2(dd))
+              .replace('HH',   p2(hr))
+              .replace('mm',   p2(min))
+              .replace('ss',   p2(sec));
+    },
+    /** Human-readable duration.  e.g. 90500 → '1m 30s', 3700000 → '1h 1m'. */
+    duration(ms: number): string {
+      var s = Math.floor(ms / 1000);
+      if (s < 60) return s + 's';
+      var m = Math.floor(s / 60); s %= 60;
+      if (m < 60) return m + 'm ' + (s ? s + 's' : '');
+      var h = Math.floor(m / 60); m %= 60;
+      if (h < 24) return h + 'h ' + (m ? m + 'm' : '');
+      var d = Math.floor(h / 24); h %= 24;
+      return d + 'd ' + (h ? h + 'h' : '');
+    },
+  },
+
+  // ── Audio (PC speaker) ────────────────────────────────────────────────────────
+
+  /**
+   * PC-speaker audio.  Tones are generated via the 8253 PIT channel 2.
+   * Only one tone can play at a time.  Only audible in real hardware / QEMU
+   * when configured with '-soundhw pcspk'.
+   *
+   * Example:
+   *   os.audio.beep(440, 200);     // 440 Hz for 200 ms
+   *   os.audio.play([{ freq: 261, duration: 150 }, { freq: 329, duration: 150 }]);
+   */
+  audio: {
+    /** Play a tone at `freq` Hz for `durationMs` milliseconds. */
+    beep(freq: number, durationMs?: number): void {
+      if (freq <= 0) { sdk.audio.stop(); return; }
+      var divisor = Math.floor(1193180 / freq) & 0xFFFF;
+      kernel.outb(0x43, 0xB6);
+      kernel.outb(0x42, divisor & 0xFF);
+      kernel.outb(0x42, (divisor >> 8) & 0xFF);
+      kernel.outb(0x61, kernel.inb(0x61) | 0x03);
+      if (durationMs && durationMs > 0) {
+        var stop = sdk.audio.stop.bind(sdk.audio);
+        sdk.process.coroutine('audio:beep', (function() {
+          var endTicks = kernel.getTicks() + Math.ceil(durationMs / 10);
+          return function(): 'done'|'pending' {
+            if (kernel.getTicks() >= endTicks) { stop(); return 'done'; }
+            return 'pending';
+          };
+        })());
+      }
+    },
+    /** Stop any playing tone immediately. */
+    stop(): void {
+      kernel.outb(0x61, kernel.inb(0x61) & 0xFC);
+    },
+    /**
+     * Play a sequence of notes.  Each note: { freq, duration } in Hz / ms.
+     * freq=0 is a rest.  Returns a coroutine id (cancel with os.process.cancel()).
+     *
+     * Example:
+     *   os.audio.play([
+     *     { freq: 523, duration: 150 }, // C5
+     *     { freq: 0,   duration:  50 }, // rest
+     *     { freq: 659, duration: 150 }, // E5
+     *   ]);
+     */
+    play(notes: Array<{ freq: number; duration: number }>): number {
+      var idx = 0;
+      var noteEndTick = 0;
+      return sdk.process.coroutine('audio:play', function(): 'done'|'pending' {
+        var now = kernel.getTicks();
+        if (idx >= notes.length) { sdk.audio.stop(); return 'done'; }
+        if (now >= noteEndTick) {
+          var note = notes[idx++];
+          noteEndTick = now + Math.ceil(note.duration / 10);
+          if (note.freq > 0) sdk.audio.beep(note.freq);
+          else sdk.audio.stop();
+        }
+        return 'pending';
+      });
+    },
+  },
+
+  // ── Animation ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Cooperative frame-based animation engine.
+   * Each animation calls `tick(progress)` once per WM frame (~16 ms) with
+   * an eased progress value in [0,1].
+   *
+   * Example:
+   *   var id = os.anim.start({ duration: 300, easing: os.anim.easings.easeOut },
+   *     function(p) { win.x = Math.round(p * 200); os.wm.markDirty(); },
+   *     function() { print('done'); }
+   *   );
+   *   // cancel early:
+   *   os.anim.cancel(id);
+   */
+  anim: {
+    /**
+     * Start an animation.  Returns an animation id for `os.anim.cancel()`.
+     * tick(progress) is called with 0..1 eased progress each frame.
+     * done() is called once when the animation completes.
+     */
+    start(
+      opts: { duration?: number; easing?: (t: number) => number },
+      tick: (progress: number) => void,
+      done?: () => void,
+    ): number {
+      var animId     = _nextAnimId++;
+      var duration   = (opts && opts.duration !== undefined) ? opts.duration : 300;
+      var easing     = (opts && opts.easing)                 ? opts.easing   : function(t: number) { return t; };
+      var startUp    = _sdkTimeNow();
+      var coroId     = threadManager.runCoroutine('anim:' + animId, function(): 'done'|'pending' {
+        var elapsed = _sdkTimeNow() - startUp;
+        var t       = duration > 0 ? Math.min(elapsed / duration, 1) : 1;
+        var p       = easing(t);
+        try { tick(p); } catch (_e) {}
+        if (t >= 1) {
+          _animRegistry.delete(animId);
+          if (done) try { done(); } catch (_e2) {}
+          return 'done';
+        }
+        return 'pending';
+      });
+      _animRegistry.set(animId, { cb: tick, duration, startUptime: startUp, coroId });
+      return animId;
+    },
+    /** Cancel a running animation by id. */
+    cancel(animId: number): void {
+      var entry = _animRegistry.get(animId);
+      if (!entry) return;
+      threadManager.cancelCoroutine(entry.coroId);
+      _animRegistry.delete(animId);
+    },
+    /** Named easing functions. */
+    easings: {
+      linear:    function(t: number): number { return t; },
+      easeIn:    function(t: number): number { return t * t; },
+      easeOut:   function(t: number): number { return t * (2 - t); },
+      easeInOut: function(t: number): number { return t < 0.5 ? 2*t*t : -1+(4-2*t)*t; },
+      bounce:    function(t: number): number {
+        if (t < 1/2.75)  return 7.5625*t*t;
+        if (t < 2/2.75)  { t -= 1.5/2.75;   return 7.5625*t*t+0.75; }
+        if (t < 2.5/2.75){ t -= 2.25/2.75;  return 7.5625*t*t+0.9375; }
+        t -= 2.625/2.75; return 7.5625*t*t+0.984375;
+      },
+      elastic: function(t: number): number {
+        if (t === 0 || t === 1) return t;
+        return -Math.pow(2, 10*(t-1)) * Math.sin((t-1.1)*5*Math.PI);
+      },
+    },
+  },
+
+  // ── Persistent storage ────────────────────────────────────────────────────────
+
+  /**
+   * Simple key-value persistent storage backed by the virtual filesystem.
+   * Values are JSON-serialised.  Stored under /etc/storage/<key>.json.
+   *
+   * Example:
+   *   os.storage.set('last-file', '/home/user/notes.txt');
+   *   var path = os.storage.get<string>('last-file', '/');
+   */
+  storage: {
+    /** Get a stored value.  Returns `fallback` if not found. */
+    get<T>(key: string, fallback?: T): T {
+      try {
+        var txt = fs.readFile('/etc/storage/' + key + '.json');
+        return txt ? JSON.parse(txt) as T : (fallback as T);
+      } catch (_e) { return fallback as T; }
+    },
+    /** Store a value.  Creates /etc/storage/ if needed. */
+    set(key: string, value: unknown): void {
+      fs.mkdir('/etc/storage');
+      fs.writeFile('/etc/storage/' + key + '.json', JSON.stringify(value));
+    },
+    /** Delete a stored value. */
+    delete(key: string): void {
+      try { fs.rm('/etc/storage/' + key + '.json'); } catch (_e) {}
+    },
+    /** All stored keys. */
+    keys(): string[] {
+      try {
+        var items = fs.readdir('/etc/storage') || [];
+        return items.filter(function(n: string) { return n.endsWith('.json'); })
+                    .map(function(n: string) { return n.slice(0, -5); });
+      } catch (_e) { return []; }
+    },
+    /** Delete all stored values. */
+    clear(): void {
+      var ks = sdk.storage.keys();
+      for (var _ki = 0; _ki < ks.length; _ki++) sdk.storage.delete(ks[_ki]);
+    },
+  },
+
+  // ── Debug ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Debug utilities: serial output, breakpoints, event tracing.
+   *
+   * Example:
+   *   os.debug.print('state:', myObj);     // → serial port
+   *   os.debug.event('info', 'loaded');    // → 'debug:event' system event
+   *   var unsub = os.debug.onEvent(function(e) { logPanel.append(e.msg); });
+   */
+  debug: {
+    /** Write to the serial debug port (visible with QEMU '-serial stdio'). */
+    print(...args: unknown[]): void {
+      var line = args.map(function(a) { return typeof a === 'string' ? a : JSON.stringify(a); }).join(' ') + '\n';
+      for (var _di = 0; _di < line.length; _di++) kernel.serialPut(line.charCodeAt(_di));
+    },
+    /** Software breakpoint — no-op unless the kernel exposes debugBreak(). */
+    break(): void {
+      if ((kernel as any).debugBreak) (kernel as any).debugBreak();
+    },
+    /** JSON-dump an object to serial — handy for deep objects. */
+    dump(label: string, obj: unknown): void {
+      sdk.debug.print('[dump] ' + label + ': ' + JSON.stringify(obj, null, 2));
+    },
+    /** Subscribe to debug events emitted via os.debug.event(). */
+    onEvent(handler: (ev: { level: string; msg: string; ts: number }) => void): () => void {
+      return sdk.events.on('debug:event', handler);
+    },
+    /** Emit a debug event with an explicit level. */
+    event(level: 'trace'|'info'|'warn'|'error', msg: string): void {
+      sdk.events.emit('debug:event', { level, msg, ts: _sdkTimeNow() });
+    },
+  },
+
+  // ── Canvas helpers ────────────────────────────────────────────────────────────
+
+  /**
+   * High-level drawing utilities.
+   *
+   * Example — fluent painter:
+   *   var p = os.canvas.painter(canvas);
+   *   p.fillRect(0, 0, 200, 100, 0xFF1E1E2E);
+   *   p.drawText(10, 10, 'Hello', 0xFFFFFFFF);
+   *
+   * Example — sprite:
+   *   os.canvas.drawSprite(canvas, 10, 10, pixelData, 8, 8, palette, 2);
+   */
+  canvas: {
+    /** Wrap a Canvas in a fluent CanvasPainter. */
+    painter(c: import('../ui/canvas.js').Canvas): CanvasPainter {
+      var C = c as any;
+      return {
+        get canvas(): import('../ui/canvas.js').Canvas { return c; },
+        fill(color: number)                             { c.fillRect(0, 0, 99999, 99999, color); },
+        fillRect(x, y, w, h, color)                    { c.fillRect(x, y, w, h, color); },
+        strokeRect(x, y, w, h, color)                  { c.drawRect(x, y, w, h, color); },
+        fillRoundRect(x, y, w, h, r, color)            { C.fillRoundRect(x, y, w, h, r, color); },
+        strokeRoundRect(x, y, w, h, r, color)          { C.drawRoundRect(x, y, w, h, r, color); },
+        fillCircle(cx, cy, r, color)                   { C.fillCircle(cx, cy, r, color); },
+        strokeCircle(cx, cy, r, color)                 { C.drawCircle(cx, cy, r, color); },
+        drawLine(x0, y0, x1, y1, color)                { c.drawLine(x0, y0, x1, y1, color); },
+        drawText(x, y, text, color)                    { c.drawText(x, y, text, color); },
+        drawTextWrap(x, y, maxW, text, color, lineH) {
+          var words = text.split(' ');
+          var cx = x, cy = y, lh = lineH || 16;
+          for (var _wi = 0; _wi < words.length; _wi++) {
+            var w = words[_wi];
+            var m = c.measureText(w + ' ');
+            if (cx + m.width > x + maxW && cx > x) { cx = x; cy += lh; }
+            c.drawText(cx, cy, w + ' ', color);
+            cx += m.width;
+          }
+          return cy + lh;
+        },
+        measureText(text)          { return c.measureText(text); },
+        drawScrollbar(x, y, h, total, visible, offset, color) {
+          var track = color || 0xFF333344;
+          var thumb = color ? (color | 0xFF000000) : 0xFF6688AA;
+          c.drawRect(x, y, 8, h, track);
+          if (total > 0 && visible < total) {
+            var ratio = visible / total;
+            var th = Math.max(8, Math.floor(h * ratio));
+            var ty = y + Math.floor((h - th) * (offset / (total - visible)));
+            c.fillRect(x, ty, 8, th, thumb);
+          }
+        },
+        drawProgressBar(x, y, w, h, fraction, fgColor, bgColor) {
+          c.fillRect(x, y, w, h, bgColor || 0xFF222233);
+          c.fillRect(x, y, Math.floor(w * Math.min(1, Math.max(0, fraction))), h, fgColor || 0xFF4488DD);
+        },
+        drawButton(x, y, w, h, label, pressed, fgColor, bgColor) {
+          var bg = pressed ? 0xFF2255AA : (bgColor || 0xFF334466);
+          var fg = fgColor || 0xFFDDDDFF;
+          c.fillRect(x, y, w, h, bg);
+          c.drawRect(x, y, w, h, 0xFF6688AA);
+          var m = c.measureText(label);
+          c.drawText(x + Math.floor((w - m.width) / 2), y + Math.floor((h - m.height) / 2), label, fg);
+        },
+        drawCheckbox(x, y, checked, label, color) {
+          var fg = color || 0xFFDDDDFF;
+          c.drawRect(x, y, 12, 12, fg);
+          if (checked) { c.drawLine(x+2, y+6, x+5, y+9, fg); c.drawLine(x+5, y+9, x+10, y+3, fg); }
+          if (label) c.drawText(x + 16, y, label, fg);
+        },
+        linearGradient(x, y, w, h, stops, dir) { C.drawLinearGradient(x, y, w, h, stops, dir); },
+        radialGradient(cx, cy, r, stops)        { C.drawRadialGradient(cx, cy, r, stops); },
+        drawSprite(x, y, pixels, pw, ph, palette, scale) { C.drawSprite(x, y, pixels, pw, ph, palette, scale); },
+      };
+    },
+    /**
+     * Draw an indexed-colour sprite directly onto a canvas.
+     * pixels = array of palette indices; palette = array of 0xAARRGGBB colours.
+     * scale = integer pixel multiplier (default 1).
+     */
+    drawSprite(
+      canvas: import('../ui/canvas.js').Canvas,
+      x: number, y: number,
+      pixels: number[], pw: number, ph: number,
+      palette: number[], scale?: number,
+    ): void {
+      (canvas as any).drawSprite(x, y, pixels, pw, ph, palette, scale);
+    },
+  },
+
+  // ── Theme ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Colour theme system.  Built-in themes: 'dark', 'light', 'hacker', 'retro'.
+   *
+   * Example:
+   *   var theme = os.theme.current();
+   *   canvas.fillRect(0, 0, w, h, theme.bg);
+   *   canvas.drawText(10, 10, 'Hello', theme.fg);
+   *   os.theme.set('hacker');
+   *   os.events.on('theme:change', function(t) { repaint(t.theme); });
+   */
+  theme: {
+    /** Name of the active theme. */
+    name(): string { return _activeThemeName; },
+    /** The active Theme object. */
+    current(): Theme {
+      return _themeMap.get(_activeThemeName) ||
+             _makeTheme('dark', 0xFF1E1E2E, 0xFFDDDDEE, 0xFF2255AA,
+                        0xFF1A3A5C, 0xFFFFFFFF, 0xFF1A2B3C,
+                        0xFF2255AA, 0xFFFFFFFF,
+                        0xFFFFB900, 0xFFFF4444, 0xFF44CC44, 0xFF888899, 0xFF445566);
+    },
+    /** All registered theme names. */
+    list(): string[] {
+      var out: string[] = [];
+      _themeMap.forEach(function(_v: Theme, k: string) { out.push(k); });
+      return out;
+    },
+    /** Get a theme by name.  Returns null if not registered. */
+    get(name: string): Theme | null { return _themeMap.get(name) || null; },
+    /** Register (or overwrite) a named theme. */
+    register(name: string, theme: Theme): void { _themeMap.set(name, theme); },
+    /**
+     * Activate a theme by name.
+     * Returns false if the theme is not registered.
+     * Emits 'theme:change' event with { name, theme }.
+     */
+    set(name: string): boolean {
+      if (!_themeMap.has(name)) return false;
+      _activeThemeName = name;
+      sdk.events.emit('theme:change', { name, theme: _themeMap.get(name) });
+      return true;
     },
   },
 

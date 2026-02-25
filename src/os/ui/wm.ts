@@ -79,7 +79,17 @@ export interface WMWindow {
   minimised: boolean;
   maximised: boolean;
   closeable: boolean;
+  /** Alpha 0–255. 255 = fully opaque (default). 0 = hidden. */
+  opacity: number;
   app: App;
+}
+
+/** Context menu item. */
+export interface MenuItem {
+  label: string;
+  action?: () => void;
+  disabled?: boolean;
+  separator?: boolean;
 }
 
 // ── Cursor sprite (8×8 arrow) ─────────────────────────────────────────────
@@ -154,6 +164,15 @@ export class WindowManager {
   private _mouseCapture: number | null = null;
   private _clipboard: string = '';
 
+  // Cursor shape
+  private _cursorShape: string = 'default';
+
+  // Modal: id of the topmost modal window (null = no modal active)
+  private _modalWinId: number | null = null;
+
+  // Context menu state
+  private _contextMenu: { x: number; y: number; items: MenuItem[] } | null = null;
+
   constructor(screen: Canvas) {
     this._screen  = screen;
     this._cursorX = screen.width  >> 1;
@@ -189,6 +208,7 @@ export class WindowManager {
       minimised: false,
       maximised: false,
       closeable: (opts.closeable !== false),
+      opacity:   255,
       app:       opts.app,
     };
 
@@ -234,6 +254,7 @@ export class WindowManager {
         if (this._mouseCapture === id) this._mouseCapture = null;
         if (this._dragging     === id) this._dragging     = null;
         if (this._resizing     === id) this._resizing     = null;
+        if (this._modalWinId   === id) this._modalWinId   = null;
         return;
       }
     }
@@ -282,6 +303,93 @@ export class WindowManager {
     if (!win) return;
     win.title = title;
     this._wmDirty = true;
+  }
+
+  /** Move a window to (x, y). */
+  moveWindow(id: number, x: number, y: number): void {
+    var win = this._findWindow(id);
+    if (!win || win.maximised) return;
+    win.x = x; win.y = y;
+    this._wmDirty = true;
+  }
+
+  /** Resize a window's content area. */
+  resizeWindow(id: number, w: number, h: number): void {
+    var win = this._findWindow(id);
+    if (!win || win.maximised) return;
+    w = Math.max(MIN_WIN_W, w);
+    h = Math.max(MIN_WIN_H, h);
+    win.width  = w;
+    win.height = h + TITLE_H;
+    win.canvas = new Canvas(w, h);
+    if (win.app.onResize) win.app.onResize(w, h);
+    this._wmDirty = true;
+  }
+
+  /** Bring a window to the top of the z-order without changing keyboard focus. */
+  bringToFront(id: number): void {
+    for (var i = 0; i < this._windows.length; i++) {
+      if (this._windows[i].id === id) {
+        var win = this._windows.splice(i, 1)[0];
+        this._windows.push(win);
+        this._wmDirty = true;
+        return;
+      }
+    }
+  }
+
+  /** Allow or disallow the user from closing a window via the X button. */
+  setCloseable(id: number, closeable: boolean): void {
+    var win = this._findWindow(id);
+    if (!win) return;
+    win.closeable = closeable;
+    this._wmDirty = true;
+  }
+
+  /** Set per-window opacity (0 = invisible, 255 = fully opaque). */
+  setWindowOpacity(id: number, opacity: number): void {
+    var win = this._findWindow(id);
+    if (!win) return;
+    win.opacity = Math.max(0, Math.min(255, opacity));
+    this._wmDirty = true;
+  }
+
+  /** Change the cursor shape. */
+  setCursorShape(shape: string): void {
+    this._cursorShape = shape;
+    this._wmDirty = true;
+  }
+
+  /** Taskbar height in pixels. */
+  get taskbarH(): number { return TASKBAR_H; }
+
+  /**
+   * Open a modal window.  While it is open all input is directed exclusively to it.
+   * When the modal window is closed, normal input routing resumes.
+   */
+  openModal(opts: {
+    title: string;
+    app: App;
+    width: number;
+    height: number;
+  }): WMWindow {
+    var win = this.createWindow({ ...opts, closeable: true });
+    this._modalWinId = win.id;
+    return win;
+  }
+
+  /**
+   * Show a right-click context menu at (x, y).
+   * Dismissed when an item is activated, or the user clicks elsewhere.
+   */
+  showContextMenu(x: number, y: number, items: MenuItem[]): void {
+    this._contextMenu = { x, y, items: items.slice() };
+    this._wmDirty = true;
+  }
+
+  /** Dismiss the active context menu without firing any action. */
+  dismissContextMenu(): void {
+    if (this._contextMenu) { this._contextMenu = null; this._wmDirty = true; }
   }
 
   // ── Clipboard ──────────────────────────────────────────────────────────
@@ -362,7 +470,16 @@ export class WindowManager {
         } else if (!prevBtn1) {
           var consumed = false;
 
-          // 1. Taskbar button click?
+          // 0. Context-menu click?
+          if (this._contextMenu) {
+            var hitItem = this._hitContextMenuItem(cx, cy);
+            if (hitItem && !hitItem.disabled && hitItem.action) hitItem.action();
+            this._contextMenu = null;
+            this._wmDirty = true;
+            consumed = true;
+          }
+
+          if (!consumed) {
           var barY = this._screen.height - TASKBAR_H;
           if (cy >= barY) {
             var btnX = 58;
@@ -437,7 +554,9 @@ export class WindowManager {
               }
             }
           }
-        }
+          } // end if (!consumed) — outer context-menu guard
+
+        } // end else if (!prevBtn1) — new-mouse-down handler
 
       } else {
         // ── Button released ──────────────────────────────────────────────────
@@ -501,6 +620,11 @@ export class WindowManager {
 
     // ── Drain keyboard to focused window ──────────────────────────────────────
     var focused = this.getFocused();
+    // If a modal is active, redirect all keyboard input to the modal window
+    if (this._modalWinId !== null) {
+      var modalWin = this._findWindow(this._modalWinId);
+      if (modalWin) focused = modalWin;
+    }
     if (focused) {
       for (var k = 0; k < 32; k++) {
         var raw = kernel.readKeyEx();
@@ -610,10 +734,18 @@ export class WindowManager {
     s.clear(Colors.DESKTOP_BG);
 
     // 2. Draw windows bottom-to-top
-    for (var i = 0; i < this._windows.length; i++) {
-      var win = this._windows[i];
-      if (win.minimised) continue;
+    //    When a modal is active: draw all non-modal windows first, then apply
+    //    the dim overlay, then draw the modal window on top.
+    var modalWin: WMWindow | null = null;
+    if (this._modalWinId !== null) {
+      for (var ii = 0; ii < this._windows.length; ii++) {
+        if (this._windows[ii].id === this._modalWinId) { modalWin = this._windows[ii]; break; }
+      }
+    }
 
+    var drawOneWindow = (win: WMWindow): void => {
+      if (win.minimised) return;
+      if (win.opacity === 0) return;
       var focused = (win.id === this._focused);
 
       // Title bar
@@ -647,7 +779,11 @@ export class WindowManager {
       var contentH = win.height - TITLE_H;
       var blitW = Math.min(win.width, win.canvas.width);
       var blitH = Math.min(contentH, win.canvas.height);
-      s.blit(win.canvas, 0, 0, win.x, win.y + TITLE_H, blitW, blitH);
+      if (win.opacity >= 255) {
+        s.blit(win.canvas, 0, 0, win.x, win.y + TITLE_H, blitW, blitH);
+      } else {
+        s.blitAlpha(win.canvas, 0, 0, win.x, win.y + TITLE_H, blitW, blitH, win.opacity);
+      }
 
       // Resize grip: three diagonal lines at bottom-right
       var gx = win.x + win.width - 1;
@@ -660,15 +796,40 @@ export class WindowManager {
       // Window border
       s.drawRect(win.x, win.y, win.width, win.height,
                  focused ? 0xFF5599CC : 0xFF445566);
+    };
+
+    for (var i = 0; i < this._windows.length; i++) {
+      var win = this._windows[i];
+      if (win.id === this._modalWinId) continue; // modal drawn last
+      drawOneWindow(win);
+    }
+
+    // Apply dim overlay after all non-modal windows, before modal
+    if (modalWin !== null) {
+      var buf = s.getBuffer();
+      var screenH = s.height - TASKBAR_H;
+      for (var dy2 = 0; dy2 < screenH; dy2++) {
+        for (var dx2 = (dy2 & 1); dx2 < s.width; dx2 += 2) {
+          var pidx = dy2 * s.width + dx2;
+          var px2  = buf[pidx];
+          buf[pidx] = ((px2 >> 1) & 0x7F7F7F7F) | 0xFF000000;
+        }
+      }
+      drawOneWindow(modalWin);
     }
 
     // 3. Taskbar
     this._drawTaskbar();
 
-    // 4. Mouse cursor
+    // 4. Context menu (above taskbar if present)
+    if (this._contextMenu) {
+      this._drawContextMenu();
+    }
+
+    // 5. Mouse cursor
     this._drawCursor();
 
-    // 5. Flip to framebuffer
+    // 6. Flip to framebuffer
     s.flip();
   }
 
@@ -709,23 +870,66 @@ export class WindowManager {
   }
 
   private _drawCursor(): void {
-    // Write directly into the screen buffer — avoids 209 individual setPixel()
-    // calls (each with a bounds-check + _bgra() call) per frame.
+    if (this._cursorShape === 'none') return;
+
     var buf = this._screen.getBuffer();
     var sw  = this._screen.width;
     var sh  = this._screen.height;
-    var BLACK = 0xFF000000;   // same bit pattern as Canvas._bgra(Colors.BLACK)
-    var WHITE = 0xFFFFFFFF;   // same bit pattern as Canvas._bgra(Colors.WHITE)
+    var cx  = this._cursorX;
+    var cy  = this._cursorY;
+    var BLACK = 0xFF000000;
+    var WHITE = 0xFFFFFFFF;
+
+    if (this._cursorShape === 'crosshair') {
+      // Simple 9×9 crosshair
+      for (var i = -4; i <= 4; i++) {
+        if (i === 0) continue;
+        var px = cx + i, py = cy;
+        if (px >= 0 && px < sw && py >= 0 && py < sh) buf[py * sw + px] = WHITE;
+        px = cx; py = cy + i;
+        if (px >= 0 && px < sw && py >= 0 && py < sh) buf[py * sw + px] = WHITE;
+      }
+      if (cx >= 0 && cx < sw && cy >= 0 && cy < sh) buf[cy * sw + cx] = BLACK;
+      return;
+    }
+
+    if (this._cursorShape === 'text') {
+      // I-beam: vertical bar with serifs
+      var ibH = 14, ibY = cy - ibH / 2;
+      for (var iy = 0; iy < ibH; iy++) {
+        var py2 = Math.floor(ibY + iy);
+        if (py2 < 0 || py2 >= sh) continue;
+        if (iy === 0 || iy === ibH - 1) {
+          // serifs
+          for (var ix = -2; ix <= 2; ix++) {
+            var px2 = cx + ix;
+            if (px2 >= 0 && px2 < sw) buf[py2 * sw + px2] = WHITE;
+          }
+        } else {
+          if (cx >= 0 && cx < sw) buf[py2 * sw + cx] = WHITE;
+        }
+      }
+      return;
+    }
+
+    if (this._cursorShape === 'pointer') {
+      // Simple pointing hand (hollow) — reuse arrow but offset slightly
+      // Fall through to default arrow for now
+    }
+
+    // Default / resize cursors: use the arrow sprite
+    // Write directly into the screen buffer — avoids 209 individual setPixel()
+    // calls (each with a bounds-check + _bgra() call) per frame.
     for (var row = 0; row < CURSOR_H; row++) {
-      var py = this._cursorY + row;
-      if (py < 0 || py >= sh) continue;
-      var rowBase = py * sw;
+      var py3 = cy + row;
+      if (py3 < 0 || py3 >= sh) continue;
+      var rowBase = py3 * sw;
       for (var col = 0; col < CURSOR_W; col++) {
         var v = CURSOR_PIXELS[row * CURSOR_W + col];
         if (v === 0) continue;
-        var px = this._cursorX + col;
-        if (px < 0 || px >= sw) continue;
-        buf[rowBase + px] = v === 1 ? BLACK : WHITE;
+        var px3 = cx + col;
+        if (px3 < 0 || px3 >= sw) continue;
+        buf[rowBase + px3] = v === 1 ? BLACK : WHITE;
       }
     }
   }
@@ -737,6 +941,67 @@ export class WindowManager {
       if (this._windows[i].id === id) return this._windows[i];
     }
     return undefined;
+  }
+
+  private _drawContextMenu(): void {
+    var cm = this._contextMenu!;
+    var s  = this._screen;
+    var ITEM_H = 16;
+    var PAD    = 6;
+    var W      = 140;
+
+    // Calculate height (separator = 5px, normal item = ITEM_H)
+    var totalH = PAD;
+    for (var k = 0; k < cm.items.length; k++) {
+      totalH += cm.items[k].separator ? 5 : ITEM_H;
+    }
+    totalH += PAD;
+
+    // Clamp to screen
+    var mx = Math.min(cm.x, s.width  - W   - 2);
+    var my = Math.min(cm.y, s.height - totalH - 2);
+
+    // Background + border
+    s.fillRect(mx, my, W, totalH, 0xFF2A2A3A);
+    s.drawRect(mx, my, W, totalH, 0xFF5599CC);
+
+    var cy = my + PAD;
+    for (var i = 0; i < cm.items.length; i++) {
+      var item = cm.items[i];
+      if (item.separator) {
+        s.fillRect(mx + 4, cy + 2, W - 8, 1, 0xFF445566);
+        cy += 5;
+        continue;
+      }
+      // Hover highlight: item under cursor?
+      var cx2 = this._cursorX, cy2 = this._cursorY;
+      var hover = cx2 >= mx && cx2 < mx + W && cy2 >= cy && cy2 < cy + ITEM_H;
+      if (hover && !item.disabled) s.fillRect(mx + 1, cy, W - 2, ITEM_H, 0xFF2255AA);
+      s.drawText(mx + 8, cy + 4, item.label,
+                 item.disabled ? 0xFF667788 : Colors.WHITE);
+      cy += ITEM_H;
+    }
+  }
+
+  private _hitContextMenuItem(cx: number, cy: number): MenuItem | null {
+    var cm = this._contextMenu;
+    if (!cm) return null;
+    var ITEM_H = 16, PAD = 6, W = 140;
+    var totalH = PAD;
+    for (var k = 0; k < cm.items.length; k++) {
+      totalH += cm.items[k].separator ? 5 : ITEM_H;
+    }
+    totalH += PAD;
+    var mx = Math.min(cm.x, this._screen.width  - W   - 2);
+    var my = Math.min(cm.y, this._screen.height - totalH - 2);
+    var iy = my + PAD;
+    for (var i = 0; i < cm.items.length; i++) {
+      var item = cm.items[i];
+      if (item.separator) { iy += 5; continue; }
+      if (cx >= mx && cx < mx + W && cy >= iy && cy < iy + ITEM_H) return item;
+      iy += ITEM_H;
+    }
+    return null;
   }
 }
 
