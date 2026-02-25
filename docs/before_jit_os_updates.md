@@ -91,12 +91,13 @@ Add a dedicated BSS array of render surfaces, one per child slot, sized for
 32-bit BGRA pixels at the maximum supported window content resolution.
 
 **Size calculation:**  
-- 800×500 content area @ 32bpp (4 bytes/pixel) = 1,600,000 bytes ≈ 1.56 MB  
-- Round up to 2 MB to allow 1024×512 windows with no reallocation
+- Maximum window content area in `main.ts`: browser = `Math.min(screen.width - 40, 1024)` × `Math.min(screen.height - 80, 700)` = **984×688 at 1024×768 resolution = 677,632 pixels × 4 bytes = 2.71 MB**  
+- 2 MB (= 1024×512) would **overflow** for the browser window at default resolution  
+- Use **3 MB per slab** — matches `fb_blit_buf[1024×768]` exactly; covers any window up to full screen
 
 ```c
 /* quickjs_binding.c */
-#define RENDER_BUF_BYTES  (2 * 1024 * 1024)   /* 2 MB — 1024×512 @ 32bpp */
+#define RENDER_BUF_BYTES  (3 * 1024 * 1024)   /* 3 MB — 1024×768 @ 32bpp, matches fb_blit_buf */
 static uint8_t _app_render_bufs[JSPROC_MAX][RENDER_BUF_BYTES]
                __attribute__((aligned(4096)));
 ```
@@ -318,25 +319,113 @@ JS_CFUNC_DEF("setInterval",   2, js_child_set_interval),
 JS_CFUNC_DEF("clearInterval", 1, js_child_clear_interval),
 ```
 
-Timer state is stored per-slot in C (`_proc_timers[JSPROC_MAX][MAX_TIMERS]`).
-The scheduler checks expired timers before each `procTick` and queues the
-callbacks as pending jobs in the child's runtime via a JS callback mechanism
-(inject code that invokes the registered handler functions by ID).
+Timer state is stored per-slot in C:
+
+```c
+#define MAX_TIMERS   32
+typedef struct {
+    uint32_t id;          /* timer handle returned to JS */
+    uint32_t interval_ms; /* delay or period in ms       */
+    uint32_t due_ticks;   /* PIT tick count when due     */
+    int      repeat;      /* 1 = setInterval, 0 = setTimeout */
+    int      active;      /* 0 = slot free               */
+    /* callback is identified by id; child calls __timerFire(id) via JS_Eval */
+} ProcTimer_t;
+static ProcTimer_t _proc_timers[JSPROC_MAX][MAX_TIMERS];
+/* BSS cost: 8 slots × 32 timers × 24 bytes = 6 KB — negligible */
+```
+
+The `serviceTimers(id)` helper (called from `_tickChildProcs`, Phase E2) walks
+`_proc_timers[id]`, fires any whose `due_ticks ≤ kernel_ticks()`, and injects
+`"__timerFire(" + timerId + ")"` into the child via `JS_Eval`. One-shot timers
+are then cleared; interval timers get `due_ticks += interval_ms / 10` (at 100 Hz
+PIT, 1 tick = 10 ms).
+
+```c
+/* Called from wm.ts → kernel.serviceTimers(id) after procTick */
+JS_CFUNC_DEF("serviceTimers", 1, js_service_timers),
+```
+
+```typescript
+/* wm.ts — the serviceTimers helper used in _tickChildProcs (Phase E2/E3) */
+// Called as: kernel.serviceTimers(list[i].id)
+// C side walks _proc_timers[id], fires due timers, returns fired count.
+function serviceTimers(procId: number): void {
+  kernel.serviceTimers(procId);  // C does the walk and JS_Eval injection
+}
+```
 
 ### B4 — Event Inbox
 
 Replace the raw string `pollMessage` with a typed event system for input:
 
 ```c
-/* kernel.pollEvent() → { type, key, keyCode, mouseX, mouseY, button } | null */
+/* kernel.pollEvent() — child runtime: dequeue next event or return null */
 JS_CFUNC_DEF("pollEvent", 0, js_child_poll_event),
+```
+
+Event queue storage:
+```c
+#define PROC_EVENT_QUEUE_SLOTS  16
+#define PROC_EVENT_SLOT_BYTES   256  /* enough for any JSON-serialised key/mouse event */
+typedef struct {
+    char    data[PROC_EVENT_SLOT_BYTES];
+    int     used;
+} ProcEventSlot_t;
+typedef struct {
+    ProcEventSlot_t slots[PROC_EVENT_QUEUE_SLOTS];
+    int             head, tail, count;
+} ProcEventQueue_t;
+static ProcEventQueue_t _proc_event_queues[JSPROC_MAX];
+/* BSS cost: 8 × 16 × 260 bytes ≈ 32 KB — negligible */
+```
+
+**Main-runtime side** (called by `ChildProcApp.onKey` / `.onMouse`):
+```c
+/* kernel.procSendEvent(id, ev) — main runtime: push serialised event into child queue */
+/* ev is a JS object — C side does JSON.stringify equivalent via QuickJS JS_JSONStringify */
+JS_CFUNC_DEF("procSendEvent", 2, js_proc_send_event),
+```
+
+`kernel.ts` additions:
+```typescript
+procSendEvent(id: number, ev: KeyEvent | MouseEvent): void;
+pollEvent(): { type: string; key?: string; keyCode?: number;
+               mouseX?: number; mouseY?: number; button?: number } | null;
 ```
 
 The WM routes keyboard and mouse events to the focused app's event queue.
 `pollEvent` returns the next queued event object or `null` if the queue is empty.
 Apps call this in their main loop / timer callback.
 
-### B5 — Window Commands
+### B5 — `getWidth` / `getHeight` for Child Runtime
+
+Phase C3 app boilerplate calls `kernel.getWidth()` and `kernel.getHeight()` to
+create their Canvas at the right size. These must be added to the **child** API:
+
+```c
+/* kernel.getWidth()  — child runtime: returns the window content width set at launch */
+/* kernel.getHeight() — child runtime: returns the window content height set at launch */
+JS_CFUNC_DEF("getWidth",  0, js_child_get_width),
+JS_CFUNC_DEF("getHeight", 0, js_child_get_height),
+```
+
+Store width/height per slot in `JSProc_t` (two `uint32_t` fields, 8 bytes
+total, negligible BSS — already within `_procs[8]` budget). Set at
+`kernel.procCreate()` time by passing dimensions, or by a separate
+`kernel.procSetDimensions(id, w, h)` call from the main runtime before
+`kernel.procEval()`.
+
+```typescript
+/* kernel.ts additions */
+procSetDimensions(id: number, w: number, h: number): void;
+getWidth(): number;   /* child runtime only */
+getHeight(): number;  /* child runtime only */
+```
+
+---
+
+### B6 — Window Commands
 
 Apps communicate with the WM via structured outbox messages:
 
@@ -349,11 +438,19 @@ kernel.windowCommand({ type: 'renderReady' });  // "I've finished drawing this f
 ```
 
 ```c
-JS_CFUNC_DEF("windowCommand", 1, js_child_window_command),
+JS_CFUNC_DEF("windowCommand",             1, js_child_window_command),
+/* Main-runtime side: dequeue one command or return null */
+JS_CFUNC_DEF("procDequeueWindowCommand",  1, js_proc_dequeue_window_cmd),
 ```
 
 Serializes the command object as JSON into the child's outbox. The WM in the
 main runtime polls outboxes after each compositor pass and handles commands.
+
+```typescript
+/* kernel.ts additions */
+windowCommand(cmd: { type: string; [k: string]: any }): void;  /* child side */
+procDequeueWindowCommand(id: number): { type: string; [k: string]: any } | null; /* main side */
+```
 
 ---
 
@@ -383,20 +480,24 @@ function launchApp(manifest: AppManifest): number {
   const procId = kernel.procCreate();
   if (procId < 0) throw new Error('No free process slots');
 
+  // Tell the child runtime what dimensions its render surface is
+  kernel.procSetDimensions(procId, manifest.width, manifest.height);
+
   // Open a window backed by this process's render buffer
-  const win = wm.openWindow({
+  // NOTE: wm.createWindow() — NOT openWindow() (that method does not exist)
+  const win = wm.createWindow({
     title: manifest.title,
-    x: ..., y: ...,
-    w: manifest.width,
-    h: manifest.height,
-    procId,
+    x: 20, y: 20,
+    width:  manifest.width,
+    height: manifest.height,
+    app:    new ChildProcApp(procId, manifest.width, manifest.height),
+    closeable: manifest.singleInstance !== true,
   });
 
   // Install the app's JS code into the child runtime
   kernel.procEval(procId, manifest.code);
-
-  // Start the render/event loop for this app in the scheduler
-  scheduler.register(procId);
+  // Note: scheduler already sees this proc via kernel.procList() —
+  // no separate scheduler.register() call needed; _tickChildProcs() picks it up.
   return procId;
 }
 ```
@@ -564,23 +665,24 @@ tick(): void {
 
 | Step | What | Risk |
 |---|---|---|
-| A1 | BSS render slabs + `getRenderBuffer` / `getProcRenderBuffer` C functions | Low — additive C |
+| A1 | BSS render slabs (3 MB × 8 = 24 MB) + `getRenderBuffer` / `getProcRenderBuffer` C functions | Low — additive C |
 | A2 | Canvas external-buffer constructor + NOP flip | Low — additive TypeScript |
 | A3 | `ChildProcApp` proxy + `Canvas.blitFromBuffer` | Medium — new WM path |
 | B1 | App bundler prepends canvas.js (build tooling only) | Low — no runtime change |
 | B2 | Child FS API | Low — additive |
-| B3 | Child timer API | Medium — scheduler integration |
-| B4 | Child event API (`pollEvent`, `procSendEvent`) | Medium — new input path |
-| B5 | Window commands (`windowCommand`, `procDequeueWindowCommand`) | Low — additive |
-| C1–C3 | App launch protocol + `launchApp()` | High — touches every app |
+| B3 | Child timer API + `_proc_timers` BSS + `kernel.serviceTimers` C + `serviceTimers` TS helper | Medium — scheduler integration |
+| B4 | Child event API: `_proc_event_queues` BSS + `pollEvent` (child) + `procSendEvent` (main) | Medium — new input path |
+| B5 | `getWidth`/`getHeight` child API + `procSetDimensions` main API | Low — additive |
+| B6 | Window commands: `windowCommand` (child) + `procDequeueWindowCommand` (main) | Low — additive |
+| C1–C3 | App launch protocol + `launchApp()` using `wm.createWindow()` | High — touches every app |
 | D | Browser isolation | Medium — browser refactor |
-| E2/E3 | `_processWindowCommands` + timer service in `_tickChildProcs` | Low — additive |
+| E2/E3 | `_processWindowCommands` + `kernel.serviceTimers()` in `_tickChildProcs` | Low — additive |
 
-**Suggested order:** A1 → A2 → A3 → B1 → B2 → B4 → B5 → E2 → C (migrate
+**Suggested order:** A1 → A2 → A3 → B1 → B2 → B4 → B5 → B6 → E2 → C (migrate
 apps one at a time, terminal first) → B3 → E3 → D
 
 Phase E1 (input routing) is implicit in A3: `ChildProcApp.onKey` calls
-`kernel.procSendEvent`. Implement B4 and B5 before migrating any app.
+`kernel.procSendEvent`. Implement B4, B5, and B6 before migrating any app.
 
 Migrate apps one at a time. Keep the original direct-render TypeScript app path
 working in parallel until every app is ported and the `main.ts` boot sequence
@@ -615,7 +717,7 @@ is updated to use `launchApp()` instead of importing app modules directly.
 |---|---|---|
 | Main runtime JS heap (`JS_SetMemoryLimit`) | 50 MB | software cap |
 | 8× child app runtimes (`JS_SetMemoryLimit`) | 8× 4 MB = 32 MB | software cap |
-| App render buffers BSS (32bpp) (`_app_render_bufs`) | 8× 2 MB = **16 MB** | added by this plan |
+| App render buffers BSS (32bpp) (`_app_render_bufs`) | 8× 3 MB = **24 MB** | added by this plan — 3 MB = 1024×768 × 4, covers max window size; 2 MB would overflow browser window (984×688 = 2.71 MB) |
 | Shared memory buffers BSS (`_sbufs`) | 8× 256 KB = **2 MB** | existing |
 | JIT pool BSS (`_jit_pool`) | **12 MB** | expanded by jit-unrolled-plan Step 1 |
 | `fb_blit_buf` BSS (`uint32_t[1024×768]`) | **3 MB** | slow-path blit fallback |
@@ -624,18 +726,20 @@ is updated to use `launchApp()` instead of importing app modules directly.
 | `_user_pds[32][1024]` uint32_t (`quickjs_binding.c`) | **128 KB** | user-mode page directory pool |
 | `rx_bufs[256][2048]` + `tx_bufs[256][2048]` (`virtio_net.c`) | **1 MB** | virtio-net DMA ring buffers |
 | `_jit_write_buf[JIT_ALLOC_MAX]` (`quickjs_binding.c`) | **64 KB** | slow-path buffer for `kernel.jitWrite(addr, number[])` |
+| `_proc_timers[8][32]` ProcTimer_t (`quickjs_binding.c`) | **~6 KB** | 8 slots × 32 timers × 24 bytes; added by Phase B3 |
+| `_proc_event_queues[8]` ProcEventQueue_t (`quickjs_binding.c`) | **~32 KB** | 8 × (16 × 260 B + 12 B); added by Phase B4 |
 | Other BSS (stack 32 KB, `paging_pd` 4 KB, `ata_sector_buf` 4 KB, `_asm_buf` 4 KB, net bufs ~3 KB, IPC strings ~4 KB, keyboard ~256 B) | **~52 KB** | |
-| **Total BSS** | **~35.5 MB** | |
+| **Total BSS** | **~43.7 MB** | |
 | **Total QuickJS heap reservation** | **82 MB** | |
-| **Combined** | **~117.5 MB** | |
+| **Combined** | **~125.7 MB** | |
 
 Derivation of BSS total:
-16 + 2 + 12 + 3 + 0.256 + 1 + 0.128 + 1 + 0.064 + 0.052 = **35.5 MB**
+24 + 2 + 12 + 3 + 0.256 + 1 + 0.128 + 1 + 0.064 + 0.006 + 0.032 + 0.052 = **43.538 MB ≈ ~43.7 MB**
 
-`_heap_start` (kernel load 1 MB + code/data ~2 MB + BSS ~35.5 MB) ≈ **~38.5 MB**
-`_heap_end` = `_heap_start` + 256 MB ≈ **~294.5 MB**
+`_heap_start` (kernel load 1 MB + code/data ~2 MB + BSS ~43.7 MB) ≈ **~46.7 MB**
+`_heap_end` = `_heap_start` + 256 MB ≈ **~302.7 MB**
 `KERNEL_END_FRAME` = 81,920 × 4096 = **320 MB** — physAlloc bitmap starts above `_heap_end` ✓
-Safety margin: 320 − 294.5 = **~25.5 MB**
+Safety margin: 320 − 302.7 = **~17.3 MB**
 
 **QEMU already runs at `-m 4G`.** See `scripts/test.sh` and
 `scripts/test-interactive.sh`. There is no memory constraint requiring

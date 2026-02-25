@@ -209,11 +209,13 @@ class assembles machine code into a JS ArrayBuffer (QuickJS heap), then
 slot. BSS is stable at **~19.5 MB** through all remaining JIT steps.
 
 > **Cross-reference:** `before_jit_os_updates.md` adds
-> `_app_render_bufs[8][2MB]` = 16 MB more BSS before the JIT lands.
-> Combined BSS when both plans are executed: **~35.5 MB**.
-> With 4 GB QEMU, 82 MB QuickJS heaps, and ~35.5 MB BSS the system
-> comfortably fits. `_heap_start` ≈ 38 MB; `_heap_end` ≈ 294 MB;
-> `KERNEL_END_FRAME` = 320 MB — the physAlloc bitmap starts above `_heap_end`.
+> `_app_render_bufs[8][3MB]` = 24 MB + `_proc_timers` ~6 KB + `_proc_event_queues` ~32 KB
+> more BSS before the JIT lands. (3 MB per slot is required — at 1024×768 the
+> browser window is 984×688 = 2.71 MB which overflows 2 MB.)
+> Combined BSS when both plans are executed: **~43.7 MB**.
+> With 4 GB QEMU, 82 MB QuickJS heaps, and ~43.7 MB BSS the system
+> comfortably fits. `_heap_start` ≈ 46.7 MB; `_heap_end` ≈ 302.7 MB;
+> `KERNEL_END_FRAME` = 320 MB — ~17.3 MB safety margin.
 
 The 256 MB heap region starts at `_heap_start` in `linker.ld`, well above BSS.
 With QEMU at 4 GB there is no address-space concern.
