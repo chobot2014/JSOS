@@ -37,7 +37,7 @@ import { parseHttpResponse } from '../net/http.js';
 import { JSProcess, listProcesses } from '../process/jsprocess.js';
 import { ipc, Pipe } from '../ipc/ipc.js';
 import { users } from '../users/users.js';
-import { wm, type App, type WMWindow, type KeyEvent, type MouseEvent } from '../ui/wm.js';
+import { wm, type App, type WMWindow, type KeyEvent, type MouseEvent, type MenuItem } from '../ui/wm.js';
 import { Canvas } from '../ui/canvas.js';
 import { Mutex, Condvar, Semaphore } from '../process/sync.js';
 import {
@@ -739,7 +739,7 @@ var _rtcBootEpoch: number | null = null;
 var _rtcBootUptime = 0;
 
 /** Animation registry: id → { cb, duration, startUptime } */
-var _animRegistry = new Map<number, { cb: (elapsed: number, total: number) => boolean; duration: number; startUptime: number; coroId: number }>();
+var _animRegistry = new Map<number, { cb: (progress: number) => void; duration: number; startUptime: number; coroId: number }>();
 var _nextAnimId = 1;
 
 /** Theme registry */
@@ -852,7 +852,7 @@ function _patchFsWatch(): void {
 function _debugSerial(level: string, args: unknown[]): void {
   var msg = args.map(function(a) { return typeof a === 'string' ? a : JSON.stringify(a); }).join(' ');
   var line = '[' + level + '] ' + msg + '\n';
-  for (var _di = 0; _di < line.length; _di++) kernel.serialPut(line.charCodeAt(_di));
+  for (var _di = 0; _di < line.length; _di++) kernel.serialPut(line[_di]);
   // Also fire event bus so in-process listeners can pick it up
   if ((sdk as any).events) {
     try { sdk.events.emit('debug:event', { level: level.toLowerCase(), msg, ts: _sdkTimeNow() }); } catch (_e) {}
@@ -1075,7 +1075,7 @@ const sdk = {
       if (!resolvedIP) {
         var q = dnsSendQueryAsync(host);
         threadManager.runCoroutine('rawsock-dns:' + host, function(): 'done'|'pending' {
-          var r = dnsPollReplyAsync(q.port, q.id);
+          var r = dnsPollReplyAsync(host, q.port, q.id);
           if (r) { resolvedIP = r; return 'done'; }
           return 'pending';
         });
@@ -1120,7 +1120,9 @@ const sdk = {
               bytes = [];
               for (var _i = 0; _i < data.length; _i++) bytes.push(data.charCodeAt(_i) & 0xFF);
             } else { bytes = data; }
-            net.send(nSock, bytes);
+            var _sendStr = '';
+            for (var _si = 0; _si < bytes.length; _si++) _sendStr += String.fromCharCode(bytes[_si]);
+            net.send(nSock, _sendStr);
           },
           read(maxBytes?: number): string {
             var bytes = sock.readBytes(maxBytes);
@@ -1609,7 +1611,7 @@ const sdk = {
         var chosen: string | null = null;
         var _cbFired = false;
         var entries: string[] = [];
-        try { entries = fs.readdir(startDir) || []; } catch (_e) { entries = []; }
+        try { entries = sdk.fs.list(startDir); } catch (_e) { entries = []; }
         var selected = -1;
         var H = 22;
         var BG = 0xFF1E1E1E, FG = 0xFFD0D0D0, SEL = 0xFF2060C0;
@@ -1623,7 +1625,7 @@ const sdk = {
           },
           onKey(_ev: KeyEvent): void {},
           onMouse(ev: MouseEvent): void {
-            if (ev.type !== 'mousedown' || !_win) return;
+            if (ev.type !== 'down' || !_win) return;
             var row = Math.floor(ev.y / H);
             if (ev.y >= _win.height - H) {
               if (ev.x < 50 && selected >= 0) chosen = startDir.replace(/\/$/, '') + '/' + entries[selected];
@@ -1676,7 +1678,7 @@ const sdk = {
           },
           onKey(_ev: KeyEvent): void {},
           onMouse(ev: MouseEvent): void {
-            if (ev.type !== 'mousedown' || !_win) return;
+            if (ev.type !== 'down' || !_win) return;
             if (ev.y >= _win.height - 40) {
               if (ev.x < 50) { chosen = (sr << 16) | (sg << 8) | sb; }
               if (!_cbFired) { _cbFired = true; callback(chosen); }
@@ -2212,6 +2214,7 @@ const sdk = {
       all(): Record<string, unknown>;
       reset(): void;
       flush(): void;
+      onChange(key: string, cb: (value: unknown) => void): () => void;
     } {
       var _path  = '/etc/prefs/' + appName + '.json';
       var _cache: Record<string, unknown> | null = null;
@@ -2550,7 +2553,7 @@ const sdk = {
     },
     /** List names in a directory (defaults to '/'). */
     list(path?: string): string[] {
-      try { return fs.readdir(path || '/') || []; } catch (_e) { return []; }
+      try { return sdk.fs.list(path || '/'); } catch (_e) { return []; }
     },
     /** Delete a file. */
     rm(path: string): boolean {
@@ -2591,7 +2594,7 @@ const sdk = {
     /** All stored keys. */
     keys(): string[] {
       try {
-        var items = fs.readdir('/etc/storage') || [];
+        var items = sdk.fs.list('/etc/storage');
         return items.filter(function(n: string) { return n.endsWith('.json'); })
                     .map(function(n: string) { return n.slice(0, -5); });
       } catch (_e) { return []; }
@@ -2626,7 +2629,7 @@ const sdk = {
     /** Write directly to the serial debug port (no level prefix). */
     print(...args: unknown[]): void {
       var line = args.map(function(a) { return typeof a === 'string' ? a : JSON.stringify(a); }).join(' ') + '\n';
-      for (var _di = 0; _di < line.length; _di++) kernel.serialPut(line.charCodeAt(_di));
+      for (var _di = 0; _di < line.length; _di++) kernel.serialPut(line[_di]);
     },
     /** Throw an Error if `cond` is falsy.  Message is included in the stack. */
     assert(cond: boolean, message?: string): void {
