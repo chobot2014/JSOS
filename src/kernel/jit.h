@@ -1,10 +1,11 @@
 /*
  * JSOS JIT Compiler — C interface (Phase 11)
  *
- * Provides three primitives used by the TypeScript JIT runtime:
+ * Provides the primitives used by the TypeScript JIT runtime:
  *
- *   jit_alloc      — carve RWX memory from a static 256 KB BSS pool.
- *   jit_write      — bulk-copy machine code bytes into a JIT region.
+ *   jit_alloc          — carve RWX memory from the 8 MB main BSS pool.
+ *   jit_proc_alloc     — carve memory from a per-child 512 KB slab.
+ *   jit_write          — bulk-copy machine code bytes into a JIT region.
  *   jit_call_i4    — call a JIT-compiled cdecl function with ≤4 int32 args.
  *   jit_used_bytes — diagnostic: bytes consumed in the pool.
  *

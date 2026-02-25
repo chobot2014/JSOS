@@ -88,8 +88,6 @@ export const OP_get_var           = 0x3A;  // 5 bytes: u32 atom → +1
 export const OP_put_var           = 0x3B;  // 5 bytes: u32 atom → -1
 
 // Control flow
-export const OP_return            = 0x28;  // NOTE: same as put_var_ref?
-// QuickJS reuses opcode space carefully; the actual return is:
 export const OP_return_val        = 0x3C;  // 1 byte  → returns TOS to caller
 export const OP_return_undef      = 0x3D;  // 1 byte  → returns undefined
 export const OP_check_ctor_return = 0x3E;  // 1 byte  → -1 +1

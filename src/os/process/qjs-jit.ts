@@ -342,20 +342,23 @@ export class QJSJITCompiler {
         case OP_shr: { e.popEcx(); e.popEax(); e.shrACl(); e.pushEax(); pc++; break; }
 
         // ── Local variable add (common loop-counter pattern) ─────────────
+        // Semantics: local[i] += TOS; pop TOS.
+        // ECX = addend (TOS), EAX = local[i], then ADD EAX, ECX → store back.
         case OP_add_loc: {
           const i = bc.u16(pc + 1);
-          e.popEax(); e.load(this._locDisp(i)); e.addAC(); e.store(this._locDisp(i));
-          // Wait: OP_add_loc semantics = local[i] += TOS; pop TOS.  So:
-          //   ECX = TOS (already in EAX after popEax, so let's redo)
-          // Actually: pop TOS → ECX; MOV EAX, local[i]; ADD EAX, ECX; MOV local[i], EAX.
-          // The emit above is wrong; fix:
-          pc += 3;
-          // Redo for correctness:
-          break; // handled specially below — see _emitAddLoc
+          e.popEcx();                      // ECX = TOS (addend)
+          e.load(this._locDisp(i));        // EAX = local[i]
+          e.addAC();                       // EAX += ECX
+          e.store(this._locDisp(i));       // local[i] = EAX
+          pc += 3; break;
         }
         case OP_add_loc8: {
           const i = bc.u8(pc + 1);
-          pc += 2; break; // see _emitAddLoc8
+          e.popEcx();
+          e.load(this._locDisp(i));
+          e.addAC();
+          e.store(this._locDisp(i));
+          pc += 2; break;
         }
 
         // ── Unary ────────────────────────────────────────────────────────
@@ -385,10 +388,12 @@ export class QJSJITCompiler {
 
         // ── Branches ─────────────────────────────────────────────────────
         case OP_goto8: {
+          // Always emit 32-bit JMP: native code expands relative to bytecode
+          // so the 8-bit QJS offset may exceed ±127 native bytes.
           const rel = bc.i8(pc + 1);
           const target = pc + 2 + rel;
-          const fixOff = e.jmp8();
-          this._fixups.push({ bcTarget: target, fixupOff: fixOff, is8: true });
+          const fixOff = e.jmp();
+          this._fixups.push({ bcTarget: target, fixupOff: fixOff, is8: false });
           pc += 2; break;
         }
         case OP_goto16: {
@@ -406,19 +411,22 @@ export class QJSJITCompiler {
           pc += 5; break;
         }
         case OP_if_true8: {
+          // Jump to target if TOS is truthy (non-zero).  TEST sets ZF if EAX==0.
+          // JNE (ZF=0) fires when EAX ≠ 0 = truthy.  32-bit form avoids expansion overflow.
           const rel = bc.i8(pc + 1);
           const target = pc + 2 + rel;
           e.popEax(); e.testAA();
-          const fixOff = e.je8();   // je = jump if ZF (EAX was 0 = false → don't branch on true)
-          this._fixups.push({ bcTarget: target, fixupOff: fixOff, is8: true });
+          const fixOff = e.jne();  // jne: jump if non-zero (truthy)
+          this._fixups.push({ bcTarget: target, fixupOff: fixOff, is8: false });
           pc += 2; break;
         }
         case OP_if_false8: {
+          // Jump to target if TOS is falsy (zero).  JE (ZF=1) fires when EAX==0.
           const rel = bc.i8(pc + 1);
           const target = pc + 2 + rel;
           e.popEax(); e.testAA();
-          const fixOff = e.jne8();  // jne = jump if not ZF (EAX non-zero = true → don't branch on false)
-          this._fixups.push({ bcTarget: target, fixupOff: fixOff, is8: true });
+          const fixOff = e.je();   // je: jump if zero (falsy)
+          this._fixups.push({ bcTarget: target, fixupOff: fixOff, is8: false });
           pc += 2; break;
         }
         case OP_if_true: {
@@ -470,20 +478,6 @@ export class QJSJITCompiler {
 
     return e.buf;
   }
-}
-
-// Fix OP_add_loc / OP_add_loc8 emission — the switch above has a bug
-// where the old code was executed before the break.  Extend QJSJITCompiler
-// via monkey-patching the switch cases.  Actually, let's override compile()
-// to handle these correctly inline.  The cases above will just advance pc;
-// the actual x86 emission for add_loc needs a separate helper:
-
-function _emitAddLocHelper(e: _Emit, locDisp: number): void {
-  // Stack: [..., val]; local[i] += val; pop val
-  e.popEcx();                // ECX = TOS (the addend)
-  e.load(locDisp);           // EAX = local[i]
-  e.addAC();                 // EAX += ECX
-  e.store(locDisp);          // local[i] = EAX
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
