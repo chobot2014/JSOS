@@ -69,7 +69,7 @@ interface Tok { type: TT; value: string; }
 
 const _KW = new Set([
   'function', 'var', 'return', 'if', 'else',
-  'while', 'for', 'break', 'continue',
+  'while', 'for', 'break', 'continue', 'do',
 ]);
 
 function _tokenise(src: string): Tok[] {
@@ -141,24 +141,31 @@ function _tokenise(src: string): Tok[] {
 // ─── AST ──────────────────────────────────────────────────────────────────────
 
 type Expr =
-  | { k: 'num';    v: number }
-  | { k: 'ident';  name: string }
-  | { k: 'binop';  op: string; l: Expr; r: Expr }
-  | { k: 'unop';   op: string; x: Expr }
-  | { k: 'assign'; op: string; l: Expr; r: Expr }
-  | { k: 'mem32';  addr: Expr }
-  | { k: 'mem8';   addr: Expr }
-  | { k: 'imul';   a: Expr; b: Expr }
-  | { k: 'iabs';   x: Expr };
+  | { k: 'num';     v: number }
+  | { k: 'ident';   name: string }
+  | { k: 'binop';   op: string; l: Expr; r: Expr }
+  | { k: 'unop';    op: string; x: Expr }
+  | { k: 'assign';  op: string; l: Expr; r: Expr }
+  | { k: 'mem32';   addr: Expr }
+  | { k: 'mem8';    addr: Expr }
+  | { k: 'imul';    a: Expr; b: Expr }
+  | { k: 'iabs';    x: Expr }
+  // ── Extensions (Phase 11b) ──────────────────────────────────────────────────
+  | { k: 'ternary'; cond: Expr; then: Expr; els: Expr }   // cond ? then : els
+  | { k: 'callN';   addr: Expr; args: Expr[] }             // call(addr, a0..aN)
+  | { k: 'imin';    a: Expr; b: Expr }                     // Math.min (signed)
+  | { k: 'imax';    a: Expr; b: Expr }                     // Math.max (signed)
+  | { k: 'iclz';    x: Expr };                             // Math.clz32
 
 type Stmt =
-  | { k: 'var';    name: string; init: Expr | null }
-  | { k: 'expr';   e: Expr }
-  | { k: 'return'; e: Expr | null }
-  | { k: 'if';     cond: Expr; then: Stmt[]; els: Stmt[] }
-  | { k: 'while';  cond: Expr; body: Stmt[] }
-  | { k: 'for';    init: Stmt | null; cond: Expr | null; update: Expr | null; body: Stmt[] }
-  | { k: 'block';  body: Stmt[] }
+  | { k: 'var';     name: string; init: Expr | null }
+  | { k: 'expr';    e: Expr }
+  | { k: 'return';  e: Expr | null }
+  | { k: 'if';      cond: Expr; then: Stmt[]; els: Stmt[] }
+  | { k: 'while';   cond: Expr; body: Stmt[] }
+  | { k: 'dowhile'; cond: Expr; body: Stmt[] }   // do { } while (cond)
+  | { k: 'for';     init: Stmt | null; cond: Expr | null; update: Expr | null; body: Stmt[] }
+  | { k: 'block';   body: Stmt[] }
   | { k: 'break' }
   | { k: 'continue' };
 
@@ -210,7 +217,7 @@ function _parse(toks: Tok[]): FnDecl {
         eat(); var addr = parseAssign(); expect(']');
         return { k: t.value as 'mem32' | 'mem8', addr };
       }
-      // Math.imul / Math.abs
+      // Math.imul / Math.abs / Math.min / Math.max / Math.clz32
       if (t.value === 'Math' && peek().value === '.') {
         eat(); var method = eat().value;
         expect('(');
@@ -222,9 +229,30 @@ function _parse(toks: Tok[]): FnDecl {
           var x = parseAssign(); expect(')');
           return { k: 'iabs', x };
         }
+        if (method === 'min') {
+          var a = parseAssign(); expect(','); var b = parseAssign(); expect(')');
+          return { k: 'imin', a, b };
+        }
+        if (method === 'max') {
+          var a = parseAssign(); expect(','); var b = parseAssign(); expect(')');
+          return { k: 'imax', a, b };
+        }
+        if (method === 'clz32') {
+          var x = parseAssign(); expect(')');
+          return { k: 'iclz', x };
+        }
         // fallback: ignore other Math methods, return 0
         parseExprList(); expect(')');
         return { k: 'num', v: 0 };
+      }
+      // call(addr, a0, a1, ...) — indirect JIT function call
+      if (t.value === 'call' && peek().value === '(') {
+        eat(); // consume '('
+        var callAddr = parseAssign();
+        var callArgs: Expr[] = [];
+        while (eatIf(',')) callArgs.push(parseAssign());
+        expect(')');
+        return { k: 'callN', addr: callAddr, args: callArgs };
       }
       // plain identifier
       return { k: 'ident', name: t.value };
@@ -305,6 +333,14 @@ function _parse(toks: Tok[]): FnDecl {
   }
   function parseAssign(): Expr {
     var l = parseLogOr();
+    // Ternary: cond ? then : else  (right-associative)
+    if (peek().value === '?') {
+      eat(); // consume '?'
+      var ternThen = parseAssign();
+      expect(':');
+      var ternEls = parseAssign();
+      return { k: 'ternary', cond: l, then: ternThen, els: ternEls };
+    }
     var ops = ['=','+=','-=','*=','/=','%=','&=','|=','^=','<<=','>>='];
     var pt = peek().type as string;
     if (ops.indexOf(pt) >= 0 || ops.indexOf(peek().value) >= 0) {
@@ -376,6 +412,13 @@ function _parse(toks: Tok[]): FnDecl {
     }
     if (t.value === 'break')    { eat(); eatSemi(); return { k: 'break' }; }
     if (t.value === 'continue') { eat(); eatSemi(); return { k: 'continue' }; }
+    if (t.value === 'do') {
+      eat();
+      var dBody: Stmt[];
+      if (peek().value === '{') dBody = parseBlock(); else dBody = [parseStmt()];
+      expect('while'); expect('('); var dCond = parseAssign(); expect(')'); eatSemi();
+      return { k: 'dowhile', cond: dCond, body: dBody };
+    }
     // expression statement
     var es = parseAssign(); eatSemi();
     return { k: 'expr', e: es };
@@ -419,8 +462,8 @@ class _Frame {
   private _next  = -4;                         // next available local slot offset
 
   constructor(params: string[]) {
-    // cdecl: first arg at EBP+8, next at EBP+12, etc.
-    for (var i = 0; i < params.length && i < 4; i++) {
+    // cdecl: first arg at EBP+8, next at EBP+12, etc.  Up to 8 params.
+    for (var i = 0; i < params.length && i < 8; i++) {
       this._slots.set(params[i], 8 + i * 4);
     }
   }
@@ -558,6 +601,22 @@ class _Emit {
     this._w(0xC9);  // LEAVE  (= MOV ESP,EBP; POP EBP)
     this._w(0xC3);  // RET
   }
+
+  // ── Conditional moves (Pentium Pro+, safe for any JSOS x86 target) ──────────
+
+  cmovgAC(): void { this._w(0x0F); this._w(0x4F); this._w(0xC1); } // CMOVG EAX, ECX  (if EAX > ECX)
+  cmovlAC(): void { this._w(0x0F); this._w(0x4C); this._w(0xC1); } // CMOVL EAX, ECX  (if EAX < ECX)
+
+  // ── Bit-scan reverse: ECX = position of highest set bit in EAX ──────────────
+  bsrCA():   void { this._w(0x0F); this._w(0xBD); this._w(0xC8); } // BSR ECX, EAX
+
+  // ── Indirect call / stack cleanup ────────────────────────────────────────────
+  callEcx(): void { this._w(0xFF); this._w(0xD1); }                 // CALL ECX
+  addEspImm8(n: number):  void { this._w(0x83); this._w(0xC4); this._w(n & 0xFF); }  // ADD ESP, imm8
+  addEspImm32(n: number): void { this._w(0x81); this._w(0xC4); this._u32(n); }       // ADD ESP, imm32
+
+  // ── Extra register transfers ──────────────────────────────────────────────────
+  movEaxEcx(): void { this._w(0x89); this._w(0xC8); }               // MOV EAX, ECX
 }
 
 // ─── Code generator ───────────────────────────────────────────────────────────
@@ -619,6 +678,73 @@ function _codegen(fn: FnDecl): number[] {
         genExpr(ex.x);
         e.absEax();
         break;
+
+      // ── Phase 11b extensions ──────────────────────────────────────────────────
+
+      case 'ternary': {
+        genExpr(ex.cond);
+        e.testAA();
+        var jtFalse = e.je();           // jump to else-branch if cond == 0
+        genExpr(ex.then);               // EAX = then-value
+        var jtEnd = e.jmp();            // jump over else-branch
+        e.patch(jtFalse, e.here());
+        genExpr(ex.els);                // EAX = else-value
+        e.patch(jtEnd, e.here());
+        break;
+      }
+
+      case 'imin': {
+        // min(a,b): eval a→push; eval b→EAX; pop ECX=a; CMP EAX(b), ECX(a); CMOVG EAX,ECX → EAX=min
+        genExpr(ex.a); e.pushEax();
+        genExpr(ex.b);
+        e.popEcx();               // ECX = a
+        e.cmpAC();                // CMP EAX(b), ECX(a)
+        e.cmovgAC();              // if b > a: EAX = a  →  result = min(a,b)
+        break;
+      }
+
+      case 'imax': {
+        // max(a,b): eval a→push; eval b→EAX; pop ECX=a; CMP EAX(b), ECX(a); CMOVL EAX,ECX → EAX=max
+        genExpr(ex.a); e.pushEax();
+        genExpr(ex.b);
+        e.popEcx();               // ECX = a
+        e.cmpAC();                // CMP EAX(b), ECX(a)
+        e.cmovlAC();              // if b < a: EAX = a  →  result = max(a,b)
+        break;
+      }
+
+      case 'iclz': {
+        // clz32(x): BSR-based.  clz(0)=32; clz(x)=31-BSR(x) for x!=0.
+        genExpr(ex.x);
+        e.testAA();
+        var jClzNz = e.jne();     // skip if x != 0
+        e.immEax(32);             // clz(0) = 32
+        var jClzEnd = e.jmp();
+        e.patch(jClzNz, e.here());
+        e.bsrCA();                // ECX = highest-set-bit position (0..31)
+        e.immEax(31);             // EAX = 31
+        e.subAC();                // EAX = 31 - ECX  =  clz32(x)
+        e.patch(jClzEnd, e.here());
+        break;
+      }
+
+      case 'callN': {
+        // cdecl indirect call: push args right-to-left, eval addr→ECX, CALL ECX, cleanup.
+        var cArgs = ex.args;
+        var cN    = cArgs.length;
+        for (var cI = cN - 1; cI >= 0; cI--) {
+          genExpr(cArgs[cI]); e.pushEax();
+        }
+        genExpr(ex.addr);
+        e.movEcxEax();            // ECX = function address
+        e.callEcx();
+        if (cN > 0) {
+          var cleanup = cN * 4;
+          if (cleanup <= 127) e.addEspImm8(cleanup);
+          else                e.addEspImm32(cleanup);
+        }
+        break;
+      }
 
       case 'unop':
         genExpr(ex.x);
@@ -851,6 +977,24 @@ function _codegen(fn: FnDecl): number[] {
         break;
       }
 
+      case 'dowhile': {
+        var dwMeta: _LoopMeta = { continueFixups: [], breakFixups: [], continueTarget: -1 };
+        loopStack.push(dwMeta);
+        var dwStart = e.here();
+        genStmts(stmt.body);
+        dwMeta.continueTarget = e.here();
+        for (var dwCi = 0; dwCi < dwMeta.continueFixups.length; dwCi++)
+          e.patch(dwMeta.continueFixups[dwCi], dwMeta.continueTarget);
+        genExpr(stmt.cond);
+        e.testAA();
+        e.patch(e.jne(), dwStart);   // loop back if cond != 0
+        var dwEnd = e.here();
+        for (var dwBi = 0; dwBi < dwMeta.breakFixups.length; dwBi++)
+          e.patch(dwMeta.breakFixups[dwBi], dwEnd);
+        loopStack.pop();
+        break;
+      }
+
       case 'block':
         genStmts(stmt.body);
         break;
@@ -884,8 +1028,24 @@ function _codegen(fn: FnDecl): number[] {
 // ─── JIT cache ────────────────────────────────────────────────────────────────
 
 interface _CacheEntry {
-  addr:  number;       // kernel JIT pool address
-  bytes: number;       // size of compiled code
+  addr:    number;   // kernel JIT pool address
+  bytes:   number;   // size of compiled code
+  nParams: number;   // number of declared parameters (determines call ABI)
+}
+
+/** Build a JS closure that dispatches to the JIT-compiled function at `addr`. */
+function _makeProxy(addr: number, nParams: number): (...args: number[]) => number {
+  if (nParams <= 4) {
+    return function(...args: number[]): number {
+      return kernel.jitCallI(addr,
+        args[0] || 0, args[1] || 0, args[2] || 0, args[3] || 0);
+    };
+  }
+  return function(...args: number[]): number {
+    return kernel.jitCallI8(addr,
+      args[0] || 0, args[1] || 0, args[2] || 0, args[3] || 0,
+      args[4] || 0, args[5] || 0, args[6] || 0, args[7] || 0);
+  };
 }
 
 var _cache = new Map<string, _CacheEntry>();
@@ -906,19 +1066,19 @@ export const JIT = {
   /**
    * Compile a JS function source string to native x86-32 code.
    *
-   * Returns a callable proxy function that invokes the compiled native code
-   * via kernel.jitCallI.  Returns null if compilation or allocation fails.
+   * Returns a callable proxy function that invokes the compiled native code.
+   * Functions with ≤4 params use kernel.jitCallI; 5–8 params use kernel.jitCallI8.
+   * Returns null if compilation or allocation fails.
    *
    * The result is cached by source text; re-compiling the same source is free.
    */
-  compile(src: string): ((a0?: number, a1?: number, a2?: number, a3?: number) => number) | null {
+  compile(src: string): ((...args: number[]) => number) | null {
     // Cache hit?
     var cached = _cache.get(src);
     if (cached) {
       var caddr = cached.addr;
-      return function(a0?: number, a1?: number, a2?: number, a3?: number): number {
-        return kernel.jitCallI(caddr, a0 || 0, a1 || 0, a2 || 0, a3 || 0);
-      };
+      var cNP   = cached.nParams;
+      return _makeProxy(caddr, cNP);
     }
 
     // Parse
@@ -940,7 +1100,6 @@ export const JIT = {
     }
 
     if (!JIT.available()) {
-      // No kernel JIT support — fall back to eval()
       kernel.serialPut('[JIT] kernel.jitAlloc unavailable — running interpreted\n');
       return null;
     }
@@ -954,24 +1113,23 @@ export const JIT = {
 
     // Write machine code
     kernel.jitWrite(addr, bytes);
-    _cache.set(src, { addr, bytes: bytes.length });
+    var nParams = fn.params.length;
+    _cache.set(src, { addr, bytes: bytes.length, nParams });
     _compiled++;
 
     kernel.serialPut('[JIT] compiled "' + fn.name + '" → 0x' +
-      addr.toString(16) + ' (' + bytes.length + ' bytes)\n');
+      addr.toString(16) + ' (' + bytes.length + ' bytes, ' + nParams + ' params)\n');
 
-    return function(a0?: number, a1?: number, a2?: number, a3?: number): number {
-      return kernel.jitCallI(addr, a0 || 0, a1 || 0, a2 || 0, a3 || 0);
-    };
+    return _makeProxy(addr, nParams);
   },
 
   /**
    * Compile and immediately call.  Useful for one-shot native operations.
    * Returns undefined if compilation fails.
    */
-  run(src: string, a0 = 0, a1 = 0, a2 = 0, a3 = 0): number | undefined {
+  run(src: string, ...args: number[]): number | undefined {
     var fn = JIT.compile(src);
-    return fn ? fn(a0, a1, a2, a3) : undefined;
+    return fn ? fn(...args) : undefined;
   },
 
   /**
@@ -994,5 +1152,90 @@ export const JIT = {
     _cache.clear();
   },
 };
+
+// ─── JITProfiler — V8-style tiered compilation ───────────────────────────────
+//
+// Wraps a TypeScript fallback with an invocation counter.  After `threshold`
+// calls the function is compiled to native x86-32 and all subsequent calls run
+// at full JIT speed.  This mirrors the Ignition→Sparkplug tier transition in V8:
+//
+//   Tier 0 (cold)  : TypeScript fallback — zero startup cost
+//   Tier 1 (warm)  : Native x86-32 via JIT.compile() — peak int32 throughput
+//
+// If compilation fails (JIT unavailable, parse error, pool exhausted) the
+// function stays permanently in Tier 0 without throwing.
+
+export interface JITProfilerOptions {
+  /** Calls before JIT compilation is attempted (default 50). */
+  threshold?: number;
+}
+
+export class JITProfiler {
+  private _callCount  = 0;
+  private _compiled:  ((...args: number[]) => number) | null = null;
+  private _dead       = false;
+
+  constructor(
+    public readonly fallback:  (...args: number[]) => number,
+    public readonly src:       string,
+    public readonly threshold: number = 50,
+  ) {}
+
+  call(...args: number[]): number {
+    if (this._compiled) return this._compiled(...args);
+    if (!this._dead) {
+      this._callCount++;
+      if (this._callCount >= this.threshold) {
+        var fn = JIT.compile(this.src);
+        if (fn) { this._compiled = fn; return fn(...args); }
+        this._dead = true;  // compilation failed — stay in Tier 0 forever
+      }
+    }
+    return this.fallback(...args);
+  }
+
+  get callCount(): number  { return this._callCount; }
+  get isJitted():  boolean { return this._compiled !== null; }
+  get failed():    boolean { return this._dead; }
+
+  /** Reset counters and discard the compiled function (forces re-profiling). */
+  reset(): void { this._compiled = null; this._dead = false; this._callCount = 0; }
+
+  /**
+   * Wrap a TypeScript function with automatic tiered compilation.
+   *
+   * Returns a plain function; the first `threshold` calls run TypeScript,
+   * then every call after that runs native x86-32.
+   *
+   * Example:
+   *   const blend = JITProfiler.wrap(
+   *     (d, s, a) => d + s * a,       // Tier-0 TypeScript fallback
+   *     `function blend(d, s, a) { return d + s * a; }`,
+   *   );
+   */
+  static wrap(
+    fallback:  (...args: number[]) => number,
+    src:       string,
+    opts:      JITProfilerOptions = {},
+  ): (...args: number[]) => number {
+    var p = new JITProfiler(fallback, src, opts.threshold ?? 50);
+    return (...args: number[]) => p.call(...args);
+  }
+
+  /**
+   * Compile immediately (no warmup period).
+   * Equivalent to JITProfiler.wrap with threshold = 0.  Falls back to the
+   * TypeScript implementation if JIT is unavailable.
+   *
+   * Use for functions that are always hot (e.g. canvas inner loops).
+   */
+  static hot(
+    fallback: (...args: number[]) => number,
+    src:      string,
+  ): (...args: number[]) => number {
+    var compiled = JIT.compile(src);
+    return compiled ?? fallback;
+  }
+}
 
 export default JIT;

@@ -1536,6 +1536,44 @@ static JSValue js_jit_used_bytes(JSContext *c, JSValueConst this_val,
     return JS_NewUint32(c, jit_used_bytes());
 }
 
+/*
+ * kernel.jitCallI8(addr, a0..a7) → int32
+ * Call a JIT-compiled cdecl function with eight 32-bit integer arguments.
+ */
+static JSValue js_jit_call_i8(JSContext *c, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewInt32(c, 0);
+    uint32_t addr = 0;
+    JS_ToUint32(c, &addr, argv[0]);
+    if (!addr) return JS_NewInt32(c, 0);
+    int32_t a[8] = {0};
+    for (int i = 0; i < 8 && (i + 1) < argc; i++)
+        JS_ToInt32(c, &a[i], argv[i + 1]);
+    return JS_NewInt32(c, jit_call_i8((void *)(uintptr_t)addr,
+                                      a[0], a[1], a[2], a[3],
+                                      a[4], a[5], a[6], a[7]));
+}
+
+/*
+ * kernel.physAddrOf(arrayBuffer) → uint32
+ * Return the physical (linear) address of a JS ArrayBuffer's backing store.
+ * QuickJS uses reference-counting (not a moving GC), so the address is stable
+ * for the lifetime of the buffer.  Returns 0 if not an ArrayBuffer.
+ *
+ * JSOS-specific: enables JIT-compiled code to operate directly on JS TypedArray
+ * data (canvas pixel buffers, audio buffers, etc.) without an extra copy.
+ */
+static JSValue js_physaddr_of(JSContext *c, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewUint32(c, 0);
+    size_t len = 0;
+    uint8_t *ptr = JS_GetArrayBuffer(c, &len, argv[0]);
+    if (!ptr) return JS_NewUint32(c, 0);
+    return JS_NewUint32(c, (uint32_t)(uintptr_t)ptr);
+}
+
 static const JSCFunctionListEntry js_kernel_funcs[] = {
     /* VGA raw access */
     JS_CFUNC_DEF("vgaPut",        4, js_vga_put),
@@ -1633,7 +1671,9 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("jitAlloc",     1, js_jit_alloc),
     JS_CFUNC_DEF("jitWrite",     2, js_jit_write),
     JS_CFUNC_DEF("jitCallI",     5, js_jit_call_i),
+    JS_CFUNC_DEF("jitCallI8",    9, js_jit_call_i8),
     JS_CFUNC_DEF("jitUsedBytes", 0, js_jit_used_bytes),
+    JS_CFUNC_DEF("physAddrOf",   1, js_physaddr_of),
 };
 
 /*  Initialization  */

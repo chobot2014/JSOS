@@ -332,10 +332,27 @@ export interface KernelAPI {
    */
   jitCallI(addr: number, a0?: number, a1?: number, a2?: number, a3?: number): number;
   /**
+   * Call a JIT-compiled cdecl function at `addr` with up to 8 int32 arguments.
+   * Required for functions with 5–8 parameters (e.g. fillRect, blitAlphaRect).
+   * Returns the int32 result (EAX). Pass 0 for unused arguments.
+   */
+  jitCallI8(addr: number,
+    a0?: number, a1?: number, a2?: number, a3?: number,
+    a4?: number, a5?: number, a6?: number, a7?: number): number;
+  /**
    * Returns the number of bytes currently consumed in the 256 KB JIT pool.
    * Useful for budget checks and debugging.
    */
   jitUsedBytes(): number;
+  /**
+   * Return the physical (linear) address of a JS ArrayBuffer's backing store.
+   * QuickJS uses reference-counting (not a moving GC), so the pointer is stable
+   * for the buffer's lifetime.  Returns 0 if the value is not an ArrayBuffer.
+   *
+   * JSOS-specific: allows JIT-compiled native code to read/write TypedArray data
+   * (canvas pixel buffers, audio, etc.) without a copy.
+   */
+  physAddrOf(ab: ArrayBuffer): number;
 
   //  Constants 
   colors: KernelColors;

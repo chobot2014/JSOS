@@ -44,6 +44,15 @@ void jit_write(void *dst, const uint8_t *src, size_t len);
 int32_t jit_call_i4(void *fn, int32_t a0, int32_t a1, int32_t a2, int32_t a3);
 
 /*
+ * Call the JIT-compiled function at `fn` with eight 32-bit integer arguments
+ * using the cdecl calling convention.  Required for functions with 5–8 parameters
+ * (e.g. fillRect, blitAlphaRect).  Unused arguments should be passed as 0.
+ */
+int32_t jit_call_i8(void *fn,
+                    int32_t a0, int32_t a1, int32_t a2, int32_t a3,
+                    int32_t a4, int32_t a5, int32_t a6, int32_t a7);
+
+/*
  * Return the number of bytes currently consumed in the JIT pool.
  * The total pool capacity is 256 KB (262 144 bytes).
  */

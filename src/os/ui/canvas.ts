@@ -11,6 +11,15 @@
  */
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
+import { JITCanvas } from '../process/jit-canvas.js';
+
+// Lazy JIT init — called on first Canvas operation that can benefit.
+var _jitReady = false;
+function _ensureJIT(): boolean {
+  if (_jitReady) return true;
+  _jitReady = JITCanvas.init();
+  return _jitReady;
+}
 
 export type PixelColor = number; // 0xAARRGGBB
 
@@ -319,7 +328,13 @@ export class Canvas {
   // ── Drawing primitives ────────────────────────────────────────────────
 
   clear(color: PixelColor = Colors.BLACK): void {
-    this._buf.fill(Canvas._bgra(color));
+    var c = Canvas._bgra(color);
+    // JIT fast-path: direct physical-memory fill (avoids JS array write loop)
+    if (_ensureJIT()) {
+      var fb = this.bufPhysAddr();
+      if (fb) { JITCanvas.fillBuffer(fb, c, this.width * this.height); return; }
+    }
+    this._buf.fill(c);
   }
 
   fillRect(x: number, y: number, w: number, h: number, color: PixelColor): void {
@@ -330,7 +345,15 @@ export class Canvas {
     var y2 = Math.min(y + h, this.height);
     var rowW = x2 - x1;
     if (rowW <= 0) return;
-    // Use TypedArray.fill() per row — native bulk operation, far faster than
+    // JIT fast-path: direct physical-memory rectangle fill
+    if (_ensureJIT()) {
+      var fb = this.bufPhysAddr();
+      if (fb) {
+        JITCanvas.fillRect(fb, c, x1, y1, rowW, y2 - y1, this.width * 4);
+        return;
+      }
+    }
+    // TypedArray.fill() fallback — native bulk operation, far faster than
     // an explicit inner for-col loop which generates individual array writes.
     for (var row = y1; row < y2; row++) {
       var base = row * this.width + x1;
@@ -576,6 +599,24 @@ export class Canvas {
 
   blit(src: Canvas, sx: number, sy: number, dx: number, dy: number,
        w: number, h: number): void {
+    // JIT fast-path: direct physical-memory row copy
+    if (_ensureJIT()) {
+      var dstBase = this.bufPhysAddr();
+      var srcBase = src.bufPhysAddr();
+      if (dstBase && srcBase) {
+        for (var row = 0; row < h; row++) {
+          var dstY = dy + row;
+          if (dstY < 0 || dstY >= this.height) continue;
+          var colStart = dx < 0 ? -dx : 0;
+          var colEnd   = (dx + w > this.width) ? (this.width - dx) : w;
+          if (colStart >= colEnd) continue;
+          var srcOff = (sy + row) * src.width + sx + colStart;
+          var dstOff = dstY * this.width + dx + colStart;
+          JITCanvas.blitRow(dstBase + dstOff * 4, srcBase + srcOff * 4, colEnd - colStart);
+        }
+        return;
+      }
+    }
     // Use TypedArray.set() per-row instead of a per-pixel loop.
     // For a 800×550 window this is ~550 bulk copies vs ~440,000 individual assignments.
     for (var row = 0; row < h; row++) {
@@ -598,6 +639,29 @@ export class Canvas {
    */
   blitAlpha(src: Canvas, sx: number, sy: number, dx: number, dy: number,
             w: number, h: number, alpha: number): void {
+    // JIT fast-path: alpha-blend via native x86-32 code operating on physical memory.
+    // Eliminates ~6 multiplies + shifts per pixel of JS interpreter overhead.
+    if (_ensureJIT()) {
+      var dstBase = this.bufPhysAddr();
+      var srcBase = src.bufPhysAddr();
+      if (dstBase && srcBase) {
+        for (var row = 0; row < h; row++) {
+          var dstY = dy + row;
+          if (dstY < 0 || dstY >= this.height) continue;
+          var colStart = dx < 0 ? -dx : 0;
+          var colEnd   = (dx + w > this.width) ? (this.width - dx) : w;
+          if (colStart >= colEnd) continue;
+          var srcOff = (sy + row) * src.width + sx + colStart;
+          var dstOff = dstY * this.width + dx + colStart;
+          JITCanvas.blitAlphaRow(
+            dstBase + dstOff * 4, srcBase + srcOff * 4,
+            colEnd - colStart, alpha,
+          );
+        }
+        return;
+      }
+    }
+    // TypeScript fallback
     var ia = 255 - alpha;
     for (var row = 0; row < h; row++) {
       var dstY = dy + row;
@@ -668,6 +732,13 @@ export class Canvas {
 
   /** Get raw Uint32Array buffer (BGRA) for compositing without allocation */
   getBuffer(): Uint32Array { return this._buf; }
+
+  /**
+   * Physical address of the pixel buffer, for use with JIT-compiled operations.
+   * Returns 0 when kernel.physAddrOf is unavailable (e.g. test environments).
+   * QuickJS is a non-moving GC, so the address is stable for the buffer's lifetime.
+   */
+  bufPhysAddr(): number { return JITCanvas.physAddr(this._buf.buffer); }
 }
 
 /**

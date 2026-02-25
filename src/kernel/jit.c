@@ -46,6 +46,14 @@ int32_t jit_call_i4(void *fn, int32_t a0, int32_t a1, int32_t a2, int32_t a3) {
     return ((fn_t)fn)(a0, a1, a2, a3);
 }
 
+int32_t jit_call_i8(void *fn,
+                    int32_t a0, int32_t a1, int32_t a2, int32_t a3,
+                    int32_t a4, int32_t a5, int32_t a6, int32_t a7) {
+    typedef int32_t (*fn_t)(int32_t, int32_t, int32_t, int32_t,
+                            int32_t, int32_t, int32_t, int32_t);
+    return ((fn_t)fn)(a0, a1, a2, a3, a4, a5, a6, a7);
+}
+
 uint32_t jit_used_bytes(void) {
     return _jit_used;
 }
