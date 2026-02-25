@@ -103,6 +103,13 @@ export interface KernelAPI {
   readMem8(addr: number): number;
   /** Write one byte to a physical memory address */
   writeMem8(addr: number, value: number): void;
+  /**
+   * Bulk-read `length` bytes from physical address `addr`.
+   * Returns an ArrayBuffer copy (max 1 MB), or null on failure.
+   */
+  readPhysMem(addr: number, length: number): ArrayBuffer | null;
+  /** Bulk-write an ArrayBuffer to a physical address. */
+  writePhysMem(addr: number, data: ArrayBuffer): void;
 
   //  System 
   halt(): void;
@@ -353,6 +360,51 @@ export interface KernelAPI {
    * (canvas pixel buffers, audio, etc.) without a copy.
    */
   physAddrOf(ab: ArrayBuffer): number;
+
+  // ─ Step 3: QuickJS internal struct offsets ─────────────────────────────────
+  /**
+   * Returns a frozen object describing the byte offsets of fields in the
+   * JSFunctionBytecode struct used by the JSOS-patched QuickJS build.
+   * Used by QJSBytecodeReader in qjs-jit.ts to interpret live GC objects.
+   */
+  qjsOffsets(): {
+    gcHeaderSize: number;  /** size of GCObjectHeader prefix                   */
+    objShape:     number;  /** offset of JSShape* field                        */
+    objSize:      number;  /** offset of proto JSValue (8-byte pair on 32-bit) */
+    callCount:    number;  /** offset of call_count uint32 (Step-5 field)      */
+    jitNativePtr: number;  /** offset of jit_native_ptr void* (Step-5 field)   */
+    bcBuf:        number;  /** offset of byte_code_buf uint8*                  */
+    bcLen:        number;  /** offset of byte_code_len int                     */
+    funcName:     number;  /** offset of func_name JSAtom                      */
+    argCount:     number;  /** offset of arg_count uint16                      */
+    varCount:     number;  /** offset of var_count uint16                      */
+    stackSize:    number;  /** offset of stack_size uint16                     */
+    cpoolPtr:     number;  /** offset of cpool JSValue*                        */
+    cpoolCount:   number;  /** offset of cpool_count uint16                    */
+    structSize:   number;  /** total sizeof(JSFunctionBytecode)                */
+  };
+
+  // ─ Step 5: QJS JIT hook + per-process JIT management ──────────────────────
+  /**
+   * Install the TypeScript JIT compiler callback.
+   * callback(bcAddr, spAddr, argc) → 1 if native code was installed, else 0.
+   */
+  setJITHook(callback: (bcAddr: number, spAddr: number, argc: number) => number): void;
+  /**
+   * Write `nativeAddr` into the jit_native_ptr field of the JSFunctionBytecode
+   * at `bcAddr` so QuickJS dispatches the compiled version on the next call.
+   */
+  setJITNative(bcAddr: number, nativeAddr: number): void;
+  /**
+   * Return and consume the next pending JIT compilation address for child
+   * process `id`.  Returns 0 if no compilation is pending.
+   */
+  procPendingJIT(id: number): number;
+  /**
+   * Allocate `size` bytes from the per-process 512 KB JIT slab for child `id`.
+   * Returns the physical address of the allocation, or 0 on failure.
+   */
+  jitProcAlloc(id: number, size: number): number;
 
   // Phase A/B: child process render surface + infrastructure
 

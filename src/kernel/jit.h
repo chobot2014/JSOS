@@ -53,9 +53,14 @@ int32_t jit_call_i8(void *fn,
                     int32_t a4, int32_t a5, int32_t a6, int32_t a7);
 
 /*
- * Return the number of bytes currently consumed in the JIT pool.
- * The total pool capacity is 256 KB (262 144 bytes).
+ * Return the number of bytes currently consumed in the main JIT pool.
+ * The main pool capacity is 8 MB (8,388,608 bytes).
  */
 uint32_t jit_used_bytes(void);
+
+/* Per-child-process JIT allocation and reclaim */
+void    *jit_proc_alloc(int proc_id, size_t size);  /* allocate from child partition */
+void     jit_proc_reset(int proc_id);               /* O(1) reclaim on procDestroy   */
+uint32_t jit_proc_used_bytes(int proc_id);          /* diagnostic                    */
 
 #endif /* JIT_H */

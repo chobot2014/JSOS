@@ -16,6 +16,7 @@ import { Canvas, Colors, defaultFont, createScreenCanvas, type PixelColor } from
 import { net } from '../net/net.js';
 import { threadManager } from '../process/threads.js';
 import { scheduler } from '../process/scheduler.js';
+import { _serviceChildJIT, clearChildJITForProc } from '../process/qjs-jit.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -584,6 +585,9 @@ export class WindowManager {
       var id = list[i].id;
       kernel.procTick(id);
       kernel.serviceTimers(id);
+      /* Step 11: service any pending child JIT compilation requests */
+      var pendingBC = kernel.procPendingJIT(id);
+      if (pendingBC !== 0) { _serviceChildJIT(id, pendingBC); }
       this._processWindowCommands(id);
     }
   }

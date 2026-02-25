@@ -389,6 +389,104 @@ static JSValue js_write_mem8(JSContext *c, JSValueConst this_val, int argc, JSVa
     return JS_UNDEFINED;
 }
 
+/* ─ Physical memory bulk access (Step 2) ─────────────────────────────────── */
+
+static void js_free_array_buffer(JSRuntime *rt, void *opaque, void *ptr) {
+    (void)opaque; js_free_rt(rt, ptr);
+}
+
+/*
+ * kernel.readPhysMem(addr, length) → ArrayBuffer | null
+ * Copy `length` bytes from the physical address `addr` into a new ArrayBuffer.
+ * Maximum length: 1 MB.  Returns null on bad arguments or allocation failure.
+ */
+static JSValue js_read_phys_mem(JSContext *c, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_NULL;
+    uint32_t addr = 0, length = 0;
+    JS_ToUint32(c, &addr,   argv[0]);
+    JS_ToUint32(c, &length, argv[1]);
+    if (length == 0 || length > (1024u * 1024u)) return JS_NULL;
+    uint8_t *buf = js_malloc(c, length);
+    if (!buf) return JS_NULL;
+    memcpy(buf, (const void *)(uintptr_t)addr, length);
+    return JS_NewArrayBuffer(c, buf, length, js_free_array_buffer, NULL, 0);
+}
+
+/*
+ * kernel.writePhysMem(addr, data) — copy an ArrayBuffer to a physical address.
+ * The caller is responsible for range-safety; no bounds checking is performed.
+ */
+static JSValue js_write_phys_mem(JSContext *c, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    uint32_t addr = 0;
+    JS_ToUint32(c, &addr, argv[0]);
+    size_t len = 0;
+    uint8_t *data = JS_GetArrayBuffer(c, &len, argv[1]);
+    if (!data || len == 0) return JS_UNDEFINED;
+    memcpy((void *)(uintptr_t)addr, data, len);
+    return JS_UNDEFINED;
+}
+
+/* ─ QuickJS internal struct offsets probe (Step 3) ───────────────────────── */
+/*
+ * kernel.qjsOffsets() → { bcBuf, bcLen, argCount, varCount, stackSize,
+ *                          cpoolPtr, cpoolCount, structSize,
+ *                          callCount, jitNativePtr, funcName,
+ *                          gcHeaderSize, objShape, objSize }
+ *
+ * Returns hardcoded offsets verified against the JSOS-patched QuickJS build
+ * (JSFunctionBytecode after Step-5 additions: call_count @20, jit_native_ptr @24).
+ * Used by qjs-jit.ts / QJSBytecodeReader to interpret live GC objects.
+ */
+static JSValue js_qjs_offsets(JSContext *c, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    JSValue o = JS_NewObject(c);
+    /* JSFunctionBytecode layout (post Step-5 patch, 32-bit i686):
+     *   [0]  gc_header      4 B   (GCObjectHeader)
+     *   [4]  realm          4 B   (JSContext*)
+     *   [8]  shape          4 B   (JSShape*)       → objShape
+     *  [12]  proto          8 B   (JSValue = tag+val) → objSize=12 for the pair
+     *  [20]  call_count     4 B   (uint32_t)        ← NEW Step-5 field
+     *  [24]  jit_native_ptr 4 B   (void*)           ← NEW Step-5 field
+     *  [28]  byte_code_buf  4 B   (uint8_t*)        → bcBuf
+     *  [32]  byte_code_len  4 B   (int)             → bcLen
+     *  [36]  func_name      4 B   (JSAtom)          → funcName
+     *  [40]  vardefs        4 B   (JSVarDef*)
+     *  [44]  closure_var    4 B   (JSClosureVar*)
+     *  [48]  arg_count      2 B   (uint16_t)        → argCount
+     *  [50]  var_count      2 B   (uint16_t)        → varCount
+     *  [52]  defined_arg_count 2 B
+     *  [54]  stack_size     2 B   (uint16_t)        → stackSize
+     *  [56]  closure_var_count 2 B
+     *  [58]  cpool_count    2 B                      (small variant; full below)
+     *  [60]  vardefs_count  2 B
+     *  [62]  ic_count       2 B
+     *  [64]  cpool          4 B   (JSValue*)        → cpoolPtr
+     *  [68]  ic             4 B                     → cpoolCount slot (count at [58])
+     *  [72]  source_len     4 B
+     *  structSize: 96 bytes total (aligned to 16 B with trailing bitfields).  */
+    JS_SetPropertyStr(c, o, "gcHeaderSize",  JS_NewUint32(c,  4));
+    JS_SetPropertyStr(c, o, "objShape",      JS_NewUint32(c,  8));
+    JS_SetPropertyStr(c, o, "objSize",       JS_NewUint32(c, 12));
+    JS_SetPropertyStr(c, o, "callCount",     JS_NewUint32(c, 20));
+    JS_SetPropertyStr(c, o, "jitNativePtr",  JS_NewUint32(c, 24));
+    JS_SetPropertyStr(c, o, "bcBuf",         JS_NewUint32(c, 28));
+    JS_SetPropertyStr(c, o, "bcLen",         JS_NewUint32(c, 32));
+    JS_SetPropertyStr(c, o, "funcName",      JS_NewUint32(c, 36));
+    JS_SetPropertyStr(c, o, "argCount",      JS_NewUint32(c, 48));
+    JS_SetPropertyStr(c, o, "varCount",      JS_NewUint32(c, 50));
+    JS_SetPropertyStr(c, o, "stackSize",     JS_NewUint32(c, 54));
+    JS_SetPropertyStr(c, o, "cpoolPtr",      JS_NewUint32(c, 64));
+    JS_SetPropertyStr(c, o, "cpoolCount",    JS_NewUint32(c, 58)); /* uint16 at [58] */
+    JS_SetPropertyStr(c, o, "structSize",    JS_NewUint32(c, 96));
+    return o;
+}
+
 /*  System  */
 
 static JSValue js_halt(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -1288,6 +1386,14 @@ static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
      * _proc_interrupt_cb fires periodically during JS_Eval and returns 1
      * when _proc_slice_deadline (a PIT tick count) has been reached.       */
     JS_SetInterruptHandler(p->rt, _proc_interrupt_cb, NULL);
+    /* Arm the JIT hook so hot functions in the child defer compilation to
+     * the main-runtime tick loop (procPendingJIT / _serviceChildJIT).     */
+#ifdef JSOS_JIT_HOOK
+    JS_SetJITHook(p->rt, _jit_hook_child);
+#endif
+    /* Reset any leftover JIT allocation slab for this slot */
+    jit_proc_reset(id);
+    memset(&_jit_proc_pending[id], 0, sizeof(_jit_proc_pending[id]));
     p->used = 1;
     return JS_NewInt32(c, id);
 }
@@ -1405,6 +1511,10 @@ static JSValue js_proc_destroy(JSContext *c, JSValueConst this_val,
     _procs[id].ctx  = NULL;
     _procs[id].rt   = NULL;
     _procs[id].used = 0;
+    /* Clear JIT slab + pending requests for this slot */
+    _jit_proc_pending[id].pending = 0;
+    _jit_proc_pending[id].bc_addr = 0;
+    jit_proc_reset(id);
     /* Clear per-proc queues */
     memset(&_proc_event_queues[id], 0, sizeof(_proc_event_queues[id]));
     memset(&_proc_wincmds[id], 0, sizeof(_proc_wincmds[id]));
@@ -1688,6 +1798,158 @@ static JSValue js_physaddr_of(JSContext *c, JSValueConst this_val,
     uint8_t *ptr = JS_GetArrayBuffer(c, &len, argv[0]);
     if (!ptr) return JS_NewUint32(c, 0);
     return JS_NewUint32(c, (uint32_t)(uintptr_t)ptr);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Step 5: QJS JIT hook — callback dispatch + per-process JIT management
+ *
+ * Compile-time gate: define JSOS_JIT_HOOK once quickjs.c has been patched
+ * (Step-5 WSL changes add js_jit_hook_t / JS_SetJITHook / JS_SetNativeIfHot).
+ * Until then the global state + JS bindings compile unconditionally; only the
+ * C→QuickJS glue that references the new API is guarded by the #ifdef.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Pending JIT request from a child runtime — stored by _jit_hook_child,
+ * consumed by js_proc_pending_jit() from the TypeScript tick loop.          */
+typedef struct {
+    uint32_t bc_addr;   /* physical address of JSFunctionBytecode, 0 = none  */
+    int      pending;   /* 1 if a compilation request is outstanding          */
+} JITProcPending_t;
+
+static JSValue         _jit_ts_callback = { 0 };   /* initialised in quickjs_initialize */
+static int             _in_jit_hook     = 0;        /* reentrancy guard                  */
+static JITProcPending_t _jit_proc_pending[JSPROC_MAX];
+
+#ifdef JSOS_JIT_HOOK
+/* Forward declarations for QuickJS post-Step-5 API */
+typedef int (*js_jit_hook_t)(JSRuntime *rt, JSContext *ctx, void *bc_ptr,
+                              void *stack_ptr, int argc);
+extern void JS_SetJITHook(JSRuntime *rt, js_jit_hook_t hook);
+extern void JS_SetNativeIfHot(JSContext *ctx, void *bc_ptr, void *native_ptr);
+
+/*
+ * Main-runtime JIT hook.
+ * Called by QuickJS when a function's call_count reaches JIT_THRESHOLD.
+ * Invokes the TypeScript QJSJITHook callback synchronously.
+ * Returns non-zero to replace the call with the native version.
+ */
+static int _jit_hook_impl(JSRuntime *rt, JSContext *hook_ctx,
+                           void *bc_ptr, void *sp, int argc) {
+    (void)rt; (void)hook_ctx;
+    if (_in_jit_hook || JS_IsUndefined(_jit_ts_callback)) return 0;
+    _in_jit_hook = 1;
+    JSValue args[3] = {
+        JS_NewUint32(ctx, (uint32_t)(uintptr_t)bc_ptr),
+        JS_NewUint32(ctx, (uint32_t)(uintptr_t)sp),
+        JS_NewInt32 (ctx, argc)
+    };
+    JSValue result = JS_Call(ctx, _jit_ts_callback, JS_UNDEFINED, 3, args);
+    JS_FreeValue(ctx, args[0]);
+    JS_FreeValue(ctx, args[1]);
+    JS_FreeValue(ctx, args[2]);
+    int ret = 0;
+    if (!JS_IsException(result) && !JS_IsUndefined(result)) {
+        int32_t r = 0; JS_ToInt32(ctx, &r, result); ret = r;
+    }
+    JS_FreeValue(ctx, result);
+    _in_jit_hook = 0;
+    return ret;
+}
+
+/*
+ * Child-runtime JIT hook.
+ * Stores the pending request for pickup by the TypeScript WM tick loop via
+ * kernel.procPendingJIT(id).  Must NOT call back into JS (different runtime).
+ */
+static int _jit_hook_child(JSRuntime *rt, JSContext *hook_ctx,
+                            void *bc_ptr, void *sp, int argc) {
+    (void)hook_ctx; (void)sp; (void)argc;
+    /* Identify which child slot owns this runtime */
+    for (int i = 0; i < JSPROC_MAX; i++) {
+        if (_procs[i].used && _procs[i].rt == rt) {
+            if (!_jit_proc_pending[i].pending) {
+                _jit_proc_pending[i].bc_addr = (uint32_t)(uintptr_t)bc_ptr;
+                _jit_proc_pending[i].pending  = 1;
+            }
+            break;
+        }
+    }
+    return 0; /* native pointer not ready yet — run as bytecode this call */
+}
+#endif /* JSOS_JIT_HOOK */
+
+/* ── JS bindings for the JIT hook API ──────────────────────────────────── */
+
+/*
+ * kernel.setJITHook(callback) — install the TS JIT compiler callback.
+ * callback(bcAddr, spAddr, argc) → 1 if native code was installed, else 0.
+ */
+static JSValue js_set_jit_hook(JSContext *c, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc;
+    if (!JS_IsUndefined(_jit_ts_callback)) JS_FreeValue(c, _jit_ts_callback);
+    _jit_ts_callback = JS_DupValue(c, argv[0]);
+#ifdef JSOS_JIT_HOOK
+    JS_SetJITHook(rt, _jit_hook_impl);
+#endif
+    return JS_UNDEFINED;
+}
+
+/*
+ * kernel.setJITNative(bcAddr, nativeAddr) — write the compiled function
+ * pointer back into the JSFunctionBytecode so QuickJS dispatches it directly.
+ */
+static JSValue js_set_jit_native(JSContext *c, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 2) return JS_UNDEFINED;
+    uint32_t bc_addr = 0, native_addr = 0;
+    JS_ToUint32(c, &bc_addr,     argv[0]);
+    JS_ToUint32(c, &native_addr, argv[1]);
+    if (!bc_addr || !native_addr) return JS_UNDEFINED;
+#ifdef JSOS_JIT_HOOK
+    JS_SetNativeIfHot(ctx,
+                      (void *)(uintptr_t)bc_addr,
+                      (void *)(uintptr_t)native_addr);
+#else
+    /* Without the patched QuickJS, manually write jit_native_ptr field @24 */
+    *(uint32_t *)((uint8_t *)(uintptr_t)bc_addr + 24) = native_addr;
+#endif
+    return JS_UNDEFINED;
+}
+
+/*
+ * kernel.procPendingJIT(id) → uint32 bc_addr (0 = none).
+ * Returns and clears the next pending JIT compilation request for child `id`.
+ */
+static JSValue js_proc_pending_jit(JSContext *c, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 1) return JS_NewUint32(c, 0);
+    int32_t id = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX) return JS_NewUint32(c, 0);
+    if (!_jit_proc_pending[id].pending) return JS_NewUint32(c, 0);
+    uint32_t addr = _jit_proc_pending[id].bc_addr;
+    _jit_proc_pending[id].pending = 0;
+    _jit_proc_pending[id].bc_addr = 0;
+    return JS_NewUint32(c, addr);
+}
+
+/*
+ * kernel.jitProcAlloc(id, size) → uint32 address in child's JIT partition.
+ * Allocates `size` bytes from the 512 KB per-process JIT slab.
+ */
+static JSValue js_jit_proc_alloc(JSContext *c, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 2) return JS_NewUint32(c, 0);
+    int32_t id = 0; int32_t size = 0;
+    JS_ToInt32(c, &id,   argv[0]);
+    JS_ToInt32(c, &size, argv[1]);
+    if (id < 0 || id >= JSPROC_MAX || size <= 0) return JS_NewUint32(c, 0);
+    void *p = jit_proc_alloc(id, (size_t)size);
+    return JS_NewUint32(c, p ? (uint32_t)(uintptr_t)p : 0u);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -2076,6 +2338,11 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("callNativeI", 4, js_call_native_i),
     JS_CFUNC_DEF("readMem8",    1, js_read_mem8),
     JS_CFUNC_DEF("writeMem8",   2, js_write_mem8),
+    /* Step 2: Physical memory bulk access */
+    JS_CFUNC_DEF("readPhysMem",  2, js_read_phys_mem),
+    JS_CFUNC_DEF("writePhysMem", 2, js_write_phys_mem),
+    /* Step 3: QuickJS struct offsets probe */
+    JS_CFUNC_DEF("qjsOffsets",   0, js_qjs_offsets),
     /* System */
     JS_CFUNC_DEF("halt",   0, js_halt),
     JS_CFUNC_DEF("reboot", 0, js_reboot),
@@ -2144,6 +2411,11 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("jitCallI8",    9, js_jit_call_i8),
     JS_CFUNC_DEF("jitUsedBytes", 0, js_jit_used_bytes),
     JS_CFUNC_DEF("physAddrOf",   1, js_physaddr_of),
+    /* Step 5: QJS JIT hook + per-process JIT management */
+    JS_CFUNC_DEF("setJITHook",    1, js_set_jit_hook),
+    JS_CFUNC_DEF("setJITNative",  2, js_set_jit_native),
+    JS_CFUNC_DEF("procPendingJIT",1, js_proc_pending_jit),
+    JS_CFUNC_DEF("jitProcAlloc",  2, js_jit_proc_alloc),
     /* Phase A/B: render surface + child runtime infrastructure */
     JS_CFUNC_DEF("getProcRenderBuffer",    1, js_get_proc_render_buf),
     JS_CFUNC_DEF("procSetDimensions",      3, js_proc_set_dimensions),
@@ -2173,6 +2445,10 @@ int quickjs_initialize(void) {
     /* Phase 5: initialise scheduler hook slot + TSS data structure */
     _scheduler_hook = JS_UNDEFINED;
     _fs_bridge_obj   = JS_UNDEFINED;
+    /* Step 5: JIT hook globals */
+    _jit_ts_callback = JS_UNDEFINED;
+    _in_jit_hook     = 0;
+    memset(_jit_proc_pending, 0, sizeof(_jit_proc_pending));
     platform_tss_init();
 
     JSValue global = JS_GetGlobalObject(ctx);

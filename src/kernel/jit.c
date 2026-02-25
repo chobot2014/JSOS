@@ -9,26 +9,51 @@
 #include "jit.h"
 #include <string.h>
 
-/* ── Static 256 KB JIT code pool ─────────────────────────────────────────── */
+/* ── Pool layout (12 MB total) ──────────────────────────────────────────── */
 
-#define JIT_POOL_SIZE  (256u * 1024u)
+#define JIT_POOL_SIZE     (12u * 1024u * 1024u)  /* 12 MB total              */
+#define JIT_MAIN_SIZE     (8u  * 1024u * 1024u)  /* 8 MB for main runtime    */
+#define JIT_PROC_SLOTS    8u
+#define JIT_PROC_SIZE     (512u * 1024u)          /* 512 KB per child process */
+
+_Static_assert(JIT_MAIN_SIZE + JIT_PROC_SLOTS * JIT_PROC_SIZE == JIT_POOL_SIZE,
+               "JIT pool partition sizes do not add up");
 
 /* 16-byte aligned so the first allocation is instruction-cache-line-aligned. */
 static uint8_t  __attribute__((aligned(16))) _jit_pool[JIT_POOL_SIZE];
-static uint32_t _jit_used = 0;
+static uint32_t _jit_main_used = 0;
+static uint32_t _jit_proc_used[JIT_PROC_SLOTS];
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
 void *jit_alloc(size_t size) {
-    if (size == 0 || size > JIT_ALLOC_MAX) return 0;
-
-    /* Round up to 16-byte boundary for instruction-cache alignment. */
+    if (size == 0 || size > JIT_ALLOC_MAX) return NULL;
     size_t aligned = (size + 15u) & ~15u;
-    if (_jit_used + aligned > JIT_POOL_SIZE) return 0;
-
-    void *p = (void *)(_jit_pool + _jit_used);
-    _jit_used += (uint32_t)aligned;
+    if (_jit_main_used + aligned > JIT_MAIN_SIZE) return NULL;
+    void *p = (void *)(_jit_pool + _jit_main_used);
+    _jit_main_used += (uint32_t)aligned;
     return p;
+}
+
+void *jit_proc_alloc(int id, size_t size) {
+    if (id < 0 || (unsigned)id >= JIT_PROC_SLOTS) return NULL;
+    if (size == 0 || size > JIT_ALLOC_MAX) return NULL;
+    size_t aligned = (size + 15u) & ~15u;
+    if (_jit_proc_used[id] + aligned > JIT_PROC_SIZE) return NULL;
+    uint32_t base = JIT_MAIN_SIZE + (uint32_t)id * JIT_PROC_SIZE;
+    void *p = (void *)(_jit_pool + base + _jit_proc_used[id]);
+    _jit_proc_used[id] += (uint32_t)aligned;
+    return p;
+}
+
+void jit_proc_reset(int id) {
+    if (id >= 0 && (unsigned)id < JIT_PROC_SLOTS)
+        _jit_proc_used[id] = 0;
+}
+
+uint32_t jit_proc_used_bytes(int id) {
+    if (id < 0 || (unsigned)id >= JIT_PROC_SLOTS) return 0;
+    return _jit_proc_used[id];
 }
 
 void jit_write(void *dst, const uint8_t *src, size_t len) {
@@ -55,5 +80,5 @@ int32_t jit_call_i8(void *fn,
 }
 
 uint32_t jit_used_bytes(void) {
-    return _jit_used;
+    return _jit_main_used;
 }

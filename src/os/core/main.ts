@@ -30,6 +30,7 @@ import { dhcpDiscover } from '../net/dhcp.js';
 import { dnsResolve } from '../net/dns.js';
 import { httpsGet } from '../net/http.js';
 import { registerCommands } from '../ui/commands.js';
+import { QJSJITHook } from '../process/qjs-jit.js';
 
 declare var kernel: import('./kernel.js').KernelAPI; // kernel.js is in core/
 
@@ -261,6 +262,14 @@ function main(): void {
     if (screen) {
       var wmInst = new WindowManager(screen);
       setWM(wmInst);
+
+      // Step 11: Install the QJS bytecode JIT compiler.
+      // The hook fires from QuickJS's call dispatch when a function becomes hot
+      // (call_count >= 100).  Requires JSOS_JIT_HOOK + Step-5 quickjs.c patch;
+      // kernel.setJITHook() is a no-op on unpatched builds so this is safe either way.
+      var qjsJit = new QJSJITHook();
+      qjsJit.install();
+      (globalThis as any).__qjsJit = qjsJit;
 
       // ── Phase 9: JSOS Native Browser ──────────────────────────────────────
       // Launch the JSOS native TypeScript browser.  Written 100% in TypeScript

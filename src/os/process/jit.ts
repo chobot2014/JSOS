@@ -495,7 +495,7 @@ class _Frame {
 
 // ─── x86-32 Code Emitter ──────────────────────────────────────────────────────
 
-class _Emit {
+export class _Emit {
   buf: number[] = [];
 
   private _w(b: number): void { this.buf.push(b & 0xFF); }
@@ -617,6 +617,117 @@ class _Emit {
 
   // ── Extra register transfers ──────────────────────────────────────────────────
   movEaxEcx(): void { this._w(0x89); this._w(0xC8); }               // MOV EAX, ECX
+
+  // ── Extended immediate & compare helpers (Step 6) ───────────────────────────
+
+  cmpEaxImm32(v: number): void {                                     // CMP EAX, imm32
+    if (v >= -128 && v <= 127) { this._w(0x83); this._w(0xF8); this._w(v & 0xFF); }
+    else { this._w(0x3D); this._u32(v); }
+  }
+  cmpMemImm32(disp: number, v: number): void {                       // CMP [EBP+disp], imm32
+    if (disp >= -128 && disp <= 127) {
+      this._w(0x83); this._w(0x7D); this._w(disp & 0xFF); this._w(v & 0xFF);
+    } else {
+      this._w(0x81); this._w(0xBD); this._u32(disp); this._u32(v);
+    }
+  }
+  movEaxAbs(addr: number): void {                                    // MOV EAX, [abs_addr]
+    this._w(0xA1); this._u32(addr);
+  }
+  movAbsEax(addr: number): void {                                    // MOV [abs_addr], EAX
+    this._w(0xA3); this._u32(addr);
+  }
+  immEcx(v: number): void { this._w(0xB9); this._u32(v); }           // MOV ECX, imm32
+  immEdx(v: number): void { this._w(0xBA); this._u32(v); }           // MOV EDX, imm32
+  pushImm32(v: number): void { this._w(0x68); this._u32(v); }        // PUSH imm32
+  pushImm8(v: number): void { this._w(0x6A); this._w(v & 0xFF); }   // PUSH imm8
+  pushEcx(): void { this._w(0x51); }                                 // PUSH ECX
+  pushEdx(): void { this._w(0x52); }                                 // PUSH EDX
+  popEax():  void { this._w(0x58); }                                 // POP EAX
+  popEdx():  void { this._w(0x5A); }                                 // POP EDX
+  popEbx():  void { this._w(0x5B); }                                 // POP EBX
+
+  addEaxImm32(v: number): void {                                     // ADD EAX, imm32 / imm8
+    if (v >= -128 && v <= 127) { this._w(0x83); this._w(0xC0); this._w(v & 0xFF); }
+    else { this._w(0x05); this._u32(v); }
+  }
+  subEaxImm32(v: number): void {                                     // SUB EAX, imm32 / imm8
+    if (v >= -128 && v <= 127) { this._w(0x83); this._w(0xE8); this._w(v & 0xFF); }
+    else { this._w(0x2D); this._u32(v); }
+  }
+  addEsp(n: number): void {                                          // ADD ESP, n
+    if (n >= -128 && n <= 127) { this._w(0x83); this._w(0xC4); this._w(n & 0xFF); }
+    else { this._w(0x81); this._w(0xC4); this._u32(n); }
+  }
+  subEsp(n: number): void {                                          // SUB ESP, n
+    if (n >= -128 && n <= 127) { this._w(0x83); this._w(0xEC); this._w(n & 0xFF); }
+    else { this._w(0x81); this._w(0xEC); this._u32(n); }
+  }
+  peekTOS(): void { this._w(0x8B); this._w(0x04); this._w(0x24); }  // MOV EAX, [ESP]
+  movEaxEcxDisp(disp: number): void {                                // MOV EAX, [ECX + disp]
+    if (disp === 0) { this._w(0x8B); this._w(0x01); }
+    else if (disp >= -128 && disp <= 127) { this._w(0x8B); this._w(0x41); this._w(disp & 0xFF); }
+    else { this._w(0x8B); this._w(0x81); this._u32(disp); }
+  }
+  movEcxDispEax(disp: number): void {                                // MOV [ECX + disp], EAX
+    if (disp === 0) { this._w(0x89); this._w(0x01); }
+    else if (disp >= -128 && disp <= 127) { this._w(0x89); this._w(0x41); this._w(disp & 0xFF); }
+    else { this._w(0x89); this._w(0x81); this._u32(disp); }
+  }
+
+  // ── Additional conditional jumps (32-bit relative, returns fixup offset) ────
+  jl():  number { this._w(0x0F); this._w(0x8C); var o = this.here(); this._u32(0); return o; }
+  jle(): number { this._w(0x0F); this._w(0x8E); var o = this.here(); this._u32(0); return o; }
+  jg():  number { this._w(0x0F); this._w(0x8F); var o = this.here(); this._u32(0); return o; }
+  jge(): number { this._w(0x0F); this._w(0x8D); var o = this.here(); this._u32(0); return o; }
+  // Short (8-bit offset) jumps — returns fixup offset
+  jmp8(): number { this._w(0xEB); var o = this.here(); this._w(0); return o; }
+  je8():  number { this._w(0x74); var o = this.here(); this._w(0); return o; }
+  jne8(): number { this._w(0x75); var o = this.here(); this._w(0); return o; }
+  patch8(fixupOff: number, targetOff: number): void {
+    this.buf[fixupOff] = (targetOff - (fixupOff + 1)) & 0xFF;
+  }
+
+  // ── x87 FPU helpers (double-precision, for float-specialised paths) ──────────
+  // Note: JSOS targets bare i686 which always has an FPU.
+
+  fld64Ebp(disp: number): void {   // FLD QWORD PTR [EBP + disp]
+    if (disp >= -128 && disp <= 127) {
+      this._w(0xDD); this._w(0x45); this._w(disp & 0xFF);
+    } else {
+      this._w(0xDD); this._w(0x85); this._u32(disp);
+    }
+  }
+  fstp64Ebp(disp: number): void {  // FSTP QWORD PTR [EBP + disp]
+    if (disp >= -128 && disp <= 127) {
+      this._w(0xDD); this._w(0x5D); this._w(disp & 0xFF);
+    } else {
+      this._w(0xDD); this._w(0x9D); this._u32(disp);
+    }
+  }
+  faddp():   void { this._w(0xDE); this._w(0xC1); }  // FADDP ST(1), ST(0)
+  fsubp():   void { this._w(0xDE); this._w(0xE9); }  // FSUBP ST(1), ST(0)
+  fsubr():   void { this._w(0xDE); this._w(0xE1); }  // FSUBRP ST(1), ST(0)
+  fmulp():   void { this._w(0xDE); this._w(0xC9); }  // FMULP ST(1), ST(0)
+  fdivp():   void { this._w(0xDE); this._w(0xF9); }  // FDIVP ST(1), ST(0)
+  fldz():    void { this._w(0xD9); this._w(0xEE); }  // FLDZ
+  fld1():    void { this._w(0xD9); this._w(0xE8); }  // FLD1
+  fcomip():  void { this._w(0xDF); this._w(0xF1); }  // FCOMIP ST(0), ST(1)
+  fstpSt0(): void { this._w(0xDD); this._w(0xD8); }  // FSTP ST(0)  (discard TOS)
+  fistpEbp(disp: number): void {  // FISTP DWORD PTR [EBP + disp]  (int32 store)
+    if (disp >= -128 && disp <= 127) {
+      this._w(0xDB); this._w(0x5D); this._w(disp & 0xFF);
+    } else {
+      this._w(0xDB); this._w(0x9D); this._u32(disp);
+    }
+  }
+  fildEbp(disp: number): void {   // FILD DWORD PTR [EBP + disp]  (int32 load)
+    if (disp >= -128 && disp <= 127) {
+      this._w(0xDB); this._w(0x45); this._w(disp & 0xFF);
+    } else {
+      this._w(0xDB); this._w(0x85); this._u32(disp);
+    }
+  }
 }
 
 // ─── Code generator ───────────────────────────────────────────────────────────
@@ -1139,7 +1250,7 @@ export const JIT = {
     return {
       compiled:  _compiled,
       poolUsed:  JIT.available() ? kernel.jitUsedBytes() : 0,
-      poolTotal: 256 * 1024,
+      poolTotal: 12 * 1024 * 1024,
     };
   },
 
