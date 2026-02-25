@@ -173,7 +173,7 @@ export class FileSystem {
       '    terminal.setColor(8,0);\n' +
       '    terminal.println("  ---  ----------------  -----------  ---  ------");\n' +
       '    terminal.setColor(7,0);\n' +
-      '    var procs=sys.scheduler.getAllProcesses();\n' +
+      '    var procs=sys.scheduler.getLiveProcesses();\n' +
       '    for(var i=0;i<procs.length;i++){\n' +
       '      var p=procs[i];\n' +
       '      var ps=("   "+p.pid).slice(-4);\n' +
@@ -340,7 +340,7 @@ export class FileSystem {
       '  print("  total="+vs.totalPhysical+" used="+vs.usedPhysical+" pages="+vs.mappedPages);\n' +
       '}catch(e){print("  Error: "+e);}\n' +
       'print("Scheduler:"); try{\n' +
-      '  var ps2=sys.scheduler.getAllProcesses();\n' +
+      '  var ps2=sys.scheduler.getLiveProcesses();\n' +
       '  print("  processes="+ps2.length+" algo="+sys.scheduler.getAlgorithm());\n' +
       '}catch(e){print("  Error: "+e);}\n' +
       'print("Init:"); try{\n' +

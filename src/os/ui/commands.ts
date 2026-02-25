@@ -163,12 +163,12 @@ export function registerCommands(g: any): void {
     uptime()    { return kernel.getUptime(); },
     ticks()     { return kernel.getTicks(); },
     screen()    { return kernel.getScreenSize(); },
-    ps()        { return scheduler.getAllProcesses(); },
+    ps()        { return scheduler.getLiveProcesses(); },
     spawn(name: string) {
-      return scheduler.createProcess(0, { priority: 10, timeSlice: 10,
+      return scheduler.createProcess(0, { name, priority: 10, timeSlice: 10,
         memory: { heapStart: 0, heapEnd: 0, stackStart: 0, stackEnd: 0 } });
     },
-    kill(pid: number)   { return scheduler.terminateProcess(pid); },
+    kill(pid: number, sig?: number) { return processManager.kill(pid, sig !== undefined ? sig : 15); },
     sleep(ms: number)   { kernel.sleep(ms); },
     reboot()            { kernel.reboot(); },
     halt()              { kernel.halt(); },
@@ -189,7 +189,7 @@ export function registerCommands(g: any): void {
         memory:       m,
         virtualMemory: vm,
         uptime:       kernel.getUptime(),
-        processes:    scheduler.getAllProcesses().length,
+        processes:    scheduler.getLiveProcesses().length,
         scheduler:    scheduler.getAlgorithm(),
         runlevel:     init.getCurrentRunlevel(),
       };
@@ -412,7 +412,7 @@ export function registerCommands(g: any): void {
   g.ps = function() {
     var results: any[] = [];
     // Kernel POSIX-facade processes (idle, kernel, init)
-    var sprocs = scheduler.getAllProcesses();
+    var sprocs = scheduler.getLiveProcesses();
     for (var _i = 0; _i < sprocs.length; _i++) {
       var sp = sprocs[_i];
       results.push({ pid: sp.pid, ppid: sp.ppid, name: sp.name, state: sp.state, priority: sp.priority, type: 'sched', cpuTime: sp.cpuTime });
@@ -440,10 +440,10 @@ export function registerCommands(g: any): void {
     });
   };
 
-  g.kill = function(pid: number) {
-    if (pid === undefined) { terminal.println('usage: kill(pid)'); return; }
-    if (scheduler.terminateProcess(pid))
-      terminal.colorPrintln('killed PID ' + pid, Color.LIGHT_GREEN);
+  g.kill = function(pid: number, sig?: number) {
+    if (pid === undefined) { terminal.println('usage: kill(pid[, sig])'); return; }
+    if (processManager.kill(pid, sig !== undefined ? sig : 15))
+      terminal.colorPrintln('sent SIGTERM to PID ' + pid, Color.LIGHT_GREEN);
     else terminal.println('kill: PID ' + pid + ': not found or protected');
   };
 
@@ -523,7 +523,7 @@ export function registerCommands(g: any): void {
       screen:   sc.width + 'x' + sc.height + ' VGA text',
       memory:   { total: Math.floor(m.total/1024), free: Math.floor(m.free/1024), used: Math.floor(m.used/1024) },
       uptime:   Math.floor(kernel.getUptime() / 1000) + 's',
-      procs:    scheduler.getAllProcesses().length,
+      procs:    scheduler.getLiveProcesses().length,
     };
     return printableObject(info, function(obj: any) {
       terminal.colorPrintln('JSOS System Information', Color.WHITE);
@@ -555,7 +555,7 @@ export function registerCommands(g: any): void {
       terminal.setColor(Color.DARK_GREY, Color.BLACK);
       terminal.println('  ' + pad('', 60).replace(/ /g, '-'));
       terminal.setColor(Color.LIGHT_GREY, Color.BLACK);
-      var procs = scheduler.getAllProcesses();
+      var procs = scheduler.getLiveProcesses();
       var kthreadsTop = threadManager.getThreads();
       var jSprocsTop  = listProcesses();
       for (var i = 0; i < procs.length; i++) {
@@ -791,7 +791,7 @@ export function registerCommands(g: any): void {
     });
 
     check('process list', function() {
-      var procs = scheduler.getAllProcesses();
+      var procs = scheduler.getLiveProcesses();
       return Array.isArray(procs) && procs.length > 0;
     });
 
@@ -838,7 +838,7 @@ export function registerCommands(g: any): void {
     });
 
     check('scheduler process count', function() {
-      var procs = scheduler.getAllProcesses();
+      var procs = scheduler.getLiveProcesses();
       return typeof procs.length === 'number';
     });
 
@@ -1237,7 +1237,7 @@ export function registerCommands(g: any): void {
     terminal.colorPrint('  ipc', Color.LIGHT_CYAN);
     terminal.println('      .pipe() .signal.send(pid,sig) .mq.send(pid,msg)');
     terminal.colorPrint('  scheduler', Color.LIGHT_CYAN);
-    terminal.println(' .getAllProcesses .spawn .terminate .getAlgorithm');
+    terminal.println(' .getLiveProcesses .spawn .kill .getAlgorithm');
     terminal.colorPrint('  vmm', Color.LIGHT_CYAN);
     terminal.println('      .allocate .free .getStats .protect .mmap');
     terminal.colorPrint('  disk', Color.LIGHT_CYAN);

@@ -50,7 +50,7 @@ export class ProcFS {
         { name: 'net',         type: 'directory', size: 0   },
         { name: 'self',        type: 'directory', size: 0   },
       ];
-      var procs = scheduler.getAllProcesses().map(function(p) {
+      var procs = scheduler.getLiveProcesses().map(function(p) {
         return { name: '' + p.pid, type: 'directory' as FileType, size: 0 };
       });
       return base.concat(procs);
@@ -193,7 +193,7 @@ export class ProcFS {
   }
 
   private loadavg(): string {
-    var procs   = scheduler.getAllProcesses();
+    var procs   = scheduler.getLiveProcesses();
     var running = procs.filter(function(p) { return p.state === 'running'; }).length;
     var last    = procs.length > 0 ? procs[procs.length - 1].pid : 0;
     return '0.00 0.00 0.00 ' + running + '/' + procs.length + ' ' + last + '\n';
@@ -201,7 +201,7 @@ export class ProcFS {
 
   private statFile(): string {
     var ticks = kernel.getTicks();
-    var procs = scheduler.getAllProcesses();
+    var procs = scheduler.getLiveProcesses();
     var run   = procs.filter(function(p) { return p.state === 'running'; }).length;
     var blk   = procs.filter(function(p) { return p.state === 'blocked'; }).length;
     return [
