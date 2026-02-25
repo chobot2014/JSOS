@@ -19,7 +19,8 @@ import { fat16 } from '../storage/fat16.js';
 import { fat32 } from '../storage/fat32.js';
 import { physAlloc } from '../process/physalloc.js';
 import { threadManager } from '../process/threads.js';
-import { devFSMount } from '../fs/dev.js';
+import { scheduler }     from '../process/scheduler.js';
+import { devFSMount    } from '../fs/dev.js';
 import { installRomFiles } from '../fs/romfs.js';
 import { createScreenCanvas } from '../ui/canvas.js';
 import { WindowManager, setWM } from '../ui/wm.js';
@@ -157,19 +158,28 @@ function main(): void {
   }
 
   // ── Phase 5: Preemptive multitasking ───────────────────────────────────
-  // Register the TypeScript scheduler tick with the C layer.
+  // The C-layer IRQ0 hook drives kernel-thread preemption at 100 Hz.
+  // Process-level scheduling (signals, time slices) is driven by the WM
+  // frame loop via scheduler.tick() (~50 fps) — see ui/wm.ts tick().
   kernel.registerSchedulerHook(function() { return threadManager.tick(); });
   kernel.serialPut('Preemptive scheduler active (100Hz)\n');
 
-  // Create the idle thread (lowest priority, runs when nothing else is ready).
-  var idleThread = threadManager.createThread('idle', 39);
-  kernel.serialPut('Thread 0 (idle) created\n');
+  // Create the three canonical kernel threads.
+  var idleThread = threadManager.createThread('idle',   39);
+  var replThread = threadManager.createThread('kernel', 10);
+  var initThread = threadManager.createThread('init',   10);
+  kernel.serialPut('Kernel threads created (idle=' + idleThread.tid +
+                   ' kernel=' + replThread.tid + ' init=' + initThread.tid + ')\n');
 
-  // Create the REPL kernel thread.
-  var replThread = threadManager.createThread('repl', 20);
-  kernel.serialPut('Thread 1 (repl) created\n');
+  // Link kernel threads to ProcessScheduler PIDs so scheduler.tick() can
+  // synchronise threadManager.setCurrentTid() on process switches.
+  scheduler.initBootProcesses({
+    idlePid:   0, idleTid:   idleThread.tid,
+    kernelPid: 1, kernelTid: replThread.tid,
+    initPid:   2, initTid:   initThread.tid,
+  });
 
-  // Context-switch test: start on idle (TID 0), tick() should switch to repl (TID 1).
+  // Verify: tick() should move from idle (TID 0) to kernel (TID 1).
   var ctxSwitchOk = false;
   try {
     threadManager.setCurrentTid(0);
@@ -177,6 +187,8 @@ function main(): void {
     ctxSwitchOk = (threadManager.getCurrentTid() === 1);
   } catch(e) { ctxSwitchOk = false; }
   kernel.serialPut('Context switch test: ' + (ctxSwitchOk ? 'PASS' : 'FAIL') + '\n');
+  kernel.serialPut('Process scheduler: ' + scheduler.getLiveProcesses().length +
+                   ' boot processes registered\n');
 
   // ── Phase 6: POSIX layer ──────────────────────────────────────────────────
   kernel.serialPut('POSIX layer ready: devFS mounted, FDTable wired, syscalls active\n');
@@ -266,7 +278,11 @@ function main(): void {
       // Expose sys.browser() shortcut for the REPL
       var g2 = globalThis as any;
       g2.sys.browser = function(url?: string) {
-        if (url) browserApp.onKey({ ch: url, ext: 0 });
+        if (url) browserApp.onKey({
+          ch: '', ext: 0,
+          key: url, type: 'down' as const,
+          ctrl: false, shift: false, alt: false,
+        });
         return 'Browser: ' + (url || 'about:jsos');
       };
 

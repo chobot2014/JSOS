@@ -11,6 +11,7 @@
 
 import { FDTable } from '../core/fdtable.js';
 import { signalManager } from './signals.js';
+import { scheduler } from './scheduler.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -73,6 +74,7 @@ export class ProcessManager {
   /**
    * Create a child process by copying the current process's state.
    * Returns the child PID (caller is always the "parent").
+   * Also registers the child in the ProcessScheduler's ready queue.
    * Phase 6 does not fork address spaces at the hardware level (Phase 9).
    */
   fork(): number {
@@ -83,13 +85,31 @@ export class ProcessManager {
     child.name    = parent.name;
     child.cwd     = parent.cwd;
     child.fdTable = parent.fdTable.clone();
-    // Copy VMAs
     for (var i = 0; i < parent.vmas.length; i++) {
       var v = parent.vmas[i];
       child.addVMA(v.start, v.end, v.prot, v.name);
     }
     this._procs.set(child.pid, child);
-    return child.pid; // parent receives child PID
+
+    // Register the new child in the process scheduler so it appears in
+    // 'ps' output, receives signals, and gets time-slice accounting.
+    scheduler.registerProcess({
+      pid:           child.pid,
+      ppid:          child.ppid,
+      name:          child.name,
+      state:         'ready',
+      priority:      10,
+      timeSlice:     10,
+      remainingTime: 10,
+      cpuTime:       0,
+      startTime:     kernel.getTicks(),
+      threadId:      -1,   // no dedicated kernel thread yet
+      registers:     { pc: 0, sp: 0, fp: 0 },
+      memory:        { heapStart: 0, heapEnd: 0, stackStart: 0, stackEnd: 0 },
+      openFiles:     new Set([0, 1, 2]),
+    });
+
+    return child.pid;
   }
 
   /**
@@ -110,9 +130,27 @@ export class ProcessManager {
   waitpid(pid: number): { pid: number; exitCode: number } {
     var p = this._procs.get(pid);
     if (!p) return { pid: -1, exitCode: -1 };
-    // Notify parent via SIGCHLD
     signalManager.send(this._currentPid, 17 /* SIGCHLD */);
     return { pid: p.pid, exitCode: p.exitCode };
+  }
+
+  /**
+   * Send a signal to a process.
+   * Delegates to signalManager, which may invoke the terminate callback
+   * (→ scheduler.terminateProcess) for fatal default-action signals.
+   */
+  kill(pid: number, sig: number): boolean {
+    var p = this._procs.get(pid);
+    if (!p) return false;
+    signalManager.send(pid, sig);
+    // If fatal, mark dead in our own table too.
+    if (p.state === 'dead') return true;
+    var ctx = scheduler.getProcess(pid);
+    if (ctx && ctx.state === 'terminated') {
+      p.state    = 'dead';
+      p.exitCode = ctx.exitCode || 0;
+    }
+    return true;
   }
 
   /** Return the current process's VMA count (used by /proc/self/maps). */

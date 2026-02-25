@@ -280,7 +280,8 @@ export class WindowManager {
   tick(): void {
     this._pollInput();
     this._tickChildProcs();
-    threadManager.tickCoroutines();
+    scheduler.tick();                 // process-level accounting, signals, time-slice
+    threadManager.tickCoroutines();   // cooperative fetch / async coroutines
     this._composite();
   }
   /** Mark the WM as needing a repaint (call from app code or external events). */
@@ -290,10 +291,11 @@ export class WindowManager {
    * Pump every live child JS process each frame.
    * This drives Promise/async resolution and fires onMessage callbacks
    * without any user code needing to manually call p.tick().
-   * Cost is negligible when no processes are running (empty procList).
+   * Guard: skip the kernel.procList() allocation entirely when no children exist.
    */
   private _tickChildProcs(): void {
     var list = kernel.procList();
+    if (list.length === 0) return;
     for (var i = 0; i < list.length; i++) {
       kernel.procTick(list[i].id);
     }
@@ -473,14 +475,17 @@ export class WindowManager {
     }
 
     // ── Drain keyboard to focused window ──────────────────────────────────────
-    for (var k = 0; k < 32; k++) {
-      var raw = kernel.readKeyEx();
-      if (!raw) break;
-      var focused = this.getFocused();
-      if (focused) {
+    var focused = this.getFocused();
+    if (focused) {
+      for (var k = 0; k < 32; k++) {
+        var raw = kernel.readKeyEx();
+        if (!raw) break;
         focused.app.onKey(this._makeKeyEvent(raw));
         this._wmDirty = true;
       }
+    } else {
+      // Still drain the queue even when no window is focused
+      for (var k = 0; k < 32; k++) { if (!kernel.readKeyEx()) break; }
     }
 
     // ── Pump network stack ────────────────────────────────────────────────────
@@ -588,10 +593,10 @@ export class WindowManager {
       s.fillRect(win.x, win.y, win.width, TITLE_H,
                  focused ? FOCUSED_TITLE_COLOR : TITLE_COLOR);
       // Title text (truncate to avoid overlapping buttons)
-      var maxTitleW = win.width - 58;
-      var title = win.title;
-      while (title.length * 8 > maxTitleW && title.length > 1)
-        title = title.slice(0, -1);
+      var maxTitleChars = Math.floor((win.width - 58) / 8);
+      var title = win.title.length > maxTitleChars
+        ? win.title.substring(0, maxTitleChars)
+        : win.title;
       s.drawText(win.x + 6, win.y + 5, title, Colors.WHITE);
 
       // Title bar buttons (right→left: close, max, min)

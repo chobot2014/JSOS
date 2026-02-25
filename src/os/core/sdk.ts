@@ -25,6 +25,8 @@ import { net }       from '../net/net.js';
 import { TLSSocket } from '../net/tls.js';
 import { threadManager, type CoroutineStep } from '../process/threads.js';
 import { processManager } from '../process/process.js';
+import { scheduler, type ProcessContext, type SchedulingAlgorithm } from '../process/scheduler.js';
+import { signalManager, SIG } from '../process/signals.js';
 import {
   dnsResolveCached,
   dnsSendQueryAsync,
@@ -446,9 +448,9 @@ const sdk = {
     ticks(): number {
       return kernel.getTicks();
     },
-    /** Current process ID. */
+    /** Current process ID (from process scheduler). */
     pid(): number {
-      return processManager.getpid();
+      return scheduler.getpid();
     },
     /** System hostname from /etc/hostname. */
     hostname(): string {
@@ -489,6 +491,35 @@ const sdk = {
     /** List all live C-level child process slots. */
     list(): Array<{ id: number; inboxCount: number; outboxCount: number }> {
       return listProcesses();
+    },
+    /**
+     * All OS-level processes known to the scheduler (idle, kernel, init,
+     * and any forked children).  Equivalent to `ps aux`.
+     */
+    all(): ProcessContext[] {
+      return scheduler.getLiveProcesses();
+    },
+    /**
+     * Send a signal to a process by PID.
+     * Fatal signals (SIGKILL, SIGTERM, SIGINT, …) terminate the process.
+     * Ignored by default: SIGCHLD, SIGCONT.
+     *
+     * Example:
+     *   os.process.kill(5, os.process.SIG.SIGTERM); // graceful
+     *   os.process.kill(5, os.process.SIG.SIGKILL);  // hard kill
+     */
+    kill(pid: number, sig: number): boolean {
+      return processManager.kill(pid, sig);
+    },
+    /** POSIX signal numbers (e.g. os.process.SIG.SIGTERM). */
+    SIG,
+    /** Change the scheduling algorithm for the process scheduler. */
+    setAlgorithm(alg: SchedulingAlgorithm): void {
+      scheduler.setAlgorithm(alg);
+    },
+    /** Get the current scheduling algorithm. */
+    getAlgorithm(): SchedulingAlgorithm {
+      return scheduler.getAlgorithm();
     },
   },
 
