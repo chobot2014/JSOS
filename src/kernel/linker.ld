@@ -27,7 +27,10 @@ SECTIONS
         *(.bss.*)
         . = ALIGN(4K);
         _heap_start = .;
-        . += 0x10000000; /* 256 MB heap — large enough for QuickJS + OS + user space */
+        . += 0x30000000; /* 768 MB heap — supports 8×64 MB child runtimes + 50 MB kernel
+                          * (562 MB peak) with 206 MB headroom. QEMU runs at -m 4G so
+                          * physical RAM is not the constraint; this window is.
+                          * _heap_end ≈ 815 MB; KERNEL_END_FRAME = 1 GB > _heap_end. */
         _heap_end = .;;
     }
 }

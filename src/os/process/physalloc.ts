@@ -19,11 +19,13 @@ const PAGE_SIZE = 4096;
 
 /**
  * First allocatable frame.
- * Must be above the entire kernel binary + 256 MB BSS heap in linker.ld.
- * kernel loads at 1 MB; code/data ~16 MB max; heap 256 MB → top ~273 MB.
- * We reserve 320 MB (81920 frames) to give a comfortable margin.
+ * Must be above the entire kernel binary + heap window in linker.ld.
+ * kernel loads at 1 MB; code/data ~2 MB; BSS ~43.7 MB; heap 768 MB → _heap_end ≈ 815 MB.
+ * We reserve 1 GB (262144 frames × 4096 B = 1,073,741,824 B) which is above _heap_end
+ * with ~209 MB margin. physAlloc returns frames ≥ 1 GB; QEMU has ~3.5 GB usable
+ * (MMIO hole at top), giving ~2.5 GB of physical pages for user-space mappings.
  */
-const KERNEL_END_FRAME = 81920;
+const KERNEL_END_FRAME = 262144;  /* 1 GB = 256 K frames × 4 KB */
 
 export class PhysicalAllocator {
   private _bitmap: Uint8Array = new Uint8Array(0);

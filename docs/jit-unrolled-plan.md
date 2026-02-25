@@ -210,13 +210,14 @@ slot. BSS is stable at **~19.5 MB** through all remaining JIT steps.
 
 > **Cross-reference:** `before_jit_os_updates.md` adds
 > `_app_render_bufs[8][3MB]` = 24 MB + `_proc_timers` ~6 KB + `_proc_event_queues` ~32 KB
-> more BSS before the JIT lands. (3 MB per slot is required — at 1024×768 the
-> browser window is 984×688 = 2.71 MB which overflows 2 MB.)
+> more BSS before the JIT lands. (3 MB per slot required — browser window at 1024×768
+> is 984×688 = 2.71 MB, overflows 2 MB.)
 > Combined BSS when both plans are executed: **~43.7 MB**.
-> Child QuickJS heaps raised to 16 MB each (from 4 MB) + stack to 256 KB;
-> peak heap cap: 8×16 + 50 = **178 MB** — well inside 256 MB heap boundary.
-> `_heap_start` ≈ 46.7 MB; `_heap_end` ≈ 302.7 MB;
-> `KERNEL_END_FRAME` = 320 MB — ~17.3 MB safety margin.
+> Child QuickJS heaps: **64 MB** each; stack: 256 KB.
+> Peak heap cap: 8×64 + 50 = **562 MB** — inside 768 MB heap window (`linker.ld`).
+> `_heap_start` ≈ 46.7 MB; `_heap_end` ≈ 814.7 MB;
+> `KERNEL_END_FRAME` = 1 GB (262144 frames) — ~209 MB above `_heap_end`.
+> physAlloc returns frames 1 GB – 3.5 GB (~2.5 GB of user pages).
 
 The 256 MB heap region starts at `_heap_start` in `linker.ld`, well above BSS.
 With QEMU at 4 GB there is no address-space concern.
@@ -1295,8 +1296,8 @@ Understanding this is essential to getting JIT right.
 | | Main runtime | Child runtimes |
 |---|---|---|
 | Created by | `quickjs_initialize()` | `kernel.procCreate()` → `_procs[0..7]` |
-| Memory limit | 50 MB | **16 MB each** (raised from 4 MB — needed for browser DOM + page JS + buffers; 8×16+50 = 178 MB peak < 256 MB heap) |
-| Stack limit | 1 MB (QuickJS default) | **256 KB** (raised from 64 KB — recursive HTML parser / nested JS eval) |
+| Memory limit | 50 MB | **64 MB each** (8×64+50 = 562 MB peak; heap window 768 MB in linker.ld) |
+| Stack limit | 1 MB (QuickJS default) | **256 KB** (recursive HTML parser / deeply nested JS) |
 | What runs in it | OS kernel, WM, services, REPL | **All user apps** (terminal, editor, browser, file manager, monitor) + worker processes |
 | Kernel API | Full | Expanded (FS, timers, events, window commands, render buffer — see before_jit_os_updates.md) |
 | JIT pool region | First 8 MB | 512 KB slot per index (after Step 1) |
