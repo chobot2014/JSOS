@@ -1,1128 +1,46 @@
 /**
  * JSOS Browser — Native TypeScript HTML browser
  *
- * Full feature set:
- *   • HTML: h1–h6, p, a, ul/ol/li (nested), pre/code, blockquote, hr, table
- *   • Inline: <strong><em><code><del><mark> — mixed styles, word wrap
- *   • Forms: <form> GET/POST, <input> text/password/submit/reset/checkbox/radio/hidden
- *           <textarea>, <select>/<option>, <button>
- *   • Images: HTTP/HTTPS fetch, BMP 24/32-bit decode, pixel rendering; placeholder for others
- *   • Navigation: back/forward, history, bookmarks (Ctrl+D), view source (about:source)
- *   • Find in page: Ctrl+F, n/N cycle, Esc close
- *   • Keyboard: Ctrl+L URL, Ctrl+R reload, PgUp/PgDn, Home/End, Tab cycles form widgets
- *   • Status bar: link hover, load status, scroll %
- *   • Redirect following 3xx (max 5 hops)
+ * Source is split into focused modules:
+ *   constants.ts  — layout/color/widget constants
+ *   types.ts      — all TypeScript interfaces
+ *   css.ts        — CSS color + inline-style parsing
+ *   utils.ts      — URL parsing, encoding, BMP/PNG decode, base64
+ *   html.ts       — HTML tokeniser + parser (with CSS support)
+ *   layout.ts     — flowSpans word-wrap + layoutNodes block engine
+ *   pages.ts      — about: page generators, JSON viewer
+ *   index.ts      — BrowserApp class (this file)
  */
 
 import {
-  os, Canvas, Colors,
-  type PixelColor, type App, type WMWindow, type KeyEvent, type MouseEvent,
-  type FetchResponse,
+  os, Canvas,
+  type App, type WMWindow, type KeyEvent, type MouseEvent, type FetchResponse,
 } from '../../core/sdk.js';
 
-
-
-// ── Layout constants ──────────────────────────────────────────────────────────
-
-const TOOLBAR_H   = 30;
-const STATUSBAR_H = 14;
-const FINDBAR_H   = 22;
-const CHAR_W      = 8;
-const CHAR_H      = 8;
-const LINE_H      = 13;
-const CONTENT_PAD = 8;
-
-// ── Color palette ─────────────────────────────────────────────────────────────
-
-const CLR_BG         = 0xFFFFFFFF;
-const CLR_TOOLBAR_BG = 0xFFE8EAED;
-const CLR_TOOLBAR_BD = 0xFFCDCDD3;
-const CLR_STATUS_BG  = 0xFFF1F3F4;
-const CLR_STATUS_TXT = 0xFF555555;
-const CLR_URL_BG     = 0xFFFFFFFF;
-const CLR_URL_FOCUS  = 0xFF1A73E8;
-const CLR_BTN_BG     = 0xFFDADCE0;
-const CLR_BTN_TXT    = 0xFF333333;
-const CLR_LINK       = 0xFF1558D6;
-const CLR_LINK_HOV   = 0xFF063099;
-const CLR_VISITED    = 0xFF7C1DBF;
-const CLR_H1         = 0xFF1A1A1A;
-const CLR_H2         = 0xFF222288;
-const CLR_H3         = 0xFF334499;
-const CLR_BODY       = 0xFF202020;
-const CLR_BOLD       = 0xFF000000;
-const CLR_ITALIC     = 0xFF333388;
-const CLR_CODE       = 0xFFBB3300;
-const CLR_CODE_BG    = 0xFFF0F0F0;
-const CLR_DEL        = 0xFF888888;
-const CLR_MARK_BG    = 0xFFFFEE88;
-const CLR_MARK_TXT   = 0xFF664400;
-const CLR_PRE_BG     = 0xFFF6F8FA;
-const CLR_PRE_TXT    = 0xFF24292E;
-const CLR_HR         = 0xFF999999;
-const CLR_QUOTE_BG   = 0xFFF6F6FF;
-const CLR_QUOTE_BAR  = 0xFFBBBBDD;
-const CLR_QUOTE_TXT  = 0xFF444466;
-const CLR_FIND_BG    = 0xFFFFFFCC;
-const CLR_FIND_MATCH = 0xFFFFCC00;
-const CLR_FIND_CUR   = 0xFFFF8800;
-const CLR_FIND_TXT   = 0xFF333333;
-const CLR_FIND_BD    = 0xFFCCCC88;
-
-// Widget colors
-const CLR_INPUT_BG   = 0xFFFFFFFF;
-const CLR_INPUT_BD   = 0xFF888888;
-const CLR_INPUT_FOCUS= 0xFF1A73E8;
-const CLR_INPUT_TXT  = 0xFF111111;
-const CLR_BTN_SUB_BG = 0xFF4285F4;
-const CLR_BTN_SUB_TXT= 0xFFFFFFFF;
-const CLR_BTN_RST_BG = 0xFFEEEEEE;
-const CLR_CHECK_FILL = 0xFF4285F4;
-const CLR_IMG_PH_BG  = 0xFFEEEEEE;
-const CLR_IMG_PH_BD  = 0xFFCCCCCC;
-const CLR_IMG_PH_TXT = 0xFF888888;
-const CLR_SEL_BG     = 0xFFFFFFFF;
-const CLR_SEL_ARROW  = 0xFF555555;
-
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-interface ParsedURL {
-  protocol: 'http' | 'https' | 'about';
-  host: string;
-  port: number;
-  path: string;
-  raw: string;
-}
-
-interface InlineSpan {
-  text:    string;
-  href?:   string;
-  bold?:   boolean;
-  italic?: boolean;
-  code?:   boolean;
-  del?:    boolean;
-  mark?:   boolean;
-}
-
-type BlockType =
-  | 'block' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6'
-  | 'hr' | 'li' | 'pre' | 'p-break' | 'blockquote' | 'widget';
-
-interface RenderNode {
-  type:    BlockType;
-  spans:   InlineSpan[];
-  indent?: number;
-  widget?: WidgetBlueprint;
-}
-
-interface RenderedSpan {
-  x:          number;
-  text:       string;
-  color:      PixelColor;
-  href?:      string;
-  bold?:      boolean;
-  del?:       boolean;
-  mark?:      boolean;
-  codeBg?:    boolean;
-  searchHit?: boolean;
-  hitIdx?:    number;
-}
-
-interface RenderedLine {
-  y:          number;
-  nodes:      RenderedSpan[];
-  lineH:      number;
-  preBg?:     boolean;
-  quoteBg?:   boolean;
-  quoteBar?:  boolean;
-  hrLine?:    boolean;
-}
-
-interface HistoryEntry { url: string; title: string; }
-
-// ── Widget / Form types ───────────────────────────────────────────────────────
-
-type WidgetKind =
-  | 'text' | 'password' | 'submit' | 'reset' | 'button'
-  | 'checkbox' | 'radio' | 'select' | 'textarea' | 'file' | 'hidden'
-  | 'img';
-
-interface WidgetBlueprint {
-  kind:      WidgetKind;
-  name:      string;
-  value:     string;
-  checked:   boolean;
-  disabled:  boolean;
-  readonly:  boolean;
-  formIdx:   number;       // index into FormState[]
-  options?:  string[];     // select option labels
-  optVals?:  string[];     // select option values
-  selIdx?:   number;       // initially selected option
-  rows?:     number;       // textarea rows
-  cols?:     number;       // textarea cols / input size
-  imgSrc?:   string;       // img src
-  imgAlt?:   string;
-  imgNatW?:  number;       // natural width from HTML attr
-  imgNatH?:  number;
-  radioGroup?: string;     // name used for radio grouping
-}
-
-/** A widget after layout — knows its position in page space. */
-interface PositionedWidget extends WidgetBlueprint {
-  id:   number;
-  px:   number;   // page x
-  py:   number;   // page y
-  pw:   number;   // width
-  ph:   number;   // height
-  // mutable runtime state
-  curValue:  string;
-  curChecked: boolean;
-  curSelIdx:  number;
-  cursorPos:  number;   // text cursor
-  imgData:    Uint32Array | null;
-  imgLoaded:  boolean;
-}
-
-interface FormState {
-  action:  string;
-  method:  'get' | 'post';
-  enctype: string;
-}
-
-// ── Widget sizing constants ───────────────────────────────────────────────────
-
-const WIDGET_INPUT_H  = 18;
-const WIDGET_BTN_H    = 20;
-const WIDGET_CHECK_SZ = 12;
-const WIDGET_INPUT_W  = 180;  // default text input width
-const WIDGET_AREA_H   = 60;   // default textarea height
-const WIDGET_SELECT_H = 18;
-
-// ── URL parser ────────────────────────────────────────────────────────────────
-
-function parseURL(raw: string): ParsedURL | null {
-  raw = raw.trim();
-  if (!raw) return null;
-  if (raw.startsWith('about:')) {
-    return { protocol: 'about', host: '', port: 0, path: raw.slice(6), raw };
-  }
-  var proto: 'http' | 'https';
-  var rest: string;
-  if (raw.startsWith('https://'))     { proto = 'https'; rest = raw.slice(8); }
-  else if (raw.startsWith('http://')) { proto = 'http';  rest = raw.slice(7); }
-  else {
-    if (!raw.includes('/')) raw = raw + '/';
-    raw = 'https://' + raw;
-    proto = 'https'; rest = raw.slice(8);
-  }
-  var slash    = rest.indexOf('/');
-  var hostPort = slash < 0 ? rest : rest.slice(0, slash);
-  var path     = slash < 0 ? '/'  : rest.slice(slash) || '/';
-  var colon    = hostPort.lastIndexOf(':');
-  var host: string;
-  var port: number;
-  if (colon > 0) {
-    host = hostPort.slice(0, colon);
-    port = parseInt(hostPort.slice(colon + 1), 10) || (proto === 'https' ? 443 : 80);
-  } else {
-    host = hostPort;
-    port = proto === 'https' ? 443 : 80;
-  }
-  if (!host) return null;
-  return { protocol: proto, host, port, path, raw };
-}
-
-// ── URL encode / decode ────────────────────────────────────────────────────────
-
-function urlEncode(s: string): string {
-  var out = '';
-  for (var i = 0; i < s.length; i++) {
-    var c = s[i];
-    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-        (c >= '0' && c <= '9') || c === '-' || c === '_' || c === '.' || c === '~') {
-      out += c;
-    } else if (c === ' ') {
-      out += '+';
-    } else {
-      var code = s.charCodeAt(i);
-      out += '%' + (code < 16 ? '0' : '') + code.toString(16).toUpperCase();
-    }
-  }
-  return out;
-}
-
-function encodeFormData(fields: Array<{name: string; value: string}>): number[] {
-  var parts: string[] = [];
-  for (var i = 0; i < fields.length; i++) {
-    parts.push(urlEncode(fields[i].name) + '=' + urlEncode(fields[i].value));
-  }
-  var str = parts.join('&');
-  var out = new Array(str.length);
-  for (var j = 0; j < str.length; j++) out[j] = str.charCodeAt(j) & 0xFF;
-  return out;
-}
-
-// ── BMP image decoder ─────────────────────────────────────────────────────────
-
-interface DecodedImage {
-  w:    number;
-  h:    number;
-  data: Uint32Array | null;  // 0xAARRGGBB pixels, null = decode failed
-}
-
-function decodeBMP(bytes: number[]): DecodedImage | null {
-  if (bytes.length < 54) return null;
-  if (bytes[0] !== 0x42 || bytes[1] !== 0x4D) return null;   // "BM"
-
-  function le32(off: number): number {
-    return bytes[off] | (bytes[off+1] << 8) | (bytes[off+2] << 16) | (bytes[off+3] << 24);
-  }
-  function le16(off: number): number {
-    return bytes[off] | (bytes[off+1] << 8);
-  }
-
-  var pixOff  = le32(10);
-  var hdrSize = le32(14);
-  var bmpW    = le32(18);
-  var bmpH    = le32(22);
-  var bpp     = le16(28);
-  var topDown = false;
-  if (bmpH < 0) { bmpH = -bmpH; topDown = true; }
-
-  if (bmpW <= 0 || bmpH <= 0 || bmpW > 4096 || bmpH > 4096) return null;
-  if (bpp !== 24 && bpp !== 32) return null;
-
-  var bytesPerPixel = bpp >> 3;
-  var rowStride     = (bmpW * bytesPerPixel + 3) & ~3;   // padded to 4 bytes
-  var expectedSize  = pixOff + rowStride * bmpH;
-  if (bytes.length < expectedSize) return null;
-
-  var data = new Uint32Array(bmpW * bmpH);
-  for (var row = 0; row < bmpH; row++) {
-    var srcRow  = topDown ? row : (bmpH - 1 - row);
-    var rowOff  = pixOff + srcRow * rowStride;
-    var dstRow  = row * bmpW;
-    for (var col = 0; col < bmpW; col++) {
-      var p = rowOff + col * bytesPerPixel;
-      var b = bytes[p];
-      var g = bytes[p + 1];
-      var r = bytes[p + 2];
-      var a = bpp === 32 ? bytes[p + 3] : 0xFF;
-      data[dstRow + col] = (a << 24) | (r << 16) | (g << 8) | b;
-    }
-  }
-  return { w: bmpW, h: bmpH, data };
-}
-
-// ── HTML tokeniser ────────────────────────────────────────────────────────────
-
-interface HtmlToken {
-  kind:  'text' | 'open' | 'close' | 'self';
-  tag:   string;
-  text:  string;
-  attrs: Map<string, string>;
-}
-
-function tokenise(html: string): HtmlToken[] {
-  var tokens: HtmlToken[] = [];
-  var n = html.length;
-  var i = 0;
-
-  function skipWS(): void {
-    while (i < n && (html[i] === ' ' || html[i] === '\t' ||
-                     html[i] === '\n' || html[i] === '\r')) i++;
-  }
-  function readAttrValue(): string {
-    if (i >= n) return '';
-    if (html[i] === '"' || html[i] === "'") {
-      var q = html[i++]; var v = '';
-      while (i < n && html[i] !== q) v += html[i++];
-      if (i < n) i++;
-      return v;
-    }
-    var v2 = '';
-    while (i < n && html[i] !== '>' && html[i] !== ' ' &&
-           html[i] !== '\t' && html[i] !== '\n') v2 += html[i++];
-    return v2;
-  }
-  function readTag(): HtmlToken | null {
-    i++;
-    var close = false;
-    if (html[i] === '/') { close = true; i++; }
-    if (html[i] === '!' || html[i] === '?') {
-      while (i < n && html[i] !== '>') i++;
-      if (i < n) i++;
-      return null;
-    }
-    var tag = '';
-    while (i < n && html[i] !== '>' && html[i] !== '/' &&
-           html[i] !== ' ' && html[i] !== '\t' && html[i] !== '\n')
-      tag += html[i++];
-    tag = tag.toLowerCase();
-    var attrs = new Map<string, string>();
-    skipWS();
-    while (i < n && html[i] !== '>' && html[i] !== '/') {
-      var nm = '';
-      while (i < n && html[i] !== '=' && html[i] !== '>' &&
-             html[i] !== '/' && html[i] !== ' ' &&
-             html[i] !== '\t' && html[i] !== '\n') nm += html[i++];
-      nm = nm.toLowerCase().trim();
-      skipWS();
-      var vl = '';
-      if (i < n && html[i] === '=') { i++; skipWS(); vl = readAttrValue(); }
-      if (nm) attrs.set(nm, vl);
-      skipWS();
-    }
-    var self = false;
-    if (i < n && html[i] === '/') { self = true; i++; }
-    if (i < n && html[i] === '>') i++;
-    var kind: 'open'|'close'|'self' = close ? 'close' : (self ? 'self' : 'open');
-    return { kind, tag, text: '', attrs };
-  }
-
-  while (i < n) {
-    if (html[i] === '<') {
-      var tok = readTag();
-      if (tok) tokens.push(tok);
-    } else {
-      var start = i;
-      while (i < n && html[i] !== '<') i++;
-      var raw = html.slice(start, i);
-      var dec = raw
-        .replace(/&amp;/g,    '&')   .replace(/&lt;/g,  '<')
-        .replace(/&gt;/g,     '>')   .replace(/&quot;/g, '"')
-        .replace(/&#39;/g,    "'")   .replace(/&apos;/g, "'")
-        .replace(/&nbsp;/g,   ' ')   .replace(/&mdash;/g, '-')
-        .replace(/&ndash;/g,  '-')   .replace(/&hellip;/g, '...')
-        .replace(/&laquo;/g,  '<<')  .replace(/&raquo;/g, '>>')
-        .replace(/&copy;/g,   '(c)') .replace(/&reg;/g, '(R)')
-        .replace(/&trade;/g,  '(TM)').replace(/&ldquo;/g, '"')
-        .replace(/&rdquo;/g,  '"')   .replace(/&lsquo;/g, "'")
-        .replace(/&rsquo;/g,  "'")   .replace(/&bull;/g, '*')
-        .replace(/&middot;/g, '*')
-        .replace(/&#(\d+);/g,     (_m: string, nc: string) => String.fromCharCode(parseInt(nc, 10)))
-        .replace(/&#x([0-9a-f]+);/gi, (_m: string, nc: string) => String.fromCharCode(parseInt(nc, 16)));
-      tokens.push({ kind: 'text', tag: '', text: dec, attrs: new Map() });
-    }
-  }
-  return tokens;
-}
-
-// ── HTML parser ───────────────────────────────────────────────────────────────
-
-interface ParseResult {
-  nodes:    RenderNode[];
-  title:    string;
-  forms:    FormState[];
-  widgets:  WidgetBlueprint[];  // in order of appearance
-}
-
-function parseHTML(html: string): ParseResult {
-  var tokens   = tokenise(html);
-  var nodes:   RenderNode[]      = [];
-  var title    = '';
-  var forms:   FormState[]       = [];
-  var widgets: WidgetBlueprint[] = [];
-
-  var inTitle  = false;
-  var inPre    = false;
-  var inHead   = false;
-  var inScript = false;
-  var inStyle  = false;
-  var bold     = 0;
-  var italic   = 0;
-  var codeInl  = 0;
-  var del      = 0;
-  var mark     = 0;
-  var listDepth= 0;
-
-  var inlineSpans: InlineSpan[] = [];
-  var linkHref  = '';
-  var linkDepth = 0;
-  var openBlock: RenderNode | null = null;
-
-  // Form tracking
-  var curFormIdx  = -1;
-  var inSelect    = false;
-  var selectOpts:  string[] = [];
-  var selectVals:  string[] = [];
-  var selectSel    = 0;
-  var inTextarea   = false;
-  var textareaWip: WidgetBlueprint | null = null;
-
-  var BLOCK_TAGS = new Set([
-    'p','div','section','article','main','header','footer','nav','aside',
-    'figure','address','details','summary','dd','dt','caption',
-  ]);
-
-  function flushInline(): void {
-    if (!inlineSpans.length) return;
-    var merged: InlineSpan[] = [];
-    for (var mi = 0; mi < inlineSpans.length; mi++) {
-      var sp = inlineSpans[mi];
-      var prev = merged[merged.length - 1];
-      if (prev && prev.href === sp.href && prev.bold === sp.bold &&
-          prev.italic === sp.italic && prev.code === sp.code &&
-          prev.del === sp.del && prev.mark === sp.mark) {
-        prev.text += sp.text;
-      } else {
-        merged.push({ ...sp });
-      }
-    }
-    nodes.push({ type: 'block', spans: merged });
-    inlineSpans = [];
-  }
-
-  function pushSpan(text: string): void {
-    if (!text) return;
-    var sp: InlineSpan = { text };
-    if (linkHref)    sp.href   = linkHref;
-    if (bold   > 0)  sp.bold   = true;
-    if (italic > 0)  sp.italic = true;
-    if (codeInl > 0) sp.code   = true;
-    if (del    > 0)  sp.del    = true;
-    if (mark   > 0)  sp.mark   = true;
-    if (openBlock) { openBlock.spans.push(sp); }
-    else           { inlineSpans.push(sp); }
-  }
-
-  function pushWidget(bp: WidgetBlueprint): void {
-    flushInline();
-    if (openBlock) { nodes.push(openBlock); openBlock = null; }
-    var idx = widgets.length;
-    widgets.push(bp);
-    nodes.push({ type: 'widget', spans: [], widget: bp });
-  }
-
-  for (var i = 0; i < tokens.length; i++) {
-    var tok = tokens[i];
-
-    if (inScript) { if (tok.kind === 'close' && tok.tag === 'script') inScript = false; continue; }
-    if (inStyle)  { if (tok.kind === 'close' && tok.tag === 'style')  inStyle  = false; continue; }
-
-    // ── text inside <select> options or <textarea> ──────────────────────────
-    if (inSelect) {
-      if (tok.kind === 'text') {
-        if (selectOpts.length > 0) {
-          selectOpts[selectOpts.length - 1] += tok.text.trim();
-        }
-      } else if (tok.kind === 'open' && tok.tag === 'option') {
-        var optVal = tok.attrs.get('value') || '';
-        var isSelected = tok.attrs.has('selected');
-        if (isSelected) selectSel = selectOpts.length;
-        selectOpts.push('');
-        selectVals.push(optVal);
-      } else if ((tok.kind === 'close' || tok.kind === 'self') && tok.tag === 'select') {
-        inSelect = false;
-        // Widget was already pushed with empty options; update it via pending idx
-        if (textareaWip) {
-          textareaWip.options   = selectOpts;
-          textareaWip.optVals   = selectVals;
-          textareaWip.selIdx    = selectSel;
-          textareaWip = null;
-        }
-      }
-      continue;
-    }
-
-    if (inTextarea) {
-      if (tok.kind === 'text' && textareaWip) {
-        textareaWip.value += tok.text;
-      } else if (tok.kind === 'close' && tok.tag === 'textarea') {
-        inTextarea = false; textareaWip = null;
-      }
-      continue;
-    }
-
-    if (tok.kind === 'open' || tok.kind === 'self') {
-      switch (tok.tag) {
-        case 'head':   inHead   = true;  break;
-        case 'body':   inHead   = false; break;
-        case 'title':  inTitle  = true;  break;
-        case 'script': inScript = true;  break;
-        case 'style':  inStyle  = true;  break;
-
-        case 'strong': case 'b':  bold++;    break;
-        case 'em':     case 'i':  italic++;  break;
-        case 'code':   case 'tt': codeInl++; break;
-        case 'del':    case 's':  del++;     break;
-        case 'mark':              mark++;    break;
-        case 'u': case 'sup': case 'sub': case 'abbr': case 'span': break;
-
-        case 'a':
-          linkHref = tok.attrs.get('href') || '';
-          linkDepth++;
-          break;
-
-        case 'h1': case 'h2': case 'h3':
-        case 'h4': case 'h5': case 'h6':
-          flushInline();
-          openBlock = { type: tok.tag as BlockType, spans: [] };
-          break;
-
-        case 'pre': flushInline(); inPre = true; break;
-
-        case 'br':
-          if (inPre) { nodes.push({ type: 'pre', spans: [{ text: '' }] }); }
-          else {
-            if (openBlock) { nodes.push(openBlock); openBlock = null; }
-            else            flushInline();
-          }
-          break;
-
-        case 'hr': flushInline(); nodes.push({ type: 'hr', spans: [] }); break;
-
-        case 'ul': case 'ol': flushInline(); listDepth++; break;
-        case 'li':
-          flushInline();
-          openBlock = { type: 'li', spans: [], indent: Math.max(0, listDepth - 1) };
-          break;
-
-        case 'blockquote':
-          flushInline();
-          openBlock = { type: 'blockquote', spans: [], indent: 1 };
-          break;
-
-        // ── Forms ────────────────────────────────────────────────────────────
-        case 'form': {
-          flushInline();
-          nodes.push({ type: 'p-break', spans: [] });
-          var fAction  = tok.attrs.get('action') || '';
-          var fMethod  = (tok.attrs.get('method') || 'get').toLowerCase() as 'get'|'post';
-          var fEnctype = tok.attrs.get('enctype') || 'application/x-www-form-urlencoded';
-          curFormIdx   = forms.length;
-          forms.push({ action: fAction, method: fMethod, enctype: fEnctype });
-          break;
-        }
-        case '/form':
-          flushInline();
-          nodes.push({ type: 'p-break', spans: [] });
-          curFormIdx = -1;
-          break;
-
-        // ── <input> ──────────────────────────────────────────────────────────
-        case 'input': {
-          var iType     = (tok.attrs.get('type') || 'text').toLowerCase() as WidgetKind;
-          var iName     = tok.attrs.get('name')     || '';
-          var iValue    = tok.attrs.get('value')    || '';
-          var iChecked  = tok.attrs.has('checked');
-          var iDisabled = tok.attrs.has('disabled');
-          var iReadonly = tok.attrs.has('readonly');
-          var iSizeStr  = tok.attrs.get('size') || '';
-          var iSize     = iSizeStr ? parseInt(iSizeStr, 10) : 0;
-
-          if (iType === 'hidden') {
-            // Hidden inputs — no UI, still register for form submission
-            widgets.push({
-              kind: 'hidden', name: iName, value: iValue,
-              checked: false, disabled: false, readonly: false, formIdx: curFormIdx,
-            });
-            break;
-          }
-
-          if ((iType as string) === 'image') iType = 'submit';  // treat image buttons as submit
-
-          var bp: WidgetBlueprint = {
-            kind: iType, name: iName, value: iValue,
-            checked: iChecked, disabled: iDisabled, readonly: iReadonly,
-            formIdx: curFormIdx,
-            cols: iSize || 20,
-          };
-          if (iType === 'radio') bp.radioGroup = iName;
-          pushWidget(bp);
-          break;
-        }
-
-        // ── <select> ─────────────────────────────────────────────────────────
-        case 'select': {
-          var sBp: WidgetBlueprint = {
-            kind: 'select', name: tok.attrs.get('name') || '',
-            value: '', checked: false, disabled: tok.attrs.has('disabled'),
-            readonly: false, formIdx: curFormIdx,
-            options: [], optVals: [], selIdx: 0,
-          };
-          // We'll fill options as we parse inner <option> tags
-          textareaWip = sBp;
-          inSelect    = true;
-          selectOpts  = [];
-          selectVals  = [];
-          selectSel   = 0;
-          pushWidget(sBp);
-          break;
-        }
-
-        // ── <textarea> ───────────────────────────────────────────────────────
-        case 'textarea': {
-          var rows  = parseInt(tok.attrs.get('rows') || '4', 10) || 4;
-          var cols  = parseInt(tok.attrs.get('cols') || '40', 10) || 40;
-          var taBp: WidgetBlueprint = {
-            kind: 'textarea', name: tok.attrs.get('name') || '',
-            value: '', checked: false, disabled: tok.attrs.has('disabled'),
-            readonly: tok.attrs.has('readonly'), formIdx: curFormIdx,
-            rows, cols,
-          };
-          textareaWip = taBp;
-          inTextarea  = true;
-          pushWidget(taBp);
-          break;
-        }
-
-        // ── <button> ─────────────────────────────────────────────────────────
-        case 'button': {
-          var bType  = (tok.attrs.get('type') || 'submit').toLowerCase();
-          var bKind: WidgetKind = bType === 'reset' ? 'reset' : 'submit';
-          pushWidget({
-            kind: bKind, name: tok.attrs.get('name') || '',
-            value: tok.attrs.get('value') || 'Submit',
-            checked: false, disabled: tok.attrs.has('disabled'),
-            readonly: false, formIdx: curFormIdx,
-          });
-          break;
-        }
-
-        // ── <img> ────────────────────────────────────────────────────────────
-        case 'img': {
-          var iSrc   = tok.attrs.get('src')    || '';
-          var iAlt   = tok.attrs.get('alt')    || '';
-          var iWStr  = tok.attrs.get('width')  || '0';
-          var iHStr  = tok.attrs.get('height') || '0';
-          var iNatW  = parseInt(iWStr, 10)  || 0;
-          var iNatH  = parseInt(iHStr, 10)  || 0;
-          pushWidget({
-            kind: 'img', name: '', value: iAlt,
-            checked: false, disabled: false, readonly: false, formIdx: -1,
-            imgSrc: iSrc, imgAlt: iAlt, imgNatW: iNatW, imgNatH: iNatH,
-          });
-          break;
-        }
-
-        // ── Table ─────────────────────────────────────────────────────────────
-        case 'table': flushInline(); nodes.push({ type: 'p-break', spans: [] }); break;
-        case 'tr':    flushInline(); nodes.push({ type: 'p-break', spans: [] }); break;
-        case 'th':    bold++; pushSpan('| '); break;
-        case 'td':    pushSpan('| '); break;
-
-        default:
-          if (BLOCK_TAGS.has(tok.tag)) {
-            flushInline();
-            nodes.push({ type: 'p-break', spans: [] });
-          }
-          break;
-      }
-
-    } else if (tok.kind === 'close') {
-      switch (tok.tag) {
-        case 'head':  inHead  = false; break;
-        case 'title': inTitle = false; break;
-
-        case 'strong': case 'b':  bold    = Math.max(0, bold    - 1); break;
-        case 'em':     case 'i':  italic  = Math.max(0, italic  - 1); break;
-        case 'code':   case 'tt': codeInl = Math.max(0, codeInl - 1); break;
-        case 'del':    case 's':  del     = Math.max(0, del     - 1); break;
-        case 'mark':              mark    = Math.max(0, mark    - 1); break;
-
-        case 'a':
-          linkDepth = Math.max(0, linkDepth - 1);
-          if (linkDepth === 0) linkHref = '';
-          break;
-
-        case 'h1': case 'h2': case 'h3':
-        case 'h4': case 'h5': case 'h6':
-          if (openBlock) { nodes.push(openBlock); openBlock = null; }
-          nodes.push({ type: 'p-break', spans: [] });
-          break;
-
-        case 'li':
-          if (openBlock) { nodes.push(openBlock); openBlock = null; }
-          break;
-
-        case 'blockquote':
-          if (openBlock) { nodes.push(openBlock); openBlock = null; }
-          flushInline();
-          nodes.push({ type: 'p-break', spans: [] });
-          break;
-
-        case 'ul': case 'ol':
-          listDepth = Math.max(0, listDepth - 1);
-          nodes.push({ type: 'p-break', spans: [] });
-          break;
-
-        case 'pre': inPre = false; nodes.push({ type: 'p-break', spans: [] }); break;
-
-        case 'form':
-          flushInline();
-          nodes.push({ type: 'p-break', spans: [] });
-          curFormIdx = -1;
-          break;
-
-        case 'button': break;  // button text was already pushed in open handler
-
-        case 'th': bold = Math.max(0, bold - 1); pushSpan('  '); break;
-        case 'td': pushSpan('  '); break;
-        case 'table':
-          pushSpan('|'); flushInline();
-          nodes.push({ type: 'p-break', spans: [] });
-          break;
-
-        default:
-          if (BLOCK_TAGS.has(tok.tag)) {
-            flushInline();
-            nodes.push({ type: 'p-break', spans: [] });
-          }
-          break;
-      }
-    } else {
-      // text token
-      var txt = tok.text;
-      if (inTitle) { title += txt.replace(/\s+/g, ' ').trim(); continue; }
-      if (inHead)  continue;
-
-      if (inPre) {
-        var preLines = txt.split('\n');
-        for (var pl = 0; pl < preLines.length; pl++) {
-          var lastNode = nodes[nodes.length - 1];
-          if (pl === 0 && lastNode && lastNode.type === 'pre' && lastNode.spans.length === 1) {
-            lastNode.spans[0].text += preLines[pl];
-          } else {
-            nodes.push({ type: 'pre', spans: [{ text: preLines[pl] }] });
-          }
-          if (pl < preLines.length - 1) {
-            nodes.push({ type: 'pre', spans: [{ text: '' }] });
-          }
-        }
-        continue;
-      }
-
-      txt = txt.replace(/[\r\n\t]+/g, ' ');
-      if (!txt.trim()) continue;
-      pushSpan(txt);
-    }
-  }
-
-  flushInline();
-  return { nodes, title, forms, widgets };
-}
-
-// ── Inline word-flow layout ───────────────────────────────────────────────────
-
-function flowSpans(
-  spans:   InlineSpan[],
-  xLeft:   number,
-  maxX:    number,
-  lineH:   number,
-  baseClr: PixelColor,
-  opts?: { preBg?: boolean; quoteBg?: boolean; quoteBar?: boolean; }
-): RenderedLine[] {
-  var lines:   RenderedLine[] = [];
-  var curLine: RenderedSpan[] = [];
-  var curX = xLeft;
-
-  function spanColor(sp: InlineSpan): PixelColor {
-    if (sp.href)   return CLR_LINK;
-    if (sp.mark)   return CLR_MARK_TXT;
-    if (sp.del)    return CLR_DEL;
-    if (sp.code)   return CLR_CODE;
-    if (sp.italic) return CLR_ITALIC;
-    if (sp.bold)   return CLR_BOLD;
-    return baseClr;
-  }
-  function commitLine(): void {
-    lines.push({ y: 0, nodes: curLine, lineH,
-                 preBg: opts?.preBg, quoteBg: opts?.quoteBg, quoteBar: opts?.quoteBar });
-    curLine = []; curX = xLeft;
-  }
-  function addWord(word: string, sp: InlineSpan): void {
-    var clr = spanColor(sp);
-    var nspc = curX > xLeft;
-    var spcW = nspc ? CHAR_W : 0;
-    if (curX + spcW + word.length * CHAR_W > maxX && curX > xLeft) {
-      commitLine(); nspc = false; spcW = 0;
-    }
-    while (word.length > 0) {
-      var avail = Math.max(1, Math.floor((maxX - curX - spcW) / CHAR_W));
-      if (avail <= 0 && curX > xLeft) { commitLine(); nspc = false; spcW = 0;
-        avail = Math.max(1, Math.floor((maxX - xLeft) / CHAR_W)); }
-      var chunk   = word.slice(0, avail);
-      var display = (nspc ? ' ' : '') + chunk;
-      var rsp: RenderedSpan = { x: curX, text: display, color: clr };
-      if (sp.href)   rsp.href   = sp.href;
-      if (sp.bold)   rsp.bold   = true;
-      if (sp.del)    rsp.del    = true;
-      if (sp.mark)   rsp.mark   = true;
-      if (sp.code)   rsp.codeBg = true;
-      curLine.push(rsp);
-      curX += display.length * CHAR_W;
-      word = word.slice(chunk.length); nspc = false; spcW = 0;
-    }
-  }
-
-  for (var si = 0; si < spans.length; si++) {
-    var sp    = spans[si];
-    var parts = sp.text.split('\n');
-    for (var pi = 0; pi < parts.length; pi++) {
-      if (pi > 0) { commitLine(); }
-      var part = parts[pi];
-      if (!part) continue;
-      var words = part.split(' ');
-      for (var wi = 0; wi < words.length; wi++) {
-        var word = words[wi];
-        if (!word) { if (curX > xLeft) curX += CHAR_W; continue; }
-        addWord(word, sp);
-      }
-    }
-  }
-  if (curLine.length > 0) commitLine();
-  return lines;
-}
-
-// ── Layout engine ─────────────────────────────────────────────────────────────
-
-interface LayoutResult {
-  lines:   RenderedLine[];
-  widgets: PositionedWidget[];
-}
-
-var _widgetCounter = 0;
-
-function layoutNodes(
-  nodes:   RenderNode[],
-  bps:     WidgetBlueprint[],
-  contentW: number
-): LayoutResult {
-  var lines:   RenderedLine[]     = [];
-  var widgets: PositionedWidget[] = [];
-  var y     = CONTENT_PAD;
-  var xLeft = CONTENT_PAD;
-  var maxX  = contentW - CONTENT_PAD;
-
-  function blank(h: number): void {
-    lines.push({ y, nodes: [], lineH: h }); y += h;
-  }
-  function commit(newLines: RenderedLine[]): void {
-    for (var k = 0; k < newLines.length; k++) {
-      newLines[k].y = y; y += newLines[k].lineH; lines.push(newLines[k]);
-    }
-  }
-
-  for (var i = 0; i < nodes.length; i++) {
-    var nd = nodes[i];
-
-    if (nd.type === 'p-break') { blank(LINE_H >> 1); continue; }
-
-    if (nd.type === 'hr') {
-      lines.push({ y, nodes: [], lineH: 3, hrLine: true }); y += 8; continue;
-    }
-
-    if (nd.type === 'pre') {
-      var preText  = nd.spans[0]?.text ?? '';
-      var maxPreCh = Math.max(1, Math.floor((maxX - xLeft) / CHAR_W));
-      lines.push({ y, nodes: [{ x: xLeft, text: preText.slice(0, maxPreCh), color: CLR_PRE_TXT }],
-                   lineH: LINE_H, preBg: true });
-      y += LINE_H; continue;
-    }
-
-    if (/^h[1-6]$/.test(nd.type)) {
-      var level = parseInt(nd.type[1]!, 10);
-      var hClr  = level === 1 ? CLR_H1 : level === 2 ? CLR_H2 : CLR_H3;
-      var lhH   = level <= 2 ? LINE_H + 8 : level <= 4 ? LINE_H + 4 : LINE_H + 2;
-      if (y > CONTENT_PAD) blank(level <= 2 ? LINE_H : LINE_H >> 1);
-      var hSpans = nd.spans.length > 0
-        ? nd.spans.map(s => ({ ...s, bold: true }))
-        : [{ text: '(untitled)', bold: true }];
-      commit(flowSpans(hSpans, xLeft, maxX, lhH, hClr));
-      blank(level <= 2 ? LINE_H >> 1 : 2); continue;
-    }
-
-    if (nd.type === 'li') {
-      var depth   = (nd.indent || 0) + 1;
-      var bxLeft  = xLeft + (depth - 1) * (CHAR_W * 3);
-      var txLeft  = bxLeft + CHAR_W * 3;
-      var bullets = ['•', '◦', '▪'];
-      var bullet  = (bullets[Math.min(depth - 1, 2)] || '•') + ' ';
-      var bulletR: RenderedSpan = { x: bxLeft, text: bullet, color: CLR_BODY };
-      if (nd.spans.length === 0) {
-        lines.push({ y, nodes: [bulletR], lineH: LINE_H }); y += LINE_H;
-      } else {
-        var itemLines = flowSpans(nd.spans, txLeft, maxX, LINE_H, CLR_BODY);
-        if (itemLines.length > 0) itemLines[0].nodes.unshift(bulletR);
-        else itemLines = [{ y: 0, nodes: [bulletR], lineH: LINE_H }];
-        commit(itemLines);
-      }
-      continue;
-    }
-
-    if (nd.type === 'blockquote') {
-      var bqLeft  = xLeft + CHAR_W * 4;
-      commit(flowSpans(nd.spans, bqLeft, maxX - CHAR_W * 2, LINE_H, CLR_QUOTE_TXT,
-                       { quoteBg: true, quoteBar: true }));
-      blank(LINE_H >> 1); continue;
-    }
-
-    if (nd.type === 'block') {
-      commit(flowSpans(nd.spans, xLeft, maxX, LINE_H, CLR_BODY)); continue;
-    }
-
-    // ── Widgets ───────────────────────────────────────────────────────────────
-    if (nd.type === 'widget' && nd.widget) {
-      var bp = nd.widget;
-
-      // Hidden fields take no screen space
-      if (bp.kind === 'hidden') continue;
-
-      // Compute widget dimensions
-      var ww = 0; var wh = 0;
-      var wOpts = bp.options || [];
-
-      switch (bp.kind) {
-        case 'text':
-        case 'password':
-          ww = (bp.cols || 20) * CHAR_W + 8;
-          wh = WIDGET_INPUT_H;
-          break;
-        case 'submit':
-        case 'reset':
-        case 'button':
-          var btnLabel = bp.value || (bp.kind === 'reset' ? 'Reset' : 'Submit');
-          ww = btnLabel.length * CHAR_W + 24;
-          wh = WIDGET_BTN_H;
-          break;
-        case 'checkbox':
-        case 'radio':
-          ww = WIDGET_CHECK_SZ + CHAR_W * 2;
-          wh = WIDGET_CHECK_SZ;
-          break;
-        case 'select':
-          var longestOpt = 8;
-          for (var oi = 0; oi < wOpts.length; oi++) {
-            if (wOpts[oi].length > longestOpt) longestOpt = wOpts[oi].length;
-          }
-          ww = longestOpt * CHAR_W + 24;
-          wh = WIDGET_SELECT_H;
-          break;
-        case 'textarea':
-          ww = Math.min((bp.cols || 40) * CHAR_W + 8, maxX - xLeft);
-          wh = (bp.rows || 4) * LINE_H + 4;
-          break;
-        case 'img':
-          ww = bp.imgNatW || 200;
-          wh = bp.imgNatH || 100;
-          if (ww > maxX - xLeft) {
-            var scale = (maxX - xLeft) / ww;
-            ww = Math.floor(ww * scale);
-            wh = Math.floor(wh * scale);
-          }
-          break;
-        default:
-          ww = WIDGET_INPUT_W; wh = WIDGET_INPUT_H;
-      }
-
-      // Place widget — leave spacing
-      if (bp.kind !== 'checkbox' && bp.kind !== 'radio') {
-        if (y > CONTENT_PAD) { blank(4); }
-      }
-
-      var pw: PositionedWidget = {
-        ...bp,
-        id: ++_widgetCounter,
-        px: xLeft, py: y, pw: ww, ph: wh,
-        curValue:   bp.value   || '',
-        curChecked: bp.checked || false,
-        curSelIdx:  bp.selIdx  || 0,
-        cursorPos:  (bp.value || '').length,
-        imgData:    null,
-        imgLoaded:  false,
-      };
-      widgets.push(pw);
-
-      // Reserve space in line list (blank sentinel)
-      lines.push({ y, nodes: [], lineH: wh + 4 });
-      y += wh + 4;
-
-      if (bp.kind !== 'checkbox' && bp.kind !== 'radio') {
-        blank(4);
-      }
-      continue;
-    }
-  }
-
-  return { lines, widgets };
-}
-
-// ── Built-in pages ────────────────────────────────────────────────────────────
-
-function aboutJsosHTML(): string {
-  return [
-    '<h1>JSOS Browser</h1>',
-    '<p>Welcome to the JSOS native TypeScript browser — running on bare metal,',
-    'built entirely in TypeScript with no Chromium or external runtimes.</p>',
-
-    '<h2>About JSOS</h2>',
-    '<p><strong>JSOS</strong> is an operating system written entirely in TypeScript',
-    'running on a bare-metal i686 PC via QuickJS (ES2023).</p>',
-    '<blockquote>TypeScript is not a guest in this OS — TypeScript <em>IS</em> the OS.</blockquote>',
-
-    '<h2>Browser Features</h2>',
-    '<ul>',
-    '<li><strong>HTML</strong>: h1–h6, p, a, ul/ol (nested), pre/code, blockquote, hr, table, img</li>',
-    '<li><strong>Inline styling</strong>: &lt;strong&gt;, &lt;em&gt;, &lt;code&gt;, &lt;del&gt;, &lt;mark&gt;</li>',
-    '<li><strong>Forms</strong>: &lt;input&gt; text/password/submit/reset/checkbox/radio,',
-    '&lt;textarea&gt;, &lt;select&gt;, &lt;button&gt; — GET and POST</li>',
-    '<li><strong>Images</strong>: BMP decode + pixel render; placeholder for other formats</li>',
-    '<li><strong>Networking</strong>: DNS, HTTP/1.1, HTTPS via TLS 1.3</li>',
-    '<li><strong>Find in page</strong>: Ctrl+F, n/N cycle, Esc close</li>',
-    '<li><strong>Bookmarks</strong>: Ctrl+D to save</li>',
-    '</ul>',
-
-    '<h2>Keyboard Shortcuts</h2>',
-    '<ul>',
-    '<li><code>Ctrl+L</code> — focus URL bar</li>',
-    '<li><code>Ctrl+R</code> — reload</li>',
-    '<li><code>Ctrl+D</code> — bookmark page</li>',
-    '<li><code>Ctrl+F</code> — find in page</li>',
-    '<li><code>Tab</code> — cycle form fields</li>',
-    '<li><code>b / f</code> — back / forward</li>',
-    '<li><code>Space / PgDn</code> — scroll down</li>',
-    '<li><code>PgUp</code> — scroll up</li>',
-    '<li><code>Home / End</code> — top / bottom</li>',
-    '</ul>',
-
-    '<h2>Demo Form</h2>',
-    '<form action="about:jsos" method="get">',
-    '<p>Name: <input type="text" name="name" value=""></p>',
-    '<p>Password: <input type="password" name="pw" value=""></p>',
-    '<p>Remember me: <input type="checkbox" name="remember" value="1"></p>',
-    '<p>Colour: <input type="radio" name="clr" value="red"> Red',
-    '  <input type="radio" name="clr" value="blue" checked> Blue</p>',
-    '<p>Version:',
-    '<select name="ver">',
-    '<option value="1">JSOS 1.0</option>',
-    '<option value="2" selected>JSOS 2.0</option>',
-    '</select></p>',
-    '<p>Comment:<br><textarea name="comment" rows="3" cols="40">Type here...</textarea></p>',
-    '<p><input type="submit" value="Submit"> <input type="reset" value="Reset"></p>',
-    '</form>',
-
-    '<h2>Links</h2>',
-    '<ul>',
-    '<li><a href="about:history">Browsing history</a></li>',
-    '<li><a href="about:bookmarks">Bookmarks</a></li>',
-    '<li><a href="about:source">View page source</a></li>',
-    '<li><a href="about:blank">Blank page</a></li>',
-    '</ul>',
-  ].join('\n');
-}
-
-function errorHTML(url: string, reason: string): string {
-  return [
-    '<h1>Cannot reach this page</h1>',
-    '<p><strong>' + url + '</strong></p>',
-    '<p>' + reason + '</p>',
-    '<hr>',
-    '<p><a href="about:jsos">JSOS Browser Home</a></p>',
-  ].join('\n');
-}
-
-// ── Browser App ───────────────────────────────────────────────────────────────
+import {
+  TOOLBAR_H, STATUSBAR_H, FINDBAR_H, CHAR_W, CHAR_H, LINE_H, CONTENT_PAD,
+  CLR_TOOLBAR_BG, CLR_TOOLBAR_BD, CLR_STATUS_BG, CLR_STATUS_TXT,
+  CLR_URL_BG, CLR_URL_FOCUS, CLR_BTN_BG, CLR_BTN_TXT, CLR_BODY, CLR_BG,
+  CLR_LINK, CLR_LINK_HOV, CLR_VISITED, CLR_HR, CLR_INPUT_BD, CLR_INPUT_BG,
+  CLR_INPUT_TXT, CLR_INPUT_FOCUS, CLR_BTN_SUB_BG, CLR_BTN_SUB_TXT,
+  CLR_BTN_RST_BG, CLR_CHECK_FILL, CLR_IMG_PH_BG, CLR_IMG_PH_BD, CLR_IMG_PH_TXT,
+  CLR_SEL_BG, CLR_SEL_ARROW, CLR_FIND_BG, CLR_FIND_MATCH, CLR_FIND_CUR,
+  CLR_FIND_TXT, CLR_FIND_BD, CLR_CODE_BG, CLR_MARK_BG, CLR_PRE_BG,
+  CLR_QUOTE_BAR, CLR_QUOTE_BG, CLR_DEL, WIDGET_INPUT_H, WIDGET_BTN_H,
+  WIDGET_CHECK_SZ, WIDGET_SELECT_H,
+} from './constants.js';
+
+import type {
+  HistoryEntry, PositionedWidget, FormState, DecodedImage,
+  RenderedLine, RenderedSpan,
+} from './types.js';
+
+import { parseURL, urlEncode, encodeFormData, decodeBMP, readPNGDimensions, decodeBase64 } from './utils.js';
+import { parseHTML }    from './html.js';
+import { layoutNodes }  from './layout.js';
+import { aboutJsosHTML, errorHTML, jsonViewerHTML } from './pages.js';
+
+// ── BrowserApp ────────────────────────────────────────────────────────────────
 
 export class BrowserApp implements App {
   readonly name = 'Browser';
@@ -1130,47 +48,48 @@ export class BrowserApp implements App {
   private _win:           WMWindow | null = null;
   private _urlInput       = 'about:jsos';
   private _urlBarFocus    = true;
-  private _urlCursorPos   = 0;       // caret index into _urlInput
-  private _urlScrollOff   = 0;       // first visible char (horizontal scroll)
-  private _urlAllSelected = false;   // select-all: next printable key replaces all
+  private _urlCursorPos   = 0;
+  private _urlScrollOff   = 0;
+  private _urlAllSelected = false;
   private _cursorBlink    = 0;
-  private _hoverBtn       = -1;      // 0=back 1=fwd 2=reload, -1=none
+  private _hoverBtn       = -1;
 
   private _history:       HistoryEntry[] = [];
   private _histIdx        = -1;
   private _visited        = new Set<string>();
   private _bookmarks:     HistoryEntry[] = [];
 
-  private _pageTitle      = 'JSOS Browser';
-  private _pageURL        = 'about:jsos';
-  private _pageSource     = '';
-  private _pageLines:     RenderedLine[] = [];
-  private _scrollY        = 0;
-  private _maxScrollY     = 0;
-  private _loading        = false;
-  private _status         = '';
-  private _dirty          = true;
-  private _hoverHref      = '';
+  private _pageTitle   = 'JSOS Browser';
+  private _pageURL     = 'about:jsos';
+  private _pageSource  = '';
+  private _pageBaseURL = '';    // from <base href> in current page
+  private _pageLines:  RenderedLine[] = [];
+  private _scrollY     = 0;
+  private _maxScrollY  = 0;
+  private _loading     = false;
+  private _status      = '';
+  private _dirty       = true;
+  private _hoverHref   = '';
 
   // Form / widget state
-  private _forms:         FormState[]     = [];
-  private _widgets:       PositionedWidget[] = [];
-  private _focusedWidget  = -1;   // index into _widgets, -1 = none
+  private _forms:         FormState[]         = [];
+  private _widgets:       PositionedWidget[]  = [];
+  private _focusedWidget  = -1;
 
-  // Image cache: maps src URL → decoded image (null data = placeholder)
-  private _imgCache       = new Map<string, DecodedImage | null>();
-  private _imgsFetching   = false;
+  // Image cache: maps src URL → decoded image (null = fetch failed / unsupported)
+  private _imgCache    = new Map<string, DecodedImage | null>();
+  private _imgsFetching = false;
 
   // Find in page
-  private _findMode       = false;
-  private _findQuery      = '';
-  private _findHits:      Array<{ lineIdx: number; spanIdx: number }> = [];
-  private _findCur        = 0;
+  private _findMode  = false;
+  private _findQuery = '';
+  private _findHits: Array<{ lineIdx: number; spanIdx: number }> = [];
+  private _findCur   = 0;
 
   // Scrollbar drag
   private _scrollbarDragging = false;
 
-  // Async fetch — the SDK owns the DNS/TCP/TLS state machine
+  // Async fetch coroutine id
   private _fetchCoroId = -1;
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -1190,7 +109,7 @@ export class BrowserApp implements App {
     var ch  = event.ch;
     var ext = event.ext;
 
-    // ── Find bar ────────────────────────────────────────────────────────────
+    // Find bar
     if (this._findMode) {
       if (ch === '\x1b') { this._clearFind(); return; }
       if (ch === '\n' || ch === '\r') { this._cycleFind(1); return; }
@@ -1201,15 +120,13 @@ export class BrowserApp implements App {
       this._doFind(); this._dirty = true; return;
     }
 
-    // ── Focused form widget ──────────────────────────────────────────────────
+    // Focused form widget
     if (this._focusedWidget >= 0) {
       var fw = this._widgets[this._focusedWidget];
-      if (fw) {
-        if (this._handleWidgetKey(fw, ch, ext)) return;
-      }
+      if (fw && this._handleWidgetKey(fw, ch, ext)) return;
     }
 
-    // ── URL bar ──────────────────────────────────────────────────────────────
+    // URL bar
     if (this._urlBarFocus) {
       if (ch === '\x0c') {
         this._urlInput = ''; this._urlCursorPos = 0; this._urlScrollOff = 0;
@@ -1218,10 +135,7 @@ export class BrowserApp implements App {
       if (ch === '\n' || ch === '\r') {
         var raw = this._urlInput.trim();
         this._urlAllSelected = false;
-        if (raw) {
-          this._urlBarFocus = false; this._urlAllSelected = false;
-          this._navigate(raw);
-        }
+        if (raw) { this._urlBarFocus = false; this._navigate(raw); }
         return;
       }
       if (ch === '\x1b') {
@@ -1229,7 +143,7 @@ export class BrowserApp implements App {
       }
       if (ext) {
         this._urlAllSelected = false;
-        if (ext === 0x4B) { this._urlCursorPos = Math.max(0, this._urlCursorPos - 1); }
+        if      (ext === 0x4B) { this._urlCursorPos = Math.max(0, this._urlCursorPos - 1); }
         else if (ext === 0x4D) { this._urlCursorPos = Math.min(this._urlInput.length, this._urlCursorPos + 1); }
         else if (ext === 0x47) { this._urlCursorPos = 0; this._urlScrollOff = 0; }
         else if (ext === 0x4F) { this._urlCursorPos = this._urlInput.length; }
@@ -1240,7 +154,8 @@ export class BrowserApp implements App {
           this._urlInput = ''; this._urlCursorPos = 0;
           this._urlScrollOff = 0; this._urlAllSelected = false;
         } else if (this._urlCursorPos > 0) {
-          this._urlInput    = this._urlInput.slice(0, this._urlCursorPos - 1) + this._urlInput.slice(this._urlCursorPos);
+          this._urlInput = this._urlInput.slice(0, this._urlCursorPos - 1) +
+                           this._urlInput.slice(this._urlCursorPos);
           this._urlCursorPos--;
           this._urlScrollOff = Math.min(this._urlScrollOff, this._urlCursorPos);
         }
@@ -1251,7 +166,8 @@ export class BrowserApp implements App {
           this._urlInput = ch; this._urlCursorPos = 1;
           this._urlScrollOff = 0; this._urlAllSelected = false;
         } else {
-          this._urlInput = this._urlInput.slice(0, this._urlCursorPos) + ch + this._urlInput.slice(this._urlCursorPos);
+          this._urlInput = this._urlInput.slice(0, this._urlCursorPos) + ch +
+                           this._urlInput.slice(this._urlCursorPos);
           this._urlCursorPos++;
         }
         this._dirty = true; return;
@@ -1259,21 +175,19 @@ export class BrowserApp implements App {
       return;
     }
 
-    // ── Tab — cycle focused widget ──────────────────────────────────────────
-    if (ch === '\t') {
-      this._cycleFocusedWidget(1); return;
-    }
+    // Tab — cycle form widgets
+    if (ch === '\t') { this._cycleFocusedWidget(1); return; }
 
-    // ── Content scroll / navigation ─────────────────────────────────────────
+    // Scroll / navigate
     if (ext) {
-      if (ext === 0x48) { this._scrollBy(-LINE_H * 3);         return; }
-      if (ext === 0x50) { this._scrollBy( LINE_H * 3);         return; }
-      if (ext === 0x4B) { this._goBack();                       return; }
-      if (ext === 0x4D) { this._goForward();                    return; }
-      if (ext === 0x49) { this._scrollBy(-this._contentH());    return; }
-      if (ext === 0x51) { this._scrollBy( this._contentH());    return; }
-      if (ext === 0x47) { this._scrollBy(-this._maxScrollY);    return; }
-      if (ext === 0x4F) { this._scrollBy( this._maxScrollY);    return; }
+      if (ext === 0x48) { this._scrollBy(-LINE_H * 3);        return; }
+      if (ext === 0x50) { this._scrollBy( LINE_H * 3);        return; }
+      if (ext === 0x4B) { this._goBack();                      return; }
+      if (ext === 0x4D) { this._goForward();                   return; }
+      if (ext === 0x49) { this._scrollBy(-this._contentH());   return; }
+      if (ext === 0x51) { this._scrollBy( this._contentH());   return; }
+      if (ext === 0x47) { this._scrollBy(-this._maxScrollY);   return; }
+      if (ext === 0x4F) { this._scrollBy( this._maxScrollY);   return; }
     }
 
     if (ch === '\x0c') {
@@ -1285,7 +199,7 @@ export class BrowserApp implements App {
     if (ch === '\x04') { this._addBookmark(); return; }
     if (ch === '\x06') { this._openFind(); return; }
 
-    if (ch === ' ')           { this._scrollBy( this._contentH()); return; }
+    if (ch === ' ')           { this._scrollBy(this._contentH()); return; }
     if (ch === 'b' || ch === 'B') { this._goBack();    return; }
     if (ch === 'f' || ch === 'F') { this._goForward(); return; }
     if (ch === 'r' || ch === 'R') { this._reload();    return; }
@@ -1301,9 +215,9 @@ export class BrowserApp implements App {
 
     var contentY0 = TOOLBAR_H;
     var contentY1 = this._win.height - STATUSBAR_H - (this._findMode ? FINDBAR_H : 0);
-    var sbX       = this._win.width - 12;   // scrollbar left edge
+    var sbX       = this._win.width - 12;
 
-    // ── Toolbar hover tracking (all event types) ──────────────────────────
+    // Toolbar hover
     if (event.y >= 5 && event.y <= 24) {
       var hb = -1;
       if      (event.x >= 4  && event.x <= 25) hb = 0;
@@ -1314,10 +228,8 @@ export class BrowserApp implements App {
       this._hoverBtn = -1; this._dirty = true;
     }
 
-    // ── Scrollbar drag: continue on move, release on up ───────────────────
-    if (event.type === 'up') {
-      this._scrollbarDragging = false;
-    }
+    // Scrollbar drag
+    if (event.type === 'up') this._scrollbarDragging = false;
     if (this._scrollbarDragging && event.type === 'move') {
       var chh0  = contentY1 - contentY0;
       var frac0 = (event.y - contentY0) / chh0;
@@ -1332,11 +244,10 @@ export class BrowserApp implements App {
         if (event.x >= 4  && event.x <= 25) { this._goBack();    return; }
         if (event.x >= 28 && event.x <= 49) { this._goForward(); return; }
         if (event.x >= 52 && event.x <= 73) { this._reload();    return; }
-        // URL bar click — select-all focus with click cursor position
         if (event.x > 76) {
-          var urlX   = 76;
-          var urlW   = this._win!.width - urlX - 4;
-          var maxCh  = Math.max(1, Math.floor((urlW - 8) / CHAR_W));
+          var urlX  = 76;
+          var urlW  = this._win!.width - urlX - 4;
+          var maxCh = Math.max(1, Math.floor((urlW - 8) / CHAR_W));
           this._urlInput       = this._pageURL;
           this._urlBarFocus    = true;
           this._urlAllSelected = true;
@@ -1346,7 +257,7 @@ export class BrowserApp implements App {
         }
       }
 
-      // Scrollbar click — start drag
+      // Scrollbar click
       if (this._maxScrollY > 0 && event.x >= sbX &&
           event.y >= contentY0 && event.y < contentY1) {
         this._scrollbarDragging = true;
@@ -1361,13 +272,9 @@ export class BrowserApp implements App {
         var cy = event.y - contentY0 + this._scrollY;
         var cx = event.x;
 
-        // Hit test widgets first
         var widgetIdx = this._hitTestWidget(cx, cy);
-        if (widgetIdx >= 0) {
-          this._handleWidgetClick(widgetIdx, cx, cy); return;
-        }
+        if (widgetIdx >= 0) { this._handleWidgetClick(widgetIdx, cx, cy); return; }
 
-        // Hit test links
         var href = this._hitTestLink(cx, cy);
         if (href) {
           var resolved = this._resolveHref(href);
@@ -1377,7 +284,6 @@ export class BrowserApp implements App {
           return;
         }
 
-        // Defocus widget and URL bar on empty content click
         if (this._focusedWidget >= 0) { this._focusedWidget = -1; this._dirty = true; }
         if (this._urlBarFocus) {
           this._urlBarFocus = false; this._urlAllSelected = false; this._dirty = true;
@@ -1400,15 +306,11 @@ export class BrowserApp implements App {
   // ── Rendering ──────────────────────────────────────────────────────────────
 
   render(canvas: Canvas): boolean {
-    // Only tick the blink counter when an input cursor is actually visible.
-    // Trigger a redraw on BOTH phase transitions (show→hide and hide→show)
-    // so the cursor actually blinks instead of staying permanently on.
     if (this._urlBarFocus || this._focusedWidget >= 0) {
       var prevPhase = (this._cursorBlink >> 4) & 1;
       this._cursorBlink++;
       if (((this._cursorBlink >> 4) & 1) !== prevPhase) this._dirty = true;
     }
-
     if (!this._dirty) return false;
     this._dirty = false;
 
@@ -1429,15 +331,15 @@ export class BrowserApp implements App {
     canvas.fillRect(0, 0, w, TOOLBAR_H, CLR_TOOLBAR_BG);
     canvas.drawLine(0, TOOLBAR_H - 1, w, TOOLBAR_H - 1, CLR_TOOLBAR_BD);
 
-    // Back button (hoverBtn=0)
+    // Back button
     canvas.fillRect(4, 5, 22, 20, this._hoverBtn === 0 ? 0xFFC4C6CA : CLR_BTN_BG);
     canvas.drawText(10, 11, '<', this._histIdx > 0 ? CLR_BTN_TXT : CLR_HR);
 
-    // Forward button (hoverBtn=1)
+    // Forward button
     canvas.fillRect(28, 5, 22, 20, this._hoverBtn === 1 ? 0xFFC4C6CA : CLR_BTN_BG);
     canvas.drawText(35, 11, '>', this._histIdx < this._history.length - 1 ? CLR_BTN_TXT : CLR_HR);
 
-    // Reload/Stop button (hoverBtn=2)
+    // Reload/Stop button
     canvas.fillRect(52, 5, 22, 20, this._hoverBtn === 2 ? 0xFFC4C6CA : CLR_BTN_BG);
     canvas.drawText(58, 11, this._loading ? 'X' : 'R', CLR_BTN_TXT);
 
@@ -1451,23 +353,18 @@ export class BrowserApp implements App {
     var maxChars = Math.max(1, Math.floor((urlW - 8) / CHAR_W));
 
     if (this._urlBarFocus) {
-      // Keep cursor in view — adjust horizontal scroll offset
       if (this._urlCursorPos < this._urlScrollOff) {
         this._urlScrollOff = this._urlCursorPos;
       } else if (this._urlCursorPos > this._urlScrollOff + maxChars) {
         this._urlScrollOff = this._urlCursorPos - maxChars;
       }
       var showTxt = display.slice(this._urlScrollOff, this._urlScrollOff + maxChars);
-
       if (this._urlAllSelected) {
-        // Blue selection highlight, white text
         canvas.fillRect(urlX + 2, 7, urlW - 4, 16, CLR_URL_FOCUS);
         canvas.drawText(urlX + 4, 12, showTxt, 0xFFFFFFFF);
       } else {
         canvas.drawText(urlX + 4, 12, showTxt, CLR_BODY);
       }
-
-      // Blinking cursor at caret position
       if ((this._cursorBlink >> 4) % 2 === 0) {
         var ccx = urlX + 4 + (this._urlCursorPos - this._urlScrollOff) * CHAR_W;
         if (ccx >= urlX + 2 && ccx <= urlX + urlW - 4) {
@@ -1475,16 +372,15 @@ export class BrowserApp implements App {
         }
       }
     } else {
-      var showTxt2 = display.length > maxChars
-        ? display.slice(display.length - maxChars) : display;
+      var showTxt2 = display.length > maxChars ? display.slice(display.length - maxChars) : display;
       canvas.drawText(urlX + 4, 12, showTxt2, CLR_BODY);
     }
   }
 
   private _drawContent(canvas: Canvas): void {
-    var w   = canvas.width;
-    var ch  = this._contentH();
-    var y0  = TOOLBAR_H;
+    var w  = canvas.width;
+    var ch = this._contentH();
+    var y0 = TOOLBAR_H;
 
     canvas.fillRect(0, y0, w, ch, CLR_BG);
 
@@ -1493,15 +389,12 @@ export class BrowserApp implements App {
       return;
     }
 
-    // Draw text lines — binary-search to the first visible line so we skip
-    // the O(n) linear scan of all off-screen lines above the viewport.
-    // This is critical for long pages (e.g. bible.txt with 50k+ lines).
+    // Binary-search to the first visible line
     var _lines = this._pageLines;
     var _sv    = this._scrollY;
     var _lo = 0, _hi = _lines.length;
     while (_lo < _hi) {
       var _mid = (_lo + _hi) >> 1;
-      // First visible line: line.y + lineH >= scrollY
       if (_lines[_mid].y + _lines[_mid].lineH < _sv) _lo = _mid + 1;
       else _hi = _mid;
     }
@@ -1509,11 +402,13 @@ export class BrowserApp implements App {
       var line  = _lines[i];
       var lineY = line.y - _sv;
       if (lineY > ch) break;
-
       var absY = y0 + lineY;
 
       if (line.hrLine) {
         canvas.fillRect(CONTENT_PAD, absY + 1, w - CONTENT_PAD * 2, 1, CLR_HR); continue;
+      }
+      if (line.bgColor) {
+        canvas.fillRect(0, absY - 1, w, line.lineH + 1, line.bgColor);
       }
       if (line.quoteBg) {
         canvas.fillRect(0, absY - 1, w, line.lineH + 1, CLR_QUOTE_BG);
@@ -1538,8 +433,9 @@ export class BrowserApp implements App {
           canvas.fillRect(span.x, absY - 1, span.text.length * CHAR_W, CHAR_H + 2, hc);
         }
         canvas.drawText(span.x, absY, span.text, clr);
-        if (span.bold) canvas.drawText(span.x + 1, absY, span.text, clr);
-        if (span.href) canvas.drawLine(span.x, absY + CHAR_H, span.x + span.text.length * CHAR_W, absY + CHAR_H, clr);
+        if (span.bold)      canvas.drawText(span.x + 1, absY, span.text, clr);
+        if (span.href)      canvas.drawLine(span.x, absY + CHAR_H, span.x + span.text.length * CHAR_W, absY + CHAR_H, clr);
+        if (span.underline) canvas.drawLine(span.x, absY + CHAR_H, span.x + span.text.length * CHAR_W, absY + CHAR_H, clr);
         if (span.del) {
           var mY = absY + Math.floor(CHAR_H / 2);
           canvas.drawLine(span.x, mY, span.x + span.text.length * CHAR_W, mY, CLR_DEL);
@@ -1547,172 +443,139 @@ export class BrowserApp implements App {
       }
     }
 
-    // Draw widgets
     this._drawWidgets(canvas, y0, ch);
 
     // Scrollbar
     if (this._maxScrollY > 0 && ch > 0) {
-      var sbW     = 10;
-      var sbXd    = w - sbW - 2;
-      var trackH  = ch - 4;
-      var thumbH  = Math.max(12, Math.floor(trackH * ch / (ch + this._maxScrollY)));
-      var thumbY0 = Math.floor((trackH - thumbH) * this._scrollY / this._maxScrollY);
+      var sbW    = 10;
+      var sbXd   = w - sbW - 2;
+      var trackH = ch - 4;
+      var thumbH = Math.max(12, Math.floor(trackH * ch / (ch + this._maxScrollY)));
+      var thumbY = Math.floor((trackH - thumbH) * this._scrollY / this._maxScrollY);
       canvas.fillRect(sbXd, y0 + 2, sbW, trackH, 0xFFDDDDDD);
-      canvas.fillRect(sbXd, y0 + 2 + thumbY0, sbW, thumbH, CLR_BTN_BG);
-      canvas.drawRect(sbXd, y0 + 2 + thumbY0, sbW, thumbH, CLR_TOOLBAR_BD);
+      canvas.fillRect(sbXd, y0 + 2 + thumbY, sbW, thumbH, CLR_BTN_BG);
+      canvas.drawRect(sbXd, y0 + 2 + thumbY, sbW, thumbH, CLR_TOOLBAR_BD);
     }
   }
 
   private _drawWidgets(canvas: Canvas, y0: number, ch: number): void {
     for (var wi = 0; wi < this._widgets.length; wi++) {
-      var w = this._widgets[wi];
-      var wy = y0 + w.py - this._scrollY;
-      if (wy + w.ph < y0 || wy > y0 + ch) continue;
-
+      var wp = this._widgets[wi];
+      var wy = y0 + wp.py - this._scrollY;
+      if (wy + wp.ph < y0 || wy > y0 + ch) continue;
       var focused = (wi === this._focusedWidget);
-
-      switch (w.kind) {
+      switch (wp.kind) {
         case 'text':
-        case 'password':
-          this._drawInputField(canvas, w, wy, focused); break;
-        case 'textarea':
-          this._drawTextarea(canvas, w, wy, focused); break;
+        case 'password':  this._drawInputField(canvas, wp, wy, focused); break;
+        case 'textarea':  this._drawTextarea(canvas, wp, wy, focused); break;
         case 'submit':
         case 'reset':
-        case 'button':
-          this._drawButton(canvas, w, wy); break;
-        case 'checkbox':
-          this._drawCheckbox(canvas, w, wy); break;
-        case 'radio':
-          this._drawRadio(canvas, w, wy); break;
-        case 'select':
-          this._drawSelect(canvas, w, wy, focused); break;
-        case 'img':
-          this._drawImage(canvas, w, wy); break;
+        case 'button':    this._drawButton(canvas, wp, wy); break;
+        case 'checkbox':  this._drawCheckbox(canvas, wp, wy); break;
+        case 'radio':     this._drawRadio(canvas, wp, wy); break;
+        case 'select':    this._drawSelect(canvas, wp, wy, focused); break;
+        case 'img':       this._drawImage(canvas, wp, wy); break;
       }
     }
   }
 
-  private _drawInputField(canvas: Canvas, w: PositionedWidget, wy: number, focused: boolean): void {
+  private _drawInputField(canvas: Canvas, wp: PositionedWidget, wy: number, focused: boolean): void {
     var bdClr = focused ? CLR_INPUT_FOCUS : CLR_INPUT_BD;
-    canvas.fillRect(w.px, wy, w.pw, w.ph, CLR_INPUT_BG);
-    canvas.drawRect(w.px, wy, w.pw, w.ph, bdClr);
-
-    var maxCh  = Math.max(1, Math.floor((w.pw - 8) / CHAR_W));
-    var disp   = w.kind === 'password' ? '*'.repeat(w.curValue.length) : w.curValue;
-    // Show end of value if too long
+    canvas.fillRect(wp.px, wy, wp.pw, wp.ph, CLR_INPUT_BG);
+    canvas.drawRect(wp.px, wy, wp.pw, wp.ph, bdClr);
+    var maxCh   = Math.max(1, Math.floor((wp.pw - 8) / CHAR_W));
+    var disp    = wp.kind === 'password' ? '*'.repeat(wp.curValue.length) : wp.curValue;
     var showStr = disp.length > maxCh ? disp.slice(disp.length - maxCh) : disp;
-    canvas.drawText(w.px + 4, wy + 5, showStr, CLR_INPUT_TXT);
-
+    canvas.drawText(wp.px + 4, wy + 5, showStr, CLR_INPUT_TXT);
     if (focused && (this._cursorBlink >> 4) % 2 === 0) {
-      var cursorX = w.px + 4 + Math.min(w.cursorPos, maxCh) * CHAR_W;
+      var cursorX = wp.px + 4 + Math.min(wp.cursorPos, maxCh) * CHAR_W;
       canvas.fillRect(cursorX, wy + 4, 1, CHAR_H, CLR_INPUT_TXT);
     }
   }
 
-  private _drawTextarea(canvas: Canvas, w: PositionedWidget, wy: number, focused: boolean): void {
+  private _drawTextarea(canvas: Canvas, wp: PositionedWidget, wy: number, focused: boolean): void {
     var bdClr = focused ? CLR_INPUT_FOCUS : CLR_INPUT_BD;
-    canvas.fillRect(w.px, wy, w.pw, w.ph, CLR_INPUT_BG);
-    canvas.drawRect(w.px, wy, w.pw, w.ph, bdClr);
-
-    var maxCh  = Math.max(1, Math.floor((w.pw - 8) / CHAR_W));
-    var rows   = w.rows || 4;
-    var lines  = w.curValue.split('\n');
+    canvas.fillRect(wp.px, wy, wp.pw, wp.ph, CLR_INPUT_BG);
+    canvas.drawRect(wp.px, wy, wp.pw, wp.ph, bdClr);
+    var maxCh  = Math.max(1, Math.floor((wp.pw - 8) / CHAR_W));
+    var rows   = wp.rows || 4;
+    var lines  = wp.curValue.split('\n');
     for (var ri = 0; ri < Math.min(rows, lines.length); ri++) {
-      var lineStr = lines[ri].slice(0, maxCh);
-      canvas.drawText(w.px + 4, wy + 4 + ri * LINE_H, lineStr, CLR_INPUT_TXT);
+      canvas.drawText(wp.px + 4, wy + 4 + ri * LINE_H, lines[ri].slice(0, maxCh), CLR_INPUT_TXT);
     }
-
     if (focused && (this._cursorBlink >> 4) % 2 === 0) {
-      // Simple cursor at end
       var lastLine = lines[Math.min(rows - 1, lines.length - 1)] || '';
-      var tx = w.px + 4 + Math.min(lastLine.length, maxCh) * CHAR_W;
+      var tx = wp.px + 4 + Math.min(lastLine.length, maxCh) * CHAR_W;
       var ty = wy + 4 + (Math.min(lines.length, rows) - 1) * LINE_H;
       canvas.fillRect(tx, ty, 1, CHAR_H, CLR_INPUT_TXT);
     }
   }
 
-  private _drawButton(canvas: Canvas, w: PositionedWidget, wy: number): void {
-    var bgClr  = w.kind === 'reset' || w.kind === 'button' ? CLR_BTN_RST_BG : CLR_BTN_SUB_BG;
-    var txtClr = w.kind === 'reset' || w.kind === 'button' ? CLR_BTN_TXT    : CLR_BTN_SUB_TXT;
-    var label  = w.curValue || (w.kind === 'reset' ? 'Reset' : 'Submit');
-    canvas.fillRect(w.px, wy, w.pw, w.ph, bgClr);
-    canvas.drawRect(w.px, wy, w.pw, w.ph, CLR_INPUT_BD);
-    var tx = w.px + Math.floor((w.pw - label.length * CHAR_W) / 2);
-    var ty = wy + Math.floor((w.ph - CHAR_H) / 2);
+  private _drawButton(canvas: Canvas, wp: PositionedWidget, wy: number): void {
+    var bgClr  = (wp.kind === 'reset' || wp.kind === 'button') ? CLR_BTN_RST_BG : CLR_BTN_SUB_BG;
+    var txtClr = (wp.kind === 'reset' || wp.kind === 'button') ? CLR_BTN_TXT    : CLR_BTN_SUB_TXT;
+    var label  = wp.curValue || (wp.kind === 'reset' ? 'Reset' : 'Submit');
+    canvas.fillRect(wp.px, wy, wp.pw, wp.ph, bgClr);
+    canvas.drawRect(wp.px, wy, wp.pw, wp.ph, CLR_INPUT_BD);
+    var tx = wp.px + Math.floor((wp.pw - label.length * CHAR_W) / 2);
+    var ty = wy   + Math.floor((wp.ph - CHAR_H) / 2);
     canvas.drawText(tx, ty, label, txtClr);
   }
 
-  private _drawCheckbox(canvas: Canvas, w: PositionedWidget, wy: number): void {
+  private _drawCheckbox(canvas: Canvas, wp: PositionedWidget, wy: number): void {
     var sz = WIDGET_CHECK_SZ;
-    canvas.fillRect(w.px, wy, sz, sz, CLR_INPUT_BG);
-    canvas.drawRect(w.px, wy, sz, sz, CLR_INPUT_BD);
-    if (w.curChecked) {
-      canvas.fillRect(w.px + 2, wy + 2, sz - 4, sz - 4, CLR_CHECK_FILL);
-      canvas.drawText(w.px + 2, wy + 2, 'v', CLR_BTN_SUB_TXT);
+    canvas.fillRect(wp.px, wy, sz, sz, CLR_INPUT_BG);
+    canvas.drawRect(wp.px, wy, sz, sz, CLR_INPUT_BD);
+    if (wp.curChecked) {
+      canvas.fillRect(wp.px + 2, wy + 2, sz - 4, sz - 4, CLR_CHECK_FILL);
+      canvas.drawText(wp.px + 2, wy + 2, 'v', 0xFFFFFFFF);
     }
-    if (w.curValue) {
-      canvas.drawText(w.px + sz + 4, wy + 2, w.curValue, CLR_BODY);
-    }
+    if (wp.curValue) canvas.drawText(wp.px + sz + 4, wy + 2, wp.curValue, CLR_BODY);
   }
 
-  private _drawRadio(canvas: Canvas, w: PositionedWidget, wy: number): void {
+  private _drawRadio(canvas: Canvas, wp: PositionedWidget, wy: number): void {
     var sz = WIDGET_CHECK_SZ;
-    canvas.fillRect(w.px, wy, sz, sz, CLR_INPUT_BG);
-    canvas.drawRect(w.px, wy, sz, sz, CLR_INPUT_BD);
-    if (w.curChecked) {
-      canvas.fillRect(w.px + 3, wy + 3, sz - 6, sz - 6, CLR_CHECK_FILL);
-    }
-    if (w.curValue) {
-      canvas.drawText(w.px + sz + 4, wy + 2, w.curValue, CLR_BODY);
-    }
+    canvas.fillRect(wp.px, wy, sz, sz, CLR_INPUT_BG);
+    canvas.drawRect(wp.px, wy, sz, sz, CLR_INPUT_BD);
+    if (wp.curChecked) canvas.fillRect(wp.px + 3, wy + 3, sz - 6, sz - 6, CLR_CHECK_FILL);
+    if (wp.curValue) canvas.drawText(wp.px + sz + 4, wy + 2, wp.curValue, CLR_BODY);
   }
 
-  private _drawSelect(canvas: Canvas, w: PositionedWidget, wy: number, focused: boolean): void {
-    var bdClr = focused ? CLR_INPUT_FOCUS : CLR_INPUT_BD;
-    canvas.fillRect(w.px, wy, w.pw, w.ph, CLR_SEL_BG);
-    canvas.drawRect(w.px, wy, w.pw, w.ph, bdClr);
-
-    var opts   = w.options || [];
-    var selIdx = w.curSelIdx;
-    var label  = opts[selIdx] || '';
-    var maxCh  = Math.max(1, Math.floor((w.pw - 20) / CHAR_W));
-    canvas.drawText(w.px + 4, wy + 5, label.slice(0, maxCh), CLR_INPUT_TXT);
-
-    // Dropdown arrow
-    canvas.drawText(w.px + w.pw - 14, wy + 5, 'v', CLR_SEL_ARROW);
-    canvas.drawLine(w.px + w.pw - 16, wy, w.px + w.pw - 16, wy + w.ph, CLR_INPUT_BD);
+  private _drawSelect(canvas: Canvas, wp: PositionedWidget, wy: number, focused: boolean): void {
+    var bdClr  = focused ? CLR_INPUT_FOCUS : CLR_INPUT_BD;
+    canvas.fillRect(wp.px, wy, wp.pw, wp.ph, CLR_SEL_BG);
+    canvas.drawRect(wp.px, wy, wp.pw, wp.ph, bdClr);
+    var opts   = wp.options || [];
+    var label  = opts[wp.curSelIdx] || '';
+    var maxCh  = Math.max(1, Math.floor((wp.pw - 20) / CHAR_W));
+    canvas.drawText(wp.px + 4, wy + 5, label.slice(0, maxCh), CLR_INPUT_TXT);
+    canvas.drawText(wp.px + wp.pw - 14, wy + 5, 'v', CLR_SEL_ARROW);
+    canvas.drawLine(wp.px + wp.pw - 16, wy, wp.px + wp.pw - 16, wy + wp.ph, CLR_INPUT_BD);
   }
 
-  private _drawImage(canvas: Canvas, w: PositionedWidget, wy: number): void {
-    if (!w.imgLoaded && !this._imgsFetching) {
-      // Placeholder
-      canvas.fillRect(w.px, wy, w.pw, w.ph, CLR_IMG_PH_BG);
-      canvas.drawRect(w.px, wy, w.pw, w.ph, CLR_IMG_PH_BD);
-      var alt = w.imgAlt || w.imgSrc || '';
+  private _drawImage(canvas: Canvas, wp: PositionedWidget, wy: number): void {
+    if (!wp.imgLoaded) {
+      canvas.fillRect(wp.px, wy, wp.pw, wp.ph, CLR_IMG_PH_BG);
+      canvas.drawRect(wp.px, wy, wp.pw, wp.ph, CLR_IMG_PH_BD);
+      var alt = wp.imgAlt || wp.imgSrc || '';
       if (alt) {
-        var maxC = Math.max(1, Math.floor((w.pw - 8) / CHAR_W));
-        canvas.drawText(w.px + 4, wy + Math.max(0, Math.floor((w.ph - CHAR_H) / 2)),
-                        ('[' + alt + ']').slice(0, maxC), CLR_IMG_PH_TXT);
+        var maxC = Math.max(1, Math.floor((wp.pw - 8) / CHAR_W));
+        canvas.drawText(wp.px + 4,
+          wy + Math.max(0, Math.floor((wp.ph - CHAR_H) / 2)),
+          ('[' + alt + ']').slice(0, maxC), CLR_IMG_PH_TXT);
       }
       return;
     }
-
-    if (w.imgData) {
-      // Render decoded BMP pixels
-      for (var row = 0; row < w.ph; row++) {
-        var srcRow = Math.floor(row * w.ph / w.ph);   // 1:1 (no scaling, fits)
-        for (var col = 0; col < w.pw; col++) {
-          var px = w.imgData[srcRow * w.pw + col];
-          canvas.setPixel(w.px + col, wy + row, px);
+    if (wp.imgData) {
+      for (var row = 0; row < wp.ph; row++) {
+        for (var col = 0; col < wp.pw; col++) {
+          canvas.setPixel(wp.px + col, wy + row, wp.imgData[row * wp.pw + col]);
         }
       }
     } else {
-      // Failed fetch placeholder
-      canvas.fillRect(w.px, wy, w.pw, w.ph, CLR_IMG_PH_BG);
-      canvas.drawRect(w.px, wy, w.pw, w.ph, 0xFFFF9999);
-      var errMsg = 'Image unavailable';
-      canvas.drawText(w.px + 4, wy + Math.floor((w.ph - CHAR_H) / 2), errMsg, 0xFFCC4444);
+      canvas.fillRect(wp.px, wy, wp.pw, wp.ph, CLR_IMG_PH_BG);
+      canvas.drawRect(wp.px, wy, wp.pw, wp.ph, 0xFFFF9999);
+      canvas.drawText(wp.px + 4, wy + Math.floor((wp.ph - CHAR_H) / 2), 'Image unavailable', 0xFFCC4444);
     }
   }
 
@@ -1721,7 +584,8 @@ export class BrowserApp implements App {
     var y0 = canvas.height - STATUSBAR_H - (this._findMode ? FINDBAR_H : 0);
     canvas.fillRect(0, y0, w, STATUSBAR_H, CLR_STATUS_BG);
     canvas.drawLine(0, y0, w, y0, CLR_TOOLBAR_BD);
-    var txt = this._hoverHref ? 'Link: ' + this._hoverHref : (this._status || this._pageTitle);
+    var txt = this._hoverHref ? 'Link: ' + this._hoverHref
+            : (this._status || this._pageTitle);
     if (!this._hoverHref && this._maxScrollY > 0) {
       txt += '  (' + Math.round(100 * this._scrollY / this._maxScrollY) + '%)';
     }
@@ -1738,8 +602,8 @@ export class BrowserApp implements App {
     var iw = Math.min(200, w - ix - 30 * CHAR_W);
     canvas.fillRect(ix - 2, y0 + 4, iw + 4, FINDBAR_H - 8, CLR_URL_BG);
     canvas.drawRect(ix - 2, y0 + 4, iw + 4, FINDBAR_H - 8, CLR_FIND_BD);
-    var mq = Math.floor(iw / CHAR_W);
-    var sq = this._findQuery.length > mq ? this._findQuery.slice(-mq) : this._findQuery;
+    var mq  = Math.floor(iw / CHAR_W);
+    var sq  = this._findQuery.length > mq ? this._findQuery.slice(-mq) : this._findQuery;
     canvas.drawText(ix, y0 + 7, sq, CLR_FIND_TXT);
     if ((this._cursorBlink >> 4) % 2 === 0) {
       canvas.fillRect(ix + sq.length * CHAR_W, y0 + 6, 1, CHAR_H, CLR_FIND_TXT);
@@ -1756,161 +620,111 @@ export class BrowserApp implements App {
 
   private _hitTestWidget(cx: number, cy: number): number {
     for (var i = 0; i < this._widgets.length; i++) {
-      var w = this._widgets[i];
-      if (cx >= w.px && cx < w.px + w.pw + 20 &&   // +20 for label text next to checkbox
-          cy >= w.py && cy < w.py + w.ph) {
-        return i;
-      }
+      var wp = this._widgets[i];
+      if (cx >= wp.px && cx < wp.px + wp.pw + 20 && cy >= wp.py && cy < wp.py + wp.ph) return i;
     }
     return -1;
   }
 
   private _handleWidgetClick(idx: number, cx: number, cy: number): void {
-    var w = this._widgets[idx];
-    if (w.disabled) return;
-
-    switch (w.kind) {
+    var wp = this._widgets[idx];
+    if (wp.disabled) return;
+    switch (wp.kind) {
       case 'text':
       case 'password':
       case 'textarea': {
         this._focusedWidget  = idx;
         this._urlBarFocus    = false;
         this._urlAllSelected = false;
-        // Position cursor at the clicked character
-        var maxCw2    = Math.max(1, Math.floor((w.pw - 8) / CHAR_W));
-        var dispLen2  = Math.min(w.curValue.length, maxCw2);
-        var scrollOff2 = w.curValue.length - dispLen2;
-        var relX2      = cx - (w.px + 4);
-        var clickChar2 = Math.max(0, Math.min(dispLen2, Math.round(relX2 / CHAR_W)));
-        w.cursorPos    = scrollOff2 + clickChar2;
-        this._dirty = true;
+        var maxCw2   = Math.max(1, Math.floor((wp.pw - 8) / CHAR_W));
+        var dispLen2 = Math.min(wp.curValue.length, maxCw2);
+        var scrollO2 = wp.curValue.length - dispLen2;
+        var relX2    = cx - (wp.px + 4);
+        wp.cursorPos = scrollO2 + Math.max(0, Math.min(dispLen2, Math.round(relX2 / CHAR_W)));
+        this._dirty  = true;
         break;
       }
-
       case 'submit':
-      case 'button':
-        this._submitForm(w.formIdx, w.name, w.curValue);
-        break;
-
-      case 'reset':
-        this._resetForm(w.formIdx);
-        break;
-
-      case 'checkbox':
-        w.curChecked = !w.curChecked;
-        this._dirty = true;
-        break;
-
+      case 'button':  this._submitForm(wp.formIdx, wp.name, wp.curValue); break;
+      case 'reset':   this._resetForm(wp.formIdx); break;
+      case 'checkbox': wp.curChecked = !wp.curChecked; this._dirty = true; break;
       case 'radio':
-        // Uncheck all radios in same group and same form
         for (var ri = 0; ri < this._widgets.length; ri++) {
           var rw = this._widgets[ri];
-          if (rw.kind === 'radio' && rw.name === w.name && rw.formIdx === w.formIdx) {
+          if (rw.kind === 'radio' && rw.name === wp.name && rw.formIdx === wp.formIdx)
             rw.curChecked = (ri === idx);
-          }
         }
-        this._dirty = true;
-        break;
-
-      case 'select':
-        // Cycle through options on click
-        var opts = w.options || [];
-        if (opts.length > 0) {
-          w.curSelIdx = (w.curSelIdx + 1) % opts.length;
-          this._dirty = true;
-        }
-        this._focusedWidget = idx;
-        break;
+        this._dirty = true; break;
+      case 'select': {
+        var opts = wp.options || [];
+        if (opts.length > 0) { wp.curSelIdx = (wp.curSelIdx + 1) % opts.length; this._dirty = true; }
+        this._focusedWidget = idx; break;
+      }
     }
   }
 
-  private _handleWidgetKey(w: PositionedWidget, ch: string, ext: number): boolean {
-    if (w.disabled || w.readonly) return false;
-
-    switch (w.kind) {
+  private _handleWidgetKey(wp: PositionedWidget, ch: string, ext: number): boolean {
+    if (wp.disabled || wp.readonly) return false;
+    switch (wp.kind) {
       case 'text':
       case 'password': {
-        if (ext === 0x4B) {  // Left
-          w.cursorPos = Math.max(0, w.cursorPos - 1); this._dirty = true; return true;
-        }
-        if (ext === 0x4D) {  // Right
-          w.cursorPos = Math.min(w.curValue.length, w.cursorPos + 1); this._dirty = true; return true;
-        }
-        if (ext === 0x47) { w.cursorPos = 0; this._dirty = true; return true; }  // Home
-        if (ext === 0x4F) { w.cursorPos = w.curValue.length; this._dirty = true; return true; }  // End
+        if (ext === 0x4B) { wp.cursorPos = Math.max(0, wp.cursorPos - 1); this._dirty = true; return true; }
+        if (ext === 0x4D) { wp.cursorPos = Math.min(wp.curValue.length, wp.cursorPos + 1); this._dirty = true; return true; }
+        if (ext === 0x47) { wp.cursorPos = 0; this._dirty = true; return true; }
+        if (ext === 0x4F) { wp.cursorPos = wp.curValue.length; this._dirty = true; return true; }
         if (ch === '\x1b') { this._focusedWidget = -1; this._dirty = true; return true; }
         if (ch === '\t')   { this._cycleFocusedWidget(1); return true; }
-        if (ch === '\n' || ch === '\r') { this._submitForm(w.formIdx, '', ''); return true; }
+        if (ch === '\n' || ch === '\r') { this._submitForm(wp.formIdx, '', ''); return true; }
         if (ch === '\b') {
-          if (w.cursorPos > 0) {
-            w.curValue  = w.curValue.slice(0, w.cursorPos - 1) + w.curValue.slice(w.cursorPos);
-            w.cursorPos = Math.max(0, w.cursorPos - 1);
-            this._dirty = true;
+          if (wp.cursorPos > 0) {
+            wp.curValue  = wp.curValue.slice(0, wp.cursorPos - 1) + wp.curValue.slice(wp.cursorPos);
+            wp.cursorPos = Math.max(0, wp.cursorPos - 1);
+            this._dirty  = true;
           }
           return true;
         }
         if (ch >= ' ') {
-          w.curValue  = w.curValue.slice(0, w.cursorPos) + ch + w.curValue.slice(w.cursorPos);
-          w.cursorPos++;
-          this._dirty = true;
+          wp.curValue  = wp.curValue.slice(0, wp.cursorPos) + ch + wp.curValue.slice(wp.cursorPos);
+          wp.cursorPos++;
+          this._dirty  = true;
           return true;
         }
         return false;
       }
-
       case 'textarea': {
         if (ch === '\x1b') { this._focusedWidget = -1; this._dirty = true; return true; }
         if (ch === '\t')   { this._cycleFocusedWidget(1); return true; }
-        if (ch === '\b') {
-          if (w.curValue.length > 0) { w.curValue = w.curValue.slice(0, -1); this._dirty = true; }
-          return true;
-        }
-        if (ch === '\n' || ch === '\r') {
-          w.curValue += '\n'; this._dirty = true; return true;
-        }
-        if (ch >= ' ') { w.curValue += ch; this._dirty = true; return true; }
+        if (ch === '\b')   { if (wp.curValue.length) { wp.curValue = wp.curValue.slice(0, -1); this._dirty = true; } return true; }
+        if (ch === '\n' || ch === '\r') { wp.curValue += '\n'; this._dirty = true; return true; }
+        if (ch >= ' ') { wp.curValue += ch; this._dirty = true; return true; }
         return false;
       }
-
       case 'select': {
-        var opts = w.options || [];
-        if (ext === 0x48 || ch === 'k') {  // Up
-          w.curSelIdx = Math.max(0, w.curSelIdx - 1); this._dirty = true; return true;
-        }
-        if (ext === 0x50 || ch === 'j') {  // Down
-          w.curSelIdx = Math.min(opts.length - 1, w.curSelIdx + 1); this._dirty = true; return true;
-        }
+        var opts = wp.options || [];
+        if (ext === 0x48 || ch === 'k') { wp.curSelIdx = Math.max(0, wp.curSelIdx - 1); this._dirty = true; return true; }
+        if (ext === 0x50 || ch === 'j') { wp.curSelIdx = Math.min(opts.length - 1, wp.curSelIdx + 1); this._dirty = true; return true; }
         if (ch === '\x1b' || ch === '\t') { this._cycleFocusedWidget(1); return true; }
         return false;
       }
-
       case 'checkbox':
-        if (ch === ' ' || ch === '\n' || ch === '\r') {
-          w.curChecked = !w.curChecked; this._dirty = true; return true;
-        }
+        if (ch === ' ' || ch === '\n' || ch === '\r') { wp.curChecked = !wp.curChecked; this._dirty = true; return true; }
         return false;
-
       case 'radio':
         if (ch === ' ' || ch === '\n' || ch === '\r') {
           for (var ri = 0; ri < this._widgets.length; ri++) {
-            var rw = this._widgets[ri];
-            if (rw.kind === 'radio' && rw.name === w.name && rw.formIdx === w.formIdx) {
-              rw.curChecked = (this._widgets[ri] === w);
-            }
+            var rw2 = this._widgets[ri];
+            if (rw2.kind === 'radio' && rw2.name === wp.name && rw2.formIdx === wp.formIdx)
+              rw2.curChecked = (rw2 === wp);
           }
           this._dirty = true; return true;
         }
         return false;
-
       case 'submit':
       case 'button':
-        if (ch === '\n' || ch === '\r' || ch === ' ') {
-          this._submitForm(w.formIdx, w.name, w.curValue); return true;
-        }
+        if (ch === '\n' || ch === '\r' || ch === ' ') { this._submitForm(wp.formIdx, wp.name, wp.curValue); return true; }
         return false;
-
       case 'reset':
-        if (ch === '\n' || ch === '\r' || ch === ' ') { this._resetForm(w.formIdx); return true; }
+        if (ch === '\n' || ch === '\r' || ch === ' ') { this._resetForm(wp.formIdx); return true; }
         return false;
     }
     return false;
@@ -1919,14 +733,11 @@ export class BrowserApp implements App {
   private _cycleFocusedWidget(dir: number): void {
     var total = this._widgets.length;
     if (total === 0) return;
-    var next = (this._focusedWidget + dir + total) % total;
-    // Skip non-interactive widgets
+    var next  = (this._focusedWidget + dir + total) % total;
     var tries = 0;
     while (tries < total) {
       var wk = this._widgets[next].kind;
-      if (wk !== 'hidden' && wk !== 'img') {
-        this._focusedWidget = next; this._dirty = true; return;
-      }
+      if (wk !== 'hidden' && wk !== 'img') { this._focusedWidget = next; this._dirty = true; return; }
       next = (next + dir + total) % total; tries++;
     }
   }
@@ -1935,64 +746,48 @@ export class BrowserApp implements App {
 
   private _submitForm(formIdx: number, submitName: string, submitValue: string): void {
     var form = this._forms[formIdx];
-    if (!form) {
-      // Formless submit — just navigate current URL
-      this._reload(); return;
-    }
+    if (!form) { this._reload(); return; }
 
-    // Collect field values
     var fields: Array<{name: string; value: string}> = [];
     for (var wi = 0; wi < this._widgets.length; wi++) {
-      var w = this._widgets[wi];
-      if (w.formIdx !== formIdx) continue;
-      if (w.disabled) continue;
-
-      switch (w.kind) {
-        case 'text':
-        case 'password':
-        case 'textarea':
-          if (w.name) fields.push({ name: w.name, value: w.curValue });
-          break;
+      var wp2 = this._widgets[wi];
+      if (wp2.formIdx !== formIdx || wp2.disabled) continue;
+      switch (wp2.kind) {
+        case 'text': case 'password': case 'textarea':
+          if (wp2.name) fields.push({ name: wp2.name, value: wp2.curValue }); break;
         case 'checkbox':
-          if (w.curChecked && w.name) fields.push({ name: w.name, value: w.curValue || '1' });
-          break;
+          if (wp2.curChecked && wp2.name) fields.push({ name: wp2.name, value: wp2.curValue || '1' }); break;
         case 'radio':
-          if (w.curChecked && w.name) fields.push({ name: w.name, value: w.curValue });
-          break;
+          if (wp2.curChecked && wp2.name) fields.push({ name: wp2.name, value: wp2.curValue }); break;
         case 'select': {
-          var vals = w.optVals || [];
-          var val  = vals[w.curSelIdx] !== undefined ? vals[w.curSelIdx] : (w.options || [])[w.curSelIdx] || '';
-          if (w.name) fields.push({ name: w.name, value: val });
-          break;
+          var vals = wp2.optVals || [];
+          var val  = vals[wp2.curSelIdx] !== undefined ? vals[wp2.curSelIdx] : (wp2.options || [])[wp2.curSelIdx] || '';
+          if (wp2.name) fields.push({ name: wp2.name, value: val }); break;
         }
         case 'hidden':
-          if (w.name) fields.push({ name: w.name, value: w.curValue });
-          break;
+          if (wp2.name) fields.push({ name: wp2.name, value: wp2.curValue }); break;
       }
     }
-
-    // Add submit button name/value if named
     if (submitName) fields.push({ name: submitName, value: submitValue });
 
-    var action  = form.action || this._pageURL;
+    var action   = form.action || this._pageURL;
     var resolved = this._resolveHref(action);
 
     if (form.method === 'post') {
       this._submitPost(resolved, fields);
     } else {
-      // GET: append query string
-      var qs = fields.map(f => urlEncode(f.name) + '=' + urlEncode(f.value)).join('&');
+      var qs  = fields.map(f => urlEncode(f.name) + '=' + urlEncode(f.value)).join('&');
       var url = resolved + (resolved.includes('?') ? '&' : '?') + qs;
       this._navigate(url);
     }
   }
 
   private _submitPost(url: string, fields: Array<{name: string; value: string}>): void {
-    var body      = encodeFormData(fields);
-    var parsed    = parseURL(url);
+    var body   = encodeFormData(fields);
+    var parsed = parseURL(url);
     if (!parsed || parsed.protocol === 'about') { this._showError(url, 'Cannot POST to ' + url); return; }
 
-    this._status = 'Submitting form...';
+    this._status  = 'Submitting form...';
     this._loading = true; this._dirty = true;
     this._histIdx++;
     this._history.splice(this._histIdx);
@@ -2002,23 +797,23 @@ export class BrowserApp implements App {
     this._fetchCoroId = os.fetchAsync(url, function(resp: FetchResponse | null, err?: string) {
       self._fetchCoroId = -1;
       if (!resp) { self._showError(url, err || 'POST failed'); return; }
-      self._pageURL  = url;
-      self._urlInput = url;
+      self._pageURL    = url;
+      self._urlInput   = url;
       self._pageSource = resp.bodyText;
       self._showHTML(resp.bodyText, '', url);
       self._status = 'POST ' + resp.status;
-      self._dirty = true;
+      self._dirty  = true;
     }, { method: 'POST', body });
   }
 
   private _resetForm(formIdx: number): void {
     for (var wi = 0; wi < this._widgets.length; wi++) {
-      var w = this._widgets[wi];
-      if (w.formIdx !== formIdx) continue;
-      w.curValue   = w.value;
-      w.curChecked = w.checked;
-      w.curSelIdx  = w.selIdx || 0;
-      w.cursorPos  = w.value.length;
+      var wp2 = this._widgets[wi];
+      if (wp2.formIdx !== formIdx) continue;
+      wp2.curValue   = wp2.value;
+      wp2.curChecked = wp2.checked;
+      wp2.curSelIdx  = wp2.selIdx || 0;
+      wp2.cursorPos  = wp2.value.length;
     }
     this._dirty = true;
   }
@@ -2027,38 +822,71 @@ export class BrowserApp implements App {
 
   private _fetchImages(): void {
     this._imgsFetching = true;
-    var pendingCount = 0;
-    for (var wi = 0; wi < this._widgets.length; wi++) {
-      var w = this._widgets[wi];
-      if (w.kind !== 'img' || w.imgLoaded) continue;
-      var src = w.imgSrc || '';
-      if (!src) { w.imgLoaded = true; w.imgData = null; continue; }
+    var pendingCount   = 0;
 
-      if (this._imgCache.has(src)) {
-        var cached = this._imgCache.get(src)!;
-        if (cached) { w.imgData = cached.data; w.pw = cached.w; w.ph = cached.h; }
-        w.imgLoaded = true;
+    for (var wi = 0; wi < this._widgets.length; wi++) {
+      var wp = this._widgets[wi];
+      if (wp.kind !== 'img' || wp.imgLoaded) continue;
+      var src = wp.imgSrc || '';
+      if (!src) { wp.imgLoaded = true; wp.imgData = null; continue; }
+
+      // Inline data: images — decode immediately without a network fetch
+      if (src.startsWith('data:')) {
+        var comma     = src.indexOf(',');
+        var meta      = comma > 5 ? src.slice(5, comma) : '';
+        var dataStr   = comma >= 0 ? src.slice(comma + 1) : '';
+        var isBase64  = meta.indexOf(';base64') >= 0;
+        var rawBytes  = isBase64 ? decodeBase64(dataStr) : Array.from(dataStr).map(c => c.charCodeAt(0));
+        var decoded   = decodeBMP(rawBytes);
+        if (!decoded) {
+          var pngDim0 = readPNGDimensions(rawBytes);
+          if (pngDim0) {
+            wp.imgNatW = pngDim0.w; wp.pw = Math.min(pngDim0.w, 600);
+            wp.imgNatH = pngDim0.h; wp.ph = Math.round(pngDim0.h * wp.pw / pngDim0.w);
+          }
+        } else {
+          wp.imgData = decoded.data; wp.pw = decoded.w; wp.ph = decoded.h;
+        }
+        wp.imgLoaded = true;
+        this._imgCache.set(src, decoded);
+        this._dirty = true;
         continue;
       }
 
-      // Kick off an async fetch; images arrive and re-render when ready
+      if (this._imgCache.has(src)) {
+        var cached = this._imgCache.get(src)!;
+        if (cached) { wp.imgData = cached.data; wp.pw = cached.w; wp.ph = cached.h; }
+        wp.imgLoaded = true;
+        continue;
+      }
+
       pendingCount++;
       var resolved = this._resolveHref(src);
       var self = this;
-      (function(ww: typeof w, srcURL: string, rawSrc: string) {
+      (function(ww: typeof wp, srcURL: string, rawSrc: string) {
         os.fetchAsync(srcURL, function(resp: FetchResponse | null, _err?: string) {
           if (resp && resp.status === 200 && resp.body.length >= 2) {
-            var decoded: DecodedImage | null = null;
-            if (resp.body[0] === 0x42 && resp.body[1] === 0x4D) decoded = decodeBMP(resp.body);
-            self._imgCache.set(rawSrc, decoded);
-            if (decoded) { ww.imgData = decoded.data; ww.pw = decoded.w; ww.ph = decoded.h; }
+            var imgDecoded: DecodedImage | null = null;
+            if (resp.body[0] === 0x42 && resp.body[1] === 0x4D) {
+              // BMP — full pixel decode
+              imgDecoded = decodeBMP(resp.body);
+            } else {
+              // PNG/JPEG/other — read dimensions only, show sized placeholder
+              var pDim = readPNGDimensions(resp.body);
+              if (pDim) {
+                ww.imgNatW = pDim.w; ww.pw = Math.min(pDim.w, 600);
+                ww.imgNatH = pDim.h; ww.ph = Math.round(pDim.h * ww.pw / pDim.w);
+              }
+            }
+            self._imgCache.set(rawSrc, imgDecoded);
+            if (imgDecoded) { ww.imgData = imgDecoded.data; ww.pw = imgDecoded.w; ww.ph = imgDecoded.h; }
           } else {
             self._imgCache.set(rawSrc, null);
           }
           ww.imgLoaded = true;
-          self._dirty = true;
+          self._dirty  = true;
         });
-      })(w, resolved, src);
+      })(wp, resolved, src);
     }
     this._imgsFetching = pendingCount > 0;
   }
@@ -2073,56 +901,44 @@ export class BrowserApp implements App {
   }
 
   private _resolveHref(href: string): string {
-    if (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('about:')) {
+    if (href.startsWith('http://') || href.startsWith('https://') ||
+        href.startsWith('about:')  || href.startsWith('data:')) {
       return href;
     }
     if (href.startsWith('//')) {
       return (this._pageURL.startsWith('https://') ? 'https' : 'http') + ':' + href;
     }
+    // Use <base href> if page provided one
+    var base = this._pageBaseURL || this._pageURL;
     if (href.startsWith('/')) {
-      var p = parseURL(this._pageURL);
+      var p = parseURL(base);
       if (!p) return href;
       var ps = (p.protocol === 'http' && p.port === 80) ||
                (p.protocol === 'https' && p.port === 443) ? '' : ':' + p.port;
       return p.protocol + '://' + p.host + ps + href;
     }
-    return this._pageURL.replace(/\/[^/]*$/, '/') + href;
+    if (href.startsWith('#')) return base.split('#')[0] + href;
+    return base.replace(/\/[^/]*$/, '/') + href;
   }
 
   private _goBack(): void {
     if (this._histIdx <= 0) return;
     this._histIdx--;
-    this._scheduleLoad(this._history[this._histIdx].url, false);
+    this._startFetch(this._history[this._histIdx].url);
   }
 
   private _goForward(): void {
     if (this._histIdx >= this._history.length - 1) return;
     this._histIdx++;
-    this._scheduleLoad(this._history[this._histIdx].url, false);
+    this._startFetch(this._history[this._histIdx].url);
   }
 
-  private _reload(): void {
-    this._scheduleLoad(this._pageURL, false);
-  }
-
-  private _scheduleLoad(url: string, push: boolean): void {
-    if (push) { this._navigate(url); }
-    else      { this._startFetch(url); }
-  }
-
-  // ── Fetch via OS SDK ─────────────────────────────────────────────────────────────
+  private _reload(): void { this._startFetch(this._pageURL); }
 
   private _cancelFetch(): void {
-    if (this._fetchCoroId >= 0) {
-      os.cancel(this._fetchCoroId);
-      this._fetchCoroId = -1;
-    }
+    if (this._fetchCoroId >= 0) { os.cancel(this._fetchCoroId); this._fetchCoroId = -1; }
   }
 
-  /**
-   * Initiate a page load.  about: URLs are resolved instantly; all HTTP/HTTPS
-   * loads are handed to os.fetchAsync() and the SDK drives the coroutine.
-   */
   private _startFetch(rawURL: string): void {
     this._cancelFetch();
     this._pageURL       = rawURL;
@@ -2140,22 +956,43 @@ export class BrowserApp implements App {
     var parsed = parseURL(rawURL);
     if (!parsed) { this._showError(rawURL, 'Invalid URL'); return; }
 
-    // about: pages don't need a network round-trip
-    if (parsed.protocol === 'about') {
-      var html = '';
-      switch (parsed.path) {
-        case 'blank':     html = '';                      break;
-        case 'jsos':      html = aboutJsosHTML();         break;
-        case 'history':   html = this._historyHTML();     break;
-        case 'bookmarks': html = this._bookmarksHTML();   break;
-        case 'source':    html = this._sourceHTML();      break;
-        default: html = errorHTML(rawURL, 'Unknown about: page'); break;
+    // ── data: URLs ───────────────────────────────────────────────────────────
+    if (parsed.protocol === 'data') {
+      var mt   = (parsed.dataMediaType || 'text/plain').toLowerCase();
+      var body = parsed.dataBody || '';
+      if (mt.indexOf(';base64') >= 0) {
+        var bytes = decodeBase64(body);
+        body = bytes.map(b => String.fromCharCode(b)).join('');
+      } else {
+        try { body = decodeURIComponent(body.replace(/\+/g, ' ')); } catch (_) {}
       }
-      this._pageSource = html;
-      this._showHTML(html, parsed.path, rawURL);
+      this._pageSource = body;
+      this._loading    = false;
+      if (mt.indexOf('text/html') >= 0 || mt.indexOf('application/xhtml') >= 0) {
+        this._showHTML(body, '', rawURL);
+      } else {
+        this._showPlainText(body, rawURL);
+      }
       return;
     }
 
+    // ── about: URLs ──────────────────────────────────────────────────────────
+    if (parsed.protocol === 'about') {
+      var pg = '';
+      switch (parsed.path) {
+        case 'blank':     pg = '';                      break;
+        case 'jsos':      pg = aboutJsosHTML();         break;
+        case 'history':   pg = this._historyHTML();     break;
+        case 'bookmarks': pg = this._bookmarksHTML();   break;
+        case 'source':    pg = this._sourceHTML();      break;
+        default: pg = errorHTML(rawURL, 'Unknown about: page'); break;
+      }
+      this._pageSource = pg;
+      this._showHTML(pg, parsed.path, rawURL);
+      return;
+    }
+
+    // ── HTTP / HTTPS ─────────────────────────────────────────────────────────
     var self = this;
     this._fetchCoroId = os.fetchAsync(rawURL, function(resp: FetchResponse | null, err?: string) {
       self._fetchCoroId = -1;
@@ -2168,31 +1005,31 @@ export class BrowserApp implements App {
         self._history[self._histIdx].title = finalURL;
       }
       os.debug.log('[browser] HTTP', resp.status, resp.body.length + 'B');
-      if (err) { self._showError(finalURL, err); return; }  // 4xx/5xx
+      if (err) { self._showError(finalURL, err); return; }
       self._pageSource = resp.bodyText;
       var ct = resp.headers.get('content-type') || 'text/html';
-      if (ct.indexOf('text/html') >= 0 || ct.indexOf('application/xhtml') >= 0) {
+      if (ct.indexOf('application/json') >= 0 || ct.indexOf('text/json') >= 0) {
+        self._showHTML(jsonViewerHTML(finalURL, resp.bodyText), 'JSON', finalURL);
+      } else if (ct.indexOf('text/html') >= 0 || ct.indexOf('application/xhtml') >= 0) {
         self._showHTML(resp.bodyText, '', finalURL);
       } else {
         self._showPlainText(resp.bodyText, finalURL);
       }
       self._status = 'HTTP ' + resp.status + '  ' +
                      (finalURL.split('/')[2] || finalURL) + '  ' + resp.body.length + ' B';
-      self._dirty = true;
+      self._dirty  = true;
     });
   }
 
   private _scrollBy(delta: number): void {
     this._scrollY = Math.max(0, Math.min(this._maxScrollY, this._scrollY + delta));
-    this._dirty = true;
+    this._dirty   = true;
   }
 
   private _hitTestLink(x: number, cy: number): string {
     for (var i = 0; i < this._pageLines.length; i++) {
       var line = this._pageLines[i];
-      // Lines are Y-sorted: once past cy there can be no more matches.
       if (line.y > cy) break;
-      // Skip lines entirely above cy.
       if (line.y + line.lineH <= cy) continue;
       for (var j = 0; j < line.nodes.length; j++) {
         var span = line.nodes[j];
@@ -2217,9 +1054,8 @@ export class BrowserApp implements App {
   }
 
   private _bookmarksHTML(): string {
-    if (!this._bookmarks.length) {
-      return '<h1>Bookmarks</h1><p>No bookmarks yet. Press <code>Ctrl+D</code> to bookmark a page.</p>';
-    }
+    if (!this._bookmarks.length)
+      return '<h1>Bookmarks</h1><p>No bookmarks yet. Press <kbd>Ctrl+D</kbd> to bookmark a page.</p>';
     var ls = ['<h1>Bookmarks</h1><ul>'];
     for (var i = 0; i < this._bookmarks.length; i++) {
       var bk = this._bookmarks[i];
@@ -2232,14 +1068,12 @@ export class BrowserApp implements App {
   // ── Find in page ──────────────────────────────────────────────────────────
 
   private _openFind(): void {
-    this._findMode  = true; this._findQuery = '';
-    this._findHits  = []; this._findCur = 0;
+    this._findMode = true; this._findQuery = '';
+    this._findHits = []; this._findCur = 0;
     this._clearSearchHighlights(); this._dirty = true;
   }
 
-  private _clearFind(): void {
-    this._findMode = false; this._clearSearchHighlights(); this._dirty = true;
-  }
+  private _clearFind(): void { this._findMode = false; this._clearSearchHighlights(); this._dirty = true; }
 
   private _clearSearchHighlights(): void {
     for (var i = 0; i < this._pageLines.length; i++) {
@@ -2283,45 +1117,46 @@ export class BrowserApp implements App {
     this._dirty = true;
   }
 
-  // ── HTTP fetch + layout ───────────────────────────────────────────────────
-
-  /** @deprecated Replaced by _startFetch.  Kept as redirect for any stale callers. */
-  private _load(rawURL: string): void {
-    this._startFetch(rawURL);
-  }
+  // ── Page display ──────────────────────────────────────────────────────────
 
   private _showHTML(html: string, fallbackTitle: string, url: string): void {
     var r = parseHTML(html);
-    this._forms = r.forms;
-    this._layoutPage(r.nodes, r.widgets, r.title || fallbackTitle || url, url);
+    this._forms       = r.forms;
+    this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
+    this._layoutPage(r.nodes as any, r.widgets as any, r.title || fallbackTitle || url, url);
   }
 
   private _showPlainText(text: string, url: string): void {
-    var pnodes: RenderNode[] = text.split('\n').map(l => ({
-      type: 'pre' as BlockType, spans: [{ text: l }],
+    var pnodes = text.split('\n').map(l => ({
+      type: 'pre' as const, spans: [{ text: l }],
     }));
-    this._forms = [];
-    this._layoutPage(pnodes, [], url, url);
+    this._forms       = [];
+    this._pageBaseURL = '';
+    this._layoutPage(pnodes as any, [], url, url);
   }
 
   private _showError(url: string, reason: string): void {
     os.debug.error('[browser] error:', reason);
     var r = parseHTML(errorHTML(url, reason));
-    this._forms = r.forms;
-    this._layoutPage(r.nodes, r.widgets, 'Error', url);
+    this._forms       = r.forms;
+    this._pageBaseURL = '';
+    this._layoutPage(r.nodes as any, r.widgets as any, 'Error', url);
     this._status = reason;
   }
 
   private _layoutPage(
-    nodes: RenderNode[], bps: WidgetBlueprint[],
-    title: string, url: string): void {
-    this._loading    = false;
-    this._pageTitle  = title;
-    this._pageURL    = url;
-    this._urlInput   = url;
-    this._scrollY    = 0;
+    nodes:   any[],
+    bps:     any[],
+    title:   string,
+    url:     string
+  ): void {
+    this._loading   = false;
+    this._pageTitle = title;
+    this._pageURL   = url;
+    this._urlInput  = url;
+    this._scrollY   = 0;
 
-    var w = this._win ? this._win.canvas.width : 800;
+    var w  = this._win ? this._win.canvas.width : 800;
     var lr = layoutNodes(nodes, bps, w);
     this._pageLines = lr.lines;
     this._widgets   = lr.widgets;
@@ -2329,7 +1164,6 @@ export class BrowserApp implements App {
     var contentH = this._contentH();
     var last     = this._pageLines[this._pageLines.length - 1];
     var totalH   = last ? last.y + last.lineH + CONTENT_PAD : 0;
-    // Account for widget extents
     for (var wi = 0; wi < this._widgets.length; wi++) {
       var wbot = this._widgets[wi].py + this._widgets[wi].ph + CONTENT_PAD;
       if (wbot > totalH) totalH = wbot;
@@ -2339,18 +1173,15 @@ export class BrowserApp implements App {
     if (this._histIdx >= 0 && this._histIdx < this._history.length) {
       this._history[this._histIdx].title = title;
     }
-
     if (this._findMode && this._findQuery) this._doFind();
 
-    // Kick off image fetching (synchronous but deferred until after first paint)
     var hasImages = this._widgets.some(wg => wg.kind === 'img' && !wg.imgLoaded);
-    if (hasImages) {
-      // Will be fetched on next render after page is displayed
-      this._dirty = true;
-    }
+    if (hasImages) this._fetchImages();
 
     this._dirty = true;
   }
+
+  // ── About / source page generators ────────────────────────────────────────
 
   private _historyHTML(): string {
     if (!this._history.length) return '<h1>History</h1><p>No pages visited yet.</p>';
@@ -2364,10 +1195,10 @@ export class BrowserApp implements App {
   }
 
   private _sourceHTML(): string {
-    if (!this._pageSource) {
-      return '<h1>Page Source</h1><p>No source — navigate to a page first.</p>';
-    }
-    var esc = this._pageSource.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    if (!this._pageSource)
+      return '<h1>Page Source</h1><p>No source &mdash; navigate to a page first.</p>';
+    var esc = this._pageSource
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     return '<h1>Page Source: ' + this._pageURL + '</h1><pre>' + esc + '</pre>';
   }
 }
