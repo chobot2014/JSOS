@@ -1110,21 +1110,44 @@ stack frame is set up, insert the hook check:
 
     /* ── JIT hook insertion point ──────────────────────────────────── */
     b->call_count++;
-    if (rt->jit_hook && b->call_count == JIT_THRESHOLD) {
-        rt->jit_hook(caller_ctx, (void *)b, argv, argc);
-        /* Always fall through to interpreter on first trigger.
-         * The hook compiles the function for NEXT time. */
-    }
     if (b->jit_native_ptr) {
-        /* Fast path: function has been JIT-compiled.
-         * Call native code, bypassing the interpreter entirely. */
-        typedef JSValue (*jit_fn_t)(JSContext *ctx, JSValue *argv, int argc);
-        JSValue result = ((jit_fn_t)b->jit_native_ptr)(caller_ctx, argv, argc);
-        if (likely(!JS_IsException(result))) {
-            return result;
+        /* Fast path: extract int32 args, call native cdecl fn, box result.
+         *
+         * CRITICAL calling convention: compiled fns are int32_t f(int32_t x8).
+         * Do NOT cast to JSValue-returning — JSValue is uint64_t (8 bytes) and
+         * on i686 struct returns use EDX:EAX, completely different from int32. */
+        if (likely(argc <= 8)) {
+            int32_t iargs[8] = {0};
+            int ok = 1;
+            for (int i = 0; i < argc; i++) {
+                if (JS_VALUE_GET_TAG(argv[i]) != JS_TAG_INT) { ok = 0; break; }
+                iargs[i] = JS_VALUE_GET_INT(argv[i]);
+            }
+            if (likely(ok)) {
+                typedef int32_t (*jit_fn_t)(int32_t, int32_t, int32_t, int32_t,
+                                             int32_t, int32_t, int32_t, int32_t);
+                int32_t r = ((jit_fn_t)b->jit_native_ptr)(
+                    iargs[0], iargs[1], iargs[2], iargs[3],
+                    iargs[4], iargs[5], iargs[6], iargs[7]);
+                if (likely(r != DEOPT_SENTINEL)) {
+                    return JS_MKVAL(JS_TAG_INT, r);
+                }
+            }
         }
-        /* Exception / deopt → clear native pointer, fall through */
+        /* Type mismatch or deopt — clear pointer, fall through to interpreter.
+         * The observation hook below will re-fire on the next call, TypeScript
+         * will detect the deopt (compiled entry still in _compiled map) and
+         * reset speculation. */
         b->jit_native_ptr = NULL;
+    }
+    /* Observation hook: fires every call once call_count >= threshold window,
+     * giving TypeSpeculator SPECULATION_WINDOW observations before compiling.
+     * After compilation jit_native_ptr is set; the fast path above intercepts
+     * before reaching here so no overhead is paid for compiled functions. */
+    if (rt->jit_hook && b->call_count >= JIT_THRESHOLD - SPECULATION_WINDOW + 1) {
+        rt->jit_hook(caller_ctx, (void *)b, argv, argc);
+        /* Return value is informational; interpreter always handles this call.
+         * TypeScript calls kernel.setJITNative() when compilation succeeds. */
     }
     /* ── End JIT hook ──────────────────────────────────────────────── */
 
@@ -1193,7 +1216,8 @@ void JS_SetJITHook(JSRuntime *rt, js_jit_hook_t hook) {
     rt->jit_hook = hook;
 }
 
-#define JIT_THRESHOLD 100
+#define JIT_THRESHOLD     100  /* compile after this many calls */
+#define SPECULATION_WINDOW   8   /* same-type calls observed before compiling */
 ```
 
 ### `call_count` and `jit_native_ptr` Fields
@@ -1991,7 +2015,12 @@ export class TypeSpeculator {
     return this._profiles.get(bytecodePtr);
   }
 
-  /** Clear all profiles (e.g., on pool eviction) */
+  /** Clear the profile for one function (e.g., after deopt to re-observe). */
+  clearFunction(bcAddr: number): void {
+    this._profiles.delete(bcAddr);
+  }
+
+  /** Clear all profiles (e.g., on full pool eviction) */
   clear(): void {
     this._profiles.clear();
   }
@@ -2468,6 +2497,27 @@ export class QJSJITCompiler {
         return pc + 1;
       }
 
+      // ── set_loc zero-operand forms (index baked in, DEF: n_pop=1 n_push=1 = peek+store) ──
+
+      case OP_set_loc0: case OP_set_loc1: case OP_set_loc2: case OP_set_loc3: {
+        const idx = op - OP_set_loc0;
+        if (idx >= this._varCount) return -1;
+        // Peek at TOS (do not pop): MOV EAX, [ESP]
+        e._w(0x8B); e._w(0x04); e._w(0x24);
+        e.store(this._varSlot(idx));
+        return pc;
+      }
+
+      // ── set_arg zero-operand forms (index baked in, DEF: n_pop=1 n_push=1 = peek+store) ──
+
+      case OP_set_arg0: case OP_set_arg1: case OP_set_arg2: case OP_set_arg3: {
+        const idx = op - OP_set_arg0;
+        if (idx >= this._argCount) return -1;
+        e._w(0x8B); e._w(0x04); e._w(0x24);  // MOV EAX, [ESP] (peek)
+        e.store(this._argSlot(idx));
+        return pc;
+      }
+
       // ── Arithmetic (stack-based: pop two, push result) ──
 
       case OP_add:
@@ -2598,6 +2648,29 @@ export class QJSJITCompiler {
       case OP_neq:
         e.popEcx(); e.buf.push(0x58);
         e.cmpAC(); e.setne();
+        e.pushEax();
+        return pc;
+
+      // strict_eq / strict_neq: in int32-only JIT mode, === and !== are
+      // bitwise identical to == and != (we already know both sides are int32).
+      case OP_strict_eq:
+        e.popEcx(); e.buf.push(0x58);
+        e.cmpAC(); e.sete();
+        e.pushEax();
+        return pc;
+
+      case OP_strict_neq:
+        e.popEcx(); e.buf.push(0x58);
+        e.cmpAC(); e.setne();
+        e.pushEax();
+        return pc;
+
+      // lnot: logical NOT (!x) — DEF(lnot, 1, 1, 1): n_pop=1, n_push=1
+      // Returns 1 if operand is 0 (falsy), 0 otherwise.
+      case OP_lnot:
+        e.buf.push(0x58);           // POP EAX
+        e.testAA();                 // TEST EAX, EAX
+        e.sete();                   // SETE AL (1 if zero, else 0)
         e.pushEax();
         return pc;
 
@@ -2876,175 +2949,101 @@ export class QJSJITHook {
   /**
    * Handle a JIT hook callback.
    *
+   * Called every call once call_count >= JIT_THRESHOLD - SPECULATION_WINDOW.
+   * Observes argument types, compiles when confident, installs via setJITNative.
+   * The C fast path (jit_native_ptr) handles all subsequent calls after install;
+   * the hook only re-fires if jit_native_ptr is cleared (deopt or type mismatch).
+   *
+   * ARCHITECTURE NOTE: TypeScript NEVER dispatches the actual JS call.
+   * The C fast path extracts int32 args, calls the compiled fn, and boxes the
+   * result. This avoids any cross-runtime GC heap issues and keeps the hot
+   * path entirely in C.
+   *
    * @param bcAddr    Physical address of the JSFunctionBytecode struct
-   * @param stackAddr Physical address of the top of the argument stack (JSValue[])
+   * @param stackAddr Physical address of argv[0] (first argument JSValue)
    * @param argc      Number of arguments passed to the function
-   * @returns         0 if JIT handled the call, 1 if interpreter should handle it
+   * @returns         Always 1 — C ignores this value; interpreter runs
    */
-  handle(bcAddr: number, stackAddr: number, argc: number): 0 | 1 {
+  handle(bcAddr: number, stackAddr: number, argc: number): 1 {
     // ── Blacklist check ──
     if (this._blacklist.has(bcAddr)) {
       this._stats.calls_interp++;
       return 1;
     }
 
-    // ── Already compiled? ──
-    const entry = this._compiled.get(bcAddr);
-    if (entry) {
-      return this._callNative(entry, bcAddr, stackAddr, argc);
+    // ── Deopt detection ──
+    // If _compiled has this addr but C re-fired the hook, jit_native_ptr was
+    // cleared by the C fast path (type mismatch or DEOPT_SENTINEL return).
+    if (this._compiled.has(bcAddr)) {
+      const count = (this._deopts.get(bcAddr) ?? 0) + 1;
+      this._deopts.set(bcAddr, count);
+      this._stats.deoptimizations++;
+      this._compiled.delete(bcAddr);
+      this._speculator.clearFunction(bcAddr); // fresh observation window
+      if (count >= MAX_DEOPTS) {
+        this._blacklist.add(bcAddr);
+        this._stats.blacklisted++;
+        kernel.serialPut('[QJS-JIT] Permanently blacklisted 0x' +
+                          bcAddr.toString(16) + ' after ' + count + ' deopts\n');
+      } else {
+        kernel.serialPut('[QJS-JIT] Deopt #' + count + ' 0x' +
+                          bcAddr.toString(16) + ' — re-observing\n');
+      }
+      this._stats.calls_interp++;
+      return 1;
     }
 
-    // ── Not yet compiled — observe and possibly compile ──
-
-    // Observe types
+    // ── Observe argument types ──
     this._speculator.observe(bcAddr, stackAddr, argc);
 
-    // Check if we should compile
+    // ── Check speculation confidence ──
     const specResult = this._speculator.shouldCompile(bcAddr);
     if (specResult !== 'int32') {
       this._stats.calls_interp++;
-      return 1; // not confident yet, or mixed types
+      return 1; // still building observation window
     }
 
-    // ── Compile! ──
-    return this._compileAndCall(bcAddr, stackAddr, argc);
+    // ── Compile and install ──
+    this._compile(bcAddr);
+    this._stats.calls_interp++; // interpreter handles this call; C fast path next
+    return 1;
   }
 
   /**
-   * Compile a function and make the first native call.
+   * Compile a function and install the native code pointer.
+   * Does NOT dispatch the current call — interpreter handles it.
+   * C fast path (jit_native_ptr) takes over on all subsequent calls.
    */
-  private _compileAndCall(bcAddr: number, stackAddr: number, argc: number): 0 | 1 {
+  private _compile(bcAddr: number): void {
     try {
       const reader = new QJSBytecodeReader(bcAddr);
       const compiler = new QJSJITCompiler(reader);
       const nativeAddr = compiler.compile();
 
       if (nativeAddr === 0) {
-        // Compilation failed (unsupported opcodes, etc.)
         this._blacklist.add(bcAddr);
         this._stats.blacklisted++;
         kernel.serialPut('[QJS-JIT] Blacklisted 0x' + bcAddr.toString(16) +
-                          ' (compilation failed)\n');
-        this._stats.calls_interp++;
-        return 1;
+                          ' (unsupported opcodes)\n');
+        return;
       }
 
-      // Record compilation
-      const codeSize = 0; // TODO: track code size for stats
-      const entry = { native: nativeAddr, nArgs: reader.argCount, codeSize };
-      this._compiled.set(bcAddr, entry);
+      // Install: from this point C fast path owns dispatch for this function.
+      kernel.setJITNative(bcAddr, nativeAddr);
+      // Keep entry in _compiled so deopt can be detected if hook re-fires.
+      this._compiled.set(bcAddr, { native: nativeAddr, nArgs: reader.argCount, codeSize: 0 });
       this._stats.compilations++;
 
       kernel.serialPut('[QJS-JIT] Compiled 0x' + bcAddr.toString(16) +
                         ' → 0x' + nativeAddr.toString(16) +
                         ' (' + reader.argCount + ' args, ' +
                         reader.bytecodeLen + ' bc bytes)\n');
-
-      // Make the first call
-      return this._callNative(entry, bcAddr, stackAddr, argc);
-
     } catch (err: any) {
-      // Unexpected error during compilation
       this._blacklist.add(bcAddr);
       this._stats.blacklisted++;
       kernel.serialPut('[QJS-JIT] Error compiling 0x' + bcAddr.toString(16) +
                         ': ' + String(err) + '\n');
-      this._stats.calls_interp++;
-      return 1;
     }
-  }
-
-  /**
-   * Extract int32 args from the JSValue stack and call the native function.
-   */
-  private _callNative(
-    entry: { native: number; nArgs: number },
-    bcAddr: number,
-    stackAddr: number,
-    argc: number,
-  ): 0 | 1 {
-    // Extract int32 values from JSValue stack
-    const args: number[] = [];
-    const argCount = Math.min(entry.nArgs, argc, 8);
-
-    for (let i = 0; i < argCount; i++) {
-      // Each JSValue is JSVALUE_SIZE bytes on the stack
-      // The arguments are at stackAddr + i * JSVALUE_SIZE
-      const valAddr = stackAddr + i * JSVALUE_SIZE;
-
-      // Read the full JSValue (8 bytes: u.int32 + tag)
-      const buf = kernel.readPhysMem(valAddr, JSVALUE_SIZE);
-      if (!buf) {
-        this._stats.calls_interp++;
-        return 1; // can't read stack → bail
-      }
-      const dv = new DataView(buf);
-      const tag = dv.getInt32(4, true);
-
-      // Type guard: must be JS_TAG_INT
-      if (tag !== JS_TAG_INT) {
-        // Type mismatch → deoptimize
-        return this._handleDeopt(bcAddr);
-      }
-
-      args.push(dv.getInt32(0, true)); // u.int32
-    }
-
-    // Pad remaining args with 0
-    while (args.length < 8) args.push(0);
-
-    // Call native code
-    let result: number;
-    if (argCount <= 4) {
-      result = kernel.jitCallI(entry.native, args[0], args[1], args[2], args[3]);
-    } else {
-      result = kernel.jitCallI8(entry.native,
-        args[0], args[1], args[2], args[3],
-        args[4], args[5], args[6], args[7]);
-    }
-
-    // Check for deoptimization
-    if (result === DEOPT_SENTINEL) {
-      return this._handleDeopt(bcAddr);
-    }
-
-    // Write result back to QuickJS stack as JSValue
-    // sp[-1] should be the return value location
-    // We write: u.int32 = result, tag = JS_TAG_INT
-    const resultBuf = new ArrayBuffer(JSVALUE_SIZE);
-    const resultDv = new DataView(resultBuf);
-    resultDv.setInt32(0, result, true);    // u.int32
-    resultDv.setInt32(4, JS_TAG_INT, true); // tag
-    kernel.writePhysMem(stackAddr - JSVALUE_SIZE, resultBuf);
-
-    this._stats.calls_jit++;
-    return 0; // JIT handled it
-  }
-
-  /**
-   * Handle deoptimization: increment counter, maybe blacklist.
-   */
-  private _handleDeopt(bcAddr: number): 1 {
-    const count = (this._deopts.get(bcAddr) ?? 0) + 1;
-    this._deopts.set(bcAddr, count);
-    this._stats.deoptimizations++;
-
-    // Delete compiled entry (will be recompiled with fresh speculation)
-    this._compiled.delete(bcAddr);
-    this._speculator.clear(); // reset type observations for this function
-
-    if (count >= MAX_DEOPTS) {
-      this._blacklist.add(bcAddr);
-      this._stats.blacklisted++;
-      kernel.serialPut('[QJS-JIT] Permanently blacklisted 0x' +
-                        bcAddr.toString(16) + ' after ' + count + ' deopts\n');
-    } else {
-      kernel.serialPut('[QJS-JIT] Deopt #' + count + ' for 0x' +
-                        bcAddr.toString(16) + '\n');
-    }
-
-    this._stats.calls_interp++;
-    return 1;
   }
 
   /** Get JIT statistics */
