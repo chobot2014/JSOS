@@ -1168,16 +1168,19 @@ static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
     memset(p, 0, sizeof(*p));
     p->rt = JS_NewRuntime();
     if (!p->rt) return JS_NewInt32(c, -1);
-    JS_SetMemoryLimit(p->rt, 64 * 1024 * 1024);  /* 64 MB per child process.
-                                                    * 8×64 + 50 MB main = 562 MB peak, well
-                                                    * within the 768 MB heap window in
-                                                    * linker.ld. QEMU has 4 GB physical RAM
-                                                    * so this is bounded only by the sbrk
-                                                    * window, not by physical availability.
-                                                    * Enough for a large SPA, complex DOM,
-                                                    * in-page JS, image decode buffers, etc. */
+    JS_SetMemoryLimit(p->rt, 256 * 1024 * 1024); /* 256 MB per child process.
+                                                    * Matches a real browser-tab budget
+                                                    * (Chrome allocates 150-500 MB/tab for
+                                                    * complex SPAs, large DOMs, image caches).
+                                                    * Heap window is 2 GB NOLOAD (no boot-time
+                                                    * zeroing). Cooperative scheduler means only
+                                                    * 2-3 runtimes are active at once (~500-800
+                                                    * MB real peak, well inside 2 GB).  If all
+                                                    * 8 slots somehow maxed (~2 GB), later
+                                                    * sbrk() returns ENOMEM for that child —
+                                                    * kernel is unaffected. QEMU has 4 GB. */
     JS_SetMaxStackSize(p->rt, 256 * 1024);        /* 256 KB — recursive HTML parser / deeply
-                                                    * nested JS needs more than 64 KB. */
+                                                    * nested JS eval needs more than 64 KB. */
     p->ctx = JS_NewContext(p->rt);
     if (!p->ctx) { JS_FreeRuntime(p->rt); p->rt = NULL; return JS_NewInt32(c, -1); }
     /* Inject minimal child kernel API */

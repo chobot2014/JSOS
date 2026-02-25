@@ -208,16 +208,12 @@ class assembles machine code into a JS ArrayBuffer (QuickJS heap), then
 `kernel.writePhysMem(addr, buf)` `memcpy`s it directly into the `_jit_pool`
 slot. BSS is stable at **~19.5 MB** through all remaining JIT steps.
 
-> **Cross-reference:** `before_jit_os_updates.md` adds
-> `_app_render_bufs[8][3MB]` = 24 MB + `_proc_timers` ~6 KB + `_proc_event_queues` ~32 KB
-> more BSS before the JIT lands. (3 MB per slot required — browser window at 1024×768
-> is 984×688 = 2.71 MB, overflows 2 MB.)
-> Combined BSS when both plans are executed: **~43.7 MB**.
-> Child QuickJS heaps: **64 MB** each; stack: 256 KB.
-> Peak heap cap: 8×64 + 50 = **562 MB** — inside 768 MB heap window (`linker.ld`).
-> `_heap_start` ≈ 46.7 MB; `_heap_end` ≈ 814.7 MB;
-> `KERNEL_END_FRAME` = 1 GB (262144 frames) — ~209 MB above `_heap_end`.
-> physAlloc returns frames 1 GB – 3.5 GB (~2.5 GB of user pages).
+> **Cross-reference:** `before_jit_os_updates.md` adds BSS ~43.7 MB more before the JIT lands.
+> Child heaps: **256 MB** each; stack: 256 KB; heap window: **2 GB NOLOAD** (no boot zeroing).
+> Real peak heap (2-3 active children): ~500-800 MB; theoretical max 2098 MB.
+> `_heap_start` ≈ 46.7 MB; `_heap_end` ≈ 2.05 GB;
+> `KERNEL_END_FRAME` = 655,360 frames = **2.5 GB** — ~450 MB above `_heap_end`.
+> physAlloc returns 2.5 GB – 3.5 GB = ~1 GB user page frames.
 
 The 256 MB heap region starts at `_heap_start` in `linker.ld`, well above BSS.
 With QEMU at 4 GB there is no address-space concern.
@@ -1296,7 +1292,7 @@ Understanding this is essential to getting JIT right.
 | | Main runtime | Child runtimes |
 |---|---|---|
 | Created by | `quickjs_initialize()` | `kernel.procCreate()` → `_procs[0..7]` |
-| Memory limit | 50 MB | **64 MB each** (8×64+50 = 562 MB peak; heap window 768 MB in linker.ld) |
+| Memory limit | 50 MB | **256 MB each** — real browser-tab budget; 2 GB NOLOAD heap window; cooperative scheduler means 500-800 MB real peak |
 | Stack limit | 1 MB (QuickJS default) | **256 KB** (recursive HTML parser / deeply nested JS) |
 | What runs in it | OS kernel, WM, services, REPL | **All user apps** (terminal, editor, browser, file manager, monitor) + worker processes |
 | Kernel API | Full | Expanded (FS, timers, events, window commands, render buffer — see before_jit_os_updates.md) |

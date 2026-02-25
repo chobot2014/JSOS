@@ -55,16 +55,17 @@ Main runtime (50 MB) — kernel only
 ├── Input routing (keyboard/mouse → focused app event queue)
 └── JIT service (deferred child JIT, Step 11 of JIT plan)
 
-Child runtimes (64 MB each, up to 8)
-├── Terminal app    → 3 MB BSS render slab + event queue + 64 MB GC heap
-├── Editor app      → 3 MB BSS render slab + event queue + 64 MB GC heap
-├── File manager    → 3 MB BSS render slab + event queue + 64 MB GC heap
-├── Browser chrome  → 3 MB BSS render slab + event queue + 64 MB GC heap
-│     └── Page JS via new Function() ← browser's own 64 MB GC heap, not kernel
-├── System monitor  → 3 MB BSS render slab + event queue + 64 MB GC heap
+Child runtimes (256 MB each, up to 8)
+├── Terminal app    → 3 MB BSS render slab + event queue + 256 MB GC heap
+├── Editor app      → 3 MB BSS render slab + event queue + 256 MB GC heap
+├── File manager    → 3 MB BSS render slab + event queue + 256 MB GC heap
+├── Browser chrome  → 3 MB BSS render slab + event queue + 256 MB GC heap
+│     └── Page JS via new Function() ← browser's own 256 MB GC heap, not kernel
+├── System monitor  → 3 MB BSS render slab + event queue + 256 MB GC heap
 └── (user-spawned worker processes — no render slab, IPC only)
 
-Stack per child runtime: 256 KB. Heap window (linker.ld): 768 MB.
+Heap window (linker.ld): 2 GB NOLOAD — no boot-time zeroing.
+Stack per child runtime: 256 KB.
 ```
 
 ---
@@ -718,7 +719,7 @@ is updated to use `launchApp()` instead of importing app modules directly.
 | Region | Size | Notes |
 |---|---|---|
 | Main runtime JS heap (`JS_SetMemoryLimit`) | 50 MB | software cap |
-| 8× child app runtimes (`JS_SetMemoryLimit`) | 8× **64 MB** = 512 MB | software cap — large SPA, complex DOM, in-page JS, image buffers; 8×64+50 = 562 MB peak well within 768 MB heap window |
+| 8× child app runtimes (`JS_SetMemoryLimit`) | 8× **256 MB** = 2048 MB | software cap — real browser-tab budget; heap window is 2 GB NOLOAD (no boot zeroing); cooperative scheduling means 500-800 MB real peak |
 | App render buffers BSS (32bpp) (`_app_render_bufs`) | 8× 3 MB = **24 MB** | added by this plan — 3 MB = 1024×768 × 4, covers max window size; 2 MB would overflow browser window (984×688 = 2.71 MB) |
 | Shared memory buffers BSS (`_sbufs`) | 8× 256 KB = **2 MB** | existing |
 | JIT pool BSS (`_jit_pool`) | **12 MB** | expanded by jit-unrolled-plan Step 1 |
@@ -732,19 +733,22 @@ is updated to use `launchApp()` instead of importing app modules directly.
 | `_proc_event_queues[8]` ProcEventQueue_t (`quickjs_binding.c`) | **~32 KB** | 8 × (16 × 260 B + 12 B); added by Phase B4 |
 | Other BSS (stack 32 KB, `paging_pd` 4 KB, `ata_sector_buf` 4 KB, `_asm_buf` 4 KB, net bufs ~3 KB, IPC strings ~4 KB, keyboard ~256 B) | **~52 KB** | |
 | **Total BSS** | **~43.7 MB** | |
-| **Total QuickJS heap reservation (theoretical max)** | **562 MB** | 50 + 512; actual simultaneous usage is much lower |
-| **Combined (BSS + heap cap)** | **~605.7 MB** | well within 768 MB heap window |
+| **Total QuickJS heap reservation (theoretical max)** | **2098 MB** | 50 + 2048; only 2-3 children active simultaneously (cooperative); real peak ~500-800 MB |
+| **Combined (BSS + real peak heap)** | **~844 MB** | 43.7 MB BSS + 800 MB real heap peak, well within 2 GB NOLOAD heap window |
 
 Derivation of BSS total:
 24 + 2 + 12 + 3 + 0.256 + 1 + 0.128 + 1 + 0.064 + 0.006 + 0.032 + 0.052 = **43.538 MB ≈ ~43.7 MB**
 
-`_heap_start` (kernel load 1 MB + code/data ~2 MB + BSS ~43.7 MB) ≈ **~46.7 MB**
-Heap window (`linker.ld`): **768 MB** (`0x30000000`)
-`_heap_end` = `_heap_start` + 768 MB ≈ **~814.7 MB**
-Peak QuickJS heap usage (all 8 children at 64 MB + main at 50 MB) = **562 MB**
-562 MB heap peak + 43.7 MB BSS static = **~605.7 MB total** — under 768 MB heap boundary ✓
-`KERNEL_END_FRAME` = 262,144 frames × 4096 = **1,073,741,824 B = 1 GB** — physAlloc bitmap starts above ~814.7 MB `_heap_end` with ~209 MB margin ✓
-physAlloc range: 1 GB – ~3.5 GB = **~2.5 GB** user-addressable page frames available
+Heap window (`linker.ld`): **2 GB** (`0x80000000`), `(NOLOAD)` section — GRUB does **not** zero this at boot.
+`_heap_start` ≈ **~46.7 MB** (kernel load 1 MB + code/data ~2 MB + BSS ~43.7 MB)
+`_heap_end` = `_heap_start` + 2 GB ≈ **~2.05 GB**
+`KERNEL_END_FRAME` = 655,360 frames × 4096 = **2.5 GB** — physAlloc bitmap above `_heap_end` with ~450 MB margin ✓
+physAlloc range: 2.5 GB – ~3.5 GB = **~1 GB** user-addressable page frames
+
+> **NOLOAD is a correctness fix:** Previously the heap lived inside `.bss`; GRUB zeroed
+> the entire window at boot. At 768 MB that caused a multi-second freeze; at 2 GB it would
+> be unacceptable. `(NOLOAD)` removes it from GRUB's load/zero pass. `_sbrk()` hands out
+> pages lazily; QEMU provides physical RAM on demand.
 
 > **Stack size:** `JS_SetMaxStackSize` is **256 KB** per child (raised from 64 KB).
 > An HTML parser with recursive descent + nested JS eval needs this.
@@ -753,7 +757,7 @@ physAlloc range: 1 GB – ~3.5 GB = **~2.5 GB** user-addressable page frames ava
 `scripts/test-interactive.sh`. There is no memory constraint requiring
 changes to QEMU flags, linker script, or child heap sizes.
 
-The QuickJS memory limits (50 MB main, **64 MB per child**) are software caps
+The QuickJS memory limits (50 MB main, **256 MB per child**) are software caps
 enforced by `JS_SetMemoryLimit` — they bound GC heap growth, not physical
 page allocation. All figures above fit trivially within 4 GB.
 
