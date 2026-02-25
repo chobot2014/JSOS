@@ -172,30 +172,48 @@ is never larger than 64 KB.
 ### Verify: BSS Budget
 
 Current BSS occupants (after Step 1 lands):
-- `paging_pd[1024]` = 4 KB
-- `_procs[JSPROC_MAX]` = **~256 KB**
-  (`JSProc_t` = rt+ctx+used (12 B) + inbox[8×2052 B] (16,416 B) + 3 ints (12 B)
-  + outbox[8×2052 B] (16,416 B) + 3 ints (12 B) = 32,868 B ≈ 32 KB per slot;
-  8 slots × 32 KB = **256 KB**. The plan's former figure of 132 KB counted only
-  the inbox and omitted the outbox.)
-- `_sbufs[8][256KB]` = 2 MB
-- `fb_blit_buf[1024×768 × uint32_t]` = 3 MB  (4 B/pixel × 786,432 pixels)
-- `_asm_buf[4096]` = 4 KB
-- `_jit_pool[12MB]` = 12 MB  (partitioned: 8 MB main + 8×512 KB children)
-- **Total BSS after Step 1 ≈ 17.3 MB**
-  (0.004 + 0.256 + 2 + 3 + 0.004 + 12 = 17.268 MB)
 
-No additional C-side staging buffer (`_jit_write_buf`) is needed. The
-TypeScript `_Emit` class assembles machine code into a JS ArrayBuffer
-(QuickJS heap), then `kernel.writePhysMem(addr, buf)` `memcpy`s it
-directly into the `_jit_pool` slot. Total BSS is stable at **~17.3 MB**
-through all remaining steps.
+| Array | Source | Size |
+|---|---|---|
+| `stack` (boot.s) | boot.s | 32 KB |
+| `memory_pool[1MB]` | memory.c | 1 MB (dead — `memory_initialize()` called but `memory_allocate()` never called) |
+| `ata_sector_buf[256×8]` uint16_t | quickjs_binding.c | 4 KB |
+| `paging_pd[1024]` uint32_t | quickjs_binding.c | 4 KB |
+| `_procs[JSPROC_MAX]` JSProc_t | quickjs_binding.c | **~256 KB** (rt+ctx+used 12 B + inbox[8×2052] + 3 ints + outbox[8×2052] + 3 ints = 32,868 B × 8 = 263 KB; the plan formerly said "132 KB" counting only inbox) |
+| `_sbufs[8][256KB]` | quickjs_binding.c | 2 MB |
+| `fb_blit_buf[1024×768]` uint32_t | quickjs_binding.c | 3 MB |
+| `_asm_buf[4096]` (static local) | quickjs_binding.c | 4 KB |
+| `_user_pds[32][1024]` uint32_t | quickjs_binding.c | 128 KB |
+| `_net_recv_buf[1514]` + `_net_send_buf[1514]` | quickjs_binding.c | ~3 KB |
+| `_es[2056]` + `_rs[2056]` (static locals) | quickjs_binding.c | ~4 KB |
+| `_jit_write_buf[JIT_ALLOC_MAX]` (static local) | quickjs_binding.c line 1498 | 64 KB — slow-path buffer for `kernel.jitWrite(addr, number[])` |
+| `rx_bufs[256][2048]` + `tx_bufs[256][2048]` | virtio_net.c | 1 MB each = **1 MB** total |
+| `_jit_pool[256KB]` → **`_jit_pool[12MB]`** after Step 1 | jit.c | **12 MB** |
+| **Total BSS after Step 1** | | **~19.5 MB** |
+
+Derivation: 0.032 + 1 + 0.004 + 0.004 + 0.256 + 2 + 3 + 0.004 + 0.128 + 0.003 + 0.004 + 0.064 + 1 + 12 = **19.503 MB**
+
+> **Note on `_jit_write_buf`:** This is the slow-path staging buffer for the
+> *existing* `kernel.jitWrite(addr, number[])` binding — it is not replaced by
+> `writePhysMem`. The fast path (ArrayBuffer argument) bypasses it entirely.
+> It already lives in BSS; Step 1 does not add it.
+
+> **Note on `memory_pool`:** `memory.c`'s 1 MB pool is zeroed at boot by
+> `memory_initialize()` but `memory_allocate()` is never called anywhere.
+> It is dead BSS weight. It counts in the physical address map but does not
+> affect correctness.
+
+No additional C-side staging buffer needs to be added. The TypeScript `_Emit`
+class assembles machine code into a JS ArrayBuffer (QuickJS heap), then
+`kernel.writePhysMem(addr, buf)` `memcpy`s it directly into the `_jit_pool`
+slot. BSS is stable at **~19.5 MB** through all remaining JIT steps.
 
 > **Cross-reference:** `before_jit_os_updates.md` adds
 > `_app_render_bufs[8][2MB]` = 16 MB more BSS before the JIT lands.
-> Combined BSS when both plans are executed: **~33.3 MB**.
-> With 4 GB QEMU, 82 MB QuickJS heaps, and ~33 MB BSS the system
-> comfortably fits. No linker script changes needed.
+> Combined BSS when both plans are executed: **~35.5 MB**.
+> With 4 GB QEMU, 82 MB QuickJS heaps, and ~35.5 MB BSS the system
+> comfortably fits. `_heap_start` ≈ 38 MB; `_heap_end` ≈ 294 MB;
+> `KERNEL_END_FRAME` = 320 MB — the physAlloc bitmap starts above `_heap_end`.
 
 The 256 MB heap region starts at `_heap_start` in `linker.ld`, well above BSS.
 With QEMU at 4 GB there is no address-space concern.

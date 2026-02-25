@@ -611,19 +611,31 @@ is updated to use `launchApp()` instead of importing app modules directly.
 > **Pixel format note:** Render buffers are 32-bit BGRA (4 bytes/pixel).
 > Previous plan revision used an incorrect 8bpp model with 512 KB buffers.
 
-| Region | Size |
-|---|---|
-| Main runtime JS heap (`JS_SetMemoryLimit`) | 50 MB |
-| 8× child app runtimes (`JS_SetMemoryLimit`) | 8× 4 MB = 32 MB |
-| App render buffers BSS (32bpp) | 8× 2 MB = **16 MB** |
-| Shared memory buffers BSS (`_sbufs`) | 8× 256 KB = 2 MB |
-| JIT pool BSS | 12 MB |
-| `fb_blit_buf` BSS (`uint32_t[1024×768]`) | 3 MB |
-| `_procs[8]` BSS (inbox + outbox ring buffers) | ~256 KB |
-| Other BSS (paging table, timers, event queues, `_asm_buf`) | ~1 MB |
-| **Total BSS** | **~34.3 MB** |
-| **Total QuickJS heap reservation** | **82 MB** |
-| **Combined** | **~116 MB** |
+| Region | Size | Notes |
+|---|---|---|
+| Main runtime JS heap (`JS_SetMemoryLimit`) | 50 MB | software cap |
+| 8× child app runtimes (`JS_SetMemoryLimit`) | 8× 4 MB = 32 MB | software cap |
+| App render buffers BSS (32bpp) (`_app_render_bufs`) | 8× 2 MB = **16 MB** | added by this plan |
+| Shared memory buffers BSS (`_sbufs`) | 8× 256 KB = **2 MB** | existing |
+| JIT pool BSS (`_jit_pool`) | **12 MB** | expanded by jit-unrolled-plan Step 1 |
+| `fb_blit_buf` BSS (`uint32_t[1024×768]`) | **3 MB** | slow-path blit fallback |
+| `_procs[8]` BSS (inbox + outbox ring buffers) | **~256 KB** | 32,868 B × 8 slots |
+| `memory_pool[1MB]` (`memory.c`) | **1 MB** | dead — `memory_allocate()` never called; zeroed at boot by `memory_initialize()` |
+| `_user_pds[32][1024]` uint32_t (`quickjs_binding.c`) | **128 KB** | user-mode page directory pool |
+| `rx_bufs[256][2048]` + `tx_bufs[256][2048]` (`virtio_net.c`) | **1 MB** | virtio-net DMA ring buffers |
+| `_jit_write_buf[JIT_ALLOC_MAX]` (`quickjs_binding.c`) | **64 KB** | slow-path buffer for `kernel.jitWrite(addr, number[])` |
+| Other BSS (stack 32 KB, `paging_pd` 4 KB, `ata_sector_buf` 4 KB, `_asm_buf` 4 KB, net bufs ~3 KB, IPC strings ~4 KB, keyboard ~256 B) | **~52 KB** | |
+| **Total BSS** | **~35.5 MB** | |
+| **Total QuickJS heap reservation** | **82 MB** | |
+| **Combined** | **~117.5 MB** | |
+
+Derivation of BSS total:
+16 + 2 + 12 + 3 + 0.256 + 1 + 0.128 + 1 + 0.064 + 0.052 = **35.5 MB**
+
+`_heap_start` (kernel load 1 MB + code/data ~2 MB + BSS ~35.5 MB) ≈ **~38.5 MB**
+`_heap_end` = `_heap_start` + 256 MB ≈ **~294.5 MB**
+`KERNEL_END_FRAME` = 81,920 × 4096 = **320 MB** — physAlloc bitmap starts above `_heap_end` ✓
+Safety margin: 320 − 294.5 = **~25.5 MB**
 
 **QEMU already runs at `-m 4G`.** See `scripts/test.sh` and
 `scripts/test-interactive.sh`. There is no memory constraint requiring
