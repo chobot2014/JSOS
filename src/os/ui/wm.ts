@@ -15,6 +15,7 @@
 import { Canvas, Colors, defaultFont, createScreenCanvas, type PixelColor } from './canvas.js';
 import { net } from '../net/net.js';
 import { threadManager } from '../process/threads.js';
+import { scheduler } from '../process/scheduler.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 

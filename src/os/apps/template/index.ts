@@ -25,13 +25,12 @@
  *     os.spawn     — register named coroutine step for async work
  *     os.fetchAsync— non-blocking HTTP/HTTPS → FetchResponse
  *
- *   import { Canvas, Colors }        from '../../ui/canvas.js';
- *     All 2-D drawing is done by calling methods on the Canvas object
- *     passed to render().  The canvas is already sized to the window
- *     content area — do NOT create your own Canvas.
- *
- *   import { type App, type WMWindow, type KeyEvent, type MouseEvent }
- *          from '../../ui/wm.js';
+ *   import { os, Canvas, Colors, defaultFont,
+ *            type App, type WMWindow, type KeyEvent, type MouseEvent }
+ *          from '../../core/sdk.js';
+ *     All types plus every OS subsystem come from the single SDK import.
+ *     The canvas passed to render() is already sized to the window content
+ *     area — do NOT create your own Canvas.
  *
  *   declare var kernel: import('../../core/kernel.js').KernelAPI;
  *     Direct kernel calls (getTicks, serialPut, sleep…) — use sparingly.
