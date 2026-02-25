@@ -57,6 +57,7 @@ typedef struct {
     JSRuntime  *rt;
     JSContext  *ctx;
     uint8_t     used;
+    uint32_t    width, height;    /* render surface dimensions set by procSetDimensions */
     /* parent → child */
     ProcMsg_t   inbox[JSPROC_MSGSLOTS];
     int         inbox_r, inbox_w, inbox_cnt;
@@ -67,6 +68,49 @@ typedef struct {
 
 static JSProc_t _procs[JSPROC_MAX];
 static int      _cur_proc = -1;   /* -1 = main runtime; ≥0 = child slot index */
+
+/* ── Phase A: Per-app BSS render surfaces (3 MB each = 1024×768 @ 32bpp) ──
+ * Stable BSS address — both main and child runtimes see the same bytes.
+ * Exposed via getRenderBuffer() (child) / getProcRenderBuffer(id) (main). */
+#define RENDER_BUF_BYTES  (3 * 1024 * 1024)
+static uint8_t _app_render_bufs[JSPROC_MAX][RENDER_BUF_BYTES] __attribute__((aligned(4096)));
+
+/* ── Phase B3: Per-child timer state ─────────────────────────────────────
+ * Callbacks stored as DupValue'd JSValues; freed safely in procDestroy. */
+#define MAX_TIMERS  32
+typedef struct {
+    uint32_t id;          /* timer handle returned to JS */
+    uint32_t interval_ms; /* delay (setTimeout) or period (setInterval) in ms */
+    uint32_t due_ticks;   /* PIT tick count when callback fires */
+    int      repeat;      /* 1 = interval, 0 = timeout */
+    int      active;      /* 0 = slot free */
+    JSValue  cb;          /* JS callback DupValue'd from child ctx */
+} ProcTimer_t;
+static ProcTimer_t _proc_timers[JSPROC_MAX][MAX_TIMERS];
+static uint32_t    _proc_timer_next_id[JSPROC_MAX]; /* monotonic ID per slot */
+
+/* ── Phase B4: Per-child event inbox (keyboard/mouse events as JSON) ──── */
+#define PROC_EVENT_QUEUE_SLOTS  16
+#define PROC_EVENT_SLOT_BYTES   256
+typedef struct { char data[PROC_EVENT_SLOT_BYTES]; int used; } ProcEventSlot_t;
+typedef struct {
+    ProcEventSlot_t slots[PROC_EVENT_QUEUE_SLOTS];
+    int             head, tail, count;
+} ProcEventQueue_t;
+static ProcEventQueue_t _proc_event_queues[JSPROC_MAX];
+
+/* ── Phase B6: Per-child window command outbox (child→WM JSON messages) ── */
+#define PROC_WINCMD_SLOTS  8
+#define PROC_WINCMD_SIZE   256
+typedef struct { char data[PROC_WINCMD_SIZE]; int len; } ProcWinCmd_t;
+typedef struct { ProcWinCmd_t slots[PROC_WINCMD_SLOTS]; int r, w, cnt; } ProcWinCmdBuf_t;
+static ProcWinCmdBuf_t _proc_wincmds[JSPROC_MAX];
+
+/* ── Phase B2: FS bridge ─────────────────────────────────────────────────
+ * Main runtime registers a JS object with readFile/writeFile/readDir/exists/stat
+ * methods via kernel.registerChildFSBridge(obj).  Child-side FS calls invoke
+ * those TS callbacks through the stable main-runtime context pointer `ctx'. */
+static JSValue _fs_bridge_obj; /* initialised to JS_UNDEFINED in quickjs_initialize() */
 
 /* ── Phase 10: Shared memory buffers ──────────────────────────────────────
  * Static BSS slabs mapped as ArrayBuffers into any runtime that calls
@@ -1155,6 +1199,25 @@ static const JSCFunctionListEntry js_child_kernel_funcs[] = {
     /* Shared memory — same physical bytes as parent */
     JS_CFUNC_DEF("sharedBufferOpen", 1, js_shared_buf_open),
     JS_CFUNC_DEF("sharedBufferSize", 1, js_shared_buf_size),
+    /* Phase A/B: render surface + dimensions */
+    JS_CFUNC_DEF("getRenderBuffer", 0, js_child_get_render_buf),
+    JS_CFUNC_DEF("getWidth",        0, js_child_get_width),
+    JS_CFUNC_DEF("getHeight",       0, js_child_get_height),
+    /* Phase B2: FS bridge */
+    JS_CFUNC_DEF("fsReadFile",        1, js_child_fs_read_file),
+    JS_CFUNC_DEF("fsWriteFile",       2, js_child_fs_write_file),
+    JS_CFUNC_DEF("fsReadDir",         1, js_child_fs_read_dir),
+    JS_CFUNC_DEF("fsExists",          1, js_child_fs_exists),
+    JS_CFUNC_DEF("fsStat",            1, js_child_fs_stat),
+    /* Phase B3: timers */
+    JS_CFUNC_DEF("setTimeout",      2, js_child_set_timeout),
+    JS_CFUNC_DEF("clearTimeout",    1, js_child_clear_timeout),
+    JS_CFUNC_DEF("setInterval",     2, js_child_set_interval),
+    JS_CFUNC_DEF("clearInterval",   1, js_child_clear_interval),
+    /* Phase B4: event queue */
+    JS_CFUNC_DEF("pollEvent",       0, js_child_poll_event),
+    /* Phase B6: window commands */
+    JS_CFUNC_DEF("windowCommand",   1, js_child_window_command),
 };
 
 /* kernel.procCreate() → id (0-7) or -1 if all slots are occupied */
@@ -1193,7 +1256,34 @@ static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
     JS_SetPropertyFunctionList(p->ctx, kobj, js_child_kernel_funcs,
         sizeof(js_child_kernel_funcs) / sizeof(js_child_kernel_funcs[0]));
     JS_SetPropertyStr(p->ctx, global, "kernel", kobj);
+    /* Inject console stub so child code can use console.log() */
+    JS_Eval(p->ctx,
+        "var console={log:function(){var a=Array.prototype.slice.call(arguments);"
+        "kernel.serialPut(a.join(' '));},"
+        "error:function(){var a=Array.prototype.slice.call(arguments);"
+        "kernel.serialPut('[E] '+a.join(' '));},"
+        "warn:function(){var a=Array.prototype.slice.call(arguments);"
+        "kernel.serialPut('[W] '+a.join(' '));}}",
+        strlen("var console={log:function(){var a=Array.prototype.slice.call(arguments);"
+        "kernel.serialPut(a.join(' '));},"
+        "error:function(){var a=Array.prototype.slice.call(arguments);"
+        "kernel.serialPut('[E] '+a.join(' '));},"
+        "warn:function(){var a=Array.prototype.slice.call(arguments);"
+        "kernel.serialPut('[W] '+a.join(' '));}}"),
+        "<boot>", JS_EVAL_TYPE_GLOBAL);
+    /* Inject Date.now() using kernel uptime */
+    JS_Eval(p->ctx,
+        "var Date={now:function(){return kernel.getUptime();}}",
+        strlen("var Date={now:function(){return kernel.getUptime();}}"),
+        "<boot>", JS_EVAL_TYPE_GLOBAL);
     JS_FreeValue(p->ctx, global);
+    /* Initialise per-proc BSS state */
+    memset(&_proc_timers[id], 0, sizeof(_proc_timers[id]));
+    memset(&_proc_event_queues[id], 0, sizeof(_proc_event_queues[id]));
+    memset(&_proc_wincmds[id], 0, sizeof(_proc_wincmds[id]));
+    _proc_timer_next_id[id] = 0;
+    _procs[id].width  = 0;
+    _procs[id].height = 0;
     /* Arm the time-slice interrupt handler on the child runtime.
      * _proc_interrupt_cb fires periodically during JS_Eval and returns 1
      * when _proc_slice_deadline (a PIT tick count) has been reached.       */
@@ -1302,11 +1392,22 @@ static JSValue js_proc_destroy(JSContext *c, JSValueConst this_val,
     int32_t id = 0;
     JS_ToInt32(c, &id, argv[0]);
     if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_UNDEFINED;
+    /* Free timer callbacks BEFORE FreeContext so JSValues are still valid */
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        ProcTimer_t *t = &_proc_timers[id][i];
+        if (t->active) {
+            JS_FreeValue(_procs[id].ctx, t->cb);
+            t->active = 0;
+        }
+    }
     JS_FreeContext(_procs[id].ctx);
     JS_FreeRuntime(_procs[id].rt);
     _procs[id].ctx  = NULL;
     _procs[id].rt   = NULL;
     _procs[id].used = 0;
+    /* Clear per-proc queues */
+    memset(&_proc_event_queues[id], 0, sizeof(_proc_event_queues[id]));
+    memset(&_proc_wincmds[id], 0, sizeof(_proc_wincmds[id]));
     return JS_UNDEFINED;
 }
 
@@ -1589,6 +1690,360 @@ static JSValue js_physaddr_of(JSContext *c, JSValueConst this_val,
     return JS_NewUint32(c, (uint32_t)(uintptr_t)ptr);
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * Phase A/B: Child render buffer, dimensions, FS bridge, event, wincmd, timers
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Helper: call a named method on _fs_bridge_obj with one string argument.
+ * Runs in the MAIN context — safe because cooperative scheduling. */
+static JSValue _fs_bridge_call(const char *method, const char *arg) {
+    if (JS_IsUndefined(_fs_bridge_obj)) return JS_NULL;
+    JSValue fn = JS_GetPropertyStr(ctx, _fs_bridge_obj, method);
+    if (!JS_IsFunction(ctx, fn)) { JS_FreeValue(ctx, fn); return JS_NULL; }
+    JSValue arg_v = JS_NewString(ctx, arg ? arg : "");
+    JSValue result = JS_Call(ctx, fn, _fs_bridge_obj, 1, &arg_v);
+    JS_FreeValue(ctx, arg_v);
+    JS_FreeValue(ctx, fn);
+    return result;
+}
+
+/* ── Main-side: kernel.getProcRenderBuffer(id) → ArrayBuffer (view of BSS) ── */
+static JSValue js_get_proc_render_buf(JSContext *c, JSValueConst this_val,
+                                      int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    int32_t id = 0; JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_NULL;
+    uint32_t w = _procs[id].width, h = _procs[id].height;
+    if (w == 0 || h == 0) return JS_NULL;
+    size_t bytes = (size_t)w * (size_t)h * 4;
+    if (bytes > RENDER_BUF_BYTES) bytes = RENDER_BUF_BYTES;
+    return JS_NewArrayBuffer(c, _app_render_bufs[id], bytes,
+                             _sbuf_no_free, NULL, 0);
+}
+
+/* ── Main-side: kernel.procSetDimensions(id, w, h) ── */
+static JSValue js_proc_set_dimensions(JSContext *c, JSValueConst this_val,
+                                      int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 3) return JS_UNDEFINED;
+    int32_t id = 0, w = 0, h = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    JS_ToInt32(c, &w, argv[1]);
+    JS_ToInt32(c, &h, argv[2]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_UNDEFINED;
+    _procs[id].width  = (uint32_t)w;
+    _procs[id].height = (uint32_t)h;
+    return JS_UNDEFINED;
+}
+
+/* ── Main-side: kernel.registerChildFSBridge(obj) ── */
+static JSValue js_register_child_fs_bridge(JSContext *c, JSValueConst this_val,
+                                           int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    if (!JS_IsUndefined(_fs_bridge_obj)) JS_FreeValue(c, _fs_bridge_obj);
+    _fs_bridge_obj = JS_DupValue(c, argv[0]);
+    return JS_UNDEFINED;
+}
+
+/* ── Main-side: kernel.procSendEvent(id, evObj) — JSON-encode evObj into child event queue ── */
+static JSValue js_proc_send_event(JSContext *c, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_FALSE;
+    int32_t id = 0; JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_FALSE;
+    ProcEventQueue_t *q = &_proc_event_queues[id];
+    if (q->count >= PROC_EVENT_QUEUE_SLOTS) return JS_FALSE;
+    JSValue _json_global = JS_GetGlobalObject(c);
+    JSValue json_fn = JS_GetPropertyStr(c, _json_global, "JSON");
+    JS_FreeValue(c, _json_global);
+    JSValue stringify = JS_GetPropertyStr(c, json_fn, "stringify");
+    JSValue json_str  = JS_Call(c, stringify, json_fn, 1, &argv[1]);
+    JS_FreeValue(c, stringify); JS_FreeValue(c, json_fn);
+    if (JS_IsException(json_str)) { JS_FreeValue(c, json_str); return JS_FALSE; }
+    const char *s = JS_ToCString(c, json_str);
+    JS_FreeValue(c, json_str);
+    if (!s) return JS_FALSE;
+    ProcEventSlot_t *slot = &q->slots[q->tail];
+    int n = (int)strlen(s);
+    if (n >= PROC_EVENT_SLOT_BYTES) n = PROC_EVENT_SLOT_BYTES - 1;
+    memcpy(slot->data, s, (size_t)n);
+    slot->data[n] = '\0';
+    slot->used = 1;
+    JS_FreeCString(c, s);
+    q->tail = (q->tail + 1) % PROC_EVENT_QUEUE_SLOTS;
+    q->count++;
+    return JS_TRUE;
+}
+
+/* ── Main-side: kernel.procDequeueWindowCommand(id) → {type,...} or null ── */
+static JSValue js_proc_dequeue_window_cmd(JSContext *c, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    int32_t id = 0; JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_NULL;
+    ProcWinCmdBuf_t *b = &_proc_wincmds[id];
+    if (b->cnt == 0) return JS_NULL;
+    ProcWinCmd_t *slot = &b->slots[b->r];
+    /* Parse JSON in main context */
+    JSValue parsed = JS_ParseJSON(c, slot->data, (size_t)slot->len, "<wincmd>");
+    b->r = (b->r + 1) % PROC_WINCMD_SLOTS;
+    b->cnt--;
+    return parsed;
+}
+
+/* ── Main-side: kernel.serviceTimers(id) — fire expired timers for child id ── */
+static JSValue js_service_timers(JSContext *c, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 1) return JS_UNDEFINED;
+    int32_t id = 0; JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_UNDEFINED;
+    uint32_t now = timer_get_ticks();
+    JSContext *cc = _procs[id].ctx;
+    _cur_proc = id;
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        ProcTimer_t *t = &_proc_timers[id][i];
+        if (!t->active) continue;
+        if ((int32_t)(now - t->due_ticks) < 0) continue; /* not yet due */
+        /* Fire callback */
+        JSValue r = JS_Call(cc, t->cb, JS_UNDEFINED, 0, NULL);
+        if (JS_IsException(r)) JS_GetException(cc); /* discard exception */
+        JS_FreeValue(cc, r);
+        if (t->repeat) {
+            t->due_ticks = now + (t->interval_ms / 10u + 1u);
+        } else {
+            JS_FreeValue(cc, t->cb);
+            t->cb = JS_UNDEFINED;
+            t->active = 0;
+        }
+    }
+    _cur_proc = -1;
+    return JS_UNDEFINED;
+}
+
+/* ── Child-side: kernel.getRenderBuffer() → ArrayBuffer pointing at BSS slab ── */
+static JSValue js_child_get_render_buf(JSContext *c, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_NULL;
+    uint32_t w = _procs[id].width, h = _procs[id].height;
+    if (w == 0 || h == 0) return JS_NULL;
+    size_t bytes = (size_t)w * (size_t)h * 4;
+    if (bytes > RENDER_BUF_BYTES) bytes = RENDER_BUF_BYTES;
+    return JS_NewArrayBuffer(c, _app_render_bufs[id], bytes,
+                             _sbuf_no_free, NULL, 0);
+}
+
+/* ── Child-side: kernel.getWidth() / kernel.getHeight() ── */
+static JSValue js_child_get_width(JSContext *c, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_NewUint32(c, 0);
+    return JS_NewUint32(c, _procs[id].width);
+}
+static JSValue js_child_get_height(JSContext *c, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_NewUint32(c, 0);
+    return JS_NewUint32(c, _procs[id].height);
+}
+
+/* ── Child-side: FS bridge calls ── */
+static JSValue js_child_fs_read_file(JSContext *c, JSValueConst this_val,
+                                      int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    const char *path = JS_ToCString(c, argv[0]);
+    if (!path) return JS_NULL;
+    JSValue main_result = _fs_bridge_call("readFile", path);
+    JS_FreeCString(c, path);
+    if (JS_IsNull(main_result) || JS_IsUndefined(main_result)) return JS_NULL;
+    const char *str = JS_ToCString(ctx, main_result);
+    JS_FreeValue(ctx, main_result);
+    if (!str) return JS_NULL;
+    JSValue ret = JS_NewString(c, str);
+    JS_FreeCString(ctx, str);
+    return ret;
+}
+static JSValue js_child_fs_write_file(JSContext *c, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_FALSE;
+    const char *path = JS_ToCString(c, argv[0]);
+    const char *cont = JS_ToCString(c, argv[1]);
+    if (!path || !cont) { JS_FreeCString(c,path); JS_FreeCString(c,cont); return JS_FALSE; }
+    /* encode as "path\x00content" and use writeFile with two args via JSON hack */
+    JSValue path_v = JS_NewString(ctx, path);
+    JSValue cont_v = JS_NewString(ctx, cont);
+    JS_FreeCString(c, path); JS_FreeCString(c, cont);
+    if (JS_IsUndefined(_fs_bridge_obj)) { JS_FreeValue(ctx,path_v); JS_FreeValue(ctx,cont_v); return JS_FALSE; }
+    JSValue fn = JS_GetPropertyStr(ctx, _fs_bridge_obj, "writeFile");
+    JSValue args[2] = { path_v, cont_v };
+    JSValue r = JS_Call(ctx, fn, _fs_bridge_obj, 2, args);
+    JS_FreeValue(ctx,fn); JS_FreeValue(ctx,path_v); JS_FreeValue(ctx,cont_v);
+    int ok = JS_ToBool(ctx, r);
+    JS_FreeValue(ctx, r);
+    return JS_NewBool(c, ok);
+}
+static JSValue js_child_fs_read_dir(JSContext *c, JSValueConst this_val,
+                                     int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    const char *path = JS_ToCString(c, argv[0]);
+    if (!path) return JS_NULL;
+    JSValue main_result = _fs_bridge_call("readDir", path);
+    JS_FreeCString(c, path);
+    const char *str = JS_IsNull(main_result)||JS_IsUndefined(main_result) ? NULL : JS_ToCString(ctx, main_result);
+    JS_FreeValue(ctx, main_result);
+    if (!str) return JS_NULL;
+    JSValue ret = JS_ParseJSON(c, str, strlen(str), "<readDir>");
+    JS_FreeCString(ctx, str);
+    return ret;
+}
+static JSValue js_child_fs_exists(JSContext *c, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_FALSE;
+    const char *path = JS_ToCString(c, argv[0]);
+    if (!path) return JS_FALSE;
+    JSValue main_result = _fs_bridge_call("exists", path);
+    JS_FreeCString(c, path);
+    int ok = JS_ToBool(ctx, main_result);
+    JS_FreeValue(ctx, main_result);
+    return JS_NewBool(c, ok);
+}
+static JSValue js_child_fs_stat(JSContext *c, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    const char *path = JS_ToCString(c, argv[0]);
+    if (!path) return JS_NULL;
+    JSValue main_result = _fs_bridge_call("stat", path);
+    JS_FreeCString(c, path);
+    const char *str = JS_IsNull(main_result)||JS_IsUndefined(main_result) ? NULL : JS_ToCString(ctx, main_result);
+    JS_FreeValue(ctx, main_result);
+    if (!str) return JS_NULL;
+    JSValue ret = JS_ParseJSON(c, str, strlen(str), "<stat>");
+    JS_FreeCString(ctx, str);
+    return ret;
+}
+
+/* ── Child-side: setTimeout / clearTimeout / setInterval / clearInterval ── */
+static JSValue js_child_set_timeout(JSContext *c, JSValueConst this_val,
+                                     int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_NewInt32(c, -1);
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_NewInt32(c, -1);
+    int32_t ms = 0; JS_ToInt32(c, &ms, argv[1]);
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        ProcTimer_t *t = &_proc_timers[id][i];
+        if (t->active) continue;
+        t->id          = ++_proc_timer_next_id[id];
+        t->interval_ms = (uint32_t)(ms > 0 ? ms : 1);
+        t->due_ticks   = timer_get_ticks() + (t->interval_ms / 10u + 1u);
+        t->repeat      = 0;
+        t->active      = 1;
+        t->cb          = JS_DupValue(c, argv[0]);
+        return JS_NewUint32(c, t->id);
+    }
+    return JS_NewInt32(c, -1); /* no free slot */
+}
+static JSValue js_child_clear_timeout(JSContext *c, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 1) return JS_UNDEFINED;
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_UNDEFINED;
+    uint32_t tid = 0; JS_ToUint32(c, &tid, argv[0]);
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        ProcTimer_t *t = &_proc_timers[id][i];
+        if (!t->active || t->id != tid) continue;
+        JS_FreeValue(c, t->cb); t->cb = JS_UNDEFINED; t->active = 0; break;
+    }
+    return JS_UNDEFINED;
+}
+static JSValue js_child_set_interval(JSContext *c, JSValueConst this_val,
+                                      int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_NewInt32(c, -1);
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_NewInt32(c, -1);
+    int32_t ms = 0; JS_ToInt32(c, &ms, argv[1]);
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        ProcTimer_t *t = &_proc_timers[id][i];
+        if (t->active) continue;
+        t->id          = ++_proc_timer_next_id[id];
+        t->interval_ms = (uint32_t)(ms > 0 ? ms : 1);
+        t->due_ticks   = timer_get_ticks() + (t->interval_ms / 10u + 1u);
+        t->repeat      = 1;
+        t->active      = 1;
+        t->cb          = JS_DupValue(c, argv[0]);
+        return JS_NewUint32(c, t->id);
+    }
+    return JS_NewInt32(c, -1);
+}
+static JSValue js_child_clear_interval(JSContext *c, JSValueConst this_val,
+                                        int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_UNDEFINED;
+    uint32_t tid = 0; JS_ToUint32(c, &tid, argv[0]);
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        ProcTimer_t *t = &_proc_timers[id][i];
+        if (!t->active || t->id != tid) continue;
+        JS_FreeValue(c, t->cb); t->cb = JS_UNDEFINED; t->active = 0; break;
+    }
+    return JS_UNDEFINED;
+}
+
+/* ── Child-side: kernel.pollEvent() → parsed object or null ── */
+static JSValue js_child_poll_event(JSContext *c, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_NULL;
+    ProcEventQueue_t *q = &_proc_event_queues[id];
+    if (q->count == 0) return JS_NULL;
+    ProcEventSlot_t *slot = &q->slots[q->head];
+    JSValue parsed = JS_ParseJSON(c, slot->data, strlen(slot->data), "<event>");
+    slot->used = 0;
+    q->head = (q->head + 1) % PROC_EVENT_QUEUE_SLOTS;
+    q->count--;
+    return parsed;
+}
+
+/* ── Child-side: kernel.sendWindowCommand(jsonStr) ── */
+static JSValue js_child_window_command(JSContext *c, JSValueConst this_val,
+                                        int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 1) return JS_FALSE;
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_FALSE;
+    ProcWinCmdBuf_t *b = &_proc_wincmds[id];
+    if (b->cnt >= PROC_WINCMD_SLOTS) return JS_FALSE;
+    const char *s = JS_ToCString(c, argv[0]);
+    if (!s) return JS_FALSE;
+    ProcWinCmd_t *slot = &b->slots[b->w];
+    int n = (int)strlen(s);
+    if (n >= PROC_WINCMD_SIZE) n = PROC_WINCMD_SIZE - 1;
+    memcpy(slot->data, s, (size_t)n);
+    slot->data[n] = '\0';
+    slot->len = n;
+    JS_FreeCString(c, s);
+    b->w = (b->w + 1) % PROC_WINCMD_SLOTS;
+    b->cnt++;
+    return JS_TRUE;
+}
+
 static const JSCFunctionListEntry js_kernel_funcs[] = {
     /* VGA raw access */
     JS_CFUNC_DEF("vgaPut",        4, js_vga_put),
@@ -1689,6 +2144,13 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("jitCallI8",    9, js_jit_call_i8),
     JS_CFUNC_DEF("jitUsedBytes", 0, js_jit_used_bytes),
     JS_CFUNC_DEF("physAddrOf",   1, js_physaddr_of),
+    /* Phase A/B: render surface + child runtime infrastructure */
+    JS_CFUNC_DEF("getProcRenderBuffer",    1, js_get_proc_render_buf),
+    JS_CFUNC_DEF("procSetDimensions",      3, js_proc_set_dimensions),
+    JS_CFUNC_DEF("registerChildFSBridge",  1, js_register_child_fs_bridge),
+    JS_CFUNC_DEF("procSendEvent",          2, js_proc_send_event),
+    JS_CFUNC_DEF("procDequeueWindowCommand", 1, js_proc_dequeue_window_cmd),
+    JS_CFUNC_DEF("serviceTimers",          1, js_service_timers),
 };
 
 /*  Initialization  */
@@ -1710,6 +2172,7 @@ int quickjs_initialize(void) {
 
     /* Phase 5: initialise scheduler hook slot + TSS data structure */
     _scheduler_hook = JS_UNDEFINED;
+    _fs_bridge_obj   = JS_UNDEFINED;
     platform_tss_init();
 
     JSValue global = JS_GetGlobalObject(ctx);

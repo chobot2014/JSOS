@@ -286,13 +286,25 @@ export class Canvas {
   private _fb_x: number;
   private _fb_y: number;
   private _is_screen: boolean;
+  /** True when this canvas wraps an external BSS buffer (no heap alloc, flip is NOP). */
+  private _external: boolean;
 
-  constructor(width: number, height: number, fb_x = 0, fb_y = 0, is_screen = false) {
+  constructor(width: number, height: number, fb_x: number | ArrayBuffer = 0, fb_y = 0, is_screen = false) {
     this.width      = width;
     this.height     = height;
-    this._buf       = new Uint32Array(width * height);
-    this._fb_x      = fb_x;
-    this._fb_y      = fb_y;
+    if (fb_x instanceof ArrayBuffer) {
+      /* External-buffer mode: wrap the caller-supplied BSS slab directly.        */
+      /* Uint32Array view starts at offset 0 and covers exactly width*height px.  */
+      this._buf      = new Uint32Array(fb_x, 0, width * height);
+      this._external = true;
+      this._fb_x     = 0;
+      this._fb_y     = 0;
+    } else {
+      this._buf      = new Uint32Array(width * height);
+      this._external = false;
+      this._fb_x     = fb_x;
+      this._fb_y     = fb_y;
+    }
     this._is_screen = is_screen;
     this._buf.fill(0xFF000000); // default black
   }
@@ -711,6 +723,8 @@ export class Canvas {
    * For sub-canvases, blits at the registered (fb_x, fb_y) offset.
    */
   flip(): void {
+    /* External-buffer canvases are owned by the WM render slab; don't blit. */
+    if (this._external) return;
     // Zero-copy fast path: pass the Uint32Array's backing ArrayBuffer directly.
     // C side detects it via JS_GetArrayBuffer() and calls a single memcpy.
     (kernel.fbBlit as any)(this._buf.buffer, this._fb_x, this._fb_y, this.width, this.height);
@@ -734,11 +748,43 @@ export class Canvas {
   getBuffer(): Uint32Array { return this._buf; }
 
   /**
+   * Copy pixels from a raw BGRA ArrayBuffer (e.g. a BSS render slab) into
+   * this canvas at destination offset (dstX, dstY).
+   *
+   * @param srcBuf    - Source ArrayBuffer containing BGRA pixels
+   * @param srcX      - X offset in source (pixels)
+   * @param srcY      - Y offset in source (pixels)
+   * @param dstX      - X offset in this canvas (pixels)
+   * @param dstY      - Y offset in this canvas (pixels)
+   * @param w         - Width of the region to copy (pixels)
+   * @param h         - Height of the region to copy (pixels)
+   * @param srcWidthPx - Row stride of the source in pixels (defaults to `w`)
+   */
+  blitFromBuffer(
+    srcBuf: ArrayBuffer, srcX: number, srcY: number,
+    dstX: number, dstY: number, w: number, h: number,
+    srcWidthPx?: number,
+  ): void {
+    var srcStride = srcWidthPx !== undefined ? srcWidthPx : w;
+    var src = new Uint32Array(srcBuf);
+    for (var row = 0; row < h; row++) {
+      var dY = dstY + row;
+      if (dY < 0 || dY >= this.height) continue;
+      var colStart = dstX < 0 ? -dstX : 0;
+      var colEnd   = (dstX + w > this.width) ? (this.width - dstX) : w;
+      if (colStart >= colEnd) continue;
+      var srcOff = (srcY + row) * srcStride + srcX + colStart;
+      var dstOff = dY * this.width + dstX + colStart;
+      this._buf.set(src.subarray(srcOff, srcOff + (colEnd - colStart)), dstOff);
+    }
+  }
+
+  /**
    * Physical address of the pixel buffer, for use with JIT-compiled operations.
    * Returns 0 when kernel.physAddrOf is unavailable (e.g. test environments).
    * QuickJS is a non-moving GC, so the address is stable for the buffer's lifetime.
    */
-  bufPhysAddr(): number { return JITCanvas.physAddr(this._buf.buffer); }
+  bufPhysAddr(): number { return JITCanvas.physAddr(this._buf.buffer as ArrayBuffer); }
 }
 
 /**

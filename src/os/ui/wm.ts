@@ -66,6 +66,84 @@ export interface App {
   onResize?(width: number, height: number): void;
 }
 
+// ── AppManifest ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Descriptor passed to `wm.launchApp()` to spawn a sandboxed child JS process
+ * in a managed window.  The child runtime receives a BSS-backed render surface
+ * and a set of kernel APIs sufficient for a typical GUI application.
+ */
+export interface AppManifest {
+  /** Application identifier (used for singleInstance checks). */
+  name: string;
+  /** Window title bar text. */
+  title: string;
+  /** Content area width in pixels (excluding title bar). */
+  width: number;
+  /** Content area height in pixels (excluding title bar). */
+  height: number;
+  /** JavaScript/TypeScript source code to evaluate in the child runtime. */
+  code: string;
+  /** If true, launching a second instance is a no-op (not yet enforced). */
+  singleInstance?: boolean;
+}
+
+// ── ChildProcApp ─────────────────────────────────────────────────────────────
+
+/**
+ * App implementation for sandboxed child JS processes.
+ *
+ * Lifecycle:
+ *   - `render()` copies the child’s BSS render slab into the window canvas each frame.
+ *   - `onKey` / `onMouse` forward events into the child’s event queue.
+ *   - `onUnmount` destroys the child runtime when the window is closed.
+ *
+ * The `procId` field is public so `WindowManager._findWindowByProc()` can locate the
+ * owning window given only the process id.
+ */
+export class ChildProcApp implements App {
+  readonly name = 'child-proc';
+  /** QuickJS child process slot (0–7). */
+  readonly procId: number;
+  private readonly _w: number;
+  private readonly _h: number;
+
+  constructor(procId: number, w: number, h: number) {
+    this.procId = procId;
+    this._w = w;
+    this._h = h;
+  }
+
+  onMount(_win: WMWindow): void { /* nothing */ }
+
+  onUnmount(): void {
+    kernel.procDestroy(this.procId);
+  }
+
+  onKey(ev: KeyEvent): void {
+    kernel.procSendEvent(this.procId, ev);
+  }
+
+  onMouse(ev: MouseEvent): void {
+    kernel.procSendEvent(this.procId, ev);
+  }
+
+  onFocus(): void {
+    kernel.procSendEvent(this.procId, { type: 'focus' });
+  }
+
+  onBlur(): void {
+    kernel.procSendEvent(this.procId, { type: 'blur' });
+  }
+
+  render(canvas: Canvas): boolean {
+    var buf = kernel.getProcRenderBuffer(this.procId);
+    if (!buf) return false;
+    canvas.blitFromBuffer(buf, 0, 0, 0, 0, this._w, this._h, this._w);
+    return true;
+  }
+}
+
 // ── Window ─────────────────────────────────────────────────────────────────
 
 export interface WMWindow {
@@ -260,6 +338,81 @@ export class WindowManager {
     }
   }
 
+  /**
+   * Launch a sandboxed child JS process in a managed window.
+   *
+   * Steps:
+   *   1. Allocate a QuickJS process slot with `kernel.procCreate()`.
+   *   2. Tell the C layer the render surface dimensions.
+   *   3. Open a WM window backed by a `ChildProcApp` proxy.
+   *   4. Evaluate the app code inside the child runtime.
+   *
+   * @returns The child process id (0–7), or -1 on failure.
+   */
+  launchApp(manifest: AppManifest): number {
+    var procId = kernel.procCreate();
+    if (procId < 0) { return -1; }
+    kernel.procSetDimensions(procId, manifest.width, manifest.height);
+    this.createWindow({
+      title:     manifest.title,
+      x:         20,
+      y:         20,
+      width:     manifest.width,
+      height:    manifest.height,
+      app:       new ChildProcApp(procId, manifest.width, manifest.height),
+      closeable: manifest.singleInstance !== true,
+    });
+    kernel.procEval(procId, manifest.code);
+    return procId;
+  }
+
+  // ── Child-process window helpers ────────────────────────────────────────────
+
+  /** Find the WM window that owns the given child process, or null. */
+  private _findWindowByProc(procId: number): WMWindow | null {
+    for (var i = 0; i < this._windows.length; i++) {
+      var w = this._windows[i];
+      if (w.app instanceof ChildProcApp && w.app.procId === procId) return w;
+    }
+    return null;
+  }
+
+  /** Close the window associated with a child process (triggers onUnmount → procDestroy). */
+  private _closeWindowByProc(procId: number): void {
+    var win = this._findWindowByProc(procId);
+    if (win) this.closeWindow(win.id);
+  }
+
+  /**
+   * Drain the window-command queue for a child process and apply each command
+   * to its owning window.  Called every frame from `_tickChildProcs()`.
+   *
+   * Supported command types:
+   *   { type: 'setTitle', title: string }       — update window title bar
+   *   { type: 'close' }                          — close the window
+   *   { type: 'renderReady' }                    — mark WM dirty (trigger composite)
+   */
+  private _processWindowCommands(procId: number): void {
+    var cmd: { type: string; [k: string]: any } | null;
+    while ((cmd = kernel.procDequeueWindowCommand(procId)) !== null) {
+      switch (cmd.type) {
+        case 'setTitle': {
+          var w = this._findWindowByProc(procId);
+          if (w) { w.title = cmd.title; this._wmDirty = true; }
+          break;
+        }
+        case 'close':
+          this._closeWindowByProc(procId);
+          break;
+        case 'renderReady':
+          this._wmDirty = true;
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
   minimiseWindow(id: number): void {
     var win = this._findWindow(id);
     if (!win || win.minimised) return;
@@ -428,7 +581,10 @@ export class WindowManager {
     var list = kernel.procList();
     if (list.length === 0) return;
     for (var i = 0; i < list.length; i++) {
-      kernel.procTick(list[i].id);
+      var id = list[i].id;
+      kernel.procTick(id);
+      kernel.serviceTimers(id);
+      this._processWindowCommands(id);
     }
   }
   // ── Input dispatch ─────────────────────────────────────────────────────

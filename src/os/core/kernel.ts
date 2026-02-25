@@ -354,6 +354,35 @@ export interface KernelAPI {
    */
   physAddrOf(ab: ArrayBuffer): number;
 
+  // Phase A/B: child process render surface + infrastructure
+
+  /** Return a view of the BSS render slab for child process `id` (width×height×4 bytes). */
+  getProcRenderBuffer(id: number): ArrayBuffer;
+
+  /** Set the render surface dimensions for child process `id` (call before procEval). */
+  procSetDimensions(id: number, w: number, h: number): void;
+
+  /**
+   * Register the TypeScript FS bridge object so child runtimes can perform
+   * file I/O via the main-runtime's filesystem implementation.
+   */
+  registerChildFSBridge(bridge: {
+    readFile(path: string): string | null;
+    writeFile(path: string, content: string): boolean;
+    readDir(path: string): string;   // JSON array of names
+    exists(path: string): boolean;
+    stat(path: string): string | null; // JSON object or null
+  }): void;
+
+  /** JSON-encode `ev` and push it into the child's event queue. */
+  procSendEvent(id: number, ev: object): void;
+
+  /** Dequeue the next window-management command from child process `id`. */
+  procDequeueWindowCommand(id: number): { type: string; [k: string]: any } | null;
+
+  /** Fire any expired timers for child process `id` (call after procTick). */
+  serviceTimers(id: number): void;
+
   //  Constants 
   colors: KernelColors;
   KEY_UP: number;    KEY_DOWN: number;   KEY_LEFT: number;  KEY_RIGHT: number;
