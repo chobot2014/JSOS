@@ -12,6 +12,9 @@ declare var kernel: import('../core/kernel.js').KernelAPI;
 
 export type ThreadState = 'ready' | 'running' | 'blocked' | 'sleeping' | 'dead';
 
+/** A coroutine step function: called once per frame. Returns 'done' when finished. */
+export type CoroutineStep = () => 'done' | 'pending';
+
 export class Thread {
   tid: number;
   name: string;
@@ -153,6 +156,18 @@ export class ThreadManager {
 
   threadCount(): number { return this._threads.length; }
 
+  /** Return a read-only snapshot of all threads (for ps / top display). */
+  getThreads(): Array<{ tid: number; name: string; state: ThreadState; priority: number }> {
+    return this._threads.map(function(t) {
+      return { tid: t.tid, name: t.name, state: t.state, priority: t.priority };
+    });
+  }
+
+  /** Return a read-only snapshot of all active coroutines. */
+  getCoroutines(): Array<{ id: number; name: string }> {
+    return this._coroutines.map(function(c) { return { id: c.id, name: c.name }; });
+  }
+
   private _byTid(tid: number): Thread | null {
     for (var i = 0; i < this._threads.length; i++) {
       if (this._threads[i].tid === tid) return this._threads[i];
@@ -165,6 +180,58 @@ export class ThreadManager {
       if (this._threads[i].tid === tid) return i;
     }
     return 0;
+  }
+
+  // ── Coroutine scheduler ────────────────────────────────────────────────────
+
+  private _coroutines: Array<{ id: number; name: string; step: CoroutineStep }> = [];
+  private _nextCid = 0;
+
+  /**
+   * Register a coroutine.  `step` is called once per WM frame until it
+   * returns 'done'.  Returns the coroutine id (can be passed to cancelCoroutine).
+   */
+  runCoroutine(name: string, step: CoroutineStep): number {
+    var id = this._nextCid++;
+    this._coroutines.push({ id, name, step });
+    return id;
+  }
+
+  /** Remove a coroutine before it finishes. */
+  cancelCoroutine(id: number): void {
+    for (var i = 0; i < this._coroutines.length; i++) {
+      if (this._coroutines[i].id === id) {
+        this._coroutines.splice(i, 1);
+        return;
+      }
+    }
+  }
+
+  /**
+   * Advance every registered coroutine by one step.
+   * Uses a snapshot so that a step() may add or cancel coroutines safely.
+   */
+  tickCoroutines(): void {
+    if (this._coroutines.length === 0) return;
+    var snap = this._coroutines.slice();   // snapshot before iteration
+    var keep: Array<{ id: number; name: string; step: CoroutineStep }> = [];
+    for (var i = 0; i < snap.length; i++) {
+      var c = snap[i];
+      var result: 'done' | 'pending';
+      try { result = c.step(); } catch (_e) { result = 'done'; }
+      if (result === 'pending') keep.push(c);
+    }
+    // Merge: retained pending items + any coroutines added during this tick
+    var out: Array<{ id: number; name: string; step: CoroutineStep }> = [];
+    for (var j = 0; j < keep.length; j++) out.push(keep[j]);
+    for (var k = 0; k < this._coroutines.length; k++) {
+      var isNew = true;
+      for (var m = 0; m < snap.length; m++) {
+        if (snap[m].id === this._coroutines[k].id) { isNew = false; break; }
+      }
+      if (isNew) out.push(this._coroutines[k]);
+    }
+    this._coroutines = out;
   }
 }
 

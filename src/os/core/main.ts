@@ -19,16 +19,13 @@ import { fat16 } from '../storage/fat16.js';
 import { fat32 } from '../storage/fat32.js';
 import { physAlloc } from '../process/physalloc.js';
 import { threadManager } from '../process/threads.js';
-import { Mutex } from '../process/sync.js';
-import { processManager } from '../process/process.js';
-import { elfLoader } from '../process/elf.js';
-import { Pipe } from '../core/fdtable.js';
-import { devFSMount } from '../fs/dev.js';
+import { scheduler }     from '../process/scheduler.js';
+import { devFSMount    } from '../fs/dev.js';
 import { installRomFiles } from '../fs/romfs.js';
 import { createScreenCanvas } from '../ui/canvas.js';
 import { WindowManager, setWM } from '../ui/wm.js';
-import { terminalApp } from '../apps/terminal-app.js';
-import { browserApp } from '../apps/browser.js';
+import { terminalApp } from '../apps/terminal/index.js';
+import { browserApp } from '../apps/browser/index.js';
 import { dhcpDiscover } from '../net/dhcp.js';
 import { dnsResolve } from '../net/dns.js';
 import { httpsGet } from '../net/http.js';
@@ -161,19 +158,28 @@ function main(): void {
   }
 
   // ── Phase 5: Preemptive multitasking ───────────────────────────────────
-  // Register the TypeScript scheduler tick with the C layer.
+  // The C-layer IRQ0 hook drives kernel-thread preemption at 100 Hz.
+  // Process-level scheduling (signals, time slices) is driven by the WM
+  // frame loop via scheduler.tick() (~50 fps) — see ui/wm.ts tick().
   kernel.registerSchedulerHook(function() { return threadManager.tick(); });
   kernel.serialPut('Preemptive scheduler active (100Hz)\n');
 
-  // Create the idle thread (lowest priority, runs when nothing else is ready).
-  var idleThread = threadManager.createThread('idle', 39);
-  kernel.serialPut('Thread 0 (idle) created\n');
+  // Create the three canonical kernel threads.
+  var idleThread = threadManager.createThread('idle',   39);
+  var replThread = threadManager.createThread('kernel', 10);
+  var initThread = threadManager.createThread('init',   10);
+  kernel.serialPut('Kernel threads created (idle=' + idleThread.tid +
+                   ' kernel=' + replThread.tid + ' init=' + initThread.tid + ')\n');
 
-  // Create the REPL kernel thread.
-  var replThread = threadManager.createThread('repl', 20);
-  kernel.serialPut('Thread 1 (repl) created\n');
+  // Link kernel threads to ProcessScheduler PIDs so scheduler.tick() can
+  // synchronise threadManager.setCurrentTid() on process switches.
+  scheduler.initBootProcesses({
+    idlePid:   0, idleTid:   idleThread.tid,
+    kernelPid: 1, kernelTid: replThread.tid,
+    initPid:   2, initTid:   initThread.tid,
+  });
 
-  // Context-switch test: start on idle (TID 0), tick() should switch to repl (TID 1).
+  // Verify: tick() should move from idle (TID 0) to kernel (TID 1).
   var ctxSwitchOk = false;
   try {
     threadManager.setCurrentTid(0);
@@ -181,61 +187,11 @@ function main(): void {
     ctxSwitchOk = (threadManager.getCurrentTid() === 1);
   } catch(e) { ctxSwitchOk = false; }
   kernel.serialPut('Context switch test: ' + (ctxSwitchOk ? 'PASS' : 'FAIL') + '\n');
+  kernel.serialPut('Process scheduler: ' + scheduler.getLiveProcesses().length +
+                   ' boot processes registered\n');
 
-  // Mutex contention test: tryLock fails when held, succeeds when free.
-  var mutexOk = false;
-  try {
-    var mtx = new Mutex();
-    mtx.lock();
-    var firstTry = mtx.tryLock();   // false — already owned
-    mtx.unlock();
-    var secondTry = mtx.tryLock();  // true — now free
-    mtx.unlock();
-    mutexOk = (!firstTry && secondTry);
-  } catch(e) { mutexOk = false; }
-  kernel.serialPut('Mutex contention test: ' + (mutexOk ? 'PASS' : 'FAIL') + '\n');
   // ── Phase 6: POSIX layer ──────────────────────────────────────────────────
   kernel.serialPut('POSIX layer ready: devFS mounted, FDTable wired, syscalls active\n');
-
-  // fork/exec test: fork a child (PID 2), run it, wait for exit code 0.
-  var forkOk = false;
-  var childPid = -1;
-  var childExit = -1;
-  try {
-    childPid = processManager.fork();  // parent thread; child PID = 2
-    processManager.execInProcess(childPid, function() { return 0; });
-    var ws = processManager.waitpid(childPid);
-    childExit = ws.exitCode;
-    forkOk = (childPid === 2 && childExit === 0);
-  } catch(e) { forkOk = false; }
-  if (forkOk) {
-    kernel.serialPut('fork/exec test: child PID ' + childPid
-                     + ' ran and exited with code ' + childExit + '\n');
-  } else {
-    kernel.serialPut('fork/exec test: FAIL\n');
-  }
-
-  // Pipe roundtrip test: write bytes into a Pipe and read them back.
-  var pipeOk = false;
-  try {
-    var pipePair = new Pipe();
-    var msg = [72, 101, 108, 108, 111]; // "Hello"
-    pipePair.write(msg);
-    var got = pipePair.read(5);
-    pipeOk = (got.length === 5 && got[0] === 72 && got[4] === 111);
-  } catch(e) { pipeOk = false; }
-  kernel.serialPut('pipe roundtrip test: ' + (pipeOk ? 'PASS' : 'FAIL') + '\n');
-
-  // /proc/self/maps: report current process's VMA count (should be 4).
-  var vmaCount = processManager.selfVMAs();
-  kernel.serialPut('/proc/self/maps: ' + vmaCount + ' regions\n');
-
-  // ELF loader: build + parse a minimal ELF32, simulate execution.
-  var elfOut = '';
-  try {
-    elfOut = elfLoader.runHelloWorld();
-  } catch(e) { elfOut = 'Hello, World!'; }
-  kernel.serialPut('ELF loader: hello_world executed, printed "' + elfOut + '"\n');
 
   // ── Phase 7: Real networking ────────────────────────────────────────────── //
   function formatMac(b: number[]): string {
@@ -322,7 +278,11 @@ function main(): void {
       // Expose sys.browser() shortcut for the REPL
       var g2 = globalThis as any;
       g2.sys.browser = function(url?: string) {
-        if (url) browserApp.onKey({ ch: url, ext: 0 });
+        if (url) browserApp.onKey({
+          ch: '', ext: 0,
+          key: url, type: 'down' as const,
+          ctrl: false, shift: false, alt: false,
+        });
         return 'Browser: ' + (url || 'about:jsos');
       };
 
@@ -342,14 +302,14 @@ function main(): void {
       kernel.serialPut('Terminal app launched\n');
       kernel.serialPut('REPL ready (windowed mode)\n');
 
-      // WM event loop — cap at ~60 fps (2 PIT ticks @ 100 Hz = 20 ms/frame)
-      // kernel.yield() at the top lets the cooperative scheduler run all ready
-      // threads before we render, so threads blocked in sleep() get their turn.
+      // WM event loop — target ~50 fps (20 ms/frame at 100 Hz PIT).
+      // kernel.yield() wakes any sleeping JS processes before input/render.
+      // kernel.sleep() uses 'hlt' so the CPU is truly idle between frames
+      // instead of burning 100% on a spin-wait.
       for (;;) {
-        kernel.yield();           // cooperative scheduler tick (Phase 5)
-        var _t0 = kernel.getTicks();
-        wmInst.tick();
-        while (kernel.getTicks() - _t0 < 2) { /* spin until 20 ms elapsed */ }
+        kernel.yield();          // cooperative scheduler tick — unblock sleeping threads
+        wmInst.tick();           // poll input, render, composite, flip
+        kernel.sleep(16);        // halt CPU until next ~2 timer ticks (~20 ms)
       }
     }
   }

@@ -45,15 +45,23 @@ function fill(n: number, v: number = 0): number[] {
   for (var i = 0; i < n; i++) a[i] = v;
   return a;
 }
-function strToBytes(s: string): number[] {
+export function strToBytes(s: string): number[] {
   var b: number[] = new Array(s.length);
   for (var i = 0; i < s.length; i++) b[i] = s.charCodeAt(i) & 0xff;
   return b;
 }
-function bytesToStr(b: number[]): string {
-  var parts: string[] = [];
-  for (var i = 0; i < b.length; i++) parts.push(String.fromCharCode(b[i]));
-  return parts.join('');
+export function bytesToStr(b: number[]): string {
+  // String.fromCharCode.apply eliminates the intermediate parts[] array and join
+  // call for every byte.  TCP MSS segments are ≤1460 bytes so a single apply
+  // is safe (QuickJS arg-count limit is far above 1460).
+  // For larger buffers (e.g. recvBuf drain) chunk to 4096 to stay stack-safe.
+  if (b.length === 0) return '';
+  if (b.length <= 4096) return String.fromCharCode.apply(null, b as any);
+  var s = '';
+  for (var off = 0; off < b.length; off += 4096) {
+    s += String.fromCharCode.apply(null, b.slice(off, off + 4096) as any);
+  }
+  return s;
 }
 
 // ── Address helpers ──────────────────────────────────────────────────────────
@@ -510,7 +518,9 @@ export class NetworkStack {
         break;
       case 'ESTABLISHED':
         if (seg.payload.length > 0) {
-          conn.recvBuf = conn.recvBuf.concat(seg.payload);
+          // push.apply mutates in-place (O(new)) vs concat which copies the
+          // entire existing buffer into a new array every segment (O(total)).
+          Array.prototype.push.apply(conn.recvBuf, seg.payload);
           conn.recvSeq = (conn.recvSeq + seg.payload.length) >>> 0;
           // Deliver to socket's recvQueue
           var sock = this._findSockForConn(conn);
@@ -845,6 +855,59 @@ export class NetworkStack {
   }
 
   /**
+   * Initiate a TCP connection without blocking.
+   * Call connectPoll() once per frame until it returns 'connected'.
+   */
+  connectAsync(sock: Socket, remoteIP: IPv4Address, remotePort: number): void {
+    sock.remoteIP   = remoteIP;
+    sock.remotePort = remotePort;
+    if (!sock.localPort) sock.localPort = this.nextEph++;
+    var iss = this._randSeq();
+    var conn: TCPConnection = {
+      id: this.nextConn++, state: 'SYN_SENT',
+      localIP: sock.localIP, localPort: sock.localPort,
+      remoteIP, remotePort,
+      sendSeq: iss, recvSeq: 0,
+      sendBuf: [], recvBuf: [], window: 65535,
+    };
+    this.connections.set(conn.id, conn);
+    this._sendTCPSeg(conn, TCP_SYN, []);
+    conn.sendSeq = (conn.sendSeq + 1) >>> 0;
+    // sock.state stays 'connecting' until connectPoll confirms ESTABLISHED
+  }
+
+  /**
+   * Poll a socket started with connectAsync.
+   * Returns 'connected' once TCP handshake completes, 'pending' otherwise.
+   */
+  connectPoll(sock: Socket): 'connected' | 'pending' {
+    if (this.nicReady) this.pollNIC();
+    this.processRxQueue();
+    var conn = this._connForSock(sock);
+    if (conn && conn.state === 'ESTABLISHED') {
+      sock.state = 'connected';
+      return 'connected';
+    }
+    return 'pending';
+  }
+
+  /**
+   * Non-blocking receive: poll the NIC once and return any buffered TCP data,
+   * or null if nothing is available yet.
+   */
+  recvBytesNB(sock: Socket): number[] | null {
+    if (this.nicReady) this.pollNIC();
+    this.processRxQueue();
+    var conn = this._connForSock(sock);
+    if (conn && conn.recvBuf.length > 0) {
+      var data = conn.recvBuf.slice();
+      conn.recvBuf = [];
+      return data;
+    }
+    return null;
+  }
+
+  /**
    * Send a UDP datagram with raw byte payload.
    */
   sendUDPRaw(localPort: number, dstIP: IPv4Address, dstPort: number, data: number[]): void {
@@ -879,6 +942,20 @@ export class NetworkStack {
       kernel.sleep(1);  // yield to QEMU for virtio BH processing
     }
     this.udpRxMap.delete(localPort);
+    return null;
+  }
+
+  /**
+   * Non-blocking UDP receive on localPort.
+   * Registers the inbox if needed, polls once, returns first datagram or null.
+   * The inbox is NOT removed — caller must call udpRxMap.delete(port) when done.
+   */
+  recvUDPRawNB(localPort: number): { from: IPv4Address; fromPort: number; data: number[] } | null {
+    if (!this.udpRxMap.has(localPort)) this.udpRxMap.set(localPort, []);
+    if (this.nicReady) this.pollNIC();
+    this.processRxQueue();
+    var inbox = this.udpRxMap.get(localPort)!;
+    if (inbox.length > 0) return inbox.shift()!;
     return null;
   }
 
@@ -962,18 +1039,24 @@ export class NetworkStack {
     if (opts.mask)    { this.mask    = opts.mask; }
   }
 
+  /** Open (pre-register) a UDP inbox for `port` so frames arriving before
+   *  the first recvUDPRawNB call are buffered, not dropped. */
+  openUDPInbox(port: number): void {
+    if (!this.udpRxMap.has(port)) this.udpRxMap.set(port, []);
+  }
+
+  /** Close and discard the UDP inbox for `port`. */
+  closeUDPInbox(port: number): void {
+    this.udpRxMap.delete(port);
+  }
+
   getStats() { return Object.assign({}, this.stats); }
 
   getConnections(): TCPConnection[] {
     return Array.from(this.connections.values());
   }
 
-  getSockets(): Socket[] {
-    return Array.from(this.sockets.values());
-  }
-
   ifconfig(): string {
-    var m = kernel.getMemoryInfo(); // dummy — not used, just callable
     return (
       'eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500\n' +
       '        inet ' + this.ip + '  netmask ' + this.mask + '  broadcast ' + this._broadcast() + '\n' +

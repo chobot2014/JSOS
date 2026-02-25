@@ -6,7 +6,7 @@
  * live here; C sees only raw TCP bytes.
  */
 
-import { net } from './net.js';
+import { net, strToBytes, bytesToStr } from './net.js';
 import { TLSSocket } from './tls.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
@@ -15,20 +15,6 @@ export interface HttpResponse {
   status:  number;
   headers: Map<string, string>;
   body:    number[];
-}
-
-// ── Byte helpers ──────────────────────────────────────────────────────────────
-
-function strToBytes(s: string): number[] {
-  var b: number[] = new Array(s.length);
-  for (var i = 0; i < s.length; i++) b[i] = s.charCodeAt(i) & 0xff;
-  return b;
-}
-
-function bytesToStr(b: number[]): string {
-  var parts: string[] = [];
-  for (var i = 0; i < b.length; i++) parts.push(String.fromCharCode(b[i]));
-  return parts.join('');
 }
 
 // ── HTTP request builder ──────────────────────────────────────────────────────
@@ -61,7 +47,7 @@ function buildPostRequest(
 
 // ── HTTP response parser ──────────────────────────────────────────────────────
 
-function parseHttpResponse(data: number[]): HttpResponse | null {
+export function parseHttpResponse(data: number[]): HttpResponse | null {
   var raw = bytesToStr(data);
   var headerEnd = raw.indexOf('\r\n\r\n');
   if (headerEnd < 0) headerEnd = raw.indexOf('\n\n');

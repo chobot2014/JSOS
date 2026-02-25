@@ -14,14 +14,29 @@
 
 import { Canvas, Colors, defaultFont, createScreenCanvas, type PixelColor } from './canvas.js';
 import { net } from '../net/net.js';
+import { threadManager } from '../process/threads.js';
+import { scheduler } from '../process/scheduler.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
 // ── Event types ────────────────────────────────────────────────────────────
 
 export interface KeyEvent {
+  /** Raw character from kernel (printable or control char, '' for ext keys). */
   ch: string;
-  ext: number;  /* non-zero for special keys (KEY_UP etc.) */
+  /** Non-zero numeric code for special/extended keys (use `key` for portable apps). */
+  ext: number;
+  /** DOM-style key name: 'ArrowUp', 'Enter', 'Backspace', 'a', 'A', 'F1' …
+   *  Ctrl+letter gives key='A'–'Z' with ctrl=true. */
+  key: string;
+  /** Always 'down' — this platform only reports key-down events. */
+  type: 'down';
+  /** True for Ctrl+A–Z codes (\x01–\x1a, excluding Tab/Enter/Backspace/Esc). */
+  ctrl: boolean;
+  /** Not provided by this hardware; always false. */
+  shift: boolean;
+  /** Not provided by this hardware; always false. */
+  alt: boolean;
 }
 
 export interface MouseEvent {
@@ -43,6 +58,12 @@ export interface App {
   onMouse(event: MouseEvent): void;
   /** Render into canvas.  Return true if anything was redrawn, false to skip composite. */
   render(canvas: Canvas): boolean;
+  /** Called when this window becomes the focused (active) window. */
+  onFocus?(): void;
+  /** Called when this window loses focus. */
+  onBlur?(): void;
+  /** Called when the window content area is resized. */
+  onResize?(width: number, height: number): void;
 }
 
 // ── Window ─────────────────────────────────────────────────────────────────
@@ -90,11 +111,14 @@ const CURSOR_PIXELS: number[] = [
 
 // ── WindowManager ─────────────────────────────────────────────────────────
 
-const TITLE_H     = 22;   /* pixels — title bar height */
-const TASKBAR_H   = 28;   /* pixels — taskbar height   */
-const MIN_WIN_W   = 120;
+const TITLE_H     = 22;   /* pixels — title bar height    */
+const TASKBAR_H   = 28;   /* pixels — taskbar height      */
+const RESIZE_GRIP = 10;   /* pixels — resize corner area  */
+const MIN_WIN_W   = 160;
 const MIN_WIN_H   = 80;
-const TITLE_COLOR = Colors.TITLE_BG;
+const BTN_W       = 14;   /* title bar button width        */
+const BTN_M       = 2;    /* margin between buttons        */
+const TITLE_COLOR         = Colors.TITLE_BG;
 const FOCUSED_TITLE_COLOR = 0xFF2A5F8F;
 
 export class WindowManager {
@@ -111,10 +135,24 @@ export class WindowManager {
   private _wmDirty     = true;   // set on cursor move, input, drag, clock change
   private _lastClockMin = -1;    // track minute for clock redraw
 
-  // Drag state
+  // Title-bar drag
   private _dragging: number | null = null;
   private _dragOffX = 0;
   private _dragOffY = 0;
+
+  // Resize drag (bottom-right corner grip)
+  private _resizing:    number | null = null;
+  private _resizeStartX = 0;
+  private _resizeStartY = 0;
+  private _resizeStartW = 0;
+  private _resizeStartH = 0;
+
+  // Saved sizes for maximise/restore
+  private _savedSizes = new Map<number, { x: number; y: number; w: number; h: number }>();
+
+  // Mouse capture — app window that receives all events while button is held
+  private _mouseCapture: number | null = null;
+  private _clipboard: string = '';
 
   constructor(screen: Canvas) {
     this._screen  = screen;
@@ -157,16 +195,26 @@ export class WindowManager {
     this._windows.push(win);
     this._focused = win.id;
     opts.app.onMount(win);
+    if (opts.app.onFocus) opts.app.onFocus();
     return win;
   }
 
   focusWindow(id: number): void {
+    if (this._focused === id) return;
+    var prevId = this._focused;
     for (var i = 0; i < this._windows.length; i++) {
       if (this._windows[i].id === id) {
+        // Notify old focused app
+        if (prevId !== null) {
+          var prev = this._findWindow(prevId);
+          if (prev && prev.app.onBlur) prev.app.onBlur();
+        }
         this._focused = id;
         // Move to top of stack
         var win = this._windows.splice(i, 1)[0];
         this._windows.push(win);
+        if (win.app.onFocus) win.app.onFocus();
+        this._wmDirty = true;
         return;
       }
     }
@@ -178,11 +226,14 @@ export class WindowManager {
       if (win.id === id) {
         win.app.onUnmount();
         this._windows.splice(i, 1);
-        if (this._focused === id) {
+        if (this._focused    === id) {
           this._focused = this._windows.length > 0
             ? this._windows[this._windows.length - 1].id
             : null;
         }
+        if (this._mouseCapture === id) this._mouseCapture = null;
+        if (this._dragging     === id) this._dragging     = null;
+        if (this._resizing     === id) this._resizing     = null;
         return;
       }
     }
@@ -190,8 +241,37 @@ export class WindowManager {
 
   minimiseWindow(id: number): void {
     var win = this._findWindow(id);
-    if (win) win.minimised = true;
+    if (!win || win.minimised) return;
+    if (win.app.onBlur) win.app.onBlur();
+    win.minimised = true;
+    if (this._mouseCapture === id) this._mouseCapture = null;
+    if (this._dragging     === id) this._dragging     = null;
+    if (this._resizing     === id) this._resizing     = null;
+    if (this._focused === id) {
+      var next: WMWindow | undefined;
+      for (var i = this._windows.length - 1; i >= 0; i--) {
+        if (!this._windows[i].minimised && this._windows[i].id !== id) {
+          next = this._windows[i]; break;
+        }
+      }
+      this._focused = next ? next.id : null;
+      if (next && next.app.onFocus) next.app.onFocus();
+    }
+    this._wmDirty = true;
   }
+
+  restoreWindow(id: number): void {
+    var win = this._findWindow(id);
+    if (!win || !win.minimised) return;
+    win.minimised = false;
+    this.focusWindow(id);
+    this._wmDirty = true;
+  }
+
+  // ── Clipboard ──────────────────────────────────────────────────────────
+
+  getClipboard(): string { return this._clipboard; }
+  setClipboard(text: string): void { this._clipboard = text; this._wmDirty = true; }
 
   // ── Query ──────────────────────────────────────────────────────────────
 
@@ -207,6 +287,8 @@ export class WindowManager {
   tick(): void {
     this._pollInput();
     this._tickChildProcs();
+    scheduler.tick();                 // process-level accounting, signals, time-slice
+    threadManager.tickCoroutines();   // cooperative fetch / async coroutines
     this._composite();
   }
   /** Mark the WM as needing a repaint (call from app code or external events). */
@@ -216,10 +298,11 @@ export class WindowManager {
    * Pump every live child JS process each frame.
    * This drives Promise/async resolution and fires onMessage callbacks
    * without any user code needing to manually call p.tick().
-   * Cost is negligible when no processes are running (empty procList).
+   * Guard: skip the kernel.procList() allocation entirely when no children exist.
    */
   private _tickChildProcs(): void {
     var list = kernel.procList();
+    if (list.length === 0) return;
     for (var i = 0; i < list.length; i++) {
       kernel.procTick(list[i].id);
     }
@@ -227,7 +310,7 @@ export class WindowManager {
   // ── Input dispatch ─────────────────────────────────────────────────────
 
   private _pollInput(): void {
-    // Drain mouse queue
+    // ── Drain mouse queue ─────────────────────────────────────────────────────
     for (var i = 0; i < 8; i++) {
       var pkt = kernel.readMouse();
       if (!pkt) break;
@@ -235,62 +318,254 @@ export class WindowManager {
       var prevY = this._cursorY;
       this._cursorX = Math.max(0, Math.min(this._screen.width  - 1, this._cursorX + pkt.dx));
       this._cursorY = Math.max(0, Math.min(this._screen.height - 1, this._cursorY + pkt.dy));
-      if (this._cursorX !== prevX || this._cursorY !== prevY) this._wmDirty = true;
+      var cx = this._cursorX;
+      var cy = this._cursorY;
+      if (cx !== prevX || cy !== prevY) this._wmDirty = true;
 
-      // Handle drag
-      if (pkt.buttons & 1) {
+      var btn1     = pkt.buttons & 1;
+      var prevBtn1 = this._prevButtons & 1;
+
+      if (btn1) {
+        // ── Active drag ──────────────────────────────────────────────────────
         if (this._dragging !== null) {
           var dw = this._findWindow(this._dragging);
           if (dw) {
-            dw.x = this._cursorX - this._dragOffX;
-            dw.y = this._cursorY - this._dragOffY;
+            dw.x = cx - this._dragOffX;
+            dw.y = Math.max(0, cy - this._dragOffY);
             this._wmDirty = true;
           }
-        } else if (!(this._prevButtons & 1)) {
-          // Mouse down — check title bar hit
-          for (var j = this._windows.length - 1; j >= 0; j--) {
-            var w = this._windows[j];
-            if (w.minimised) continue;
-            if (this._cursorX >= w.x && this._cursorX < w.x + w.width &&
-                this._cursorY >= w.y && this._cursorY < w.y + TITLE_H) {
-              this.focusWindow(w.id);
-              // Close button
-              if (w.closeable &&
-                  this._cursorX >= w.x + w.width - 18 &&
-                  this._cursorX <= w.x + w.width - 4 &&
-                  this._cursorY >= w.y + 4 &&
-                  this._cursorY <= w.y + TITLE_H - 4) {
-                this.closeWindow(w.id);
-              } else {
-                this._dragging = w.id;
-                this._dragOffX = this._cursorX - w.x;
-                this._dragOffY = this._cursorY - w.y;
-                this._wmDirty = true;
+        // ── Active resize ────────────────────────────────────────────────────
+        } else if (this._resizing !== null) {
+          var rw = this._findWindow(this._resizing);
+          if (rw) {
+            rw.width  = Math.max(MIN_WIN_W, this._resizeStartW + cx - this._resizeStartX);
+            rw.height = Math.max(MIN_WIN_H + TITLE_H, this._resizeStartH + cy - this._resizeStartY);
+            this._wmDirty = true;
+          }
+        // ── New mouse-down ───────────────────────────────────────────────────
+        } else if (!prevBtn1) {
+          var consumed = false;
+
+          // 1. Taskbar button click?
+          var barY = this._screen.height - TASKBAR_H;
+          if (cy >= barY) {
+            var btnX = 58;
+            for (var bi = 0; bi < this._windows.length; bi++) {
+              var wb = this._windows[bi];
+              if (cx >= btnX && cx < btnX + 90 && cy >= barY + 3 && cy < barY + TASKBAR_H - 3) {
+                if (wb.minimised) {
+                  this.restoreWindow(wb.id);
+                } else if (wb.id === this._focused) {
+                  this.minimiseWindow(wb.id);
+                } else {
+                  this.focusWindow(wb.id);
+                }
+                consumed = true;
+                break;
               }
-              break;
+              btnX += 95;
+            }
+          }
+
+          // 2. Window hit scan (top-most first)
+          if (!consumed) {
+            for (var j = this._windows.length - 1; j >= 0; j--) {
+              var w = this._windows[j];
+              if (w.minimised) continue;
+
+              // 2a. Resize grip (bottom-right corner)?
+              if (!w.maximised &&
+                  cx >= w.x + w.width - RESIZE_GRIP && cx < w.x + w.width &&
+                  cy >= w.y + w.height - RESIZE_GRIP && cy < w.y + w.height) {
+                this.focusWindow(w.id);
+                this._resizing      = w.id;
+                this._resizeStartX  = cx;
+                this._resizeStartY  = cy;
+                this._resizeStartW  = w.width;
+                this._resizeStartH  = w.height;
+                consumed = true;
+                break;
+              }
+
+              // 2b. Title bar?
+              if (cx >= w.x && cx < w.x + w.width &&
+                  cy >= w.y && cy < w.y + TITLE_H) {
+                this.focusWindow(w.id);
+                var btnBase = w.x + w.width;
+                if (w.closeable && cx >= btnBase - 18 && cx <= btnBase - 4 &&
+                    cy >= w.y + 4 && cy <= w.y + TITLE_H - 4) {
+                  this.closeWindow(w.id);
+                } else if (cx >= btnBase - 34 && cx <= btnBase - 20 &&
+                           cy >= w.y + 4 && cy <= w.y + TITLE_H - 4) {
+                  this._toggleMaximise(w);
+                } else if (cx >= btnBase - 50 && cx <= btnBase - 36 &&
+                           cy >= w.y + 4 && cy <= w.y + TITLE_H - 4) {
+                  this.minimiseWindow(w.id);
+                } else {
+                  this._dragging  = w.id;
+                  this._dragOffX  = cx - w.x;
+                  this._dragOffY  = cy - w.y;
+                  this._wmDirty   = true;
+                }
+                consumed = true;
+                break;
+              }
+
+              // 2c. Content area?
+              if (cx >= w.x && cx < w.x + w.width &&
+                  cy >= w.y + TITLE_H && cy < w.y + w.height) {
+                this._mouseCapture = w.id;
+                this.focusWindow(w.id);
+                consumed = true;
+                break;
+              }
             }
           }
         }
+
       } else {
+        // ── Button released ──────────────────────────────────────────────────
+        if (this._resizing !== null) {
+          var rw2 = this._findWindow(this._resizing);
+          if (rw2) {
+            var newCW = rw2.width;
+            var newCH = rw2.height - TITLE_H;
+            if (rw2.canvas.width !== newCW || rw2.canvas.height !== newCH) {
+              rw2.canvas = new Canvas(newCW, newCH);
+              if (rw2.app.onResize) rw2.app.onResize(newCW, newCH);
+            }
+          }
+          this._resizing = null;
+          this._wmDirty  = true;
+        }
         this._dragging = null;
+      }
+
+      // ── Dispatch mouse events to app content area ─────────────────────────
+      if (this._dragging === null && this._resizing === null) {
+        var hitWin: WMWindow | null = null;
+        for (var hj = this._windows.length - 1; hj >= 0; hj--) {
+          var hw = this._windows[hj];
+          if (hw.minimised) continue;
+          if (cx >= hw.x && cx < hw.x + hw.width &&
+              cy >= hw.y + TITLE_H && cy < hw.y + hw.height) {
+            hitWin = hw; break;
+          }
+        }
+        var dispWin: WMWindow | null = hitWin;
+        if (this._mouseCapture !== null) {
+          var cw = this._findWindow(this._mouseCapture);
+          if (cw && !cw.minimised) dispWin = cw;
+        }
+        if (!btn1 && prevBtn1) this._mouseCapture = null;
+
+        if (dispWin) {
+          var evType: 'move' | 'down' | 'up';
+          if      (btn1 && !prevBtn1)  evType = 'down';
+          else if (!btn1 && prevBtn1)  evType = 'up';
+          else                         evType = 'move';
+          try {
+            dispWin.app.onMouse({
+              x:       cx - dispWin.x,
+              y:       cy - (dispWin.y + TITLE_H),
+              dx:      cx - prevX,
+              dy:      cy - prevY,
+              buttons: pkt.buttons,
+              type:    evType,
+            });
+          } catch (_e) {}
+          if (evType !== 'move') this._wmDirty = true;
+        }
+      } else {
+        this._mouseCapture = null;
       }
 
       this._prevButtons = pkt.buttons;
     }
 
-    // Drain keyboard to focused window (readKeyEx checks ext keys + chars)
-    for (var k = 0; k < 32; k++) {
-      var kev = kernel.readKeyEx();
-      if (!kev) break;
-      var focused = this.getFocused();
-      if (focused) {
-        focused.app.onKey(kev);
+    // ── Drain keyboard to focused window ──────────────────────────────────────
+    var focused = this.getFocused();
+    if (focused) {
+      for (var k = 0; k < 32; k++) {
+        var raw = kernel.readKeyEx();
+        if (!raw) break;
+        try { focused.app.onKey(this._makeKeyEvent(raw)); } catch (_e) {}
         this._wmDirty = true;
       }
+    } else {
+      // Still drain the queue even when no window is focused
+      for (var k = 0; k < 32; k++) { if (!kernel.readKeyEx()) break; }
     }
 
-    // Drain virtio-net RX ring — keep the TCP/IP stack ticking every frame.
+    // ── Pump network stack ────────────────────────────────────────────────────
     net.pollNIC();
+  }
+
+  /** Convert raw kernel {ch, ext} into the portable KeyEvent format. */
+  private _makeKeyEvent(raw: { ch: string; ext: number }): KeyEvent {
+    var ch  = raw.ch;
+    var ext = raw.ext;
+    var key = '';
+    var ctrl = false;
+
+    if (ext !== 0) {
+      if      (ext === 0x80) key = 'ArrowUp';
+      else if (ext === 0x81) key = 'ArrowDown';
+      else if (ext === 0x82) key = 'ArrowLeft';
+      else if (ext === 0x83) key = 'ArrowRight';
+      else if (ext === 0x84) key = 'Home';
+      else if (ext === 0x85) key = 'End';
+      else if (ext === 0x86) key = 'PageUp';
+      else if (ext === 0x87) key = 'PageDown';
+      else if (ext === 0x88) key = 'Delete';
+      else if (ext >= 0x90 && ext <= 0x9B) key = 'F' + (ext - 0x8F);
+      else key = 'Ext' + ext.toString(16).toUpperCase();
+    } else if (ch === '\n' || ch === '\r') {
+      key = 'Enter';
+    } else if (ch === '\b' || ch === '\x7f') {
+      key = 'Backspace';
+    } else if (ch === '\t') {
+      key = 'Tab';
+    } else if (ch === '\x1b') {
+      key = 'Escape';
+    } else if (ch.length === 1) {
+      var code = ch.charCodeAt(0);
+      if (code >= 1 && code <= 26) {
+        // Ctrl+A(1) … Ctrl+Z(26) — but Tab(9), Enter(10/13), Esc(27) already handled
+        ctrl = true;
+        key  = String.fromCharCode(code + 64);
+      } else {
+        key = ch;
+      }
+    } else {
+      key = ch;
+    }
+
+    return { ch, ext, key, type: 'down', ctrl, shift: false, alt: false };
+  }
+
+  /** Toggle maximised state; saves/restores geometry and rebuilds content canvas. */
+  private _toggleMaximise(win: WMWindow): void {
+    if (win.maximised) {
+      var saved = this._savedSizes.get(win.id);
+      if (saved) {
+        win.x = saved.x;  win.y = saved.y;
+        win.width = saved.w;  win.height = saved.h;
+        this._savedSizes.delete(win.id);
+      }
+      win.maximised = false;
+    } else {
+      this._savedSizes.set(win.id, { x: win.x, y: win.y, w: win.width, h: win.height });
+      win.x = 0;  win.y = 0;
+      win.width  = this._screen.width;
+      win.height = this._screen.height - TASKBAR_H;
+      win.maximised = true;
+    }
+    var newCW = win.width;
+    var newCH = win.height - TITLE_H;
+    win.canvas = new Canvas(newCW, newCH);
+    if (win.app.onResize) win.app.onResize(newCW, newCH);
+    this._wmDirty = true;
   }
 
   // ── Compositing ────────────────────────────────────────────────────────
@@ -307,7 +582,9 @@ export class WindowManager {
     var anyDirty = this._wmDirty;
     for (var ai = 0; ai < this._windows.length; ai++) {
       var wi = this._windows[ai];
-      if (!wi.minimised && wi.app.render(wi.canvas)) anyDirty = true;
+      if (!wi.minimised) {
+        try { if (wi.app.render(wi.canvas)) anyDirty = true; } catch (_e) {}
+      }
     }
 
     if (!anyDirty) return;   // ★ nothing changed — skip expensive composite+flip
@@ -323,24 +600,46 @@ export class WindowManager {
 
       var focused = (win.id === this._focused);
 
-      // Let app render into its sub-canvas (already called above for dirty check)
       // Title bar
       s.fillRect(win.x, win.y, win.width, TITLE_H,
                  focused ? FOCUSED_TITLE_COLOR : TITLE_COLOR);
-      s.drawText(win.x + 6, win.y + 5, win.title, Colors.WHITE);
+      // Title text (truncate to avoid overlapping buttons)
+      var maxTitleChars = Math.floor((win.width - 58) / 8);
+      var title = win.title.length > maxTitleChars
+        ? win.title.substring(0, maxTitleChars)
+        : win.title;
+      s.drawText(win.x + 6, win.y + 5, title, Colors.WHITE);
 
-      // Close button
+      // Title bar buttons (right→left: close, max, min)
+      var bb = win.x + win.width;
+      // Close
       if (win.closeable) {
-        s.fillRect(win.x + win.width - 18, win.y + 4, 14, TITLE_H - 8, 0xFFCC3333);
-        s.drawText(win.x + win.width - 14, win.y + 6, 'X', Colors.WHITE);
+        s.fillRect(bb - 18, win.y + 4, BTN_W, TITLE_H - 8, 0xFFCC3333);
+        s.drawText(bb - 14, win.y + 6, 'X', Colors.WHITE);
       }
+      // Maximise
+      s.fillRect(bb - 34, win.y + 4, BTN_W, TITLE_H - 8, focused ? 0xFF226622 : 0xFF1A441A);
+      s.drawText(bb - 31, win.y + 6, win.maximised ? '\u25a4' : '\u25a1', Colors.LIGHT_GREY);
+      // Minimise
+      s.fillRect(bb - 50, win.y + 4, BTN_W, TITLE_H - 8, focused ? 0xFF664422 : 0xFF442D17);
+      s.drawText(bb - 47, win.y + 6, '_', Colors.LIGHT_GREY);
 
-      // Content area shadow
+      // Content area
       s.fillRect(win.x, win.y + TITLE_H, win.width, win.height - TITLE_H, 0xFF111111);
 
-      // Blit window content canvas onto screen
+      // Blit window canvas (clamped to actual canvas dimensions to handle mid-resize)
       var contentH = win.height - TITLE_H;
-      s.blit(win.canvas, 0, 0, win.x, win.y + TITLE_H, win.width, contentH);
+      var blitW = Math.min(win.width, win.canvas.width);
+      var blitH = Math.min(contentH, win.canvas.height);
+      s.blit(win.canvas, 0, 0, win.x, win.y + TITLE_H, blitW, blitH);
+
+      // Resize grip: three diagonal lines at bottom-right
+      var gx = win.x + win.width - 1;
+      var gy = win.y + win.height - 1;
+      var gc = focused ? 0xFF6688AA : 0xFF445566;
+      s.drawLine(gx - 8, gy, gx, gy - 8, gc);
+      s.drawLine(gx - 5, gy, gx, gy - 5, gc);
+      s.drawLine(gx - 2, gy, gx, gy - 2, gc);
 
       // Window border
       s.drawRect(win.x, win.y, win.width, win.height,
@@ -417,3 +716,7 @@ export class WindowManager {
 /** Singleton WM instance — created by main.ts after framebuffer detection. */
 export let wm: WindowManager | null = null;
 export function setWM(instance: WindowManager): void { wm = instance; }
+export function getWM(): WindowManager {
+  if (!wm) throw new Error('WindowManager not yet initialised');
+  return wm;
+}

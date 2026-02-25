@@ -14,12 +14,13 @@
  *   • Redirect following 3xx (max 5 hops)
  */
 
-import { Canvas, Colors, type PixelColor } from '../ui/canvas.js';
-import type { App, WMWindow, KeyEvent, MouseEvent } from '../ui/wm.js';
-import { dnsResolve } from '../net/dns.js';
-import { httpGet, httpsGet, httpPost, httpsPost } from '../net/http.js';
+import {
+  os, Canvas, Colors,
+  type PixelColor, type App, type WMWindow, type KeyEvent, type MouseEvent,
+  type FetchResponse,
+} from '../../core/sdk.js';
 
-declare var kernel: import('../core/kernel.js').KernelAPI;
+declare var kernel: import('../../core/kernel.js').KernelAPI;
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 
@@ -1130,7 +1131,11 @@ export class BrowserApp implements App {
   private _win:           WMWindow | null = null;
   private _urlInput       = 'about:jsos';
   private _urlBarFocus    = true;
+  private _urlCursorPos   = 0;       // caret index into _urlInput
+  private _urlScrollOff   = 0;       // first visible char (horizontal scroll)
+  private _urlAllSelected = false;   // select-all: next printable key replaces all
   private _cursorBlink    = 0;
+  private _hoverBtn       = -1;      // 0=back 1=fwd 2=reload, -1=none
 
   private _history:       HistoryEntry[] = [];
   private _histIdx        = -1;
@@ -1163,11 +1168,11 @@ export class BrowserApp implements App {
   private _findHits:      Array<{ lineIdx: number; spanIdx: number }> = [];
   private _findCur        = 0;
 
-  // Deferred load
-  private _pendingLoad:      string | null = null;
-  private _pendingLoadReady  = false;
-  private _pendingNavPush    = false;
-  private _redirectDepth     = 0;
+  // Scrollbar drag
+  private _scrollbarDragging = false;
+
+  // Async fetch — the SDK owns the DNS/TCP/TLS state machine
+  private _fetchCoroId = -1;
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -1207,18 +1212,51 @@ export class BrowserApp implements App {
 
     // ── URL bar ──────────────────────────────────────────────────────────────
     if (this._urlBarFocus) {
-      if (ch === '\x0c') { this._urlInput = ''; this._dirty = true; return; }
+      if (ch === '\x0c') {
+        this._urlInput = ''; this._urlCursorPos = 0; this._urlScrollOff = 0;
+        this._urlAllSelected = false; this._dirty = true; return;
+      }
       if (ch === '\n' || ch === '\r') {
         var raw = this._urlInput.trim();
+        this._urlAllSelected = false;
         if (raw) {
-          this._pendingLoad = raw; this._pendingNavPush = true;
-          this._pendingLoadReady = false; this._loading = true; this._dirty = true;
+          this._urlBarFocus = false; this._urlAllSelected = false;
+          this._navigate(raw);
         }
         return;
       }
-      if (ch === '\b')   { this._urlInput = this._urlInput.slice(0, -1); this._dirty = true; return; }
-      if (ch === '\x1b') { this._urlBarFocus = false; this._dirty = true; return; }
-      if (ch >= ' ')     { this._urlInput += ch; this._dirty = true; return; }
+      if (ch === '\x1b') {
+        this._urlBarFocus = false; this._urlAllSelected = false; this._dirty = true; return;
+      }
+      if (ext) {
+        this._urlAllSelected = false;
+        if (ext === 0x4B) { this._urlCursorPos = Math.max(0, this._urlCursorPos - 1); }
+        else if (ext === 0x4D) { this._urlCursorPos = Math.min(this._urlInput.length, this._urlCursorPos + 1); }
+        else if (ext === 0x47) { this._urlCursorPos = 0; this._urlScrollOff = 0; }
+        else if (ext === 0x4F) { this._urlCursorPos = this._urlInput.length; }
+        this._dirty = true; return;
+      }
+      if (ch === '\b') {
+        if (this._urlAllSelected) {
+          this._urlInput = ''; this._urlCursorPos = 0;
+          this._urlScrollOff = 0; this._urlAllSelected = false;
+        } else if (this._urlCursorPos > 0) {
+          this._urlInput    = this._urlInput.slice(0, this._urlCursorPos - 1) + this._urlInput.slice(this._urlCursorPos);
+          this._urlCursorPos--;
+          this._urlScrollOff = Math.min(this._urlScrollOff, this._urlCursorPos);
+        }
+        this._dirty = true; return;
+      }
+      if (ch >= ' ') {
+        if (this._urlAllSelected) {
+          this._urlInput = ch; this._urlCursorPos = 1;
+          this._urlScrollOff = 0; this._urlAllSelected = false;
+        } else {
+          this._urlInput = this._urlInput.slice(0, this._urlCursorPos) + ch + this._urlInput.slice(this._urlCursorPos);
+          this._urlCursorPos++;
+        }
+        this._dirty = true; return;
+      }
       return;
     }
 
@@ -1239,7 +1277,11 @@ export class BrowserApp implements App {
       if (ext === 0x4F) { this._scrollBy( this._maxScrollY);    return; }
     }
 
-    if (ch === '\x0c') { this._urlBarFocus = true; this._urlInput = this._pageURL; this._dirty = true; return; }
+    if (ch === '\x0c') {
+      this._urlBarFocus = true; this._urlInput = this._pageURL;
+      this._urlCursorPos = this._urlInput.length; this._urlScrollOff = 0;
+      this._urlAllSelected = true; this._dirty = true; return;
+    }
     if (ch === '\x12') { this._reload(); return; }
     if (ch === '\x04') { this._addBookmark(); return; }
     if (ch === '\x06') { this._openFind(); return; }
@@ -1248,7 +1290,11 @@ export class BrowserApp implements App {
     if (ch === 'b' || ch === 'B') { this._goBack();    return; }
     if (ch === 'f' || ch === 'F') { this._goForward(); return; }
     if (ch === 'r' || ch === 'R') { this._reload();    return; }
-    if (ch === '/' || ch === 'l') { this._urlBarFocus = true; this._dirty = true; return; }
+    if (ch === '/' || ch === 'l') {
+      this._urlBarFocus = true; this._urlInput = this._pageURL;
+      this._urlCursorPos = this._urlInput.length; this._urlScrollOff = 0;
+      this._urlAllSelected = true; this._dirty = true; return;
+    }
   }
 
   onMouse(event: MouseEvent): void {
@@ -1256,6 +1302,30 @@ export class BrowserApp implements App {
 
     var contentY0 = TOOLBAR_H;
     var contentY1 = this._win.height - STATUSBAR_H - (this._findMode ? FINDBAR_H : 0);
+    var sbX       = this._win.width - 12;   // scrollbar left edge
+
+    // ── Toolbar hover tracking (all event types) ──────────────────────────
+    if (event.y >= 5 && event.y <= 24) {
+      var hb = -1;
+      if      (event.x >= 4  && event.x <= 25) hb = 0;
+      else if (event.x >= 28 && event.x <= 49) hb = 1;
+      else if (event.x >= 52 && event.x <= 73) hb = 2;
+      if (hb !== this._hoverBtn) { this._hoverBtn = hb; this._dirty = true; }
+    } else if (this._hoverBtn !== -1) {
+      this._hoverBtn = -1; this._dirty = true;
+    }
+
+    // ── Scrollbar drag: continue on move, release on up ───────────────────
+    if (event.type === 'up') {
+      this._scrollbarDragging = false;
+    }
+    if (this._scrollbarDragging && event.type === 'move') {
+      var chh0  = contentY1 - contentY0;
+      var frac0 = (event.y - contentY0) / chh0;
+      this._scrollY = Math.round(frac0 * this._maxScrollY);
+      this._scrollY = Math.max(0, Math.min(this._maxScrollY, this._scrollY));
+      this._dirty = true; return;
+    }
 
     if (event.type === 'down') {
       // Toolbar buttons
@@ -1263,12 +1333,24 @@ export class BrowserApp implements App {
         if (event.x >= 4  && event.x <= 25) { this._goBack();    return; }
         if (event.x >= 28 && event.x <= 49) { this._goForward(); return; }
         if (event.x >= 52 && event.x <= 73) { this._reload();    return; }
-        if (event.x > 76) { this._urlBarFocus = true; this._dirty = true; return; }
+        // URL bar click — select-all focus with click cursor position
+        if (event.x > 76) {
+          var urlX   = 76;
+          var urlW   = this._win!.width - urlX - 4;
+          var maxCh  = Math.max(1, Math.floor((urlW - 8) / CHAR_W));
+          this._urlInput       = this._pageURL;
+          this._urlBarFocus    = true;
+          this._urlAllSelected = true;
+          this._urlCursorPos   = this._urlInput.length;
+          this._urlScrollOff   = Math.max(0, this._urlInput.length - maxCh);
+          this._dirty = true; return;
+        }
       }
 
-      // Scrollbar click
-      if (this._maxScrollY > 0 && event.x >= this._win.width - 10 &&
+      // Scrollbar click — start drag
+      if (this._maxScrollY > 0 && event.x >= sbX &&
           event.y >= contentY0 && event.y < contentY1) {
+        this._scrollbarDragging = true;
         var chh  = contentY1 - contentY0;
         var frac = (event.y - contentY0) / chh;
         this._scrollY = Math.round(frac * this._maxScrollY);
@@ -1292,14 +1374,17 @@ export class BrowserApp implements App {
           var resolved = this._resolveHref(href);
           this._visited.add(resolved);
           this._urlBarFocus = false;
-          this._pendingLoad = resolved; this._pendingNavPush = true;
-          this._pendingLoadReady = false; this._loading = true; this._dirty = true;
+          this._navigate(resolved);
           return;
         }
 
-        // Defocus widget on empty click
+        // Defocus widget and URL bar on empty content click
         if (this._focusedWidget >= 0) { this._focusedWidget = -1; this._dirty = true; }
-        this._urlBarFocus = false; this._dirty = true;
+        if (this._urlBarFocus) {
+          this._urlBarFocus = false; this._urlAllSelected = false; this._dirty = true;
+        } else {
+          this._dirty = true;
+        }
       }
     }
 
@@ -1316,24 +1401,13 @@ export class BrowserApp implements App {
   // ── Rendering ──────────────────────────────────────────────────────────────
 
   render(canvas: Canvas): boolean {
-    this._cursorBlink++;
-    if ((this._cursorBlink & 31) === 0) this._dirty = true;
-
-    if (this._pendingLoad !== null) {
-      if (!this._pendingLoadReady) {
-        this._pendingLoadReady = true; this._dirty = true;
-        this._drawToolbar(canvas);
-        this._drawContent(canvas);
-        this._drawStatusBar(canvas);
-        if (this._findMode) this._drawFindBar(canvas);
-        return true;
-      } else {
-        var pu = this._pendingLoad!;
-        var ph = this._pendingNavPush;
-        this._pendingLoad = null; this._pendingLoadReady = false;
-        if (ph) { this._navigate(pu); }
-        else    { this._redirectDepth = 0; this._load(pu); }
-      }
+    // Only tick the blink counter when an input cursor is actually visible.
+    // Trigger a redraw on BOTH phase transitions (show→hide and hide→show)
+    // so the cursor actually blinks instead of staying permanently on.
+    if (this._urlBarFocus || this._focusedWidget >= 0) {
+      var prevPhase = (this._cursorBlink >> 4) & 1;
+      this._cursorBlink++;
+      if (((this._cursorBlink >> 4) & 1) !== prevPhase) this._dirty = true;
     }
 
     if (!this._dirty) return false;
@@ -1356,15 +1430,19 @@ export class BrowserApp implements App {
     canvas.fillRect(0, 0, w, TOOLBAR_H, CLR_TOOLBAR_BG);
     canvas.drawLine(0, TOOLBAR_H - 1, w, TOOLBAR_H - 1, CLR_TOOLBAR_BD);
 
-    canvas.fillRect(4, 5, 22, 20, CLR_BTN_BG);
+    // Back button (hoverBtn=0)
+    canvas.fillRect(4, 5, 22, 20, this._hoverBtn === 0 ? 0xFFC4C6CA : CLR_BTN_BG);
     canvas.drawText(10, 11, '<', this._histIdx > 0 ? CLR_BTN_TXT : CLR_HR);
 
-    canvas.fillRect(28, 5, 22, 20, CLR_BTN_BG);
+    // Forward button (hoverBtn=1)
+    canvas.fillRect(28, 5, 22, 20, this._hoverBtn === 1 ? 0xFFC4C6CA : CLR_BTN_BG);
     canvas.drawText(35, 11, '>', this._histIdx < this._history.length - 1 ? CLR_BTN_TXT : CLR_HR);
 
-    canvas.fillRect(52, 5, 22, 20, CLR_BTN_BG);
+    // Reload/Stop button (hoverBtn=2)
+    canvas.fillRect(52, 5, 22, 20, this._hoverBtn === 2 ? 0xFFC4C6CA : CLR_BTN_BG);
     canvas.drawText(58, 11, this._loading ? 'X' : 'R', CLR_BTN_TXT);
 
+    // URL bar
     var urlX = 76;
     var urlW = w - urlX - 4;
     canvas.fillRect(urlX, 5, urlW, 20, CLR_URL_BG);
@@ -1372,12 +1450,35 @@ export class BrowserApp implements App {
 
     var display  = this._urlBarFocus ? this._urlInput : this._pageURL;
     var maxChars = Math.max(1, Math.floor((urlW - 8) / CHAR_W));
-    var showTxt  = display.length > maxChars ? display.slice(display.length - maxChars) : display;
-    canvas.drawText(urlX + 4, 12, showTxt, CLR_BODY);
 
-    if (this._urlBarFocus && (this._cursorBlink >> 4) % 2 === 0) {
-      var ccx = urlX + 4 + showTxt.length * CHAR_W;
-      if (ccx <= urlX + urlW - 4) canvas.fillRect(ccx, 10, 1, CHAR_H, CLR_BODY);
+    if (this._urlBarFocus) {
+      // Keep cursor in view — adjust horizontal scroll offset
+      if (this._urlCursorPos < this._urlScrollOff) {
+        this._urlScrollOff = this._urlCursorPos;
+      } else if (this._urlCursorPos > this._urlScrollOff + maxChars) {
+        this._urlScrollOff = this._urlCursorPos - maxChars;
+      }
+      var showTxt = display.slice(this._urlScrollOff, this._urlScrollOff + maxChars);
+
+      if (this._urlAllSelected) {
+        // Blue selection highlight, white text
+        canvas.fillRect(urlX + 2, 7, urlW - 4, 16, CLR_URL_FOCUS);
+        canvas.drawText(urlX + 4, 12, showTxt, 0xFFFFFFFF);
+      } else {
+        canvas.drawText(urlX + 4, 12, showTxt, CLR_BODY);
+      }
+
+      // Blinking cursor at caret position
+      if ((this._cursorBlink >> 4) % 2 === 0) {
+        var ccx = urlX + 4 + (this._urlCursorPos - this._urlScrollOff) * CHAR_W;
+        if (ccx >= urlX + 2 && ccx <= urlX + urlW - 4) {
+          canvas.fillRect(ccx, 10, 1, CHAR_H, this._urlAllSelected ? 0xFFFFFFFF : CLR_BODY);
+        }
+      }
+    } else {
+      var showTxt2 = display.length > maxChars
+        ? display.slice(display.length - maxChars) : display;
+      canvas.drawText(urlX + 4, 12, showTxt2, CLR_BODY);
     }
   }
 
@@ -1393,12 +1494,22 @@ export class BrowserApp implements App {
       return;
     }
 
-    // Draw text lines
-    for (var i = 0; i < this._pageLines.length; i++) {
-      var line  = this._pageLines[i];
-      var lineY = line.y - this._scrollY;
-      if (lineY + line.lineH < 0) continue;
-      if (lineY > ch)             break;
+    // Draw text lines — binary-search to the first visible line so we skip
+    // the O(n) linear scan of all off-screen lines above the viewport.
+    // This is critical for long pages (e.g. bible.txt with 50k+ lines).
+    var _lines = this._pageLines;
+    var _sv    = this._scrollY;
+    var _lo = 0, _hi = _lines.length;
+    while (_lo < _hi) {
+      var _mid = (_lo + _hi) >> 1;
+      // First visible line: line.y + lineH >= scrollY
+      if (_lines[_mid].y + _lines[_mid].lineH < _sv) _lo = _mid + 1;
+      else _hi = _mid;
+    }
+    for (var i = _lo; i < _lines.length; i++) {
+      var line  = _lines[i];
+      var lineY = line.y - _sv;
+      if (lineY > ch) break;
 
       var absY = y0 + lineY;
 
@@ -1442,12 +1553,14 @@ export class BrowserApp implements App {
 
     // Scrollbar
     if (this._maxScrollY > 0 && ch > 0) {
+      var sbW     = 10;
+      var sbXd    = w - sbW - 2;
       var trackH  = ch - 4;
       var thumbH  = Math.max(12, Math.floor(trackH * ch / (ch + this._maxScrollY)));
       var thumbY0 = Math.floor((trackH - thumbH) * this._scrollY / this._maxScrollY);
-      canvas.fillRect(w - 8, y0 + 2, 6, trackH, CLR_TOOLBAR_BG);
-      canvas.fillRect(w - 8, y0 + 2 + thumbY0, 6, thumbH, CLR_BTN_BG);
-      canvas.drawRect(w - 8, y0 + 2 + thumbY0, 6, thumbH, CLR_TOOLBAR_BD);
+      canvas.fillRect(sbXd, y0 + 2, sbW, trackH, 0xFFDDDDDD);
+      canvas.fillRect(sbXd, y0 + 2 + thumbY0, sbW, thumbH, CLR_BTN_BG);
+      canvas.drawRect(sbXd, y0 + 2 + thumbY0, sbW, thumbH, CLR_TOOLBAR_BD);
     }
   }
 
@@ -1660,12 +1773,20 @@ export class BrowserApp implements App {
     switch (w.kind) {
       case 'text':
       case 'password':
-      case 'textarea':
-        this._focusedWidget = idx;
-        this._urlBarFocus   = false;
-        w.cursorPos = w.curValue.length;
+      case 'textarea': {
+        this._focusedWidget  = idx;
+        this._urlBarFocus    = false;
+        this._urlAllSelected = false;
+        // Position cursor at the clicked character
+        var maxCw2    = Math.max(1, Math.floor((w.pw - 8) / CHAR_W));
+        var dispLen2  = Math.min(w.curValue.length, maxCw2);
+        var scrollOff2 = w.curValue.length - dispLen2;
+        var relX2      = cx - (w.px + 4);
+        var clickChar2 = Math.max(0, Math.min(dispLen2, Math.round(relX2 / CHAR_W)));
+        w.cursorPos    = scrollOff2 + clickChar2;
         this._dirty = true;
         break;
+      }
 
       case 'submit':
       case 'button':
@@ -1863,8 +1984,7 @@ export class BrowserApp implements App {
       // GET: append query string
       var qs = fields.map(f => urlEncode(f.name) + '=' + urlEncode(f.value)).join('&');
       var url = resolved + (resolved.includes('?') ? '&' : '?') + qs;
-      this._pendingLoad = url; this._pendingNavPush = true;
-      this._pendingLoadReady = false; this._loading = true; this._dirty = true;
+      this._navigate(url);
     }
   }
 
@@ -1875,37 +1995,21 @@ export class BrowserApp implements App {
 
     this._status = 'Submitting form...';
     this._loading = true; this._dirty = true;
-
-    var ip: string | null = null;
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(parsed.host)) {
-      ip = parsed.host;
-    } else {
-      try { ip = dnsResolve(parsed.host); } catch (_e) { ip = null; }
-    }
-    if (!ip) { this._showError(url, 'DNS failed for ' + parsed.host); return; }
-
-    var resp: import('../net/http.js').HttpResponse | null = null;
-    try {
-      if (parsed.protocol === 'https') {
-        var r = httpsPost(parsed.host, ip, parsed.port, parsed.path, body);
-        resp = r.response;
-      } else {
-        resp = httpPost(parsed.host, ip, parsed.port, parsed.path, body);
-      }
-    } catch (_e2) { resp = null; }
-
-    if (!resp) { this._showError(url, 'POST failed'); return; }
-
-    // Push POST result as a new history entry
     this._histIdx++;
     this._history.splice(this._histIdx);
     this._history.push({ url, title: url });
 
-    var bodyStr = '';
-    for (var bi = 0; bi < resp.body.length; bi++) bodyStr += String.fromCharCode(resp.body[bi] & 0xFF);
-    this._pageSource = bodyStr;
-    this._showHTML(bodyStr, '', url);
-    this._status = 'POST ' + resp.status + '  ' + ip;
+    var self = this;
+    this._fetchCoroId = os.fetchAsync(url, function(resp: FetchResponse | null, err?: string) {
+      self._fetchCoroId = -1;
+      if (!resp) { self._showError(url, err || 'POST failed'); return; }
+      self._pageURL  = url;
+      self._urlInput = url;
+      self._pageSource = resp.bodyText;
+      self._showHTML(resp.bodyText, '', url);
+      self._status = 'POST ' + resp.status;
+      self._dirty = true;
+    }, { method: 'POST', body });
   }
 
   private _resetForm(formIdx: number): void {
@@ -1924,6 +2028,7 @@ export class BrowserApp implements App {
 
   private _fetchImages(): void {
     this._imgsFetching = true;
+    var pendingCount = 0;
     for (var wi = 0; wi < this._widgets.length; wi++) {
       var w = this._widgets[wi];
       if (w.kind !== 'img' || w.imgLoaded) continue;
@@ -1932,75 +2037,40 @@ export class BrowserApp implements App {
 
       if (this._imgCache.has(src)) {
         var cached = this._imgCache.get(src)!;
-        if (cached) {
-          w.imgData   = cached.data;
-          w.pw        = cached.w;
-          w.ph        = cached.h;
-        } else {
-          w.imgData = null;
-        }
+        if (cached) { w.imgData = cached.data; w.pw = cached.w; w.ph = cached.h; }
         w.imgLoaded = true;
         continue;
       }
 
-      // Fetch the image
-      var decoded = this._fetchImage(src);
-      this._imgCache.set(src, decoded);
-      if (decoded) {
-        w.imgData = decoded.data;
-        w.pw      = decoded.w;
-        w.ph      = decoded.h;
-      } else {
-        w.imgData = null;
-      }
-      w.imgLoaded = true;
+      // Kick off an async fetch; images arrive and re-render when ready
+      pendingCount++;
+      var resolved = this._resolveHref(src);
+      var self = this;
+      (function(ww: typeof w, srcURL: string, rawSrc: string) {
+        os.fetchAsync(srcURL, function(resp: FetchResponse | null, _err?: string) {
+          if (resp && resp.status === 200 && resp.body.length >= 2) {
+            var decoded: DecodedImage | null = null;
+            if (resp.body[0] === 0x42 && resp.body[1] === 0x4D) decoded = decodeBMP(resp.body);
+            self._imgCache.set(rawSrc, decoded);
+            if (decoded) { ww.imgData = decoded.data; ww.pw = decoded.w; ww.ph = decoded.h; }
+          } else {
+            self._imgCache.set(rawSrc, null);
+          }
+          ww.imgLoaded = true;
+          self._dirty = true;
+        });
+      })(w, resolved, src);
     }
-    this._imgsFetching = false;
-    this._dirty = true;
-  }
-
-  private _fetchImage(src: string): DecodedImage | null {
-    var resolved = this._resolveHref(src);
-    var parsed   = parseURL(resolved);
-    if (!parsed || parsed.protocol === 'about') return null;
-
-    var ip: string | null = null;
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(parsed.host)) {
-      ip = parsed.host;
-    } else {
-      try { ip = dnsResolve(parsed.host); } catch (_e) { ip = null; }
-    }
-    if (!ip) return null;
-
-    var resp: import('../net/http.js').HttpResponse | null = null;
-    try {
-      if (parsed.protocol === 'https') {
-        var r = httpsGet(parsed.host, ip, parsed.port, parsed.path);
-        resp = r.response;
-      } else {
-        resp = httpGet(parsed.host, ip, parsed.port, parsed.path);
-      }
-    } catch (_e2) { resp = null; }
-
-    if (!resp || resp.status !== 200 || resp.body.length < 2) return null;
-
-    // Try BMP
-    if (resp.body[0] === 0x42 && resp.body[1] === 0x4D) {
-      var bmp = decodeBMP(resp.body);
-      if (bmp) return bmp;
-    }
-
-    return null;  // unsupported format — placeholder will be shown
+    this._imgsFetching = pendingCount > 0;
   }
 
   // ── Navigation ────────────────────────────────────────────────────────────
 
   private _navigate(url: string): void {
-    this._redirectDepth = 0;
     this._histIdx++;
     this._history.splice(this._histIdx);
     this._history.push({ url, title: url });
-    this._load(url);
+    this._startFetch(url);
   }
 
   private _resolveHref(href: string): string {
@@ -2037,8 +2107,80 @@ export class BrowserApp implements App {
   }
 
   private _scheduleLoad(url: string, push: boolean): void {
-    this._pendingLoad = url; this._pendingNavPush = push;
-    this._pendingLoadReady = false; this._loading = true; this._dirty = true;
+    if (push) { this._navigate(url); }
+    else      { this._startFetch(url); }
+  }
+
+  // ── Fetch via OS SDK ─────────────────────────────────────────────────────────────
+
+  private _cancelFetch(): void {
+    if (this._fetchCoroId >= 0) {
+      os.cancel(this._fetchCoroId);
+      this._fetchCoroId = -1;
+    }
+  }
+
+  /**
+   * Initiate a page load.  about: URLs are resolved instantly; all HTTP/HTTPS
+   * loads are handed to os.fetchAsync() and the SDK drives the coroutine.
+   */
+  private _startFetch(rawURL: string): void {
+    this._cancelFetch();
+    this._pageURL       = rawURL;
+    this._urlInput      = rawURL;
+    this._loading       = true;
+    this._scrollY       = 0;
+    this._hoverHref     = '';
+    this._status        = 'Loading...';
+    this._dirty         = true;
+    this._focusedWidget = -1;
+    if (this._histIdx >= 0 && this._histIdx < this._history.length) {
+      this._history[this._histIdx].url = rawURL;
+    }
+
+    var parsed = parseURL(rawURL);
+    if (!parsed) { this._showError(rawURL, 'Invalid URL'); return; }
+
+    // about: pages don't need a network round-trip
+    if (parsed.protocol === 'about') {
+      var html = '';
+      switch (parsed.path) {
+        case 'blank':     html = '';                      break;
+        case 'jsos':      html = aboutJsosHTML();         break;
+        case 'history':   html = this._historyHTML();     break;
+        case 'bookmarks': html = this._bookmarksHTML();   break;
+        case 'source':    html = this._sourceHTML();      break;
+        default: html = errorHTML(rawURL, 'Unknown about: page'); break;
+      }
+      this._pageSource = html;
+      this._showHTML(html, parsed.path, rawURL);
+      return;
+    }
+
+    var self = this;
+    this._fetchCoroId = os.fetchAsync(rawURL, function(resp: FetchResponse | null, err?: string) {
+      self._fetchCoroId = -1;
+      if (!resp) { self._showError(rawURL, err || 'Network error'); return; }
+      var finalURL = resp.finalURL;
+      self._pageURL  = finalURL;
+      self._urlInput = finalURL;
+      if (self._histIdx >= 0 && self._histIdx < self._history.length) {
+        self._history[self._histIdx].url   = finalURL;
+        self._history[self._histIdx].title = finalURL;
+      }
+      kernel.serialPut('[browser] HTTP ' + resp.status + ' ' + resp.body.length + 'B\n');
+      if (err) { self._showError(finalURL, err); return; }  // 4xx/5xx
+      self._pageSource = resp.bodyText;
+      var ct = resp.headers.get('content-type') || 'text/html';
+      if (ct.indexOf('text/html') >= 0 || ct.indexOf('application/xhtml') >= 0) {
+        self._showHTML(resp.bodyText, '', finalURL);
+      } else {
+        self._showPlainText(resp.bodyText, finalURL);
+      }
+      self._status = 'HTTP ' + resp.status + '  ' +
+                     (finalURL.split('/')[2] || finalURL) + '  ' + resp.body.length + ' B';
+      self._dirty = true;
+    });
   }
 
   private _scrollBy(delta: number): void {
@@ -2049,12 +2191,14 @@ export class BrowserApp implements App {
   private _hitTestLink(x: number, cy: number): string {
     for (var i = 0; i < this._pageLines.length; i++) {
       var line = this._pageLines[i];
-      if (cy >= line.y && cy < line.y + line.lineH) {
-        for (var j = 0; j < line.nodes.length; j++) {
-          var span = line.nodes[j];
-          if (span.href && x >= span.x && x <= span.x + span.text.length * CHAR_W) {
-            return span.href;
-          }
+      // Lines are Y-sorted: once past cy there can be no more matches.
+      if (line.y > cy) break;
+      // Skip lines entirely above cy.
+      if (line.y + line.lineH <= cy) continue;
+      for (var j = 0; j < line.nodes.length; j++) {
+        var span = line.nodes[j];
+        if (span.href && x >= span.x && x <= span.x + span.text.length * CHAR_W) {
+          return span.href;
         }
       }
     }

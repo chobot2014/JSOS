@@ -10,6 +10,8 @@
  * BigInt is used for X25519 field arithmetic and GHASH (GCM).
  */
 
+import { strToBytes } from './net.js';
+
 // ────────────────────────────────────────────────────── SHA-256 ──────────────
 
 const SHA256_K: number[] = [
@@ -149,12 +151,6 @@ export function hkdfExpandLabel(
   hkdfInfo.push(context.length);
   hkdfInfo = hkdfInfo.concat(context);
   return hkdfExpand(secret, hkdfInfo, len);
-}
-
-function strToBytes(s: string): number[] {
-  var b: number[] = new Array(s.length);
-  for (var i = 0; i < s.length; i++) b[i] = s.charCodeAt(i) & 0xff;
-  return b;
 }
 
 // ─────────────────────────────────────────────────── AES-128 ─────────────────

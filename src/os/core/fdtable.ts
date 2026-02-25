@@ -171,18 +171,21 @@ export class VFSFileDescription implements FileDescription {
  */
 export class SocketDescription implements FileDescription {
   private _net: any;
-  private _sockId: number;
+  private _sock: any; // holds the Socket object from net.ts
 
-  constructor(net: any, sockId: number) {
-    this._net   = net;
-    this._sockId = sockId;
+  constructor(net: any, sock: any) {
+    this._net  = net;
+    this._sock = sock;
   }
 
-  /** Expose the raw socket ID so callers can pass it to net.connect etc. */
-  get sockId(): number { return this._sockId; }
+  /** Expose the raw Socket object so callers can pass it to net.connect etc. */
+  get sock(): any { return this._sock; }
+
+  /** Legacy numeric id — the net stack stores it in socket.id */
+  get sockId(): number { return this._sock && this._sock.id != null ? this._sock.id : -1; }
 
   read(count: number): number[] {
-    var s: string | null = this._net.recv(this._sockId);
+    var s: string | null = this._net.recv(this._sock);
     if (!s) return [];
     var bytes: number[] = [];
     for (var i = 0; i < s.length && bytes.length < count; i++)
@@ -193,12 +196,12 @@ export class SocketDescription implements FileDescription {
   write(data: number[]): number {
     var s = '';
     for (var i = 0; i < data.length; i++) s += String.fromCharCode(data[i]);
-    this._net.send(this._sockId, s);
+    this._net.send(this._sock, s);
     return data.length;
   }
 
   seek(_offset: number, _whence: number): number { return -1; } // not seekable
-  close(): void { this._net.close(this._sockId); }
+  close(): void { this._net.close(this._sock); }
 }
 
 /**
@@ -304,13 +307,22 @@ export class FDTable {
    * Returns the new fd number.  The raw socket ID is accessible via getSocketId().
    */
   openSocket(netInst: any, type: 'tcp' | 'udp'): number {
-    var sockId: number = netInst.createSocket(type);
-    return this.insert(new SocketDescription(netInst, sockId));
+    var sock: any = netInst.createSocket(type);
+    return this.insert(new SocketDescription(netInst, sock));
   }
 
   /**
-   * Return the raw socket ID for a socket fd, or -1 if fd is not a socket fd.
-   * Use this to obtain the socket ID needed for net.connect/bind/listen etc.
+   * Return the raw Socket object for a socket fd, or null.
+   * Use this to call net.connect / net.bind / net.listen etc. directly.
+   */
+  getSocket(fd: number): any {
+    var d = this._fds.get(fd);
+    return (d instanceof SocketDescription) ? d.sock : null;
+  }
+
+  /**
+   * Return the raw socket ID (socket.id) for a socket fd, or -1.
+   * @deprecated Prefer getSocket() to get the full Socket object.
    */
   getSocketId(fd: number): number {
     var d = this._fds.get(fd);
@@ -341,6 +353,17 @@ export class FDTable {
     if (!d) return -9;  // -EBADF
     if (!d.ioctl) return -25; // -ENOTTY
     return d.ioctl(request, arg);
+  }
+
+  /**
+   * Move the file-position indicator for `fd`.
+   * Delegates to the underlying FileDescription's seek().
+   * Returns the new offset, or a negative errno on error.
+   */
+  seek(fd: number, offset: number, whence: number): number {
+    var d = this._fds.get(fd);
+    if (!d) return -9; // -EBADF
+    return d.seek(offset, whence);
   }
 }
 

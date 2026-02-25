@@ -22,7 +22,7 @@ import {
   x25519, x25519PublicKey, generateKey32,
   concat,
 } from './crypto.js';
-import { net } from './net.js';
+import { net, strToBytes } from './net.js';
 import type { Socket } from './net.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
@@ -60,12 +60,6 @@ function u24(b: number[], i: number): number {
 function putU8(b: number[], v: number): void  { b.push(v & 0xff); }
 function putU16(b: number[], v: number): void { b.push((v >> 8) & 0xff); b.push(v & 0xff); }
 function putU24(b: number[], v: number): void { b.push((v >> 16) & 0xff); b.push((v >> 8) & 0xff); b.push(v & 0xff); }
-function strToBytes(s: string): number[] {
-  var b: number[] = new Array(s.length);
-  for (var i = 0; i < s.length; i++) b[i] = s.charCodeAt(i) & 0xff;
-  return b;
-}
-
 // ── AEAD helpers ──────────────────────────────────────────────────────────────
 
 function xorIV(baseIV: number[], seq: number): number[] {
@@ -152,44 +146,42 @@ export class TLSSocket {
     this.sock = net.createSocket('tcp');
   }
 
-  /** Connect TCP and perform TLS 1.3 handshake. Returns true on success. */
+  /** Connect TCP (blocking) then perform TLS 1.3 handshake. Returns true on success. */
   handshake(remoteIP: string, remotePort: number): boolean {
     if (!net.connect(this.sock, remoteIP, remotePort)) return false;
+    return this._performHandshake();
+  }
 
-    this.myPrivate = generateKey32();
-    this.myPublic  = x25519PublicKey(this.myPrivate);
+  /**
+   * Perform TLS 1.3 handshake on an already-connected socket.
+   * Use this when TCP connect was managed asynchronously via net.connectAsync/connectPoll.
+   */
+  handshakeOnConnected(sock: Socket): boolean {
+    this.sock = sock;
+    return this._performHandshake();
+  }
 
-    var clientHello = this._buildClientHello();
-    this.transcript = this.transcript.concat(clientHello.slice(5)); // skip record header
-    if (!net.sendBytes(this.sock, clientHello)) return false;
-
-    // Read ServerHello
-    var sh = this._readHandshakeMsg(true);
-    if (!sh || sh.type !== HS_SERVER_HELLO) return false;
-    var serverPublic = this._parseServerHello(sh.data);
-    if (!serverPublic) return false;
-
-    // Derive handshake keys
-    if (!this._deriveHandshakeKeys(serverPublic)) return false;
-
-    // Read encrypted server handshake messages
-    var finishedOk = false;
-    for (var attempt = 0; attempt < 20; attempt++) {
-      var msg = this._readEncryptedHandshakeMsg();
-      if (!msg) break;
-      if (msg.type === HS_FINISHED) {
-        // Verify server Finished, send client Finished
-        finishedOk = this._processServerFinished(msg.data);
-        break;
-      }
-      // EncryptedExtensions, Certificate, CertificateVerify — skip
+  /**
+   * Non-blocking TLS read: poll the NIC once and try to parse one complete
+   * TLS record from the buffer.  Returns decrypted app data or null.
+   */
+  readNB(): number[] | null {
+    var chunk = net.recvBytesNB(this.sock);
+    if (chunk) this.rxBuf = this.rxBuf.concat(chunk);
+    if (this.rxBuf.length < 5) return null;
+    var outerType = u8(this.rxBuf, 0);
+    var recLen    = u16(this.rxBuf, 3);
+    if (this.rxBuf.length < 5 + recLen) return null;  // incomplete record — wait more
+    var record    = this.rxBuf.slice(0, 5 + recLen);
+    this.rxBuf    = this.rxBuf.slice(5 + recLen);
+    if (outerType !== TLS_APPLICATION_DATA) return null;
+    var dec = tlsDecryptRecord(
+        this.serverAppKey, this.serverAppIV, this.serverAppSeq, record);
+    if (dec) {
+      this.serverAppSeq++;
+      if (dec.type === TLS_APPLICATION_DATA) return dec.data;
     }
-    if (!finishedOk) return false;
-
-    // App keys already derived inside _processServerFinished with the correct
-    // pre-ClientFinished transcript hash.
-    this.handshakeDone = true;
-    return true;
+    return null;
   }
 
   /** Send application data over TLS */
@@ -236,6 +228,42 @@ export class TLSSocket {
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
+
+  private _performHandshake(): boolean {
+    this.myPrivate = generateKey32();
+    this.myPublic  = x25519PublicKey(this.myPrivate);
+
+    var clientHello = this._buildClientHello();
+    this.transcript = this.transcript.concat(clientHello.slice(5)); // skip record header
+    if (!net.sendBytes(this.sock, clientHello)) return false;
+
+    // Read ServerHello
+    var sh = this._readHandshakeMsg(true);
+    if (!sh || sh.type !== HS_SERVER_HELLO) return false;
+    var serverPublic = this._parseServerHello(sh.data);
+    if (!serverPublic) return false;
+
+    // Derive handshake keys
+    if (!this._deriveHandshakeKeys(serverPublic)) return false;
+
+    // Read encrypted server handshake messages
+    var finishedOk = false;
+    for (var attempt = 0; attempt < 20; attempt++) {
+      var msg = this._readEncryptedHandshakeMsg();
+      if (!msg) break;
+      if (msg.type === HS_FINISHED) {
+        finishedOk = this._processServerFinished(msg.data);
+        break;
+      }
+      // EncryptedExtensions, Certificate, CertificateVerify — skip
+    }
+    if (!finishedOk) return false;
+
+    // App keys already derived inside _processServerFinished with the correct
+    // pre-ClientFinished transcript hash.
+    this.handshakeDone = true;
+    return true;
+  }
 
   private _buildClientHello(): number[] {
     var body: number[] = [];

@@ -8,6 +8,7 @@
 
 import { globalFDTable, VFSFileDescription, SocketDescription } from './fdtable.js';
 import { processManager } from '../process/process.js';
+import { scheduler } from '../process/scheduler.js';
 import { vmm } from '../process/vmm.js';
 import { physAlloc } from '../process/physalloc.js';
 import { elfLoader } from '../process/elf.js';
@@ -177,21 +178,25 @@ export class SystemCallInterface {
   }
 
   exit(status: number): void {
-    var pid = processManager.getpid();
+    var pid = scheduler.getpid();
     var p   = processManager.getProcess(pid);
     if (p) { p.exitCode = status; p.state = 'dead'; }
+    scheduler.terminateProcess(pid, status);
   }
 
   wait(pid?: number): SyscallResult<{ pid: number; status: number }> {
-    var target = (pid !== undefined && pid > 0) ? pid : processManager.getpid() + 1;
+    var target = (pid !== undefined && pid > 0) ? pid : scheduler.getpid() + 1;
     try {
       var ws = processManager.waitpid(target);
       return { success: ws.pid >= 0, value: { pid: ws.pid, status: ws.exitCode } };
     } catch (e) { return { success: false, error: String(e), errno: Errno.ECHILD }; }
   }
 
-  getpid():  SyscallResult<number> { return { success: true, value: processManager.getpid()  }; }
-  getppid(): SyscallResult<number> { return { success: true, value: processManager.getppid() }; }
+  getpid():  SyscallResult<number> { return { success: true, value: scheduler.getpid() }; }
+  getppid(): SyscallResult<number> {
+    var cur = scheduler.getCurrentProcess();
+    return { success: true, value: cur ? cur.ppid : 0 };
+  }
 
   kill(pid: number, sig: number): SyscallResult<void> {
     signalManager.send(pid, sig);
@@ -266,8 +271,11 @@ export class SystemCallInterface {
       : { success: false, errno: Errno.EBADF, error: 'EBADF' };
   }
 
-  lseek(_fd: number, _offset: number, _whence: number): SyscallResult<number> {
-    return { success: true, value: 0 }; // Phase 9: full seek via FDTable
+  lseek(fd: number, offset: number, whence: number): SyscallResult<number> {
+    var pos = globalFDTable.seek(fd, offset, whence);
+    return pos >= 0
+      ? { success: true, value: pos }
+      : { success: false, errno: Errno.ESPIPE, error: 'ESPIPE' };
   }
 
   // ── Directory ─────────────────────────────────────────────────────────────
@@ -320,7 +328,7 @@ export class SystemCallInterface {
   // ── Signals ───────────────────────────────────────────────────────────────
 
   signal(signum: number, handler: Function): SyscallResult<Function> {
-    signalManager.handle(processManager.getpid(), signum, handler as (sig: number) => void);
+    signalManager.handle(scheduler.getpid(), signum, handler as (sig: number) => void);
     return { success: true, value: handler };
   }
 
@@ -346,37 +354,37 @@ export class SystemCallInterface {
   }
 
   connect(fd: number, ip: string, port: number): SyscallResult<boolean> {
-    var sockId = globalFDTable.getSocketId(fd);
-    if (sockId < 0) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
-    var ok = net.connect(sockId, ip, port);
+    var sock = globalFDTable.getSocket(fd);
+    if (!sock) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
+    var ok = net.connect(sock, ip, port);
     return { success: ok, value: ok };
   }
 
   bind(fd: number, port: number): SyscallResult<void> {
-    var sockId = globalFDTable.getSocketId(fd);
-    if (sockId < 0) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
-    try { (net as any).bind(sockId, port); } catch (_e) { /* optional in net */ }
+    var sock = globalFDTable.getSocket(fd);
+    if (!sock) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
+    net.bind(sock, port);
     return { success: true };
   }
 
   listen(fd: number): SyscallResult<void> {
-    var sockId = globalFDTable.getSocketId(fd);
-    if (sockId < 0) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
-    try { (net as any).listen(sockId); } catch (_e) { /* optional in net */ }
+    var sock = globalFDTable.getSocket(fd);
+    if (!sock) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
+    net.listen(sock);
     return { success: true };
   }
 
   send(fd: number, data: string): SyscallResult<number> {
-    var sockId = globalFDTable.getSocketId(fd);
-    if (sockId < 0) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
-    net.send(sockId, data);
+    var sock = globalFDTable.getSocket(fd);
+    if (!sock) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
+    net.send(sock, data);
     return { success: true, value: data.length };
   }
 
   recv(fd: number): SyscallResult<string> {
-    var sockId = globalFDTable.getSocketId(fd);
-    if (sockId < 0) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
-    return { success: true, value: net.recv(sockId) || '' };
+    var sock = globalFDTable.getSocket(fd);
+    if (!sock) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
+    return { success: true, value: net.recv(sock) || '' };
   }
 }
 

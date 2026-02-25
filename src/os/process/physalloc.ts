@@ -26,9 +26,9 @@ const PAGE_SIZE = 4096;
 const KERNEL_END_FRAME = 81920;
 
 export class PhysicalAllocator {
-  _bitmap: Uint8Array = new Uint8Array(0);
-  _totalFrames = 0;
-  _freeFrames  = 0;
+  private _bitmap: Uint8Array = new Uint8Array(0);
+  private _totalFrames = 0;
+  private _freeFrames  = 0;
 
   /** Must be called once before alloc/free are used. */
   init(): void {
@@ -109,7 +109,7 @@ export class PhysicalAllocator {
 
   // ── Internals ─────────────────────────────────────────────────────────
 
-  _findFreeRun(count: number): number {
+  private _findFreeRun(count: number): number {
     var runStart = -1;
     var runLen   = 0;
     // Byte-level scan: skip fully-used bytes quickly.
@@ -134,19 +134,19 @@ export class PhysicalAllocator {
     return -1;
   }
 
-  _testBit(frame: number): boolean {
+  private _testBit(frame: number): boolean {
     var byte_ = Math.floor(frame / 8);
     var bit   = frame % 8;
     return (this._bitmap[byte_] & (1 << bit)) !== 0;
   }
 
-  _setBit(frame: number): void {
+  private _setBit(frame: number): void {
     var byte_ = Math.floor(frame / 8);
     var bit   = frame % 8;
     this._bitmap[byte_] |= (1 << bit);
   }
 
-  _clearBit(frame: number): void {
+  private _clearBit(frame: number): void {
     var byte_ = Math.floor(frame / 8);
     var bit   = frame % 8;
     this._bitmap[byte_] &= ~(1 << bit);

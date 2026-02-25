@@ -25,10 +25,18 @@ export class SignalManager {
   private _handlers: Map<number, Map<number, SignalHandler>> = new Map();
   /** Pending signals not yet delivered. */
   private _pending: PendingSignal[] = [];
+  /** Called when a signal's default action is to terminate the process. */
+  private _terminateCb: ((pid: number) => void) | null = null;
+
+  /** Register the callback that terminates a process (set by scheduler). */
+  setTerminateCallback(fn: (pid: number) => void): void {
+    this._terminateCb = fn;
+  }
 
   /** Send a signal to a process. */
   send(pid: number, sig: number): void {
-    this._pending.push({ pid, sig });
+    // Deliver immediately — don't also queue in _pending or deliverPending()
+    // will deliver it a second time on the next scheduler tick.
     this._deliver(pid, sig);
   }
 
@@ -62,8 +70,11 @@ export class SignalManager {
 
     if (handler === 'ignore') return;
     if (handler === 'default') {
-      // Default actions: most signals terminate the process
-      if (sig === SIG.SIGCHLD || sig === SIG.SIGCONT) return; // ignore by default
+      // Signals that are ignored by default:
+      if (sig === SIG.SIGCHLD || sig === SIG.SIGCONT) return;
+      // All other signals terminate by default (SIGKILL, SIGTERM, SIGINT, …)
+      // SIGSTOP suspends but we treat it as a soft terminate at this phase.
+      if (this._terminateCb) this._terminateCb(pid);
     } else if (typeof handler === 'function') {
       handler(sig);
     }

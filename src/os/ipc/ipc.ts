@@ -15,27 +15,9 @@
  */
 
 // ── POSIX Signal Numbers ─────────────────────────────────────────────────────
+// Use SIG / SignalName from ../process/signals.ts — not duplicated here.
 
-export const Signal = {
-  SIGHUP:  1,   // Hangup
-  SIGINT:  2,   // Interrupt (Ctrl+C)
-  SIGQUIT: 3,   // Quit
-  SIGILL:  4,   // Illegal instruction
-  SIGABRT: 6,   // Abort
-  SIGFPE:  8,   // Floating-point exception
-  SIGKILL: 9,   // Kill (unblockable)
-  SIGSEGV: 11,  // Segmentation fault
-  SIGPIPE: 13,  // Broken pipe
-  SIGALRM: 14,  // Alarm clock
-  SIGTERM: 15,  // Termination
-  SIGCHLD: 17,  // Child stopped or terminated
-  SIGCONT: 18,  // Continue
-  SIGSTOP: 19,  // Stop (unblockable)
-  SIGTSTP: 20,  // Keyboard stop
-  SIGUSR1: 10,  // User-defined signal 1
-  SIGUSR2: 12,  // User-defined signal 2
-  SIGWINCH: 28, // Window size change
-} as const;
+declare var kernel: import('../core/kernel.js').KernelAPI;
 
 export type SignalNumber = number;
 export type SignalHandler = (signum: SignalNumber) => void;
@@ -157,7 +139,7 @@ export class MessageQueue {
    * Send a message.  If `to` is 0 it is a broadcast to all registered queues.
    */
   send(msg: Omit<Message, 'timestamp'>): void {
-    var m: Message = { type: msg.type, from: msg.from, to: msg.to, payload: msg.payload, timestamp: Date.now() };
+    var m: Message = { type: msg.type, from: msg.from, to: msg.to, payload: msg.payload, timestamp: kernel.getUptime() };
     if (m.to === 0) {
       // Broadcast
       this.queues.forEach(function(q) { q.push(m); });

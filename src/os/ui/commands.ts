@@ -19,8 +19,11 @@ import terminal from './terminal.js';
 import { Color } from '../core/kernel.js';
 import fs from '../fs/filesystem.js';
 import { openEditor } from './editor.js';
-import { EditorApp } from '../apps/editor-app.js';
-import { wm } from '../ui/wm.js';
+import { EditorApp } from '../apps/editor/index.js';
+import { fileManagerApp } from '../apps/file-manager/index.js';
+import { systemMonitorApp } from '../apps/system-monitor/index.js';
+import { settingsApp } from '../apps/settings/index.js';
+import { wm, getWM, type App } from '../ui/wm.js';
 import { scheduler } from '../process/scheduler.js';
 import { vmm } from '../process/vmm.js';
 import { init } from '../process/init.js';
@@ -36,6 +39,7 @@ import { processManager } from '../process/process.js';
 import { threadManager } from '../process/threads.js';
 import { physAlloc } from '../process/physalloc.js';
 import { JSProcess, listProcesses } from '../process/jsprocess.js';
+import { os } from '../core/sdk.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -159,12 +163,12 @@ export function registerCommands(g: any): void {
     uptime()    { return kernel.getUptime(); },
     ticks()     { return kernel.getTicks(); },
     screen()    { return kernel.getScreenSize(); },
-    ps()        { return scheduler.getAllProcesses(); },
+    ps()        { return scheduler.getLiveProcesses(); },
     spawn(name: string) {
-      return scheduler.createProcess(0, { priority: 10, timeSlice: 10,
+      return scheduler.createProcess(0, { name, priority: 10, timeSlice: 10,
         memory: { heapStart: 0, heapEnd: 0, stackStart: 0, stackEnd: 0 } });
     },
-    kill(pid: number)   { return scheduler.terminateProcess(pid); },
+    kill(pid: number, sig?: number) { return processManager.kill(pid, sig !== undefined ? sig : 15); },
     sleep(ms: number)   { kernel.sleep(ms); },
     reboot()            { kernel.reboot(); },
     halt()              { kernel.halt(); },
@@ -185,7 +189,7 @@ export function registerCommands(g: any): void {
         memory:       m,
         virtualMemory: vm,
         uptime:       kernel.getUptime(),
-        processes:    scheduler.getAllProcesses().length,
+        processes:    scheduler.getLiveProcesses().length,
         scheduler:    scheduler.getAlgorithm(),
         runlevel:     init.getCurrentRunlevel(),
       };
@@ -194,8 +198,8 @@ export function registerCommands(g: any): void {
     scheduler, vmm, init, syscalls, net, users, ipc,
     processManager, physAlloc, threadManager,
     // POSIX FD API
-    getpid()            { return processManager.getpid(); },
-    getppid()           { return processManager.getppid(); },
+    getpid()            { return scheduler.getpid(); },
+    getppid()           { return scheduler.getCurrentProcess()?.ppid ?? 0; },
     open(path: string, flags?: number) { return syscalls.open(path, flags || 0); },
     read(fd: number, count?: number) {
       var bytes = globalFDTable.read(fd, count !== undefined ? count : 4096);
@@ -406,24 +410,76 @@ export function registerCommands(g: any): void {
   // ──────────────────────────────────────────────────────────────────────────
 
   g.ps = function() {
-    var procs = scheduler.getAllProcesses();
-    return printableArray(procs, function(arr: any[]) {
-      terminal.colorPrintln('  ' + lpad('PID', 4) + '  ' + lpad('PPID', 5) + '  ' + pad('NAME', 16) + '  ' + pad('STATE', 12) + 'PRI', Color.LIGHT_CYAN);
-      terminal.colorPrintln('  ' + pad('', 48).replace(/ /g, '-'), Color.DARK_GREY);
+    var results: any[] = [];
+    // Kernel POSIX-facade processes (idle, kernel, init)
+    var sprocs = scheduler.getLiveProcesses();
+    for (var _i = 0; _i < sprocs.length; _i++) {
+      var sp = sprocs[_i];
+      results.push({ pid: sp.pid, ppid: sp.ppid, name: sp.name, state: sp.state, priority: sp.priority, type: 'sched', cpuTime: sp.cpuTime });
+    }
+    // Cooperative kernel threads (ThreadManager)
+    var kthreads = threadManager.getThreads();
+    for (var _j = 0; _j < kthreads.length; _j++) {
+      var kt = kthreads[_j];
+      results.push({ pid: kt.tid, ppid: 0, name: '[' + kt.name + ']', state: kt.state, priority: kt.priority, type: 'thread', cpuTime: 0 });
+    }
+    // Active JSProcess child QuickJS runtimes
+    var jsprocs = listProcesses();
+    for (var _k = 0; _k < jsprocs.length; _k++) {
+      var jp = jsprocs[_k];
+      results.push({ pid: jp.id, ppid: 1, name: 'js#' + jp.id, state: 'running', priority: 20, type: 'js', cpuTime: 0 });
+    }
+    return printableArray(results, function(arr: any[]) {
+      terminal.colorPrintln('  TYPE    ' + lpad('PID', 4) + '  ' + lpad('PPID', 5) + '  ' + pad('NAME', 18) + '  ' + pad('STATE', 10) + 'PRI', Color.LIGHT_CYAN);
+      terminal.colorPrintln('  ' + pad('', 56).replace(/ /g, '-'), Color.DARK_GREY);
       for (var i = 0; i < arr.length; i++) {
         var p = arr[i];
-        terminal.println('  ' + lpad('' + p.pid, 4) + '  ' + lpad('' + p.ppid, 5) + '  ' + pad(p.name, 16) + '  ' + pad(p.state, 12) + p.priority);
+        terminal.println('  ' + pad(p.type, 7) + ' ' + lpad('' + p.pid, 4) + '  ' + lpad('' + p.ppid, 5) + '  ' + pad(p.name, 18) + '  ' + pad(p.state, 10) + p.priority);
       }
-      terminal.colorPrintln('  ' + arr.length + ' process(es)', Color.DARK_GREY);
+      terminal.colorPrintln('  ' + arr.length + ' total', Color.DARK_GREY);
     });
   };
 
-  g.kill = function(pid: number) {
-    if (pid === undefined) { terminal.println('usage: kill(pid)'); return; }
-    if (scheduler.terminateProcess(pid))
-      terminal.colorPrintln('killed PID ' + pid, Color.LIGHT_GREEN);
+  g.kill = function(pid: number, sig?: number) {
+    if (pid === undefined) { terminal.println('usage: kill(pid[, sig])'); return; }
+    if (processManager.kill(pid, sig !== undefined ? sig : 15))
+      terminal.colorPrintln('sent SIGTERM to PID ' + pid, Color.LIGHT_GREEN);
     else terminal.println('kill: PID ' + pid + ': not found or protected');
   };
+
+  g.services = function(name?: string) {
+    if (name !== undefined) {
+      // Show single service detail
+      var svc = init.getServiceStatus(name);
+      if (!svc) { terminal.println('services: ' + name + ': not found'); return; }
+      return printableObject(svc, function(s: any) {
+        terminal.colorPrintln('Service: ' + s.service.name, Color.WHITE);
+        terminal.println('  description : ' + s.service.description);
+        terminal.println('  state       : ' + s.state);
+        terminal.println('  pid         : ' + (s.pid !== undefined ? s.pid : '-'));
+        terminal.println('  runlevel    : ' + s.service.runlevel);
+        terminal.println('  restart     : ' + s.service.restartPolicy);
+        if (s.exitCode !== undefined) terminal.println('  exitCode    : ' + s.exitCode);
+      });
+    }
+    // List all services
+    var all = init.listServices();
+    return printableArray(all, function(arr: any[]) {
+      terminal.colorPrintln('  ' + pad('NAME', 16) + ' ' + pad('STATE', 10) + ' ' + pad('PID', 5) + ' RUNLEVEL', Color.LIGHT_CYAN);
+      terminal.colorPrintln('  ' + pad('', 40).replace(/ /g, '-'), Color.DARK_GREY);
+      for (var i = 0; i < arr.length; i++) {
+        var s = arr[i];
+        var stateColor = s.state === 'running' ? Color.LIGHT_GREEN
+                       : s.state === 'failed'  ? Color.LIGHT_RED
+                       : Color.DARK_GREY;
+        terminal.print('  ' + pad(s.service.name, 16) + ' ');
+        terminal.colorPrint(pad(s.state, 10), stateColor);
+        terminal.println(' ' + lpad(s.pid !== undefined ? '' + s.pid : '-', 5) + ' ' + s.service.runlevel);
+      }
+      terminal.colorPrintln('  ' + arr.length + ' service(s)', Color.DARK_GREY);
+    });
+  };
+
 
   g.mem = function() {
     var m = kernel.getMemoryInfo();
@@ -467,7 +523,7 @@ export function registerCommands(g: any): void {
       screen:   sc.width + 'x' + sc.height + ' VGA text',
       memory:   { total: Math.floor(m.total/1024), free: Math.floor(m.free/1024), used: Math.floor(m.used/1024) },
       uptime:   Math.floor(kernel.getUptime() / 1000) + 's',
-      procs:    scheduler.getAllProcesses().length,
+      procs:    scheduler.getLiveProcesses().length,
     };
     return printableObject(info, function(obj: any) {
       terminal.colorPrintln('JSOS System Information', Color.WHITE);
@@ -495,18 +551,28 @@ export function registerCommands(g: any): void {
       terminal.println(' mem: ' + Math.floor(m.used / 1024) + 'K / ' + Math.floor(m.total / 1024) + 'K   runlevel: ' + init.getCurrentRunlevel() + '   scheduler: ' + scheduler.getAlgorithm());
       terminal.println('');
       terminal.setColor(Color.LIGHT_CYAN, Color.BLACK);
-      terminal.println('  ' + lpad('PID', 4) + '  ' + lpad('PPID', 5) + '  ' + pad('NAME', 16) + '  ' + pad('STATE', 12) + '  PRI  CPU-ms');
+      terminal.println('  TYPE    ' + lpad('PID', 4) + '  ' + lpad('PPID', 5) + '  ' + pad('NAME', 16) + '  ' + pad('STATE', 10) + '  PRI  CPU-ms');
       terminal.setColor(Color.DARK_GREY, Color.BLACK);
       terminal.println('  ' + pad('', 60).replace(/ /g, '-'));
       terminal.setColor(Color.LIGHT_GREY, Color.BLACK);
-      var procs = scheduler.getAllProcesses();
+      var procs = scheduler.getLiveProcesses();
+      var kthreadsTop = threadManager.getThreads();
+      var jSprocsTop  = listProcesses();
       for (var i = 0; i < procs.length; i++) {
         var p = procs[i];
-        terminal.println('  ' + lpad('' + p.pid, 4) + '  ' + lpad('' + p.ppid, 5) + '  ' + pad(p.name, 16) + '  ' + pad(p.state, 12) + '  ' + lpad('' + p.priority, 3) + '  ' + p.cpuTime);
+        terminal.println('  ' + pad('sched', 7) + ' ' + lpad('' + p.pid, 4) + '  ' + lpad('' + p.ppid, 5) + '  ' + pad(p.name, 16) + '  ' + pad(p.state, 10) + '  ' + lpad('' + p.priority, 3) + '  ' + p.cpuTime);
+      }
+      for (var _j = 0; _j < kthreadsTop.length; _j++) {
+        var kt = kthreadsTop[_j];
+        terminal.println('  ' + pad('thread', 7) + ' ' + lpad('' + kt.tid, 4) + '      0  ' + pad('[' + kt.name + ']', 16) + '  ' + pad(kt.state, 10) + '  ' + lpad('' + kt.priority, 3) + '  0');
+      }
+      for (var _k = 0; _k < jSprocsTop.length; _k++) {
+        var jpt = jSprocsTop[_k];
+        terminal.println('  ' + pad('js', 7) + ' ' + lpad('' + jpt.id, 4) + '      1  ' + pad('js#' + jpt.id, 16) + '  ' + pad('running', 10) + '   20  0');
       }
       terminal.println('');
       terminal.setColor(Color.DARK_GREY, Color.BLACK);
-      terminal.println('  ' + procs.length + ' process(es)');
+      terminal.println('  ' + (procs.length + kthreadsTop.length + jSprocsTop.length) + ' total');
       terminal.setColor(Color.LIGHT_GREY, Color.BLACK);
       kernel.sleep(500);
       if (kernel.hasKey()) {
@@ -725,7 +791,7 @@ export function registerCommands(g: any): void {
     });
 
     check('process list', function() {
-      var procs = scheduler.getAllProcesses();
+      var procs = scheduler.getLiveProcesses();
       return Array.isArray(procs) && procs.length > 0;
     });
 
@@ -742,6 +808,64 @@ export function registerCommands(g: any): void {
     check('VFS /proc mounts', function() {
       var c = fs.readFile('/proc/meminfo');
       return c !== null;
+    });
+
+    check('VFS /dev/null', function() {
+      fs.writeFile('/dev/null', 'anything');
+      var r = fs.readFile('/dev/null');
+      return r === '' || r === null;
+    });
+
+    check('VFS /dev/urandom', function() {
+      var r = fs.readFile('/dev/urandom');
+      return typeof r === 'string' && r.length > 0;
+    });
+
+    check('IPC pipe write/read', function() {
+      var p = ipc.fifo();
+      p.write('pipes');
+      var got = p.read(5);
+      ipc.closePipe(p.readFd);
+      return got === 'pipes';
+    });
+
+    check('IPC signal delivery', function() {
+      var fired = false;
+      var SIGUSR1 = 10;
+      ipc.signals.handle(0, SIGUSR1, function() { fired = true; });
+      ipc.signals.send(0, SIGUSR1);
+      return fired;
+    });
+
+    check('scheduler process count', function() {
+      var procs = scheduler.getLiveProcesses();
+      return typeof procs.length === 'number';
+    });
+
+    check('physAlloc pages', function() {
+      var before = physAlloc.freePages();
+      var addr   = physAlloc.alloc(1);
+      var during = physAlloc.freePages();
+      physAlloc.free(addr, 1);
+      var after  = physAlloc.freePages();
+      return before === after && during === before - 1;
+    });
+
+    check('init services list', function() {
+      var svcs = init.listServices();
+      return Array.isArray(svcs);
+    });
+
+    check('os.disk.available() returns bool', function() {
+      var v = os.disk.available();
+      return typeof v === 'boolean';
+    });
+
+    check('os.clipboard read/write', function() {
+      os.clipboard.write('_clip_test_');
+      var v = os.clipboard.read();
+      os.clipboard.write('');
+      return v === '_clip_test_';
     });
 
     terminal.println('');
@@ -778,6 +902,17 @@ export function registerCommands(g: any): void {
 
   // Make JSProcess available as a global constructor for scripts
   g.JSProcess = JSProcess;
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // 11.  SDK — unified OS abstraction layer
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * The JSOS Application SDK — the recommended API for all app and script code.
+   * os.fs, os.fetchAsync, os.spawn, os.cancel, os.system,
+   * os.process, os.ipc, os.users
+   */
+  g.os = os;
 
   /**
    * Allocate a shared BSS buffer accessible from both parent and child runtimes.
@@ -872,12 +1007,71 @@ export function registerCommands(g: any): void {
     return printableObject(data, printer);
   };
 
+  // ── App registry ─────────────────────────────────────────────────────────
+
+  /** Built-in app registry: name → factory that returns an App instance. */
+  var _appRegistry: Record<string, { factory: () => App; defaultWidth: number; defaultHeight: number }> = {
+    'editor':         { factory: () => new EditorApp(),   defaultWidth: 720,  defaultHeight: 480 },
+    'file-manager':   { factory: () => fileManagerApp,    defaultWidth: 640,  defaultHeight: 480 },
+    'system-monitor': { factory: () => systemMonitorApp,  defaultWidth: 560,  defaultHeight: 400 },
+    'settings':       { factory: () => settingsApp,       defaultWidth: 560,  defaultHeight: 440 },
+  };
+
+  /** List all registered apps. */
+  g.apps = function() {
+    var names = Object.keys(_appRegistry);
+    return printableArray(names, function(arr) {
+      terminal.colorPrintln('  Registered apps:', Color.YELLOW);
+      for (var i = 0; i < arr.length; i++) {
+        terminal.println('    ' + arr[i]);
+      }
+      terminal.colorPrintln('  Use launch(\'name\') to open.', Color.DARK_GREY);
+    });
+  };
+
+  /** Generic app launcher: launch('file-manager') etc. */
+  g.launch = function(name: string, opts?: { width?: number; height?: number; title?: string }) {
+    var reg = _appRegistry[name];
+    if (!reg) {
+      terminal.colorPrintln("Unknown app '" + name + "'. Use apps() to list available apps.", Color.LIGHT_RED);
+      return;
+    }
+    if (wm === null) {
+      terminal.colorPrintln('Window manager not running (text mode).', Color.LIGHT_RED);
+      return;
+    }
+    var app  = reg.factory();
+    var w    = (opts && opts.width)  || reg.defaultWidth;
+    var h    = (opts && opts.height) || reg.defaultHeight;
+    var t    = (opts && opts.title)  || (name.charAt(0).toUpperCase() + name.slice(1).replace(/-/g, ' '));
+    wm.createWindow({ title: t, width: w, height: h, app: app, closeable: true });
+    return t + ' opened';
+  };
+
+  /** Open the File Manager app. */
+  g.files = function(path?: string) {
+    if (wm === null) { terminal.colorPrintln('WM not running.', Color.LIGHT_RED); return; }
+    wm.createWindow({ title: 'File Manager', width: 640, height: 480, app: fileManagerApp, closeable: true });
+  };
+
+  /** Open the System Monitor app. */
+  g.sysmon = function() {
+    if (wm === null) { terminal.colorPrintln('WM not running.', Color.LIGHT_RED); return; }
+    wm.createWindow({ title: 'System Monitor', width: 560, height: 400, app: systemMonitorApp, closeable: true });
+  };
+
+  /** Open the Settings app. */
+  g.settings = function() {
+    if (wm === null) { terminal.colorPrintln('WM not running.', Color.LIGHT_RED); return; }
+    wm.createWindow({ title: 'Settings', width: 560, height: 440, app: settingsApp, closeable: true });
+  };
+
   // Text editor — opens windowed EditorApp in WM mode, VGA editor in text mode
   g.edit = function(path?: string) {
     if (wm !== null) {
       var app = new EditorApp(path);
       var title = path ? 'Edit: ' + path.split('/').pop() : 'Editor';
-      wm.createWindow({ title: title, width: 640, height: 200, app: app, closeable: true });
+      wm.createWindow({ title: title, width: 720, height: 480, app: app, closeable: true });
     } else {
       openEditor(path);
     }
@@ -917,6 +1111,7 @@ export function registerCommands(g: any): void {
     terminal.println('  ps()                 process list  (PID PPID NAME STATE PRI)');
     terminal.println('  top()                interactive process monitor  (q = quit)');
     terminal.println('  kill(pid)            terminate a process');
+    terminal.println('  services(name?)      list services or show one service detail');
     terminal.println('  mem()                memory usage + bar');
     terminal.println('  uptime()             system uptime');
     terminal.println('  sysinfo()            full system summary');
@@ -988,12 +1183,46 @@ export function registerCommands(g: any): void {
     terminal.println('  net.createSocket(t)  UDP or TCP socket');
     terminal.println('');
 
+    terminal.colorPrintln('Apps:', Color.YELLOW);
+    terminal.println('  apps()               list all registered apps');
+    terminal.println('  launch(name, opts?)  open any registered app by name');
+    terminal.println('  files()              File Manager  (browse VFS + disk)');
+    terminal.println('  sysmon()             System Monitor  (CPU/mem/procs/net)');
+    terminal.println('  settings()           Settings  (display/users/network/disk)');
+    terminal.println('  edit(path?)          text editor  (^S save  ^Q quit)');
+    terminal.println('');
+
     terminal.colorPrintln('REPL:', Color.YELLOW);
     terminal.println('  history()            show input history');
     terminal.println('  env()                pseudo-environment variables');
     terminal.println('  echo(...)            print arguments');
     terminal.println('  print(s)             print a value');
     terminal.println('  printable(d, fn)     wrap data with a custom pretty-printer');
+    terminal.println('');
+
+    terminal.colorPrintln('App SDK  (recommended for all app/script code):', Color.YELLOW);
+    terminal.colorPrint('  os.fs', Color.LIGHT_CYAN);
+    terminal.println('              .read .write .readBytes .list .mkdir .exists .cd .cwd .rm');
+    terminal.colorPrint('  os.fetchAsync', Color.LIGHT_CYAN);
+    terminal.println('       (url, cb, opts?)  non-blocking HTTP/HTTPS → FetchResponse');
+    terminal.colorPrint('  os.process', Color.LIGHT_CYAN);
+    terminal.println('          .spawn(code, name?)  .list()  → isolated JSProcess');
+    terminal.colorPrint('  os.ipc', Color.LIGHT_CYAN);
+    terminal.println('             .pipe()  .signals.handle/send  .mq.send/recv');
+    terminal.colorPrint('  os.users', Color.LIGHT_CYAN);
+    terminal.println('           .login .logout .whoami .getUser .addUser .passwd');
+    terminal.colorPrint('  os.system', Color.LIGHT_CYAN);
+    terminal.println('          .uptime .ticks .pid .hostname .memInfo .screenWidth/Height');
+    terminal.colorPrint('  os.disk', Color.LIGHT_CYAN);
+    terminal.println('            .available .read .write .list .mkdir .exists .rm');
+    terminal.colorPrint('  os.clipboard', Color.LIGHT_CYAN);
+    terminal.println('       .read()  .write(text)');
+    terminal.colorPrint('  os.wm', Color.LIGHT_CYAN);
+    terminal.println('             .openWindow .closeWindow .getWindows .focus .markDirty');
+    terminal.colorPrint('  os.spawn', Color.LIGHT_CYAN);
+    terminal.println('           (name, step)  register cooperative coroutine');
+    terminal.colorPrint('  os.cancel', Color.LIGHT_CYAN);
+    terminal.println('          (id)           cancel fetch or coroutine');
     terminal.println('');
 
     terminal.colorPrintln('Scripting APIs (raw data, never print):', Color.YELLOW);
@@ -1008,7 +1237,7 @@ export function registerCommands(g: any): void {
     terminal.colorPrint('  ipc', Color.LIGHT_CYAN);
     terminal.println('      .pipe() .signal.send(pid,sig) .mq.send(pid,msg)');
     terminal.colorPrint('  scheduler', Color.LIGHT_CYAN);
-    terminal.println(' .getAllProcesses .spawn .terminate .getAlgorithm');
+    terminal.println(' .getLiveProcesses .spawn .kill .getAlgorithm');
     terminal.colorPrint('  vmm', Color.LIGHT_CYAN);
     terminal.println('      .allocate .free .getStats .protect .mmap');
     terminal.colorPrint('  disk', Color.LIGHT_CYAN);
