@@ -1165,6 +1165,15 @@ stack frame is set up, insert the hook check:
 >
 > **After modifying the struct, re-run the probe to get exact values.**
 > The +8 shift is a prediction; actual padding may differ.
+>
+> **Also update `js_qjs_offsets()` in `quickjs_binding.c` (added in Step 3) to
+> return the new post-JIT-fields offsets** (bcBuf=28, bcLen=32, argCount=48, etc.).
+> `initOffsets()` in `qjs-jit.ts` calls `kernel.qjsOffsets` first — if the C
+> function still returns the old values (bcBuf=20), the TS compiler will read the
+> wrong fields and silently produce broken code. The hardcoded fallback in
+> `initOffsets()` already uses the post-modification values (bcBuf=28 etc.) and
+> is correct, but it is only reached if `kernel.qjsOffsets` is absent, which it
+> won't be after Step 3. Update the C values at the same time as the struct change.
 
 **In `JSRuntime` struct, add:**
 
@@ -2445,16 +2454,17 @@ export class QJSJITCompiler {
         return pc + 1;
       }
       case OP_add_loc: {
-        // TOS += local[idx] — pops TOS, adds local, pushes result
+        // local[idx] += pop()  — DEF(add_loc, 2, 1, 0, loc8): n_pop=1, n_push=0
+        // Pops TOS, adds it to the local variable, stores back. Does NOT push result.
         const idx = ops[pc];
         if (idx >= this._varCount) return -1;
-        e.buf.push(0x58);           // POP EAX (value to add)
-        e.pushEax();                // save it
-        e.load(this._varSlot(idx)); // load local
-        e.popEcx();                 // get saved value
-        e.addAC();                  // EAX = local + value
-        e.store(this._varSlot(idx));// store back
-        e.pushEax();                // push result
+        e.buf.push(0x58);           // POP EAX   — TOS value to add
+        e.pushEax();                // PUSH EAX  — save on stack temporarily
+        e.load(this._varSlot(idx)); // EAX = local[idx]
+        e.popEcx();                 // ECX = saved TOS value
+        e.addAC();                  // EAX = local[idx] + TOS
+        e.store(this._varSlot(idx));// local[idx] = result
+        // n_push=0: do NOT push result
         return pc + 1;
       }
 
