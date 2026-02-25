@@ -1237,7 +1237,7 @@ static JSValue js_set_jit_hook(JSContext *c, JSValueConst this_val,
     if (!JS_IsUndefined(_jit_ts_callback))
         JS_FreeValue(c, _jit_ts_callback);
     _jit_ts_callback = JS_DupValue(c, argv[0]);
-    JS_SetJITHook(JS_GetRuntime(c), _jit_hook_impl, NULL);
+    JS_SetJITHook(JS_GetRuntime(c), _jit_hook_impl);
     return JS_UNDEFINED;
 }
 
@@ -2512,10 +2512,16 @@ export class QJSJITCompiler {
         return pc;
 
       case OP_sar:
+        e.popEcx();
+        e.buf.push(0x58);
+        e.sarACl();               // SAR EAX, CL — arithmetic (signed) right shift
+        e.pushEax();
+        return pc;
+
       case OP_shr:
         e.popEcx();
         e.buf.push(0x58);
-        e.sarACl();
+        e.shrACl();               // SHR EAX, CL — logical (unsigned) right shift
         e.pushEax();
         return pc;
 

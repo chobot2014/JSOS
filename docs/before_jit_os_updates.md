@@ -549,8 +549,8 @@ kernel.setTimeout(0, frame);
 
 With the browser running in its own child runtime:
 
-- Page JS runs via `new Function()` **inside the browser's child heap** (4 MB)
-- A runaway page can exhaust the browser's 4 MB heap → browser crashes and is
+- Page JS runs via `new Function()` **inside the browser's child heap** (up to 1 GB — same cap as all child runtimes; covers Gmail, Docs, heavy SPAs)
+- A runaway page can exhaust the browser's heap → browser crashes and is
   restarted, OS continues running
 - Page JS that hits `JIT_THRESHOLD` gets compiled into the browser child's
   512 KB JIT pool partition — hot page animations, game loops, etc. benefit
@@ -744,7 +744,7 @@ Heap window (`linker.ld`): **2 GB** (`0x80000000`), `(NOLOAD)` section — GRUB 
 `_heap_start` ≈ **~46.7 MB** (kernel load 1 MB + code/data ~2 MB + BSS ~43.7 MB)
 `_heap_end` = `_heap_start` + 2 GB ≈ **~2.05 GB**
 `KERNEL_END_FRAME` = 655,360 frames × 4096 = **2.5 GB** — physAlloc bitmap above `_heap_end` with ~450 MB margin ✓
-physAlloc range: 2.5 GB – ~3.5 GB = **~1 GB** user-addressable page frames
+physAlloc range: 2.5 GB – ~3.0 GB = **~512 MB** user-addressable page frames (3.0 GB is the 32-bit physical ceiling; top 1 GB is MMIO/PCI hole at 0xC0000000)
 
 > **NOLOAD is a correctness fix:** Previously the heap lived inside `.bss`; GRUB zeroed
 > the entire window at boot. At 768 MB that caused a multi-second freeze; at 2 GB it would
