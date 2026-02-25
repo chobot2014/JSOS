@@ -1096,6 +1096,8 @@ static JSValue _jit_ts_callback = JS_UNDEFINED;
 
 static int _jit_hook_impl(JSContext *ctx, void *bytecode_ptr,
                            JSValue *stack_ptr, int argc) {
+    /* Only fire for the main runtime — child runtimes are excluded from JIT. */
+    if (JS_GetRuntime(ctx) != rt) return 1;
     if (JS_IsUndefined(_jit_ts_callback)) return 1; /* no TS handler → interpreter */
 
     /* Call TypeScript: jitHook(bytecodeAddr, stackAddr, argc) */
@@ -1171,6 +1173,87 @@ Register:
    */
   setJITNative(bytecodeAddr: number, nativeAddr: number): void;
 ```
+
+### Multiple QuickJS Runtimes — Architecture and JIT Scope
+
+**JSOS runs multiple simultaneous QuickJS runtimes.** This must be fully
+understood before touching the hook infrastructure.
+
+#### Runtime Tiers
+
+| | Main runtime | Child runtimes |
+|---|---|---|
+| Created by | `quickjs_initialize()` in `quickjs_binding.c` | `kernel.procCreate()` → `_procs[0..7]` |
+| Memory limit | 50 MB | 4 MB each |
+| Max count | 1 (always exists) | 8 concurrent |
+| Lifetime | Boot → OS death | Spawned/destroyed on demand |
+| What runs in it | **ALL TypeScript OS code, ALL apps, browser page JS, REPL** | Isolated background worker scripts |
+| Kernel API | Full (`setJITHook`, `readPhysMem`, VGA, FS, IPC, …) | Minimal (`postMessage`, `pollMessage`, `getTicks`, `sleep`) |
+| Has JIT? | **YES** | **NO** |
+
+#### Why Browser Page JS Is In the Main Runtime
+
+`jsruntime.ts` (`createPageJS`) executes browser scripts using **`new
+Function(...keys, code)`**. `new Function` lives in the current QuickJS
+runtime — the main one. Browser page JS is sandboxed at the JavaScript level
+(controlled scope object passed as parameters) but executes in the main
+runtime's GC heap. Hot functions in a page's JS **will** accumulate
+`call_count` and **will** get JIT-compiled once they reach `JIT_THRESHOLD`.
+This is desirable and requires no special handling.
+
+Similarly, REPL user code is evaluated via `JS_Eval(ctx, ...)` where `ctx` is
+the main context. Repeated REPL call-sites also accumulate `call_count`.
+
+#### Why Child Runtimes Are Excluded From JIT
+
+Child runtimes are short-lived background workers. They:
+- Run isolated, minimal scripts (no VGA, no FS access)
+- Are rarely CPU-bound enough to hit `JIT_THRESHOLD` (100 calls)
+- Are destroyed by `procDestroy` — any JIT-compiled code in the pool would be leaked with no way to reclaim it (the pool has no free list)
+- Have no access to `kernel.setJITHook` (not in the child kernel API)
+
+**The JIT hook is therefore ONLY registered on the main runtime.** Child
+runtimes have `jit_hook = NULL` (the default) and the QuickJS hook dispatch
+never fires for them. This is correct and deliberate.
+
+#### Safety: `_jit_ts_callback` Is a Main-Runtime JSValue
+
+`_jit_ts_callback` is a `JSValue` allocated in the main runtime's GC. If
+`_jit_hook_impl` were ever called with a child runtime's `ctx`, the
+`JS_Call(ctx, _jit_ts_callback, …)` would mix JSValues across GC heaps —
+undefined behavior, likely a crash.
+
+This is prevented by the invariant above: the hook is never registered on
+child runtimes. As a belt-and-suspenders guard, add a runtime identity check:
+
+```c
+/* Global: the main runtime pointer, for identity checks */
+extern JSRuntime *rt;   /* defined at top of quickjs_binding.c */
+
+static int _jit_hook_impl(JSContext *ctx, void *bytecode_ptr,
+                           JSValue *stack_ptr, int argc) {
+    /* SAFETY: only handle hook from the main runtime.
+     * Child runtimes (procCreate) have jit_hook=NULL so this should
+     * never fire for them, but guard anyway. */
+    if (JS_GetRuntime(ctx) != rt) return 1;  /* ← ADD THIS LINE */
+
+    if (JS_IsUndefined(_jit_ts_callback)) return 1;
+    /* … rest unchanged … */
+}
+```
+
+#### `call_count` Overhead in Child Runtimes
+
+Adding `call_count` and `jit_native_ptr` to `JSFunctionBytecode` costs **+8
+bytes per function object** in every runtime, including child runtimes. With a
+4 MB child heap and at most a few hundred function objects per child, this is
+a negligible ~2–3 KB overhead. Acceptable.
+
+The `jit_native_ptr` field in child runtimes will always be NULL (the hook
+never fires, so nothing ever calls `kernel.setJITNative` for child functions).
+The hot path check in the interpreter (`if (b->jit_native_ptr)`) will always
+branch-not-taken for child runtimes — one correctly-predicted branch per
+function call, no measurable cost.
 
 ---
 
