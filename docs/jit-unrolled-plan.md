@@ -44,7 +44,7 @@
 | `JIT.compile()` public API | `src/os/process/jit.ts:1089–1148` | Parse → codegen → `kernel.jitAlloc` → `kernel.jitWrite` → return callable proxy |
 | `JITProfiler` tiered warmup | `src/os/process/jit.ts:1163–1242` | Threshold-based Tier 0 (TS) → Tier 1 (native) promotion |
 | `JITCanvas` pixel operations | `src/os/process/jit-canvas.ts` | Pre-compiled native: fillBuffer, fillRect, blitRow, blitAlphaRow, glyphRow |
-| C JIT pool (256 KB BSS) | `src/kernel/jit.c` | `jit_alloc()` bump allocator, `jit_write()` memcpy, `jit_call_i4/i8()` trampolines |
+| C JIT pool (256 KB BSS → 12 MB) | `src/kernel/jit.c` | `jit_alloc()` bump allocator, `jit_write()` memcpy, `jit_call_i4/i8()` trampolines |
 | C JIT header | `src/kernel/jit.h` | Public C API: `jit_alloc`, `jit_write`, `jit_call_i4`, `jit_call_i8`, `jit_used_bytes` |
 | Kernel bindings (JS→C) | `src/kernel/quickjs_binding.c:1486–1600` | `js_jit_alloc`, `js_jit_write`, `js_jit_call_i`, `js_jit_call_i8`, `js_physaddr_of` |
 | TypeScript kernel types | `src/os/core/kernel.ts` | Full `KernelAPI` interface with JIT method signatures |
@@ -53,7 +53,7 @@
 
 | Component | File(s) | Description |
 |---|---|---|
-| Pool expansion to 2 MB | `src/kernel/jit.c` | Change `JIT_POOL_SIZE` constant |
+| Pool expansion to 12 MB | `src/kernel/jit.c` | Change `JIT_POOL_SIZE` / partition constants |
 | `readPhysMem` primitive | `src/kernel/quickjs_binding.c` + `src/os/core/kernel.ts` | Read N bytes from a physical address into an ArrayBuffer |
 | `writePhysMem` primitive | Same | Write N bytes to a physical address from an ArrayBuffer |
 | Boot-time struct offsets | `src/kernel/quickjs_binding.c` | Export `JSFunctionBytecode` field offsets as `kernel.qjsOffsets` |
@@ -77,30 +77,41 @@
 
 A JIT-compiled SPA page can have 500+ hot functions at ~512 bytes each = 256 KB
 consumed immediately. The current 256 KB pool will be exhausted on any non-trivial
-page. 2 MB gives room for 4000 functions before eviction is needed.
+page. 8 MB for the main runtime holds thousands of compiled functions before
+LRU eviction (Step 15) is needed; 512 KB per child slot handles a full game
+engine or physics sim with 200+ hot functions and room to spare.
 
 ### Exact Changes
 
 **`src/kernel/jit.c`:**
 
-The pool is expanded to 2 MB and **partitioned** so child runtimes each get
+The pool is expanded to **12 MB** and **partitioned** so child runtimes each get
 a fixed region that can be instantly reclaimed on `procDestroy`:
 
 ```
- _jit_pool (2 MB BSS)
- ├── [0 .. 1 MB)         Main runtime  — main OS code, apps, browser page JS
- ├── [1MB .. 1MB+128KB)  Child slot 0
- ├── [1MB+128KB .. +256KB) Child slot 1
+ _jit_pool (12 MB BSS)
+ ├── [0 .. 8 MB)           Main runtime  — OS kernel, apps, browser page JS
+ ├── [8MB .. 8MB+512KB)    Child slot 0
+ ├── [8MB+512KB .. +1MB)   Child slot 1
  │   …
- └── [1MB+7×128KB .. 2MB)  Child slot 7
+ └── [8MB+7×512KB .. 12MB)  Child slot 7
+
+ Pool sizing rationale:
+   Main (8 MB): never freed; OS runs indefinitely. 200+ hot functions at
+   ~500–2000 bytes each = several MB before LRU eviction kicks in.
+   Per-child (512 KB): a game engine or physics sim has 200+ hot functions.
+   At ~200–500 bytes/function that is ~100 KB; 512 KB gives 5× headroom.
+   Physical RAM: both test scripts run QEMU at `-m 4G` (4 GB); there is no
+   meaningful RAM constraint. BSS + QuickJS heaps total well under 256 MB
+   (see BSS budget below). The 12 MB JIT pool is sized for coverage, not RAM.
 ```
 
 ```c
 /* ── Pool layout ─────────────────────────────────────────────────────────── */
-#define JIT_POOL_SIZE     (2u * 1024u * 1024u)   /* 2 MB total              */
-#define JIT_MAIN_SIZE     (1u * 1024u * 1024u)   /* 1 MB for main runtime   */
+#define JIT_POOL_SIZE     (12u * 1024u * 1024u)  /* 12 MB total             */
+#define JIT_MAIN_SIZE     (8u  * 1024u * 1024u)  /* 8 MB for main runtime   */
 #define JIT_PROC_SLOTS    8u
-#define JIT_PROC_SIZE     (128u * 1024u)          /* 128 KB per child proc   */
+#define JIT_PROC_SIZE     (512u * 1024u)          /* 512 KB per child proc   */
 
 /* Sanity: main + all child slots must fit in pool */
 _Static_assert(JIT_MAIN_SIZE + JIT_PROC_SLOTS * JIT_PROC_SIZE == JIT_POOL_SIZE,
@@ -160,17 +171,34 @@ is never larger than 64 KB.
 
 ### Verify: BSS Budget
 
-Current BSS occupants:
+Current BSS occupants (after Step 1 lands):
 - `paging_pd[1024]` = 4 KB
-- `_procs[8]` = ~132 KB (8 × 16 KB message slots)
+- `_procs[JSPROC_MAX]` = **~256 KB**
+  (`JSProc_t` = rt+ctx+used (12 B) + inbox[8×2052 B] (16,416 B) + 3 ints (12 B)
+  + outbox[8×2052 B] (16,416 B) + 3 ints (12 B) = 32,868 B ≈ 32 KB per slot;
+  8 slots × 32 KB = **256 KB**. The plan's former figure of 132 KB counted only
+  the inbox and omitted the outbox.)
 - `_sbufs[8][256KB]` = 2 MB
-- `fb_blit_buf[1024*768]` = 3 MB
+- `fb_blit_buf[1024×768 × uint32_t]` = 3 MB  (4 B/pixel × 786,432 pixels)
 - `_asm_buf[4096]` = 4 KB
-- `_jit_write_buf[JIT_ALLOC_MAX]` = 64 KB
-- `_jit_pool[256KB]` → `_jit_pool[2MB]` = +1.75 MB (partitioned: 1MB main + 8×128KB children)
-- Total BSS ≈ 7–8 MB
+- `_jit_pool[12MB]` = 12 MB  (partitioned: 8 MB main + 8×512 KB children)
+- **Total BSS after Step 1 ≈ 17.3 MB**
+  (0.004 + 0.256 + 2 + 3 + 0.004 + 12 = 17.268 MB)
+
+No additional C-side staging buffer (`_jit_write_buf`) is needed. The
+TypeScript `_Emit` class assembles machine code into a JS ArrayBuffer
+(QuickJS heap), then `kernel.writePhysMem(addr, buf)` `memcpy`s it
+directly into the `_jit_pool` slot. Total BSS is stable at **~17.3 MB**
+through all remaining steps.
+
+> **Cross-reference:** `before_jit_os_updates.md` adds
+> `_app_render_bufs[8][2MB]` = 16 MB more BSS before the JIT lands.
+> Combined BSS when both plans are executed: **~33.3 MB**.
+> With 4 GB QEMU, 82 MB QuickJS heaps, and ~33 MB BSS the system
+> comfortably fits. No linker script changes needed.
 
 The 256 MB heap region starts at `_heap_start` in `linker.ld`, well above BSS.
+With QEMU at 4 GB there is no address-space concern.
 **No linker script changes needed.**
 
 ### Test
@@ -188,7 +216,7 @@ After modifying `jit.c`, verify:
 poolTotal: 256 * 1024,
 
 // AFTER:
-poolTotal: 2 * 1024 * 1024,
+poolTotal: 12 * 1024 * 1024,
 ```
 
 ---
@@ -3090,7 +3118,7 @@ case 'jit-stats':
     terminal.writeLine('  Blacklisted:    ' + stats.blacklisted);
     terminal.writeLine('  Calls (JIT):    ' + stats.calls_jit);
     terminal.writeLine('  Calls (interp): ' + stats.calls_interp);
-    terminal.writeLine('  Pool used:      ' + kernel.jitUsedBytes() + ' / ' + (2*1024*1024));
+    terminal.writeLine('  Pool used:      ' + kernel.jitUsedBytes() + ' / ' + (8*1024*1024) + ' (main)');
   }
   break;
 ```
@@ -3182,7 +3210,7 @@ For each compiled function, verify:
 1. **Correctness:** `fib_jit(10) === fib_interp(10)` for N=0..20
 2. **No stack corruption:** Call compiled function 10000 times, check EBP is preserved
 3. **Deopt correctly:** Call with float arg → deopt fires → interpreter produces correct result
-4. **Pool budget:** After 100 compilations, `jitUsedBytes()` < 2 MB
+4. **Pool budget:** After 100 compilations, `jitUsedBytes()` < 8 MB (main pool limit)
 5. **Blacklist works:** Deopt 3 times → function is permanently in interpreter
 
 ---
@@ -3350,8 +3378,12 @@ Deferred until int32 JIT is validated.
 
 ### Rationale
 
-Even with a 2 MB pool, a large SPA with 1000+ hot functions will eventually
-exhaust the pool. LRU eviction reclaims space by overwriting the coldest function.
+Even with an 8 MB main pool, a long-running OS instance with thousands of hot
+functions across many apps will eventually exhaust the pool. LRU eviction
+reclaims space by overwriting the coldest function.
+
+Note: child process pools (512 KB per slot) are fully reclaimed by O(1) reset
+on `procDestroy` — LRU is only needed for the main runtime's persistent pool.
 
 ### C-Side: Entry Table
 
@@ -3450,7 +3482,7 @@ Step 12 (benchmarks)
 | QuickJS struct layout changes between versions | JIT reads wrong fields → crash | Medium | Boot-time probe validates all offsets. If wrong → JIT disabled, interpreter only |
 | Opcode encoding doesn't match our assumptions | Compiled code is wrong | Medium | Canary function validation at boot. Abort JIT if canary fails |
 | Stack corruption in compiled code | OS crash / data corruption | High initially | Conservative: disable JIT on any fault. Add stack canary cookies in debug builds |
-| JIT pool exhaustion before eviction is implemented | No more functions can be compiled | Low (2 MB) | Log a warning when pool > 75% full. Don't crash — just stop compiling |
+| JIT pool exhaustion before eviction is implemented | No more functions can be compiled | Low (8 MB main / 512 KB per child) | Log a warning when pool > 75% full. Don't crash — just stop compiling |
 | QuickJS GC moves objects during JIT read | Stale pointers → crash | Very Low | QJS uses refcounting, not moving GC. Pointers are stable. Always `readPhysMem` fresh |
 | Hook insertion point changes in QJS updates | Hook doesn't fire | Medium | Pin to specific QJS commit. Document exact insertion point |
 | x87 FPU state clobbered by QuickJS runtime | Float64 results wrong | Medium | Save/restore x87 state at JIT function entry/exit if needed |
@@ -3466,7 +3498,7 @@ Step 12 (benchmarks)
 | **JSFunctionBytecode** | QuickJS internal struct holding compiled bytecode for one JS function |
 | **JSValue** | QuickJS's NaN-boxed value type (8 bytes on i686): `uint64_t`. Tag in upper 32 bits, int32 value in lower 32 bits. Float64 values stored directly as the full uint64_t. |
 | **JS_TAG_INT** | Tag value 0 — the JSValue contains a 32-bit integer in the lower 32 bits |
-| **JIT pool** | 2 MB BSS region in `jit.c` that holds compiled native code |
+| **JIT pool** | 12 MB BSS region in `jit.c` — 8 MB main runtime + 8×512 KB child slots |
 | **Type speculation** | Observing argument types across calls to predict future types |
 | **Type guard** | Runtime check at function entry verifying argument tags match expectations |
 | **Deoptimization** | Falling back to the interpreter when a type guard fails |
@@ -3480,10 +3512,10 @@ Step 12 (benchmarks)
 
 ```typescript
 // Pool layout (partitioned)
-JIT_POOL_SIZE       = 2 * 1024 * 1024   // 2 MB total BSS
-JIT_MAIN_SIZE       = 1 * 1024 * 1024   // 1 MB — main runtime
+JIT_POOL_SIZE       = 12 * 1024 * 1024  // 12 MB total BSS
+JIT_MAIN_SIZE       = 8 * 1024 * 1024   // 8 MB — main runtime (never freed)
 JIT_PROC_SLOTS      = 8                  // JSPROC_MAX child slots
-JIT_PROC_SIZE       = 128 * 1024         // 128 KB per child slot
+JIT_PROC_SIZE       = 512 * 1024         // 512 KB per child slot (reclaimed on procDestroy)
 JIT_ALLOC_MAX       = 64 * 1024          // 64 KB max single allocation
 
 // Compilation policy
@@ -3515,7 +3547,7 @@ DEOPT_SENTINEL      = 0x7FFFDEAD
 
 | Step | Description | Effort | Depends On |
 |---|---|---|---|
-| 1 | JIT pool expansion to 2 MB | 0.5 days | — |
+| 1 | JIT pool expansion to 12 MB | 0.5 days | — |
 | 2 | `readPhysMem` / `writePhysMem` C primitives | 1 day | — |
 | 3 | QJS struct offset discovery | 1 day | — |
 | 4 | Opcode table extraction + constants file | 2 days | QJS source access |
@@ -3539,7 +3571,7 @@ DEOPT_SENTINEL      = 0x7FFFDEAD
 
 | After Step | Test | Expected Result |
 |---|---|---|
-| 1 | Boot OS, run existing canvas ops | JIT pool is 2 MB, all pixel ops work |
+| 1 | Boot OS, run existing canvas ops | JIT pool is 12 MB, all pixel ops work |
 | 2 | `kernel.readPhysMem(addr, 16)` in REPL | Returns ArrayBuffer with correct bytes |
 | 5 | Compile function, call 101 times | Hook fires, serial shows "[QJS-JIT] Hook fired" |
 | 7 | `new QJSBytecodeReader(addr).dump()` | Shows arg_count, var_count, bytecodeLen |
