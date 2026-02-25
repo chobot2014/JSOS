@@ -621,6 +621,77 @@ win.sessionStorage = new VFSStorage('/tmp/browser_session.json');
 
 ---
 
+### 1.17 Real Wall Clock (CMOS RTC)
+
+**Files:** `src/kernel/platform.c` (or new `src/kernel/rtc.c`), `src/kernel/quickjs_binding.c`, `src/os/core/kernel.ts`, `src/os/apps/browser/jsruntime.ts`
+
+Currently `new Date()` always constructs `1970-01-01T00:00:00Z` because `gettimeofday()` hardcodes `tv_sec=0`. Any page that displays dates, formats timestamps, or computes time-based state will behave incorrectly.
+
+**C primitive** — reads the CMOS RTC via I/O ports `0x70`/`0x71` (pure hardware I/O, no logic):
+```c
+// rtc.c
+typedef struct { uint8_t sec, min, hour, mday, mon; uint16_t year; } RTCTime;
+
+static uint8_t rtc_read(uint8_t reg) {
+    outb(0x70, reg);
+    return inb(0x71);
+}
+static uint8_t bcd2bin(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
+
+void platform_read_rtc(RTCTime *t) {
+    // Wait for update-in-progress flag to clear
+    while (rtc_read(0x0A) & 0x80);
+    t->sec  = bcd2bin(rtc_read(0x00));
+    t->min  = bcd2bin(rtc_read(0x02));
+    t->hour = bcd2bin(rtc_read(0x04));
+    t->mday = bcd2bin(rtc_read(0x07));
+    t->mon  = bcd2bin(rtc_read(0x08));
+    uint8_t yr  = bcd2bin(rtc_read(0x09));
+    uint8_t cen = bcd2bin(rtc_read(0x32));  // century register
+    t->year = (uint16_t)(cen * 100 + yr);
+}
+```
+
+**`quickjs_binding.c`** — expose as `kernel.getWallClock()` returning Unix ms:
+```c
+// Computes days-since-epoch from RTC fields, multiplies to ms
+static JSValue js_get_wall_clock(JSContext *ctx, ...) {
+    RTCTime t; platform_read_rtc(&t);
+    int64_t unix_ms = rtc_to_unix_ms(&t);  // standard calendar math
+    return JS_NewInt64(ctx, unix_ms);
+}
+```
+
+**`kernel.ts`:**
+```typescript
+getWallClock(): number { /* calls js_get_wall_clock */ }
+```
+
+**`jsruntime.ts`** — compute boot epoch offset once at startup, then `Date.now()` stays fast:
+```typescript
+// At browser/OS init:
+const _bootEpochMs  = kernel.getWallClock();   // RTC read once
+const _bootUptimeMs = kernel.getUptime();       // PIT ticks at same instant
+
+// Patch Date.now() to return real wall time:
+win.Date = new Proxy(Date, {
+  apply(target, thisArg, args) { return new target(...args); },
+  construct(target, args) {
+    if (args.length === 0) {
+      return new target(_bootEpochMs + (kernel.getUptime() - _bootUptimeMs));
+    }
+    return new target(...args);
+  }
+});
+win.Date.now = () => _bootEpochMs + (kernel.getUptime() - _bootUptimeMs);
+```
+
+This means `Date.now()` is monotonic (no RTC re-reads after boot), correct to wall time, and the RTC is only touched once at startup — no ongoing I/O overhead.
+
+**Effort:** 1 day.
+
+---
+
 ### Phase 1 Summary
 
 | Item | Description | Effort |
@@ -641,10 +712,11 @@ win.sessionStorage = new VFSStorage('/tmp/browser_session.json');
 | 1.14 | `structuredClone` | 1 day |
 | 1.15 | `localStorage` VFS-backed | 2 days |
 | 1.16 | `fetch()` improvements | 1 week |
-| **Total** | | **~5 weeks** |
+| 1.17 | Real wall clock (CMOS RTC) | 1 day |
+| **Total** | | **~5.5 weeks** |
 
 **Checkpoint:** After Phase 1 — **TodoMVC React 18** and **Vue 3 TodoMVC** should
-both load and run correctly.
+both load and run correctly. `new Date()` returns real wall time.
 
 ---
 
@@ -1573,7 +1645,8 @@ no float). Enough to show JIT speedup on arithmetic benchmarks. ~4 weeks of work
 | **1** | 1.14 | structuredClone | 1 day | 3.4w |
 | **1** | 1.15 | localStorage VFS-backed | 2 days | 3.8w |
 | **1** | 1.16 | fetch() improvements | 1 week | 4.8w |
-| **2** | 2.1 | JIT image blit | 2 days | 5.2w |
+| **1** | 1.17 | Real wall clock (CMOS RTC) | 1 day | 5.0w |
+| **2** | 2.1 | JIT image blit | 2 days | 5.4w |
 | **2** | 2.2 | Scroll blit | 3 days | 5.8w |
 | **2** | 2.3 | Incremental layout (dirty subtree) | 1 week | 6.8w |
 | **2** | 2.4 | Damage rectangles | 1 week | 7.8w |
@@ -1619,17 +1692,23 @@ after Phase 1 milestones are stable).
 
 ## What Stays Out of Scope
 
-The following items from the JSOS backlog are **not included in this plan** because
-they are not required for browser/SPA functionality:
+### Stretch Goals (web platform completeness, not required for SPA correctness)
 
-- `os.time` — system clock / NTP sync
-- `os.audio` — audio driver / Web Audio API
-- `os.video` — video decoder
-- `os.usb` — USB device support
+These are needed to make the browser a full web platform but are not required for
+any checkpoint SPA in this plan:
+
+- `os.audio` — Web Audio API (`AudioContext`, `OscillatorNode`, etc.); requires audio driver
+- `os.video` — `<video>` element, MediaSource API; requires a codec decoder
+- `os.usb` — `navigator.usb` (WebUSB); requires USB host controller driver
+
+### Truly Out of Scope
+
+The following are valid JSOS items but have no bearing on browser/SPA functionality:
+
 - Package management / AppStore
 - Multi-user / login system
 - Process isolation / memory protection between processes
 - Network services (DNS server, DHCP server, SSH daemon)
 - ARM / RISC-V port
 
-These are valid future items but tracked separately.
+These are tracked separately in the JSOS backlog.
