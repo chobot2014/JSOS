@@ -20,7 +20,7 @@ import {
   type FetchResponse,
 } from '../../core/sdk.js';
 
-declare var kernel: import('../../core/kernel.js').KernelAPI;
+
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 
@@ -2167,7 +2167,7 @@ export class BrowserApp implements App {
         self._history[self._histIdx].url   = finalURL;
         self._history[self._histIdx].title = finalURL;
       }
-      kernel.serialPut('[browser] HTTP ' + resp.status + ' ' + resp.body.length + 'B\n');
+      os.debug.log('[browser] HTTP', resp.status, resp.body.length + 'B');
       if (err) { self._showError(finalURL, err); return; }  // 4xx/5xx
       self._pageSource = resp.bodyText;
       var ct = resp.headers.get('content-type') || 'text/html';
@@ -2305,7 +2305,7 @@ export class BrowserApp implements App {
   }
 
   private _showError(url: string, reason: string): void {
-    kernel.serialPut('[browser] error: ' + reason + '\n');
+    os.debug.error('[browser] error:', reason);
     var r = parseHTML(errorHTML(url, reason));
     this._forms = r.forms;
     this._layoutPage(r.nodes, r.widgets, 'Error', url);

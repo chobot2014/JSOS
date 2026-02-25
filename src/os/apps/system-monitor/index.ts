@@ -94,22 +94,17 @@ export const systemMonitorApp: App = {
     if (_tab === 0) {
       // ── Overview ──────────────────────────────────────────────────────────
       var ticks  = os.system.ticks();
-      var uptime = Math.floor(ticks / 100);
-      var hh     = Math.floor(uptime / 3600);
-      var mm     = Math.floor((uptime % 3600) / 60);
-      var ss     = uptime % 60;
-      var pad    = (n: number) => (n < 10 ? '0' : '') + n;
-
+      var upMs   = os.time.uptime();
       var mem    = os.system.memory();
 
       var y = contentY;
-      canvas.drawText(PADDING, y, 'Uptime:   ' + hh + ':' + pad(mm) + ':' + pad(ss), Colors.WHITE); y += ROW_H;
+      canvas.drawText(PADDING, y, 'Uptime:   ' + os.time.duration(upMs), Colors.WHITE); y += ROW_H;
       canvas.drawText(PADDING, y, 'Ticks:    ' + ticks, Colors.LIGHT_GREY); y += ROW_H;
       canvas.drawText(PADDING, y, '', 0); y += ROW_H;
       canvas.drawText(PADDING, y, 'Memory', Colors.YELLOW); y += ROW_H;
-      canvas.drawText(PADDING, y, '  Total:  ' + (mem.total >> 10) + ' KB', Colors.WHITE); y += ROW_H;
-      canvas.drawText(PADDING, y, '  Used:   ' + (mem.used  >> 10) + ' KB', Colors.WHITE); y += ROW_H;
-      canvas.drawText(PADDING, y, '  Free:   ' + (mem.free  >> 10) + ' KB', Colors.WHITE); y += ROW_H;
+      canvas.drawText(PADDING, y, '  Total:  ' + os.text.bytes(mem.total), Colors.WHITE); y += ROW_H;
+      canvas.drawText(PADDING, y, '  Used:   ' + os.text.bytes(mem.used),  Colors.WHITE); y += ROW_H;
+      canvas.drawText(PADDING, y, '  Free:   ' + os.text.bytes(mem.free),  Colors.WHITE); y += ROW_H;
 
       // Memory bar
       var barW = w - 2 * PADDING;

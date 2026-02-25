@@ -27,11 +27,11 @@ const PADDING = 6;
 function _refresh(): void {
   _entries = [];
   try {
-    var names = os.fs.readdir(_cwd);
+    var names = os.fs.list(_cwd);
     for (var i = 0; i < names.length; i++) {
       var full = (_cwd === '/' ? '' : _cwd) + '/' + names[i];
       var isDir = false;
-      try { isDir = os.fs.isDirectory(full); } catch (_) {}
+      try { isDir = os.fs.isDir(full); } catch (_) {}
       _entries.push({ name: names[i], type: isDir ? 'dir' : 'file' });
     }
     _entries.sort((a, b) => {
