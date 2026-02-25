@@ -10,7 +10,7 @@ QJS_SOURCES = $(QUICKJS_DIR)/quickjs.c $(QUICKJS_DIR)/libregexp.c \
 
 SOURCES = boot.s crt0.s irq_asm.s kernel.c quickjs_binding.c platform.c memory.c \
           syscalls.c math_impl.c irq.c keyboard.c mouse.c timer.c ata.c \
-          pci.c virtio_net.c
+          pci.c virtio_net.c jit.c
 OBJECTS = $(SOURCES:.s=.o)
 OBJECTS := $(OBJECTS:.c=.o)
 

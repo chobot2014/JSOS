@@ -19,6 +19,7 @@
 #include "embedded_js.h"
 #include "ata.h"
 #include "virtio_net.h"
+#include "jit.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -1441,6 +1442,100 @@ static JSValue js_shared_buf_release(JSContext *c, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* ── Phase 11: JIT compiler primitives ───────────────────────────────────
+ *
+ * These three functions are the entire C surface exposed to the TypeScript
+ * JIT compiler.  All compilation logic lives in jit.ts; C only provides:
+ *   jitAlloc(size)           — carve RWX memory from the 256 KB JIT pool
+ *   jitWrite(addr, bytes[])  — bulk-copy machine code bytes into the pool
+ *   jitCallI(addr,a,b,c,d)  — call compiled cdecl fn with 4 int32 args
+ *   jitUsedBytes()           — diagnostic: bytes consumed in pool
+ */
+
+/*
+ * kernel.jitAlloc(size) → address (uint32) or 0 on failure.
+ * Allocates `size` bytes from the static 256 KB RWX JIT pool.
+ */
+static JSValue js_jit_alloc(JSContext *c, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    (void)this_val;
+    int32_t size = 0;
+    if (argc >= 1) JS_ToInt32(c, &size, argv[0]);
+    if (size <= 0) return JS_NewInt32(c, 0);
+    void *p = jit_alloc((size_t)size);
+    return JS_NewUint32(c, p ? (uint32_t)(uintptr_t)p : 0u);
+}
+
+/*
+ * kernel.jitWrite(addr, bytes) — copy a JS number[] of byte values into
+ * the JIT pool at the address returned by jitAlloc().
+ */
+static JSValue js_jit_write(JSContext *c, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    uint32_t addr = 0;
+    JS_ToUint32(c, &addr, argv[0]);
+    if (!addr) return JS_UNDEFINED;
+
+    /* Fast path: ArrayBuffer */
+    size_t ab_len = 0;
+    uint8_t *ab = JS_GetArrayBuffer(c, &ab_len, argv[1]);
+    if (ab) {
+        jit_write((void *)(uintptr_t)addr, ab, ab_len);
+        return JS_UNDEFINED;
+    }
+
+    /* Slow path: plain JS number[] */
+    int32_t len_i = 0;
+    JSValue lv = JS_GetPropertyStr(c, argv[1], "length");
+    JS_ToInt32(c, &len_i, lv);
+    JS_FreeValue(c, lv);
+    if (len_i <= 0) return JS_UNDEFINED;
+    if (len_i > (int32_t)JIT_ALLOC_MAX) len_i = (int32_t)JIT_ALLOC_MAX;
+
+    /* Stack-allocate up to 4 KB; heap-allocate larger (rare). */
+    static uint8_t _jit_write_buf[JIT_ALLOC_MAX];
+    for (int32_t i = 0; i < len_i; i++) {
+        JSValue bv = JS_GetPropertyUint32(c, argv[1], (uint32_t)i);
+        int32_t b  = 0;
+        JS_ToInt32(c, &b, bv);
+        JS_FreeValue(c, bv);
+        _jit_write_buf[i] = (uint8_t)b;
+    }
+    jit_write((void *)(uintptr_t)addr, _jit_write_buf, (size_t)len_i);
+    return JS_UNDEFINED;
+}
+
+/*
+ * kernel.jitCallI(addr, a0, a1, a2, a3) → int32
+ * Call a JIT-compiled cdecl function with four 32-bit integer arguments.
+ */
+static JSValue js_jit_call_i(JSContext *c, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewInt32(c, 0);
+    uint32_t addr = 0;
+    JS_ToUint32(c, &addr, argv[0]);
+    if (!addr) return JS_NewInt32(c, 0);
+    int32_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+    if (argc > 1) JS_ToInt32(c, &a0, argv[1]);
+    if (argc > 2) JS_ToInt32(c, &a1, argv[2]);
+    if (argc > 3) JS_ToInt32(c, &a2, argv[3]);
+    if (argc > 4) JS_ToInt32(c, &a3, argv[4]);
+    return JS_NewInt32(c, jit_call_i4((void *)(uintptr_t)addr, a0, a1, a2, a3));
+}
+
+/*
+ * kernel.jitUsedBytes() → uint32
+ * Returns bytes consumed in the JIT pool (for diagnostics / budget checks).
+ */
+static JSValue js_jit_used_bytes(JSContext *c, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewUint32(c, jit_used_bytes());
+}
+
 static const JSCFunctionListEntry js_kernel_funcs[] = {
     /* VGA raw access */
     JS_CFUNC_DEF("vgaPut",        4, js_vga_put),
@@ -1534,6 +1629,11 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("sharedBufferOpen",    1, js_shared_buf_open),
     JS_CFUNC_DEF("sharedBufferRelease", 1, js_shared_buf_release),
     JS_CFUNC_DEF("sharedBufferSize",    1, js_shared_buf_size),
+    /* JIT compiler primitives (Phase 11) */
+    JS_CFUNC_DEF("jitAlloc",     1, js_jit_alloc),
+    JS_CFUNC_DEF("jitWrite",     2, js_jit_write),
+    JS_CFUNC_DEF("jitCallI",     5, js_jit_call_i),
+    JS_CFUNC_DEF("jitUsedBytes", 0, js_jit_used_bytes),
 };
 
 /*  Initialization  */

@@ -312,6 +312,31 @@ export interface KernelAPI {
   /** Returns the byte size allocated for a shared buffer slot, or 0. */
   sharedBufferSize(id: number): number;
 
+  // ─ JIT compiler primitives (Phase 11) ─────────────────────────────────────
+  /**
+   * Allocate `size` bytes of execute+read+write memory from the 256 KB JIT pool.
+   * Allocations are 16-byte aligned. Returns a physical address (uint32), or 0 on failure.
+   * There is no free — pool is bump-allocated. Max single allocation: 64 KB.
+   */
+  jitAlloc(size: number): number;
+  /**
+   * Copy machine code bytes into a JIT allocation.
+   * `addr` must have been returned by jitAlloc().
+   * `bytes` may be a plain number[] or an ArrayBuffer (fast path, zero memcpy overhead).
+   */
+  jitWrite(addr: number, bytes: number[] | ArrayBuffer): void;
+  /**
+   * Call a JIT-compiled cdecl function at `addr` with up to 4 int32 arguments.
+   * Returns the int32 result (EAX). Pass 0 for unused arguments.
+   * WARNING: executes kernel-mode machine code with no sandboxing.
+   */
+  jitCallI(addr: number, a0?: number, a1?: number, a2?: number, a3?: number): number;
+  /**
+   * Returns the number of bytes currently consumed in the 256 KB JIT pool.
+   * Useful for budget checks and debugging.
+   */
+  jitUsedBytes(): number;
+
   //  Constants 
   colors: KernelColors;
   KEY_UP: number;    KEY_DOWN: number;   KEY_LEFT: number;  KEY_RIGHT: number;
