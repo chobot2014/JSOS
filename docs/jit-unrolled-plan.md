@@ -1204,17 +1204,40 @@ This is desirable and requires no special handling.
 Similarly, REPL user code is evaluated via `JS_Eval(ctx, ...)` where `ctx` is
 the main context. Repeated REPL call-sites also accumulate `call_count`.
 
-#### Why Child Runtimes Are Excluded From JIT
+#### Why Child Runtimes Are Excluded From JIT (Phase 4a)
 
-Child runtimes are short-lived background workers. They:
-- Run isolated, minimal scripts (no VGA, no FS access)
-- Are rarely CPU-bound enough to hit `JIT_THRESHOLD` (100 calls)
-- Are destroyed by `procDestroy` — any JIT-compiled code in the pool would be leaked with no way to reclaim it (the pool has no free list)
-- Have no access to `kernel.setJITHook` (not in the child kernel API)
+Child runtimes are the "processes" of the OS. In principle they benefit from
+JIT just as much as anything else — a CPU-heavy worker (pathfinding, number
+crunching, compression) dispatched to a child runtime eats its entire
+cooperative time slice at interpreter speed. This is a real limitation.
 
-**The JIT hook is therefore ONLY registered on the main runtime.** Child
-runtimes have `jit_hook = NULL` (the default) and the QuickJS hook dispatch
-never fires for them. This is correct and deliberate.
+The Phase 4a exclusion is a **practical constraint, not a design choice**:
+
+1. **Pool leak**: `_jit_pool` has no free list. When `procDestroy` runs, any
+   bytecode compiled for that child's functions is stranded in the pool
+   forever. Repeated spawn/destroy cycles fragment the pool with dead code.
+
+2. **Cross-heap JSValue hazard**: `_jit_ts_callback` lives in the main
+   runtime's GC heap. Calling it with a child's `ctx` would mix GC heaps —
+   undefined behavior.
+
+3. **`JIT_THRESHOLD` natural filter**: Most child processes finish their
+   work before any function is called 100 times. The counter increments
+   harmlessly and the hot path (`if (b->jit_native_ptr)`) is always
+   branch-not-taken at zero cost.
+
+**Phase 4b should extend JIT to child runtimes by:**
+- Partitioning `_jit_pool` into per-slot regions (e.g. 128 KB × 8 = 1 MB
+  of the 2 MB pool reserved for children)
+- On `procDestroy`, reset that slot's write pointer → instant O(1) reclaim
+- Register `jit_hook` on each child runtime at `procCreate`, routing through
+  a per-child dispatcher that writes into the child's pool partition
+- The TypeScript JIT compiler runs in the main runtime (it always does), but
+  writes compiled code into the child's pool partition
+
+**For Phase 4a**, the JIT hook is ONLY registered on the main runtime. Child
+runtimes have `jit_hook = NULL` (the default) and the hook never fires for
+them.
 
 #### Safety: `_jit_ts_callback` Is a Main-Runtime JSValue
 
