@@ -31,6 +31,8 @@ smooth rendering at 60 fps on bare metal.
 | Canvas 2D API | ❌ (gap) | see Phase 1 |
 | Mutation batching / incremental layout | ❌ (gap) | see Phase 1.9 |
 | Damage rects / scroll blit / JIT image blit | ❌ (gap) | see Phase 1.9 |
+| `getBoundingClientRect` / `offsetWidth/Height` / layout feedback | ❌ (gap) | see Phase 1.10 |
+| `queueMicrotask` correct ordering / `MessageChannel` / `TextEncoder` | ❌ (gap) | see Phase 1.11 |
 | QuickJS bytecode → x86 JIT | ❌ (gap) | see Phase 2 |
 
 ### Why Two Separate Phases
@@ -45,6 +47,69 @@ It requires patching QuickJS internals, implementing a type-speculation system, 
 deoptimisation path. Estimated effort: 12–16 weeks minimum. ROI per hour: lower — only
 compute-heavy SPA logic benefits; DOM, layout, and rendering are already TypeScript.
 **Do Phase 1 first.**
+
+---
+
+## SPA Compatibility Audit
+
+A full code audit of `dom.ts`, `jsruntime.ts`, and `index.ts` against what React 18,
+Vue 3, Angular 17, and Svelte 5 actually call at runtime.
+
+### What Already Works (no changes needed)
+
+| API | Status | Notes |
+|---|---|---|
+| `Proxy` / `Reflect` / `WeakMap` / `WeakSet` | ✅ | Vue 3 reactive() works |
+| `element.classList` (full API) | ✅ | add/remove/toggle/contains/replace |
+| `element.style` as live Proxy | ✅ | camelCase and hyphen-case both work |
+| Event bubbling + `stopPropagation` | ✅ | complete capture-less model |
+| `requestAnimationFrame` / `cancelAnimationFrame` | ✅ | drained in tick() |
+| `performance.now()` | ✅ | boot-relative ms |
+| `crypto.randomUUID()` / `getRandomValues()` | ✅ | |
+| `localStorage` / `sessionStorage` | ✅ | in-memory; VFS backing planned in 1.7 |
+| `fetch()` returning real Promise | ✅ | os.fetchAsync under the hood |
+| `MutationObserver` / `IntersectionObserver` / `ResizeObserver` | ⚠️ | classes exist, `observe()` is no-op |
+| `queueMicrotask` | ⚠️ | exists but fires as macrotask — see 1.11.1 |
+| `innerHTML` / `outerHTML` / `insertAdjacentHTML` | ✅ | |
+| `document.createElement` / `createTextNode` / `createDocumentFragment` | ✅ | |
+| `appendChild` / `removeChild` / `insertBefore` / `replaceChild` | ✅ | all mark `_dirty` |
+| `querySelector` / `querySelectorAll` | ✅ | CSS3 selectors, compound, pseudo |
+| `document.cookie` | ✅ | |
+| `atob` / `btoa` | ✅ | |
+| `structuredClone` | ⚠️ | JSON round-trip — loses `Date`/`Map`/`Set`/`undefined` |
+| `Symbol`, `Map`, `Set`, `BigInt` | ✅ | QuickJS natives, passed through |
+| `DOMParser` | ✅ | backed by `buildDOM()` |
+
+### What Is Missing or Broken (will prevent frameworks from running)
+
+#### Correctness Blockers
+
+| Gap | Impact | Fix |
+|---|---|---|
+| `getBoundingClientRect()` — NOT on `VElement` | Floating UI, Popper.js, all dropdown/tooltip libs | Phase 1.10 |
+| `offsetWidth/offsetHeight/offsetTop/offsetLeft` — NOT on `VElement` | jQuery, Bootstrap JS, many form libs | Phase 1.10 |
+| `clientWidth/clientHeight/scrollHeight/scrollTop` — NOT on `VElement` | Virtual scroll, infinite list | Phase 1.10 |
+| `isConnected` — NOT on `VNode` | React DOM checks this before attaching refs | Phase 1.10 |
+| `node.contains(other)` — NOT on `VNode` | React uses `document.contains(target)` in event delegation | Phase 1.10 |
+| `element.dataset` — NOT on `VElement` | `data-*` attribute access via `.dataset.foo` | Phase 1.10 |
+| `window.innerWidth` / `window.innerHeight` — NOT in `win` | Responsive components query viewport size | Phase 1.11 |
+| `document.readyState` — NOT on `VDocument` | Some frameworks check `'complete'` before init | Phase 1.11 |
+| `document.activeElement` — NOT on `VDocument` | Form libraries, `focus` management | Phase 1.11 |
+| `MessageChannel` / `MessagePort` — NOT in `win` | React 18 scheduler's primary yield mechanism | Phase 1.11 |
+| `TextEncoder` / `TextDecoder` — NOT in `win` | Binary data, many utility libs | Phase 1.11 |
+| `addEventListener` capture phase (`{ capture: true }`) — ignored | React 17+ uses capture delegation on root | Phase 1.11 |
+| `MutationObserver.observe()` is a no-op | React DOM's synchronous flush signal doesn't fire | Phase 1.8 |
+| `queueMicrotask` fires as macrotask (next tick) | Vue 3 `nextTick()` timing is one frame late | Phase 1.11 |
+
+#### Performance Killers (correct but slow)
+
+| Gap | Impact | Fix |
+|---|---|---|
+| `VClassList._clss()` re-parses class string on every call | O(N×C) for React reconciler toggling N class names | Phase 1.10 |
+| `getElementById` is `_walk()` — O(page size) | Called in every React reconciler update cycle | Phase 1.10 |
+| `nextSibling`/`previousSibling` call `indexOf` on childNodes | O(N) per traversal — React Fiber walks siblings | Phase 1.10 |
+| N style mutations per frame → N `_dirty` flags | Each `el.style.color=` triggers rerender unless 1.9.1 is done | Phase 1.9 |
+| `innerHTML` setter calls `_parseFragment` (full reparse) | React's `dangerouslySetInnerHTML` is a hot path | Phase 1.10 |
 
 ---
 
@@ -294,17 +359,63 @@ If `fetch()` blocks, the component never re-renders.
 
 ### 1.8 `MutationObserver` and `requestAnimationFrame`
 
-**Problem:** React DOM and Vue both use `MutationObserver` to schedule batched re-renders.
-`requestAnimationFrame` is used by animation loops (game engines, charting libraries,
-CSS animation polyfills).
+**`requestAnimationFrame`** is already implemented — callbacks are queued and drained
+in `tick()`. No changes needed.
 
-**Implementation:**
-- `requestAnimationFrame(cb)` → register `cb` in a queue; drain queue on each `tick()` call
-  from BrowserApp. Return an integer handle (cancelAnimationFrame cancels it).
-- `MutationObserver` → wrap VDocument mutations: after any `VElement` property/child change,
-  queue a microtask notification. Drain at end of each `tick()`.
+**`MutationObserver` is currently a stub** — `observe()` does nothing. This breaks:
+- React DOM's `scheduleMicrotask` fallback (some builds post a MutationObserver
+  record as a zero-cost microtask signal)
+- Libraries that use MO to detect when elements enter/leave the DOM
 
-Both are pure TypeScript additions to `jsruntime.ts`.
+**Fix:** Make `observe()` actually register, and fire recorded mutations each `tick()`.
+
+**Files to modify:** `src/os/apps/browser/jsruntime.ts`
+
+```typescript
+// Real MutationObserver backed by VDocument dirty tracking
+class MutationObserver {
+  private _fn: (records: MutationRecord[]) => void;
+  private _targets: Map<VNode, MutationObserverInit> = new Map();
+  private _pending: MutationRecord[] = [];
+
+  constructor(fn: (records: MutationRecord[]) => void) { this._fn = fn; }
+
+  observe(node: VNode, opts: MutationObserverInit = {}): void {
+    this._targets.set(node, opts);
+    // Register with the per-document observer registry
+    doc._observers.push(this);
+  }
+  disconnect(): void {
+    doc._observers = doc._observers.filter(o => o !== this);
+    this._targets.clear();
+  }
+  takeRecords(): MutationRecord[] { var r = this._pending; this._pending = []; return r; }
+
+  // Called by VElement mutation methods (appendChild, setAttribute, etc.)
+  _notify(record: MutationRecord): void {
+    if (this._targets.has(record.target as VNode) || this._targets.has(record.target.parentNode as VNode)) {
+      this._pending.push(record);
+    }
+  }
+
+  // Called once per tick() after DOM mutations accumulate
+  _flush(): void {
+    if (this._pending.length) {
+      var r = this._pending.splice(0);
+      try { this._fn(r); } catch(_) {}
+    }
+  }
+}
+```
+
+**`VDocument` change:** Add `_observers: MutationObserver[]` array. Mutating methods
+(`appendChild`, `setAttribute`, `textContent=`, etc.) push a `MutationRecord` to
+each registered observer. `tick()` calls `_flushObservers()` before firing RAF.
+
+**Simplification:** Only `childList` and `attributes`/`characterData` subtypes are
+needed. `subtree: true` is handled by checking if the target is a descendant of any
+observed node. Full W3C spec compliance is not needed — just enough for React DOM
+and Vue 3 to receive their expected notifications.
 
 ---
 
@@ -312,11 +423,22 @@ Both are pure TypeScript additions to `jsruntime.ts`.
 
 | # | Item | Blocks | Effort |
 |---|---|---|---|
-| 1.6 | Async fetch / Promise | React hooks, data-driven SPAs | S |
-| 1.8 | rAF + MutationObserver | React DOM, Vue reactivity | S |
-| 1.7 | localStorage | Auth flows, settings persistence | XS |
-| **1.9.1** | **Batch mutations to RAF** | **All JS-driven SPAs** | **XS** |
+| **1.9.1** | **Batch mutations to RAF** | **All JS-driven SPAs — do first** | **XS** |
 | **1.9.2** | **Eliminate serialize/reparse** | **All JS-driven SPAs** | **S** |
+| **1.10.2** | **Linked-list siblings + ID index** | **React Fiber O(N²) → O(N)** | **S** |
+| **1.10.3** | **VClassList caching** | **Class-toggling in reconciler** | **XS** |
+| **1.10.4** | **isConnected / contains / dataset** | **React DOM refs, event delegation** | **XS** |
+| **1.11.1** | **queueMicrotask correct ordering** | **Vue 3 nextTick, React 18 scheduler** | **S** |
+| **1.11.2** | **MessageChannel** | **React 18 concurrent mode** | **XS** |
+| **1.11.3** | **window.innerWidth/Height** | **Responsive components** | **XS** |
+| **1.11.4** | **document.readyState / activeElement** | **Framework init guards** | **XS** |
+| **1.11.6** | **addEventListener capture phase** | **React 17+ event delegation** | **S** |
+| 1.8 | MutationObserver (functional) | React DOM flush signal | S |
+| 1.6 | Async fetch / Promise | React hooks, data-driven SPAs | S |
+| 1.7 | localStorage | Auth flows, settings persistence | XS |
+| **1.10.1** | **getBoundingClientRect** | **Dropdowns, tooltips, focus** | **S** |
+| **1.11.5** | **TextEncoder / TextDecoder** | **Binary data libs** | **S** |
+| **1.11.7** | **structuredClone proper** | **State management libs** | **S** |
 | **1.9.5** | **JIT image blit** | **Image-heavy pages** | **S** |
 | 1.1 | CSS box model (%, flex) | Bootstrap, Tailwind grid layouts | L |
 | 1.2 | Canvas 2D API | Chart.js, D3, game engines | L |
@@ -417,6 +539,12 @@ tick(nowMs: number): void {
 **Impact:** SPA frameworks that batch updates (React, Vue, Solid) go from N rerenders
 per frame to exactly 1. This is the highest-ROI fix in the entire plan — zero new
 infrastructure required, ~20 lines changed.
+
+**`flushSync` caveat:** React provides `ReactDOM.flushSync(fn)` for synchronous
+flushing. `flushSync` must trigger an immediate rerender, bypassing the deferred
+batch. Implement by adding a `forceRerender()` path to `PageCallbacks` that
+BrowserApp calls synchronously. `flushSync` in `jsruntime.ts` calls
+`forceRerender()` then resets `needsRerender = false`.
 
 ---
 
@@ -705,6 +833,483 @@ Chrome's compositor thread).
 
 Do 1.9.1 and 1.9.2 first — together they take 3 days and deliver the majority of
 the frame-rate improvement for JS-driven SPAs. The rest are additive optimisations.
+
+---
+
+### 1.10 DOM Performance Internals
+
+> These are correctness and performance fixes inside `dom.ts` and `jsruntime.ts` that
+> do not require any new browser feature — they make the existing DOM implementation
+> fast enough and correct enough for frameworks to run against.
+
+#### 1.10.1 `getBoundingClientRect()` and Layout Geometry APIs
+
+**Problem:** `getBoundingClientRect()` does not exist on `VElement`. This is the
+number-one cause of broken SPA components:
+- **Floating UI** (used by Radix UI, Headless UI, shadcn/ui) — needs real element coords
+  for dropdown/tooltip placement
+- **Popper.js** — same
+- **React's focus management** (`element.getBoundingClientRect()` before `focus()`)
+- **Intersection detection**, virtual scroll, sticky headers
+
+**Dependency:** Requires Phase 1.1 (CSS box model) to give every `VElement` a real
+layout rect. Until then, returns zeros — at least without crashing.
+
+**Files to modify:** `src/os/apps/browser/dom.ts`, `src/os/apps/browser/layout.ts`
+
+```typescript
+// Added to VElement after Phase 1.1:
+_renderedRect: { x: number; y: number; w: number; h: number } | null = null;
+
+getBoundingClientRect(): DOMRect {
+  var r = this._renderedRect;
+  if (!r) return { x:0, y:0, width:0, height:0, top:0, left:0, right:0, bottom:0 };
+  // Adjust for scroll position (from BrowserApp via a shared ref)
+  var scrollY = this.ownerDocument?._scrollY ?? 0;
+  var top  = r.y - scrollY + TOOLBAR_H;
+  return { x: r.x, y: top, width: r.w, height: r.h,
+           top, left: r.x, right: r.x + r.w, bottom: top + r.h,
+           toJSON() { return this; } };
+}
+
+// Geometry shorthands — all derived from _renderedRect:
+get offsetWidth():  number { return this._renderedRect?.w ?? 0; }
+get offsetHeight(): number { return this._renderedRect?.h ?? 0; }
+get offsetTop():    number { return this._renderedRect?.y ?? 0; }
+get offsetLeft():   number { return this._renderedRect?.x ?? 0; }
+get clientWidth():  number { return this._renderedRect?.w ?? 0; }
+get clientHeight(): number { return this._renderedRect?.h ?? 0; }
+get scrollHeight(): number { return this._renderedRect?.h ?? 0; }  // stub until overflow layout
+get scrollWidth():  number { return this._renderedRect?.w ?? 0; }
+```
+
+**`layout.ts` change:** After computing each block's pixel rect, write it back:
+```typescript
+nodeEl._renderedRect = { x: blockX, y: absoluteY, w: blockW, h: blockH };
+```
+
+**Phase 1.1 dependency note:** Before 1.1, all rects are zero. After 1.1, rects are
+real. The API exists in both phases — it just returns zeros before layout is real.
+
+---
+
+#### 1.10.2 Fast DOM Lookups (ID index + sibling linking)
+
+**Problem:** `getElementById()` calls `_walk()` — O(entire DOM). React's reconciler
+calls `getElementById` (via refs) on every reconcile cycle. On a 500-node page this
+is O(500) per reconcile pass.
+
+`nextSibling`/`previousSibling` call `Array.indexOf(child)` on the parent's
+`childNodes` — O(N) per traversal. React Fiber's sibling-chain walk is O(N²).
+
+**Files to modify:** `src/os/apps/browser/dom.ts`
+
+**Fix 1 — ID index:**
+```typescript
+// In VDocument:
+_idIndex: Map<string, VElement> = new Map();
+
+// In VElement.setAttribute():
+if (name === 'id') {
+  if (this.ownerDocument) {
+    if (oldId) this.ownerDocument._idIndex.delete(oldId);
+    if (value) this.ownerDocument._idIndex.set(value, this);
+  }
+}
+
+// getElementById becomes O(1):
+getElementById(id: string): VElement | null {
+  return this._idIndex.get(id) ?? null;
+}
+```
+
+**Fix 2 — Linked-list siblings:**
+Replace `childNodes.indexOf(this)` in `nextSibling`/`previousSibling` with
+direct `_next`/`_prev` pointers maintained by `appendChild`/`insertBefore`/
+`removeChild`. O(1) sibling traversal.
+
+```typescript
+class VNode {
+  _next: VNode | null = null;  // nextSibling
+  _prev: VNode | null = null;  // previousSibling
+
+  get nextSibling():     VNode | null { return this._next; }
+  get previousSibling(): VNode | null { return this._prev; }
+}
+
+// appendChild updates:
+child._prev = this.lastChild;
+if (this.lastChild) (this.lastChild as any)._next = child;
+child._next = null;
+```
+
+**Impact:** React Fiber sibling traversal goes from O(N²) to O(N). `getElementById`
+goes from O(page size) to O(1). Critical for large component trees.
+
+---
+
+#### 1.10.3 `VClassList` Caching
+
+**Problem:** `VClassList._clss()` calls `this._owner.getAttribute('class')` and
+`split(/\s+/)` on every `add/remove/toggle/contains` call. React's class reconciler
+calls `classList.contains()` + `classList.add()` + `classList.remove()` in a tight
+loop over the class diff.
+
+**Fix:** Cache the `Set<string>` on the `VClassList` instance, invalidated only when
+`setAttribute('class', ...)` is called:
+```typescript
+class VClassList {
+  _cache: Set<string> | null = null;
+
+  _clssSet(): Set<string> {
+    if (!this._cache) {
+      this._cache = new Set(
+        (this._owner.getAttribute('class') || '').split(/\s+/).filter(Boolean)
+      );
+    }
+    return this._cache;
+  }
+  _invalidate(): void { this._cache = null; }  // called by setAttribute('class')
+
+  contains(c: string): boolean { return this._clssSet().has(c); }
+  add(...cs: string[]): void {
+    var s = this._clssSet();
+    var changed = false;
+    for (var c of cs) { if (!s.has(c)) { s.add(c); changed = true; } }
+    if (changed) this._sync();
+  }
+  // ... remove, toggle: update Set directly, then _sync()
+  _sync(): void {
+    this._owner._attrs.set('class', [...this._clssSet()].join(' '));
+    if (this._owner.ownerDocument) this._owner.ownerDocument._dirty = true;
+  }
+}
+```
+
+**Impact:** Class toggling becomes O(1) per operation instead of O(class string length).
+For a React component that diffs 10 classes on 50 nodes per render, this is ~500 string
+parse+split calls saved per frame.
+
+---
+
+#### 1.10.4 `isConnected`, `contains()`, `dataset`
+
+Small but critical properties that frameworks check before operating on nodes:
+
+**`isConnected`** (React DOM uses this before attaching fiber refs):
+```typescript
+get isConnected(): boolean {
+  var n: VNode | null = this;
+  while (n) { if (n === this.ownerDocument) return true; n = n.parentNode; }
+  return false;
+}
+```
+
+**`contains(other)`** (React event delegation: `document.contains(event.target)`):
+```typescript
+contains(other: VNode | null): boolean {
+  var n: VNode | null = other;
+  while (n) { if (n === this) return true; n = n.parentNode; }
+  return false;
+}
+```
+
+**`element.dataset`** (Svelte and some Vue libs use `data-*` for component metadata):
+```typescript
+get dataset(): Record<string, string> {
+  return new Proxy({} as Record<string, string>, {
+    get: (_, k: string) => this.getAttribute('data-' + _camelToDash(String(k))) ?? undefined,
+    set: (_, k: string, v: string) => { this.setAttribute('data-' + _camelToDash(String(k)), v); return true; },
+    has: (_, k: string) => this.hasAttribute('data-' + _camelToDash(String(k))),
+  });
+}
+function _camelToDash(s: string) { return s.replace(/[A-Z]/g, m => '-' + m.toLowerCase()); }
+```
+
+**`element.offsetParent`** (used by some layout measurement utilities):
+```typescript
+get offsetParent(): VElement | null {
+  var n = this.parentNode;
+  while (n) { if (n instanceof VElement) return n; n = n.parentNode; }
+  return null;
+}
+```
+
+---
+
+#### Phase 1.10 Effort: 1 week
+
+All items are pure `dom.ts` / `layout.ts` changes. No C. No new architecture.
+Do 1.10.2 (linked-list siblings + ID index) first — it is the single biggest
+correctness+performance item with zero user-visible API surface change.
+
+---
+
+### 1.11 Missing Browser Runtime APIs
+
+> These are entries in the `win` global object in `jsruntime.ts` that modern SPA
+> frameworks depend on but are currently absent or broken.
+
+#### 1.11.1 `queueMicrotask` — Correct Microtask Ordering
+
+**Problem:** `queueMicrotask` is currently `(fn) => setTimeout_(fn, 0)`. This makes
+it a **macrotask** — it fires on the NEXT `tick()` call (~16ms later). The spec
+requires microtasks to drain **before** returning to the event loop, i.e., before the
+next macro task.
+
+**Impact on frameworks:**
+- **Vue 3 `nextTick()`**: implemented as `Promise.resolve().then(fn)`. QuickJS
+  drains its own Promise job queue natively between top-level calls, so Vue's
+  `nextTick` actually works correctly **if** `JS_ExecutePendingJob` is called
+  after each timer/RAF callback in `tick()`. Verify this is done in
+  `quickjs_binding.c`.
+- **React 18 scheduler**: uses `queueMicrotask` directly for its `scheduleCallback`
+  microtask lane. If this fires 16ms late, concurrent mode is degraded.
+- **`Promise.then()` chains**: QuickJS handles these natively and they drain
+  automatically — this is correct already.
+
+**Fix:** Maintain a separate `microtaskQueue: Array<() => void>` that drains
+**synchronously** at the end of each `execScript()`, timer callback, and RAF
+callback — not on the next tick:
+
+```typescript
+var microtaskQueue: Array<() => void> = [];
+
+function queueMicrotask_(fn: () => void): void { microtaskQueue.push(fn); }
+
+function drainMicrotasks(): void {
+  // drain in a loop in case microtasks enqueue more microtasks
+  while (microtaskQueue.length) {
+    var q = microtaskQueue.splice(0);
+    for (var fn of q) { try { fn(); } catch(_) {} }
+  }
+}
+
+// Called after each execScript(), timer fn(), and rAF callback:
+function execScript(code: string): void {
+  /* ... */
+  drainMicrotasks();
+}
+```
+
+**Note:** Native QuickJS `Promise.then()` microtasks are drained by the QuickJS
+runtime itself (via `JS_ExecutePendingJob`) — they don't go through this queue.
+This queue is only for the JS-land `queueMicrotask(fn)` calls.
+
+---
+
+#### 1.11.2 `MessageChannel` / `MessagePort`
+
+**Problem:** React 18's scheduler (`scheduler.development.js`) uses `MessageChannel`
+as its primary yield mechanism:
+```js
+const channel = new MessageChannel();
+const port = channel.port2;
+channel.port1.onmessage = performWorkUntilDeadline;
+schedulePerformWorkUntilDeadline = () => { port.postMessage(null); };
+```
+Without `MessageChannel`, React 18 falls back to `setTimeout(fn, 0)` which is
+functional but fire on the next tick (same as the current behavior).
+
+**Fix:** Implement `MessageChannel` as two connected ports:
+```typescript
+class MessagePort {
+  onmessage: ((ev: { data: unknown }) => void) | null = null;
+  _partner: MessagePort | null = null;
+  postMessage(data: unknown): void {
+    var partner = this._partner;
+    if (partner?.onmessage) {
+      // Enqueue as a macrotask (fires on next tick — equivalent to setTimeout 0)
+      setTimeout_(() => { try { partner!.onmessage!({ data }); } catch(_) {} }, 0);
+    }
+  }
+  addEventListener(type: string, fn: (ev: { data: unknown }) => void): void {
+    if (type === 'message') this.onmessage = fn;
+  }
+  start(): void {}
+  close(): void { this._partner = null; }
+}
+
+class MessageChannel {
+  port1: MessagePort;
+  port2: MessagePort;
+  constructor() {
+    this.port1 = new MessagePort();
+    this.port2 = new MessagePort();
+    this.port1._partner = this.port2;
+    this.port2._partner = this.port1;
+  }
+}
+```
+
+Add `MessageChannel` and `MessagePort` to the `win` object.
+
+---
+
+#### 1.11.3 `window.innerWidth` / `innerHeight` / `devicePixelRatio`
+
+Every responsive SPA queries `window.innerWidth` to adapt layout. Currently absent
+from `win`. Fix: add to `win` with dynamic access to the WMWindow size:
+
+```typescript
+// In win object:
+get innerWidth():  number { return cb.getViewportWidth();  },
+get innerHeight(): number { return cb.getViewportHeight(); },
+get outerWidth():  number { return cb.getViewportWidth();  },
+get outerHeight(): number { return cb.getViewportHeight(); },
+devicePixelRatio: 1,
+```
+
+Add `getViewportWidth()/getViewportHeight()` to `PageCallbacks` — BrowserApp
+returns `this._win?.width ?? 800` and `this._contentH()`.
+
+---
+
+#### 1.11.4 `document.readyState`, `document.activeElement`
+
+```typescript
+// In VDocument:
+_readyState: 'loading' | 'interactive' | 'complete' = 'loading';
+get readyState(): string { return this._readyState; }
+
+_activeElement: VElement | null = null;
+get activeElement(): VElement | null { return this._activeElement ?? this.body; }
+```
+
+Set `doc._readyState = 'interactive'` after DOM parsing, `'complete'` after all
+scripts run and `DOMContentLoaded` fires. Many frameworks gate initialization
+behind `document.readyState === 'complete'`.
+
+---
+
+#### 1.11.5 `TextEncoder` / `TextDecoder`
+
+Used by binary data processing, WASM interop, and many utility libraries. Pure JS
+implementation is fine for UTF-8:
+
+```typescript
+class TextEncoder {
+  readonly encoding = 'utf-8';
+  encode(s: string): Uint8Array {
+    var bytes: number[] = [];
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c < 0x80) bytes.push(c);
+      else if (c < 0x800) { bytes.push(0xC0|(c>>6)); bytes.push(0x80|(c&63)); }
+      else { bytes.push(0xE0|(c>>12)); bytes.push(0x80|((c>>6)&63)); bytes.push(0x80|(c&63)); }
+    }
+    return new Uint8Array(bytes);
+  }
+}
+
+class TextDecoder {
+  readonly encoding: string;
+  constructor(enc = 'utf-8') { this.encoding = enc; }
+  decode(buf: Uint8Array): string {
+    var s = ''; var i = 0;
+    while (i < buf.length) {
+      var b = buf[i++];
+      if (b < 0x80) s += String.fromCharCode(b);
+      else if ((b & 0xE0) === 0xC0) { s += String.fromCharCode(((b&31)<<6)|(buf[i++]&63)); }
+      else { s += String.fromCharCode(((b&15)<<12)|((buf[i++]&63)<<6)|(buf[i++]&63)); }
+    }
+    return s;
+  }
+}
+```
+
+---
+
+#### 1.11.6 `addEventListener` Capture Phase
+
+React 17+ attaches all events to the root container in **capture** phase
+(`el.addEventListener(type, fn, { capture: true })`). The current `VNode.addEventListener`
+ignores the third argument — all listeners are treated as bubble-phase.
+
+**Fix:** Add a separate `_captureHandlers` map to `VNode` and update `dispatchEvent`
+to first walk DOWN the ancestor chain (capture), then walk UP (bubble):
+
+```typescript
+class VNode {
+  _handlers: Map<string, Array<...>> = new Map();         // bubble
+  _captureHandlers: Map<string, Array<...>> = new Map();  // capture
+
+  addEventListener(type: string, fn: Fn, opts?: boolean | { capture?: boolean }): void {
+    var capture = opts === true || (opts as any)?.capture === true;
+    var map = capture ? this._captureHandlers : this._handlers;
+    // ... same as before
+  }
+
+  dispatchEvent(ev: VEvent): boolean {
+    ev.target = this;
+    // 1. Collect ancestor chain (excluding target)
+    var path: VNode[] = [];
+    var n: VNode | null = this.parentNode;
+    while (n) { path.push(n); n = n.parentNode; }
+    // 2. Capture phase: fire _captureHandlers top-down
+    for (var i = path.length - 1; i >= 0 && !ev._stopProp; i--) {
+      ev.currentTarget = path[i]; path[i]._fireCaptureList(ev);
+    }
+    // 3. Target phase
+    if (!ev._stopProp) this._fireList(ev);
+    // 4. Bubble phase
+    if (ev.bubbles) {
+      for (var j = 0; j < path.length && !ev._stopProp; j++) {
+        ev.currentTarget = path[j]; path[j]._fireList(ev);
+      }
+    }
+    return !ev.defaultPrevented;
+  }
+}
+```
+
+**Impact:** React 17+ event delegation (which uses capture on the root) fires
+correctly instead of being silently ignored.
+
+---
+
+#### 1.11.7 `structuredClone` — Proper Implementation
+
+The current `JSON.parse(JSON.stringify(v))` implementation silently corrupts
+state that contains `Date`, `Map`, `Set`, `undefined`, `ArrayBuffer`, or circular
+references. Zustand, Redux Toolkit, and Pinia all use `structuredClone` for
+state snapshots.
+
+**Fix:** Implement a proper recursive clone in TypeScript:
+```typescript
+function structuredClone_(v: unknown, seen = new Map()): unknown {
+  if (v === null || typeof v !== 'object' && typeof v !== 'function') return v;
+  if (seen.has(v)) return seen.get(v);
+  if (v instanceof Date) return new Date(v.getTime());
+  if (v instanceof RegExp) return new RegExp(v.source, v.flags);
+  if (v instanceof Map) {
+    var m = new Map(); seen.set(v, m);
+    v.forEach((val, k) => m.set(structuredClone_(k, seen), structuredClone_(val, seen)));
+    return m;
+  }
+  if (v instanceof Set) {
+    var s = new Set(); seen.set(v, s);
+    v.forEach(val => s.add(structuredClone_(val, seen))); return s;
+  }
+  if (v instanceof ArrayBuffer) { var ab = v.slice(0); seen.set(v, ab); return ab; }
+  if (ArrayBuffer.isView(v)) { var tv = (v as any).constructor.from(v); seen.set(v, tv); return tv; }
+  if (Array.isArray(v)) {
+    var a: unknown[] = []; seen.set(v, a);
+    for (var i = 0; i < v.length; i++) a.push(structuredClone_(v[i], seen)); return a;
+  }
+  var o: Record<string, unknown> = {}; seen.set(v, o);
+  for (var k2 in v as any) { if (Object.prototype.hasOwnProperty.call(v, k2)) o[k2] = structuredClone_((v as any)[k2], seen); }
+  return o;
+}
+```
+
+---
+
+#### Phase 1.11 Effort: 1 week
+
+All items are additions to `jsruntime.ts` and `dom.ts`. No C. The biggest-impact
+fixes are 1.11.1 (`queueMicrotask`) and 1.11.2 (`MessageChannel`) since they
+unblock React 18 concurrent features and Vue 3 batching.
 
 ---
 
@@ -1082,33 +1687,48 @@ Adds ~4 weeks of work after Phase 1 is complete.
 
 | Phase | Item | Effort | Cumulative |
 |---|---|---|---|
-| **1.6** | Async fetch + Promise | 1 week | 1w |
-| **1.8** | rAF + MutationObserver | 3 days | 1.5w |
-| **1.7** | localStorage | 2 days | 2w |
-| **1.9.1** | Batch mutations to RAF | 1 day | 2.2w |
-| **1.9.2** | Eliminate serialize/reparse round-trip | 2 days | 2.5w |
-| **1.9.5** | JIT image blit | 2 days | 3w |
-| **1.9.7** | Scroll blit | 3 days | 3.5w |
-| **1.1** | CSS box model (%, flex) | 3 weeks | 6.5w |
-| **1.2** | Canvas 2D API (Tier 1) | 2 weeks | 8.5w |
-| **1.3** | `<canvas>` compositing | 1 week | 9.5w |
-| **1.4** | CSS transitions | 1 week | 10.5w |
-| **1.5** | Proportional font | 1 week | 11.5w |
-| **1.9.3** | Incremental layout (dirty subtree) | 1 week | 12.5w |
-| **1.9.4** | Damage rectangles + partial redraws | 1 week | 13.5w |
-| **1.2b** | Canvas 2D Tier 2 (gradients, transforms) | 1 week | 14.5w |
-| **1.9.6** | JIT line rasterizer | 2 weeks | 16.5w |
-| **2.1–2.4** | QJS bytecode JIT (int32, no IC) | 4 weeks | 20.5w |
-| **2.5** | Inline caches | 1 week | 21.5w |
-| **2.7** | Pool expansion + eviction | 1 week | 22.5w |
-| **2.8** | Float64 JIT paths | 1 week | 23.5w |
+| **1.9.1** | Batch mutations to RAF (highest ROI) | 1 day | 0.2w |
+| **1.9.2** | Eliminate serialize/reparse round-trip | 2 days | 0.6w |
+| **1.10.2** | Linked-list siblings + ID index | 2 days | 1w |
+| **1.10.3** | VClassList caching | 0.5 days | 1.1w |
+| **1.10.4** | isConnected / contains / dataset | 0.5 days | 1.2w |
+| **1.11.1** | queueMicrotask correct ordering | 1 day | 1.4w |
+| **1.11.2** | MessageChannel / MessagePort | 1 day | 1.6w |
+| **1.11.3** | window.innerWidth/Height/devicePixelRatio | 0.5 days | 1.7w |
+| **1.11.4** | document.readyState / activeElement | 0.5 days | 1.8w |
+| **1.11.6** | addEventListener capture phase | 2 days | 2.2w |
+| **1.8** | MutationObserver functional callbacks | 3 days | 2.8w |
+| **1.6** | Async fetch + Promise | 1 week | 3.8w |
+| **1.7** | localStorage (VFS-backed) | 2 days | 4.2w |
+| **1.10.1** | getBoundingClientRect (zeros until 1.1) | 1 day | 4.4w |
+| **1.11.5** | TextEncoder / TextDecoder | 1 day | 4.6w |
+| **1.11.7** | structuredClone proper implementation | 1 day | 4.8w |
+| **1.9.5** | JIT image blit | 2 days | 5.2w |
+| **1.9.7** | Scroll blit | 3 days | 5.8w |
+| **1.1** | CSS box model (%, flex) | 3 weeks | 8.8w |
+| **1.2** | Canvas 2D API (Tier 1) | 2 weeks | 10.8w |
+| **1.3** | `<canvas>` compositing | 1 week | 11.8w |
+| **1.4** | CSS transitions | 1 week | 12.8w |
+| **1.5** | Proportional font | 1 week | 13.8w |
+| **1.9.3** | Incremental layout (dirty subtree) | 1 week | 14.8w |
+| **1.9.4** | Damage rectangles + partial redraws | 1 week | 15.8w |
+| **1.2b** | Canvas 2D Tier 2 (gradients, transforms) | 1 week | 16.8w |
+| **1.9.6** | JIT line rasterizer | 2 weeks | 18.8w |
+| **2.1–2.4** | QJS bytecode JIT (int32, no IC) | 4 weeks | 22.8w |
+| **2.5** | Inline caches | 1 week | 23.8w |
+| **2.7** | Pool expansion + eviction | 1 week | 24.8w |
+| **2.8** | Float64 JIT paths | 1 week | 25.8w |
 
 **Checkpoint SPAs to validate each phase:**
-- After 1.6 + 1.8 + 1.7: TodoMVC (Vanilla JS) should work
-- After 1.9.1 + 1.9.2: React setState loop should hit 60 fps (was ~5 fps)
+- After 1.9.1 + 1.9.2 + 1.10.x + 1.11.x (first 5 weeks): **TodoMVC React 18** should
+  run correctly — hooks, state, effects, event delegation all working
+- After above + 1.6 + 1.8: **Vue 3 TodoMVC** should work — reactivity, nextTick,
+  MutationObserver signal all functional
+- After 1.9.1 + 1.9.2: React `setState` loop should render at 60 fps (was ~5 fps)
 - After 1.9.5 + 1.9.7: Image-heavy pages scroll without tearing
-- After 1.1: Bootstrap 5 layout should render columns correctly
-- After 1.2: Chart.js line chart should render
-- After full Phase 1 + 1.9: A React + React-DOM SPA at smooth framerate, no jank
-- After Phase 2 MVP: Fibonacci benchmark should show >10× speedup over interpreter
-- After 2.5: React reconciler should show measurable speedup on property-access-heavy workloads
+- After 1.1 + 1.10.1 (real getBCR): Floating UI dropdowns appear in correct position
+- After 1.1: Bootstrap 5 layout renders columns correctly
+- After 1.2: Chart.js line chart renders
+- After full Phase 1: A compiled React + React-DOM SPA at smooth framerate
+- After Phase 2 MVP: Fibonacci benchmark >10× speedup over interpreter
+- After 2.5: React reconciler shows measurable speedup on property-access workloads
