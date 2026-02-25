@@ -35,6 +35,7 @@ import {
 } from '../net/dns.js';
 import { parseHttpResponse } from '../net/http.js';
 import { JSProcess, listProcesses } from '../process/jsprocess.js';
+import { ProcessSupervisor, supervisor as _defaultSupervisor } from '../process/supervisor.js';
 import { ipc, Pipe } from '../ipc/ipc.js';
 import { users } from '../users/users.js';
 import { wm, type App, type WMWindow, type KeyEvent, type MouseEvent, type MenuItem } from '../ui/wm.js';
@@ -51,6 +52,8 @@ import type { User, Group } from '../users/users.js';
 export { Canvas, Colors, defaultFont, type PixelColor } from '../ui/canvas.js';
 export type { App, WMWindow, KeyEvent, MouseEvent, MenuItem } from '../ui/wm.js';
 export { JSProcess } from '../process/jsprocess.js';
+export { ProcessSupervisor } from '../process/supervisor.js';
+export type { SupervisedProcessOptions, SupervisedProcessStats, CrashEvent, CrashReason, RestartPolicy, SupervisedProcessState } from '../process/supervisor.js';
 export { Mutex, Condvar, Semaphore } from '../process/sync.js';
 export type { User, Group } from '../users/users.js';
 export { Pipe } from '../ipc/ipc.js';
@@ -1327,6 +1330,82 @@ const sdk = {
       var pid = scheduler.getpid();
       ipc.signals.handle(pid, sig, handler);
       return function() { ipc.signals.ignore(pid, sig); };
+    },
+  },
+
+  // ── Process Supervisor ───────────────────────────────────────────────────────
+
+  /**
+   * Process supervisor — spawn and supervise isolated child JS runtimes with
+   * heartbeat, CPU/memory budgets, crash detection, log capture, and auto-restart.
+   *
+   * Example:
+   *   var proc = os.supervisor.spawn(`
+   *     var n = 0;
+   *     function work() { n++; sv.heartbeat(); sv.log('info', 'n=' + n); }
+   *   `, {
+   *     name: 'counter',
+   *     heartbeatIntervalMs: 2000,
+   *     cpuTickBudget: 200,
+   *     restartPolicy: 'on-failure',
+   *     maxRestarts: 3,
+   *   });
+   *   proc.onMessage(function(m) { print(m); });
+   *   proc.onCrash(function(ev) { print('crash:', ev.reason); });
+   *
+   *   // Drive supervision manually each frame, or call os.supervisor.startCoroutine()
+   *   // once to run it automatically in the background.
+   */
+  supervisor: {
+    /**
+     * Spawn a new supervised child process.
+     *
+     * @param code   JS source executed immediately in the child runtime.
+     * @param opts   Supervision options (heartbeat, budgets, restart policy, logs).
+     */
+    spawn(code: string, opts?: import('../process/supervisor.js').SupervisedProcessOptions): import('../process/supervisor.js').SupervisedProcess {
+      return _defaultSupervisor.spawn(code, opts);
+    },
+
+    /**
+     * Create an independent supervisor instance.
+     * Use this when you need separate supervision domains (e.g. one per app).
+     */
+    create(): ProcessSupervisor {
+      return new ProcessSupervisor();
+    },
+
+    /** Drive all supervised children for one WM frame. */
+    tick(): void {
+      _defaultSupervisor.tick();
+    },
+
+    /**
+     * Register an autonomous per-frame coroutine so tick() is called
+     * automatically.  Returns the coroutine id.
+     */
+    startCoroutine(): number {
+      return _defaultSupervisor.startCoroutine();
+    },
+
+    /** Stop the autonomous coroutine. */
+    stopCoroutine(): void {
+      _defaultSupervisor.stopCoroutine();
+    },
+
+    /** Stats snapshot for all children of the default supervisor. */
+    stats(): import('../process/supervisor.js').SupervisedProcessStats[] {
+      return _defaultSupervisor.allStats();
+    },
+
+    /** All supervised processes in the default supervisor. */
+    children(): import('../process/supervisor.js').SupervisedProcess[] {
+      return _defaultSupervisor.children();
+    },
+
+    /** Kill and release all supervised processes, stop coroutine. */
+    shutdown(): void {
+      _defaultSupervisor.shutdown();
     },
   },
 

@@ -27,6 +27,29 @@ var _CSS_NAMED: Record<string, number> = {
   thistle:0xFFD8BFD8, tomato:0xFFFF6347, turquoise:0xFF40E0D0,
   violet:0xFFEE82EE, wheat:0xFFF5DEB3, yellowgreen:0xFF9ACD32,
   transparent:0x00000000, rebeccapurple:0xFF663399,
+  // Extended named colors
+  aliceblue:0xFFF0F8FF, antiquewhite:0xFFFAEBD7, azure:0xFFF0FFFF,
+  beige:0xFFF5F5DC, bisque:0xFFFFE4C4, blanchedalmond:0xFFFFEBCD,
+  blueviolet:0xFF8A2BE2, burlywood:0xFFDEB887, cadetblue:0xFF5F9EA0,
+  chartreuse:0xFF7FFF00, chocolate:0xFFD2691E, cornflowerblue:0xFF6495ED,
+  cornsilk:0xFFFFF8DC, darkgray:0xFFA9A9A9, darkgrey:0xFFA9A9A9,
+  darkcyan:0xFF008B8B, darkkhaki:0xFFBDB76B, darkmagenta:0xFF8B008B,
+  darkolivegreen:0xFF556B2F, darkorange:0xFFFF8C00, darkorchid:0xFF9932CC,
+  darksalmon:0xFFE9967A, darkseagreen:0xFF8FBC8F, darkslateblue:0xFF483D8B,
+  darkslategray:0xFF2F4F4F, darkturquoise:0xFF00CED1, darkviolet:0xFF9400D3,
+  deeppink:0xFFFF1493, floralwhite:0xFFFFFAF0, gainsboro:0xFFDCDCDC,
+  ghostwhite:0xFFF8F8FF, goldenrod:0xFFDAA520, greenyellow:0xFFADFF2F,
+  honeydew:0xFFF0FFF0, ivory:0xFFFFFFF0, lavenderblush:0xFFFFF0F5,
+  lawngreen:0xFF7CFC00, lemonchiffon:0xFFFFFACD, lightgoldenrodyellow:0xFFFAFAD2,
+  lightgrey:0xFFD3D3D3, lightpink:0xFFFFB6C1, lightsalmon:0xFFFFA07A,
+  lightseagreen:0xFF20B2AA, lightslategray:0xFF778899, lightsteelblue:0xFFB0C4DE,
+  linen:0xFFFAF0E6, mediumaquamarine:0xFF66CDAA, mediumspringgreen:0xFF00FA9A,
+  mediumturquoise:0xFF48D1CC, mediumvioletred:0xFFC71585, mistyrose:0xFFFFE4E1,
+  navajowhite:0xFFFFDEAD, oldlace:0xFFFDF5E6, olivedrab:0xFF6B8E23,
+  palegoldenrod:0xFFEEE8AA, paleturquoise:0xFFAFEEEE, palevioletred:0xFFDB7093,
+  papayawhip:0xFFFFEFD5, peru:0xFFCD853F, rosybrown:0xFFBC8F8F,
+  seashell:0xFFFFF5EE, slategrey:0xFF708090, snow:0xFFFFFAFA,
+  whitesmoke:0xFFF5F5F5,
 };
 
 /**
@@ -45,8 +68,19 @@ export function parseCSSColor(val: string): number | undefined {
     if (hex.length === 6) return 0xFF000000 | (parseInt(hex, 16) & 0xFFFFFF);
     if (hex.length === 8) return parseInt(hex, 16) >>> 0;
   }
-  var m = val.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-  if (m) return 0xFF000000 | (parseInt(m[1]) << 16) | (parseInt(m[2]) << 8) | parseInt(m[3]);
+  var m = val.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)/);
+  if (m) {
+    var aa = m[4] !== undefined ? Math.round(parseFloat(m[4]) * 255) : 255;
+    return ((aa & 0xFF) << 24 | (parseInt(m[1]) & 0xFF) << 16 | (parseInt(m[2]) & 0xFF) << 8 | (parseInt(m[3]) & 0xFF)) >>> 0;
+  }
+  var mh = val.match(/^hsla?\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%(?:\s*,\s*([\d.]+))?\s*\)/);
+  if (mh) {
+    var hh = parseFloat(mh[1]) % 360; var ss = parseFloat(mh[2]) / 100; var ll = parseFloat(mh[3]) / 100;
+    var aha = mh[4] !== undefined ? Math.round(parseFloat(mh[4]) * 255) : 255;
+    var cc = ss * Math.min(ll, 1 - ll);
+    var fh = (n: number) => { var k2 = (n + hh / 30) % 12; return Math.round((ll - cc * Math.max(-1, Math.min(k2 - 3, 9 - k2, 1))) * 255); };
+    return ((aha & 0xFF) << 24 | fh(0) << 16 | fh(8) << 8 | fh(4)) >>> 0;
+  }
   return undefined;
 }
 

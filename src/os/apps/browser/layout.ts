@@ -127,7 +127,10 @@ export function layoutNodes(
     if (nd.type === 'pre') {
       var preText  = nd.spans[0]?.text ?? '';
       var maxPreCh = Math.max(1, Math.floor((maxX - xLeft) / CHAR_W));
-      lines.push({ y, nodes: [{ x: xLeft, text: preText.slice(0, maxPreCh), color: CLR_PRE_TXT }],
+      var preDisp  = preText.length > maxPreCh
+        ? preText.slice(0, maxPreCh - 1) + '\u00BB'   // » truncation marker
+        : preText;
+      lines.push({ y, nodes: [{ x: xLeft, text: preDisp, color: CLR_PRE_TXT }],
                    lineH: LINE_H, preBg: true });
       y += LINE_H; continue;
     }

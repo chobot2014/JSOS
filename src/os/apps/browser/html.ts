@@ -117,6 +117,7 @@ export function parseHTML(html: string): ParseResult {
   var inScriptSrc  = '';
   var inScriptBuf  = '';
   var inStyle      = false;
+  var skipUntilClose = '';  // skip all content until this close tag (iframe, video, etc.)
   var bold      = 0;
   var italic    = 0;
   var codeInl   = 0;
@@ -163,6 +164,14 @@ export function parseHTML(html: string): ParseResult {
   var inTextarea   = false;
   var textareaWip: WidgetBlueprint | null = null;
 
+  // ── Table tracking ──────────────────────────────────────────────────────────
+  var inTable       = false;
+  var tableRows:    Array<Array<{ text: string; head: boolean }>> = [];
+  var tableCurRow:  Array<{ text: string; head: boolean }> = [];
+  var tableCellBuf  = '';
+  var inTableCell   = false;
+  var tableCellHead = false;
+
   var BLOCK_TAGS = new Set([
     'p', 'div', 'section', 'article', 'main', 'header', 'footer', 'nav', 'aside',
     'figure', 'figcaption', 'address', 'details', 'dd', 'dt', 'caption',
@@ -190,6 +199,7 @@ export function parseHTML(html: string): ParseResult {
 
   function pushSpan(text: string): void {
     if (!text) return;
+    if (inTableCell) { tableCellBuf += text; return; }
     if (skipDepth > 0) return;
     var sp: InlineSpan = { text };
     if (linkHref)                          sp.href      = linkHref;
@@ -234,6 +244,7 @@ export function parseHTML(html: string): ParseResult {
       continue;
     }
     if (inStyle)  { if (tok.kind === 'close' && tok.tag === 'style')  inStyle  = false; continue; }
+    if (skipUntilClose) { if (tok.kind === 'close' && tok.tag === skipUntilClose) skipUntilClose = ''; continue; }
 
     // ── text inside <select> options or <textarea> ────────────────────────
     if (inSelect) {
@@ -300,6 +311,42 @@ export function parseHTML(html: string): ParseResult {
         case 'meta': break;  // ignored
         case 'link': break;  // ignored
 
+        // ── Embedded media / replaced elements ─────────────────────────────────────────
+        case 'iframe': {
+          var ifSrc  = tok.attrs.get('src') || 'about:blank';
+          var ifW    = tok.attrs.get('width')  || '';
+          var ifH    = tok.attrs.get('height') || '';
+          var ifDims = (ifW || ifH) ? ' (' + (ifW || '?') + '\xD7' + (ifH || '?') + ')' : '';
+          flushInline();
+          nodes.push({ type: 'block', spans: [{ text: '[\uD83D\uDDBC\uFE0F iframe: ' + ifSrc + ifDims + ']', code: true }] });
+          skipUntilClose = 'iframe'; break;
+        }
+        case 'video': {
+          var vidSrc = tok.attrs.get('src') || '';
+          nodes.push({ type: 'block', spans: [{ text: '\u25B6\uFE0F [video' + (vidSrc ? ': ' + vidSrc : '') + ']', code: true }] });
+          skipUntilClose = 'video'; break;
+        }
+        case 'audio': {
+          var audSrc = tok.attrs.get('src') || '';
+          pushSpan('\u266A [audio' + (audSrc ? ': ' + audSrc : '') + ']');
+          skipUntilClose = 'audio'; break;
+        }
+        case 'canvas': {
+          var cnW = tok.attrs.get('width')  || '300';
+          var cnH = tok.attrs.get('height') || '150';
+          flushInline();
+          nodes.push({ type: 'block', spans: [{ text: '[canvas ' + cnW + '\xD7' + cnH + ']', code: true }] });
+          break;
+        }
+        case 'noscript': {
+          skipUntilClose = 'noscript'; break;  // We have JS, so skip noscript fallback content
+        }
+        case 'object': case 'embed': case 'noembed': {
+          var objType = tok.attrs.get('type') || tok.tag;
+          pushSpan('[' + objType + ']');
+          skipUntilClose = tok.tag; break;
+        }
+
         // ── Inline formatting ───────────────────────────────────────────────
         case 'strong': case 'b':
           applyStyle(tok.attrs); bold++;    break;
@@ -365,6 +412,39 @@ export function parseHTML(html: string): ParseResult {
           nodes.push({ type: 'hr', spans: [] });
           break;
         case 'wbr': break;  // ignored
+
+        // ── Progress / Meter / Output ────────────────────────────────────────────────────
+        case 'progress': {
+          var pgVal = parseFloat(tok.attrs.get('value') || '0');
+          var pgMax = parseFloat(tok.attrs.get('max') || '100');
+          var pgFrac = Math.max(0, Math.min(1, pgMax > 0 ? pgVal / pgMax : 0));
+          var pgFilled = Math.round(pgFrac * 20);
+          pushSpan('[' + '\u2588'.repeat(pgFilled) + '\u2591'.repeat(20 - pgFilled) + '] ' + Math.round(pgFrac * 100) + '%');
+          break;
+        }
+        case 'meter': {
+          var mtVal  = parseFloat(tok.attrs.get('value') || '0');
+          var mtMin  = parseFloat(tok.attrs.get('min')   || '0');
+          var mtMax2 = parseFloat(tok.attrs.get('max')   || '1');
+          var mtFrac = Math.max(0, Math.min(1, mtMax2 > mtMin ? (mtVal - mtMin) / (mtMax2 - mtMin) : 0));
+          var mtFilled = Math.round(mtFrac * 16);
+          pushSpan('[' + '\u2593'.repeat(mtFilled) + '\u2591'.repeat(16 - mtFilled) + '] ' + mtVal);
+          break;
+        }
+        case 'output': applyStyle(tok.attrs); break;
+
+        // ── Fieldset / Legend ──────────────────────────────────────────────────────
+        case 'fieldset':
+          applyStyle(tok.attrs); flushInline();
+          nodes.push({ type: 'p-break', spans: [] });
+          nodes.push({ type: 'hr', spans: [] }); break;
+        case 'legend': {
+          flushInline();
+          if (openBlock) { nodes.push(openBlock); openBlock = null; }
+          applyStyle(tok.attrs);
+          openBlock = { type: 'h4', spans: [] };
+          break;
+        }
 
         // ── Lists ────────────────────────────────────────────────────────────
         case 'ul': case 'ol':
@@ -434,6 +514,14 @@ export function parseHTML(html: string): ParseResult {
             break;
           }
           if ((iType as string) === 'image') iType = 'submit';
+          // Normalize novel input types to renderable equivalents
+          var iTypeStr = iType as string;
+          if (iTypeStr === 'number' || iTypeStr === 'email' || iTypeStr === 'url' ||
+              iTypeStr === 'search' || iTypeStr === 'tel'   || iTypeStr === 'date' ||
+              iTypeStr === 'time'   || iTypeStr === 'color' || iTypeStr === 'range' ||
+              iTypeStr === 'datetime-local' || iTypeStr === 'month' || iTypeStr === 'week') {
+            iType = 'text';
+          }
 
           var bp: WidgetBlueprint = {
             kind: iType, name: iName, value: iValue,
@@ -508,15 +596,24 @@ export function parseHTML(html: string): ParseResult {
         // ── Table ─────────────────────────────────────────────────────────────
         case 'table':
           applyStyle(tok.attrs); flushInline();
+          inTable = true; tableRows = []; tableCurRow = []; tableCellBuf = ''; inTableCell = false;
           nodes.push({ type: 'p-break', spans: [] }); break;
         case 'thead': case 'tbody': case 'tfoot': break;
         case 'tr':
+          if (inTable && (inTableCell || tableCurRow.length > 0)) {
+            if (inTableCell) { tableCurRow.push({ text: tableCellBuf.trim(), head: tableCellHead }); inTableCell = false; }
+            tableRows.push(tableCurRow); tableCurRow = [];
+          }
           flushInline();
           nodes.push({ type: 'p-break', spans: [] }); break;
         case 'th':
-          applyStyle(tok.attrs); bold++; pushSpan('| '); break;
+          applyStyle(tok.attrs); bold++;
+          if (inTable) { inTableCell = true; tableCellHead = true; tableCellBuf = ''; } else pushSpan('| ');
+          break;
         case 'td':
-          applyStyle(tok.attrs); pushSpan('| '); break;
+          applyStyle(tok.attrs);
+          if (inTable) { inTableCell = true; tableCellHead = false; tableCellBuf = ''; } else pushSpan('| ');
+          break;
         case 'colgroup': case 'col': break;
 
         // ── Default block ─────────────────────────────────────────────────────
@@ -610,12 +707,71 @@ export function parseHTML(html: string): ParseResult {
 
         case 'button': break;
 
-        case 'th': bold = Math.max(0, bold - 1); pushSpan('  '); popCSS(); break;
-        case 'td': pushSpan('  '); popCSS(); break;
-        case 'table':
-          pushSpan('|'); flushInline();
+        case 'fieldset':
+          flushInline();
+          nodes.push({ type: 'hr', spans: [] });
           nodes.push({ type: 'p-break', spans: [] });
           popCSS(); break;
+        case 'legend':
+          if (openBlock) { nodes.push(openBlock); openBlock = null; }
+          popCSS(); break;
+        case 'output': popCSS(); break;
+        case 'progress': case 'meter': break;
+
+        case 'th':
+          bold = Math.max(0, bold - 1);
+          if (inTable && inTableCell) { tableCurRow.push({ text: tableCellBuf.trim(), head: true }); inTableCell = false; } else pushSpan('  ');
+          popCSS(); break;
+        case 'td':
+          if (inTable && inTableCell) { tableCurRow.push({ text: tableCellBuf.trim(), head: false }); inTableCell = false; } else pushSpan('  ');
+          popCSS(); break;
+        case 'table': {
+          if (inTable) {
+            if (inTableCell) { tableCurRow.push({ text: tableCellBuf.trim(), head: tableCellHead }); inTableCell = false; }
+            if (tableCurRow.length > 0) { tableRows.push(tableCurRow); tableCurRow = []; }
+            inTable = false;
+            if (tableRows.length > 0) {
+              var numCols = 0;
+              for (var tri = 0; tri < tableRows.length; tri++) { if (tableRows[tri].length > numCols) numCols = tableRows[tri].length; }
+              var colW: number[] = [];
+              for (var ci = 0; ci < numCols; ci++) colW[ci] = 3;
+              for (var tri2 = 0; tri2 < tableRows.length; tri2++) {
+                for (var ci2 = 0; ci2 < tableRows[tri2].length; ci2++) {
+                  var cw = tableRows[tri2][ci2].text.length + 2;
+                  if (cw > colW[ci2]) colW[ci2] = cw;
+                }
+              }
+              var hbar = function(l: string, m: string, r: string, x: string): string {
+                return l + colW.map(function(w) { return m.repeat(w); }).join(x) + r;
+              };
+              var dataRow = function(cells: Array<{text: string; head: boolean}>): string {
+                var s = '\u2502';
+                for (var ci3 = 0; ci3 < numCols; ci3++) {
+                  var c = cells[ci3] ? cells[ci3].text : '';
+                  s += ' ' + c + ' '.repeat(Math.max(0, colW[ci3] - c.length - 1)) + '\u2502';
+                }
+                return s;
+              };
+              nodes.push({ type: 'pre', spans: [{ text: hbar('\u250C', '\u2500', '\u2510', '\u252C') }] });
+              for (var tri3 = 0; tri3 < tableRows.length; tri3++) {
+                if (tri3 > 0) {
+                  var prevHead = tableRows[tri3 - 1].some(function(cc) { return cc.head; });
+                  var nxtHead  = tableRows[tri3].some(function(cc)  { return cc.head; });
+                  if (prevHead && !nxtHead) {
+                    nodes.push({ type: 'pre', spans: [{ text: hbar('\u255E', '\u2550', '\u2561', '\u256A') }] });
+                  } else {
+                    nodes.push({ type: 'pre', spans: [{ text: hbar('\u251C', '\u2500', '\u2524', '\u253C') }] });
+                  }
+                }
+                nodes.push({ type: 'pre', spans: [{ text: dataRow(tableRows[tri3]) }] });
+              }
+              nodes.push({ type: 'pre', spans: [{ text: hbar('\u2514', '\u2500', '\u2518', '\u2534') }] });
+            }
+            tableRows = []; tableCurRow = [];
+          }
+          nodes.push({ type: 'p-break', spans: [] });
+          popCSS(); break;
+        }
         case 'thead': case 'tbody': case 'tfoot': break;
 
         default:
@@ -651,6 +807,7 @@ export function parseHTML(html: string): ParseResult {
       }
 
       txt = txt.replace(/[\r\n\t]+/g, ' ');
+      if (inTableCell) { tableCellBuf += txt; continue; }
       if (!txt.trim()) continue;
       pushSpan(txt);
     }
