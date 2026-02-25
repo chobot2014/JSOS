@@ -1606,6 +1606,11 @@ subEsp(n: number): void {
   }
 }
 
+/** MOV EAX, [ESP] — peek at TOS without popping (used by set_loc, set_arg, dup) */
+peekTOS(): void {
+  this._w(0x8B); this._w(0x04); this._w(0x24);  // MOV EAX, [ESP]
+}
+
 /** MOV EAX, [ECX+disp] — indexed memory read */
 movEaxEcxDisp(disp: number): void {
   if (disp === 0) {
@@ -2467,15 +2472,15 @@ export class QJSJITCompiler {
       case OP_set_loc: {
         const idx = ops[pc] | (ops[pc+1] << 8);
         if (idx >= this._varCount) return -1;
-        // Peek at TOS: MOV EAX, [ESP]
-        e._w(0x8B); e._w(0x04); e._w(0x24);
+        // Peek at TOS: MOV EAX, [ESP] (n_push=1: TOS stays on stack)
+        e.peekTOS();
         e.store(this._varSlot(idx));
         return pc + 2;
       }
       case OP_set_loc8: {
         const idx = ops[pc];
         if (idx >= this._varCount) return -1;
-        e._w(0x8B); e._w(0x04); e._w(0x24);
+        e.peekTOS();
         e.store(this._varSlot(idx));
         return pc + 1;
       }
@@ -2517,8 +2522,7 @@ export class QJSJITCompiler {
       case OP_set_loc0: case OP_set_loc1: case OP_set_loc2: case OP_set_loc3: {
         const idx = op - OP_set_loc0;
         if (idx >= this._varCount) return -1;
-        // Peek at TOS (do not pop): MOV EAX, [ESP]
-        e._w(0x8B); e._w(0x04); e._w(0x24);
+        e.peekTOS();  // MOV EAX, [ESP] — peek, do not pop (n_push=1)
         e.store(this._varSlot(idx));
         return pc;
       }
@@ -2528,7 +2532,7 @@ export class QJSJITCompiler {
       case OP_set_arg0: case OP_set_arg1: case OP_set_arg2: case OP_set_arg3: {
         const idx = op - OP_set_arg0;
         if (idx >= this._argCount) return -1;
-        e._w(0x8B); e._w(0x04); e._w(0x24);  // MOV EAX, [ESP] (peek)
+        e.peekTOS();  // MOV EAX, [ESP] — peek, do not pop (n_push=1)
         e.store(this._argSlot(idx));
         return pc;
       }
@@ -2803,10 +2807,9 @@ export class QJSJITCompiler {
         return pc;
 
       case OP_dup:
-        // Peek at TOS without popping, then push again
-        // MOV EAX, [ESP]
-        e._w(0x8B); e._w(0x04); e._w(0x24);  // MOV EAX, [ESP]
-        e.pushEax();
+        // Peek at TOS without popping, then push a copy
+        e.peekTOS();    // MOV EAX, [ESP]
+        e.pushEax();    // PUSH EAX — now TOS is duplicated
         return pc;
 
       case OP_swap:
