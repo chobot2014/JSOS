@@ -198,8 +198,8 @@ export function registerCommands(g: any): void {
     scheduler, vmm, init, syscalls, net, users, ipc,
     processManager, physAlloc, threadManager,
     // POSIX FD API
-    getpid()            { return processManager.getpid(); },
-    getppid()           { return processManager.getppid(); },
+    getpid()            { return scheduler.getpid(); },
+    getppid()           { return scheduler.getCurrentProcess()?.ppid ?? 0; },
     open(path: string, flags?: number) { return syscalls.open(path, flags || 0); },
     read(fd: number, count?: number) {
       var bytes = globalFDTable.read(fd, count !== undefined ? count : 4096);

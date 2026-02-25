@@ -8,6 +8,7 @@
 
 import { globalFDTable, VFSFileDescription, SocketDescription } from './fdtable.js';
 import { processManager } from '../process/process.js';
+import { scheduler } from '../process/scheduler.js';
 import { vmm } from '../process/vmm.js';
 import { physAlloc } from '../process/physalloc.js';
 import { elfLoader } from '../process/elf.js';
@@ -177,21 +178,25 @@ export class SystemCallInterface {
   }
 
   exit(status: number): void {
-    var pid = processManager.getpid();
+    var pid = scheduler.getpid();
     var p   = processManager.getProcess(pid);
     if (p) { p.exitCode = status; p.state = 'dead'; }
+    scheduler.terminateProcess(pid, status);
   }
 
   wait(pid?: number): SyscallResult<{ pid: number; status: number }> {
-    var target = (pid !== undefined && pid > 0) ? pid : processManager.getpid() + 1;
+    var target = (pid !== undefined && pid > 0) ? pid : scheduler.getpid() + 1;
     try {
       var ws = processManager.waitpid(target);
       return { success: ws.pid >= 0, value: { pid: ws.pid, status: ws.exitCode } };
     } catch (e) { return { success: false, error: String(e), errno: Errno.ECHILD }; }
   }
 
-  getpid():  SyscallResult<number> { return { success: true, value: processManager.getpid()  }; }
-  getppid(): SyscallResult<number> { return { success: true, value: processManager.getppid() }; }
+  getpid():  SyscallResult<number> { return { success: true, value: scheduler.getpid() }; }
+  getppid(): SyscallResult<number> {
+    var cur = scheduler.getCurrentProcess();
+    return { success: true, value: cur ? cur.ppid : 0 };
+  }
 
   kill(pid: number, sig: number): SyscallResult<void> {
     signalManager.send(pid, sig);
@@ -323,7 +328,7 @@ export class SystemCallInterface {
   // ── Signals ───────────────────────────────────────────────────────────────
 
   signal(signum: number, handler: Function): SyscallResult<Function> {
-    signalManager.handle(processManager.getpid(), signum, handler as (sig: number) => void);
+    signalManager.handle(scheduler.getpid(), signum, handler as (sig: number) => void);
     return { success: true, value: handler };
   }
 
