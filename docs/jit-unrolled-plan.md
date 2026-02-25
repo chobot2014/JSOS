@@ -719,21 +719,22 @@ export const OP_rest              = 0x0D;  // size=3
 export const OP_drop              = 0x0E;  // size=1, discard TOS
 export const OP_nip               = 0x0F;  // size=1
 export const OP_nip1              = 0x10;  // size=1
-export const OP_dup               = 0x11;  // size=1, duplicate TOS
-export const OP_dup2              = 0x12;  // size=1
-export const OP_dup3              = 0x13;  // size=1
-export const OP_insert2           = 0x14;  // size=1
-export const OP_insert3           = 0x15;  // size=1
-export const OP_insert4           = 0x16;  // size=1
-export const OP_perm3             = 0x17;  // size=1
-export const OP_perm4             = 0x18;  // size=1
-export const OP_perm5             = 0x19;  // size=1
-export const OP_swap              = 0x1A;  // size=1  [NOTE: was 0x1B in prior notes, recheck]
-export const OP_swap2             = 0x1B;  // size=1
-export const OP_rot3l             = 0x1C;  // size=1
-export const OP_rot3r             = 0x1D;  // size=1
-export const OP_rot4l             = 0x1E;  // size=1
-export const OP_rot5l             = 0x1F;  // size=1
+export const OP_dup               = 0x11;  // size=1, duplicate TOS  /* a -> a a */
+export const OP_dup1              = 0x12;  // size=1  /* a b -> a a b */
+export const OP_dup2              = 0x13;  // size=1  /* a b -> a b a b */
+export const OP_dup3              = 0x14;  // size=1  /* a b c -> a b c a b c */
+export const OP_insert2           = 0x15;  // size=1
+export const OP_insert3           = 0x16;  // size=1
+export const OP_insert4           = 0x17;  // size=1
+export const OP_perm3             = 0x18;  // size=1
+export const OP_perm4             = 0x19;  // size=1
+export const OP_perm5             = 0x1A;  // size=1
+export const OP_swap              = 0x1B;  // size=1  /* a b -> b a */
+export const OP_swap2             = 0x1C;  // size=1
+export const OP_rot3l             = 0x1D;  // size=1
+export const OP_rot3r             = 0x1E;  // size=1
+export const OP_rot4l             = 0x1F;  // size=1
+export const OP_rot5l             = 0x20;  // size=1
 
 // ── Function calls ──
 export const OP_call              = 0x22;  // size=3, fmt=npop, argc operand (2 bytes)
@@ -879,8 +880,8 @@ export const OP_goto16            = 0xFE;  // size=3, fmt=label16, 2-byte signed
 
 // ─── Priority 2: Phase 4b (Interpreter-only for now) ─────────────────────────
 
-export const OP_await             = 0x6D;  // async/await state machine
-export const OP_yield             = 0x6C;  // generator yield
+export const OP_yield             = 0x86;  // generator yield  (DEF: size=1, n_pop=1, n_push=2)
+export const OP_await             = 0x89;  // async/await state machine  (DEF: size=1, n_pop=1, n_push=1)
 
 // ─── Opcode Metadata (VERIFIED) ──────────────────────────────────────────────
 
@@ -897,11 +898,11 @@ export const OPCODE_SIZE: Record<number, number> = {
   [0x06]: 1, [0x07]: 1, [0x08]: 1, [0x09]: 1, [0x0A]: 1, // undefined, null, push_this, push_false, push_true
   [0x0B]: 1, // object
   [0x0E]: 1, [0x0F]: 1, [0x10]: 1, // drop, nip, nip1
-  [0x11]: 1, [0x12]: 1, [0x13]: 1, // dup, dup2, dup3
-  [0x14]: 1, [0x15]: 1, [0x16]: 1, // insert2, insert3, insert4
-  [0x17]: 1, [0x18]: 1, [0x19]: 1, // perm3, perm4, perm5
-  [0x1A]: 1, [0x1B]: 1, // swap, swap2
-  [0x1C]: 1, [0x1D]: 1, [0x1E]: 1, [0x1F]: 1, // rot3l, rot3r, rot4l, rot5l
+  [0x11]: 1, [0x12]: 1, [0x13]: 1, [0x14]: 1, // dup, dup1, dup2, dup3
+  [0x15]: 1, [0x16]: 1, [0x17]: 1, // insert2, insert3, insert4
+  [0x18]: 1, [0x19]: 1, [0x1A]: 1, // perm3, perm4, perm5
+  [0x1B]: 1, [0x1C]: 1, // swap, swap2
+  [0x1D]: 1, [0x1E]: 1, [0x1F]: 1, [0x20]: 1, // rot3l, rot3r, rot4l, rot5l
   [0x28]: 1, [0x29]: 1, // return, return_undef
   [0x43]: 1, [0x46]: 1, // get_array_el, put_array_el
   [0x8A]: 1, [0x8B]: 1, [0x8C]: 1, [0x8D]: 1, [0x8E]: 1, [0x8F]: 1, // neg..post_inc
@@ -942,6 +943,16 @@ export const OPCODE_SIZE: Record<number, number> = {
   [0xCF]: 3, // push_i16
   [0xFE]: 3, // goto16
 
+  // size=1 (no operand) — compact call forms and type-check shortcuts
+  [0xFF]: 1,   // call0
+  [0x100]: 1,  // call1
+  [0x101]: 1,  // call2
+  [0x102]: 1,  // call3
+  [0x103]: 1,  // is_undefined
+  [0x104]: 1,  // is_null
+  [0x105]: 1,  // typeof_is_undefined
+  [0x106]: 1,  // typeof_is_function
+
   // size=5 (4-byte operand)
   [0x01]: 5, // push_i32
   [0x02]: 5, // push_const
@@ -963,12 +974,14 @@ export const OPCODE_STACK_EFFECT: Record<number, [number, number]> = {
   [0x09]: [0, 1], [0x0A]: [0, 1], // push_false, push_true
   [0x0E]: [1, 0], // drop: pop 1
   [0x11]: [0, 1], // dup: net +1 (peek+push)
-  [0x1A]: [0, 0], // swap: net 0
+  [0x1A]: [0, 0], // perm5: net 0
+  [0x1B]: [0, 0], // swap: net 0
+  [0x1C]: [0, 0], // swap2: net 0
   [0x28]: [1, 0], // return: pop 1
   [0x29]: [0, 0], // return_undef: nothing
   [0x55]: [0, 1], [0x58]: [0, 1], // get_loc, get_arg: push 1
   [0x56]: [1, 0], [0x59]: [1, 0], // put_loc, put_arg: pop 1
-  [0x57]: [0, 0], [0x5A]: [0, 0], // set_loc, set_arg: peek (no pop)
+  [0x57]: [0, 0], [0x5A]: [0, 0], // set_loc, set_arg: peek (no net change)
   [0x68]: [1, 0], [0x69]: [1, 0], // if_false, if_true: pop 1
   [0x6A]: [0, 0], // goto: nothing
   [0x8A]: [1, 1], [0x8C]: [1, 1], [0x8D]: [1, 1], // neg, dec, inc
@@ -983,11 +996,13 @@ export const OPCODE_STACK_EFFECT: Record<number, [number, number]> = {
   [0xC5]: [0, 1], [0xC6]: [0, 1], [0xC7]: [0, 1], [0xC8]: [0, 1], // push_minus1..push_2
   [0xC9]: [0, 1], [0xCA]: [0, 1], [0xCB]: [0, 1], [0xCC]: [0, 1], [0xCD]: [0, 1], // push_3..push_7
   [0xCE]: [0, 1], [0xCF]: [0, 1], // push_i8, push_i16
-  [0xD3]: [0, 1], [0xD4]: [1, 0], [0xD5]: [0, 0], // get_loc8, put_loc8, set_loc8
+  [0xD3]: [0, 1], [0xD4]: [1, 0], [0xD5]: [0, 0], // get_loc8, put_loc8, set_loc8 (set=peek, net 0)
   [0xD6]: [0, 1], [0xD7]: [0, 1], [0xD8]: [0, 1], [0xD9]: [0, 1], // get_loc0..3
   [0xDA]: [1, 0], [0xDB]: [1, 0], [0xDC]: [1, 0], [0xDD]: [1, 0], // put_loc0..3
+  [0xDE]: [0, 0], [0xDF]: [0, 0], [0xE0]: [0, 0], [0xE1]: [0, 0], // set_loc0..3 (peek, net 0)
   [0xE2]: [0, 1], [0xE3]: [0, 1], [0xE4]: [0, 1], [0xE5]: [0, 1], // get_arg0..3
   [0xE6]: [1, 0], [0xE7]: [1, 0], [0xE8]: [1, 0], [0xE9]: [1, 0], // put_arg0..3
+  [0xEA]: [0, 0], [0xEB]: [0, 0], [0xEC]: [0, 0], [0xED]: [0, 0], // set_arg0..3 (peek, net 0)
   [0xFB]: [1, 0], [0xFC]: [1, 0], // if_false8, if_true8
   [0xFD]: [0, 0], [0xFE]: [0, 0], // goto8, goto16
 };
