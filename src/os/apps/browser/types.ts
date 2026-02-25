@@ -138,12 +138,20 @@ export interface HtmlToken {
 
 // ── HTML parser output ────────────────────────────────────────────────────────
 
+export interface ScriptRecord {
+  inline: boolean;
+  src:    string;   // URL for external
+  code:   string;   // source for inline
+  type:   string;   // mime-type
+}
+
 export interface ParseResult {
   nodes:    RenderNode[];
   title:    string;
   forms:    FormState[];
   widgets:  WidgetBlueprint[];
   baseURL:  string;
+  scripts:  ScriptRecord[];
 }
 
 // ── CSS ───────────────────────────────────────────────────────────────────────

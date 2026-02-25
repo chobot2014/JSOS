@@ -1,6 +1,6 @@
 import type {
   HtmlToken, ParseResult, RenderNode, InlineSpan, BlockType,
-  WidgetBlueprint, WidgetKind, FormState, CSSProps,
+  WidgetBlueprint, WidgetKind, FormState, CSSProps, ScriptRecord,
 } from './types.js';
 import { parseInlineStyle } from './css.js';
 
@@ -106,13 +106,17 @@ export function parseHTML(html: string): ParseResult {
   var title    = '';
   var forms:   FormState[]       = [];
   var widgets: WidgetBlueprint[] = [];
+  var scripts: ScriptRecord[]    = [];
   var baseURL  = '';
 
-  var inTitle   = false;
-  var inPre     = false;
-  var inHead    = false;
-  var inScript  = false;
-  var inStyle   = false;
+  var inTitle      = false;
+  var inPre        = false;
+  var inHead       = false;
+  var inScript     = false;
+  var inScriptType = '';
+  var inScriptSrc  = '';
+  var inScriptBuf  = '';
+  var inStyle      = false;
   var bold      = 0;
   var italic    = 0;
   var codeInl   = 0;
@@ -218,7 +222,17 @@ export function parseHTML(html: string): ParseResult {
   for (var i = 0; i < tokens.length; i++) {
     var tok = tokens[i];
 
-    if (inScript) { if (tok.kind === 'close' && tok.tag === 'script') inScript = false; continue; }
+    if (inScript) {
+      if (tok.kind === 'close' && tok.tag === 'script') {
+        if (inScriptBuf.trim()) {
+          scripts.push({ inline: true, src: '', code: inScriptBuf, type: inScriptType || 'text/javascript' });
+        }
+        inScript = false; inScriptBuf = ''; inScriptSrc = ''; inScriptType = '';
+      } else if (tok.kind === 'text') {
+        inScriptBuf += tok.text;
+      }
+      continue;
+    }
     if (inStyle)  { if (tok.kind === 'close' && tok.tag === 'style')  inStyle  = false; continue; }
 
     // ── text inside <select> options or <textarea> ────────────────────────
@@ -266,7 +280,16 @@ export function parseHTML(html: string): ParseResult {
         case 'body':   inHead   = false; break;
         case 'html':   break;
         case 'title':  inTitle  = true;  break;
-        case 'script': inScript = true;  break;
+        case 'script': {
+          inScriptType = tok.attrs.get('type') || 'text/javascript';
+          inScriptSrc  = tok.attrs.get('src')  || '';
+          if (inScriptSrc) {
+            scripts.push({ inline: false, src: inScriptSrc, code: '', type: inScriptType });
+            // content (if any) is still buffered but won't be used
+          }
+          inScript = true;
+          break;
+        }
         case 'style':  inStyle  = true;  break;
 
         case 'base': {
@@ -634,5 +657,5 @@ export function parseHTML(html: string): ParseResult {
   }
 
   flushInline();
-  return { nodes, title, forms, widgets, baseURL };
+  return { nodes, title, forms, widgets, baseURL, scripts };
 }

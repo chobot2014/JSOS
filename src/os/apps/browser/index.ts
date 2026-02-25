@@ -39,6 +39,7 @@ import { parseURL, urlEncode, encodeFormData, decodeBMP, readPNGDimensions, deco
 import { parseHTML }    from './html.js';
 import { layoutNodes }  from './layout.js';
 import { aboutJsosHTML, errorHTML, jsonViewerHTML } from './pages.js';
+import { createPageJS, type PageJS } from './jsruntime.js';
 
 // ── BrowserApp ────────────────────────────────────────────────────────────────
 
@@ -92,6 +93,10 @@ export class BrowserApp implements App {
   // Async fetch coroutine id
   private _fetchCoroId = -1;
 
+  // JavaScript runtime for the current page (null if page has no scripts)
+  private _pageJS: PageJS | null = null;
+  private _jsStartMs = 0;
+
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   onMount(win: WMWindow): void {
@@ -100,6 +105,7 @@ export class BrowserApp implements App {
   }
 
   onUnmount(): void {
+    if (this._pageJS) { this._pageJS.dispose(); this._pageJS = null; }
     this._win = null;
   }
 
@@ -306,6 +312,11 @@ export class BrowserApp implements App {
   // ── Rendering ──────────────────────────────────────────────────────────────
 
   render(canvas: Canvas): boolean {
+    // Tick JS timers / RAF before dirty check
+    if (this._pageJS) {
+      var nowMs = Date.now() - this._jsStartMs;
+      this._pageJS.tick(nowMs);
+    }
     if (this._urlBarFocus || this._focusedWidget >= 0) {
       var prevPhase = (this._cursorBlink >> 4) & 1;
       this._cursorBlink++;
@@ -645,7 +656,12 @@ export class BrowserApp implements App {
         break;
       }
       case 'submit':
-      case 'button':  this._submitForm(wp.formIdx, wp.name, wp.curValue); break;
+      case 'button':  {
+        // let JS handle the click first; if no JS or not consumed, do form submit
+        var jsHandled = this._pageJS?.fireClick(wp.id !== undefined ? String(wp.id) : wp.name) ?? false;
+        if (!jsHandled) this._submitForm(wp.formIdx, wp.name, wp.curValue);
+        break;
+      }
       case 'reset':   this._resetForm(wp.formIdx); break;
       case 'checkbox': wp.curChecked = !wp.curChecked; this._dirty = true; break;
       case 'radio':
@@ -680,6 +696,7 @@ export class BrowserApp implements App {
             wp.curValue  = wp.curValue.slice(0, wp.cursorPos - 1) + wp.curValue.slice(wp.cursorPos);
             wp.cursorPos = Math.max(0, wp.cursorPos - 1);
             this._dirty  = true;
+            if (this._pageJS) this._pageJS.fireInput(wp.name, wp.curValue);
           }
           return true;
         }
@@ -687,6 +704,7 @@ export class BrowserApp implements App {
           wp.curValue  = wp.curValue.slice(0, wp.cursorPos) + ch + wp.curValue.slice(wp.cursorPos);
           wp.cursorPos++;
           this._dirty  = true;
+          if (this._pageJS) this._pageJS.fireInput(wp.name, wp.curValue);
           return true;
         }
         return false;
@@ -694,20 +712,20 @@ export class BrowserApp implements App {
       case 'textarea': {
         if (ch === '\x1b') { this._focusedWidget = -1; this._dirty = true; return true; }
         if (ch === '\t')   { this._cycleFocusedWidget(1); return true; }
-        if (ch === '\b')   { if (wp.curValue.length) { wp.curValue = wp.curValue.slice(0, -1); this._dirty = true; } return true; }
-        if (ch === '\n' || ch === '\r') { wp.curValue += '\n'; this._dirty = true; return true; }
-        if (ch >= ' ') { wp.curValue += ch; this._dirty = true; return true; }
+        if (ch === '\b')   { if (wp.curValue.length) { wp.curValue = wp.curValue.slice(0, -1); this._dirty = true; if (this._pageJS) this._pageJS.fireInput(wp.name, wp.curValue); } return true; }
+        if (ch === '\n' || ch === '\r') { wp.curValue += '\n'; this._dirty = true; if (this._pageJS) this._pageJS.fireInput(wp.name, wp.curValue); return true; }
+        if (ch >= ' ') { wp.curValue += ch; this._dirty = true; if (this._pageJS) this._pageJS.fireInput(wp.name, wp.curValue); return true; }
         return false;
       }
       case 'select': {
         var opts = wp.options || [];
-        if (ext === 0x48 || ch === 'k') { wp.curSelIdx = Math.max(0, wp.curSelIdx - 1); this._dirty = true; return true; }
-        if (ext === 0x50 || ch === 'j') { wp.curSelIdx = Math.min(opts.length - 1, wp.curSelIdx + 1); this._dirty = true; return true; }
+        if (ext === 0x48 || ch === 'k') { wp.curSelIdx = Math.max(0, wp.curSelIdx - 1); this._dirty = true; if (this._pageJS) this._pageJS.fireChange(wp.name, wp.options?.[wp.curSelIdx] ?? ''); return true; }
+        if (ext === 0x50 || ch === 'j') { wp.curSelIdx = Math.min(opts.length - 1, wp.curSelIdx + 1); this._dirty = true; if (this._pageJS) this._pageJS.fireChange(wp.name, wp.options?.[wp.curSelIdx] ?? ''); return true; }
         if (ch === '\x1b' || ch === '\t') { this._cycleFocusedWidget(1); return true; }
         return false;
       }
       case 'checkbox':
-        if (ch === ' ' || ch === '\n' || ch === '\r') { wp.curChecked = !wp.curChecked; this._dirty = true; return true; }
+        if (ch === ' ' || ch === '\n' || ch === '\r') { wp.curChecked = !wp.curChecked; this._dirty = true; if (this._pageJS) this._pageJS.fireChange(wp.name, wp.curChecked ? 'on' : ''); return true; }
         return false;
       case 'radio':
         if (ch === ' ' || ch === '\n' || ch === '\r') {
@@ -937,6 +955,7 @@ export class BrowserApp implements App {
 
   private _cancelFetch(): void {
     if (this._fetchCoroId >= 0) { os.cancel(this._fetchCoroId); this._fetchCoroId = -1; }
+    if (this._pageJS) { this._pageJS.dispose(); this._pageJS = null; }
   }
 
   private _startFetch(rawURL: string): void {
@@ -1123,7 +1142,40 @@ export class BrowserApp implements App {
     var r = parseHTML(html);
     this._forms       = r.forms;
     this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
+    // Dispose any previous page JS before setting up the new page
+    if (this._pageJS) { this._pageJS.dispose(); this._pageJS = null; }
     this._layoutPage(r.nodes as any, r.widgets as any, r.title || fallbackTitle || url, url);
+    // Start JS engine for the new page (after layout so widgets have positions)
+    if (r.scripts.length > 0) {
+      var self = this;
+      this._jsStartMs = Date.now();
+      this._pageJS = createPageJS(html, r.scripts, {
+        baseURL: url,
+        navigate: (u: string) => self._navigate(u),
+        setTitle: (t: string) => { self._pageTitle = t; self._dirty = true; },
+        alert:   (msg: string) => { self._status = 'Alert: ' + msg; self._dirty = true; os.debug.log('[browser alert]', msg); },
+        confirm: (_msg: string): boolean => true,   // no blocking UI — default accept
+        prompt:  (_msg: string, def: string): string => def,
+        rerender: (bodyHTML: string) => {
+          // Re-parse the mutated body and re-layout without re-running scripts
+          var newHTML  = '<body>' + bodyHTML + '</body>';
+          var r2 = parseHTML(newHTML);
+          self._forms = r2.forms;
+          self._layoutPage(r2.nodes as any, r2.widgets as any, self._pageTitle, self._pageURL);
+        },
+        log: (msg: string) => os.debug.log(msg),
+        getWidgetValue: (id: string) => {
+          var w = self._widgets.find(wg => wg.name === id || String((wg as any).id) === id);
+          return w ? w.curValue : undefined;
+        },
+        setWidgetValue: (id: string, value: string) => {
+          var w = self._widgets.find(wg => wg.name === id || String((wg as any).id) === id);
+          if (w) { w.curValue = value; self._dirty = true; }
+        },
+        getScrollY: () => self._scrollY,
+        scrollTo: (_x: number, y: number) => { self._scrollBy(y - self._scrollY); },
+      });
+    }
   }
 
   private _showPlainText(text: string, url: string): void {
