@@ -2899,6 +2899,18 @@ functions, handles deoptimization and blacklisting.
 
 ```typescript
 /**
+ * Utility namespace for JIT availability checks.
+ * The pool is a BSS static array that always exists on bare metal.
+ * `available()` returns false only in non-bare-metal contexts (e.g. test
+ * harnesses, browser emulation) where `kernel.jitAlloc` is not bound.
+ */
+export const JIT = {
+  available(): boolean {
+    return typeof (kernel as any).jitAlloc === 'function';
+  },
+};
+
+/**
  * The main JIT dispatch class. One instance per JSOS runtime.
  *
  * Lifecycle:
@@ -3127,12 +3139,62 @@ function schedulerTick(procId: number): void {
 }
 
 /**
+/**
  * Compile a function from a child runtime and install the native code.
  * Runs entirely in the main runtime's context — no cross-heap issues.
  * The JIT compiler is runtime-agnostic: it reads bytecode via readPhysMem
  * (physical address access) so it doesn't care which runtime owns the data.
  */
+
+// ── Child JIT state (companion to QJSJITHook for child runtimes) ─────────────
+// Blacklist: bcAddr → true. Prevents infinite retry on compile failure or deopt.
+// Compiled:  bcAddr → { procId, deoptCount }. Detects deopt when hook re-fires.
+const _childJITBlacklist = new Set<number>();
+const _childJITCompiled  = new Map<number, { procId: number; deoptCount: number }>();
+
+/**
+ * Call this whenever a child proc is destroyed (e.g. WM window close).
+ * Removes stale entries — the physical bytecode addresses of the dead proc
+ * are now invalid and may be reused by a new proc.
+ *
+ * Implementation: iterate and remove entries whose procId matches.
+ * (Should be called from the same place that calls kernel.procDestroy /
+ *  jit_proc_reset, e.g. WM._closeWindowByProc / procDestroy.)
+ */
+export function clearChildJITForProc(procId: number): void {
+  for (const [addr, entry] of _childJITCompiled) {
+    if (entry.procId === procId) {
+      _childJITCompiled.delete(addr);
+      _childJITBlacklist.delete(addr);
+    }
+  }
+}
+
 function _serviceChildJIT(procId: number, bcAddr: number): void {
+  // ── Blacklist check — skip functions that previously failed or deopted too many times
+  if (_childJITBlacklist.has(bcAddr)) return;
+
+  // ── Deopt detection — if bcAddr is in _childJITCompiled, jit_native_ptr was
+  //    cleared by the C fast path (type mismatch or DEOPT_SENTINEL), meaning
+  //    the hook re-fired after a successful compile. Count deopts; blacklist at MAX.
+  const prev = _childJITCompiled.get(bcAddr);
+  if (prev) {
+    const deopts = prev.deoptCount + 1;
+    if (deopts >= MAX_DEOPTS) {
+      _childJITBlacklist.add(bcAddr);
+      _childJITCompiled.delete(bcAddr);
+      kernel.serialPut('[QJS-JIT] Child proc ' + procId + ' blacklisted 0x' +
+                        bcAddr.toString(16) + ' after ' + deopts + ' deopts\n');
+      return;
+    }
+    prev.deoptCount = deopts;
+    kernel.serialPut('[QJS-JIT] Child proc ' + procId + ' deopt #' + deopts +
+                      ' 0x' + bcAddr.toString(16) + ' — recompiling\n');
+    // Remove old compiled entry; fall through to recompile
+    _childJITCompiled.delete(bcAddr);
+  }
+
+  // ── Compile
   try {
     const reader = new QJSBytecodeReader(bcAddr);
     const compiler = new QJSJITCompiler(reader, {
@@ -3142,10 +3204,19 @@ function _serviceChildJIT(procId: number, bcAddr: number): void {
     const nativeAddr = compiler.compile();
     if (nativeAddr !== 0) {
       kernel.setJITNative(bcAddr, nativeAddr);
+      // Record as compiled so a future re-fire is detected as a deopt
+      _childJITCompiled.set(bcAddr, { procId, deoptCount: prev?.deoptCount ?? 0 });
+    } else {
+      // Unsupported opcodes or pool exhaustion — blacklist immediately
+      _childJITBlacklist.add(bcAddr);
+      kernel.serialPut('[QJS-JIT] Child proc ' + procId + ' blacklisted 0x' +
+                        bcAddr.toString(16) + ' (compile returned 0)\n');
     }
   } catch (e) {
-    // Compilation failed — function stays interpreted; not fatal
-    kernel.serialPut('[QJS-JIT] Child proc ' + procId + ' compile failed: ' + e + '\n');
+    // Unexpected error — blacklist to prevent retry storms
+    _childJITBlacklist.add(bcAddr);
+    kernel.serialPut('[QJS-JIT] Child proc ' + procId + ' compile error 0x' +
+                      bcAddr.toString(16) + ': ' + e + '\n');
   }
 }
 ```
@@ -3432,11 +3503,36 @@ Deferred until int32 JIT is validated.
 ### Rationale
 
 Even with an 8 MB main pool, a long-running OS instance with thousands of hot
-functions across many apps will eventually exhaust the pool. LRU eviction
-reclaims space by overwriting the coldest function.
+functions across many apps will eventually exhaust the pool.
 
 Note: child process pools (512 KB per slot) are fully reclaimed by O(1) reset
 on `procDestroy` — LRU is only needed for the main runtime's persistent pool.
+
+> **⚠ Allocator constraint:** The main pool is a **bump allocator** (`_jit_main_top`).
+> Simply zeroing `pool_offset` in an entry table does **not** reclaim memory —
+> `_jit_main_top` does not move back, and new `jit_alloc()` calls keep advancing.
+> True LRU eviction therefore requires one of:
+>
+> 1. **Two-generation (flip) pool** *(recommended)*: Maintain two equal halves
+>    (`pool_A` / `pool_B`, 4 MB each). When the active half is full, switch to the
+>    inactive half (reset its bump pointer to 0) and clear `jit_native_ptr` for
+>    every entry that was in the now-stale half. Functions whose pointers were
+>    cleared will re-fire the JIT hook and be recompiled into the new active half.
+>    This is O(n) on switchover but switchover is rare (<1 per minutes at normal
+>    workloads).
+> 2. **Slab / block allocator**: Pre-partition the pool into fixed-size blocks
+>    (e.g. 64 KB each = 128 blocks). Record which block each compiled function
+>    occupies. On eviction, mark the block free and reuse it. Requires alignment
+>    padding and a free-list but is correct.
+> 3. **Pool reset at idle**: When call counts drop to zero for >N ticks, reset
+>    `_jit_main_top = 0` and mark all `jit_native_ptr` NULL. Simple but drops all
+>    compiled code.
+>
+> The `JITEntry` table below is the **correct starting point** for any of the
+> above strategies. The `jit_evict_lru()` function shown is a **placeholder** that
+> locates the LRU entry and returns its `bc_ptr` for TS-side cleanup; the actual
+> pool reclamation mechanism must be chosen from the options above before
+> implementing this step.
 
 ### C-Side: Entry Table
 
@@ -3454,8 +3550,13 @@ typedef struct {
 
 static JITEntry _jit_entries[MAX_JIT_ENTRIES];
 
-/* Find the LRU entry and free its slot */
-int jit_evict_lru(uint32_t *evicted_bc_ptr) {
+/*
+ * PLACEHOLDER: Find the LRU entry. Does NOT actually reclaim pool memory.
+ * See design note above — real reclamation requires the flip-pool or slab
+ * strategy. This function is only the "find victim" step; the caller is
+ * responsible for clearing jit_native_ptr and then resetting/switching the pool.
+ */
+int jit_find_lru(uint32_t *evicted_bc_ptr) {
     uint32_t oldest_tick = UINT32_MAX;
     int oldest_idx = -1;
     for (int i = 0; i < MAX_JIT_ENTRIES; i++) {
@@ -3467,7 +3568,7 @@ int jit_evict_lru(uint32_t *evicted_bc_ptr) {
     }
     if (oldest_idx < 0) return -1;
     *evicted_bc_ptr = _jit_entries[oldest_idx].bc_ptr;
-    _jit_entries[oldest_idx].pool_offset = 0; // free the slot
+    _jit_entries[oldest_idx].pool_offset = 0; // mark entry free (tracking only)
     return oldest_idx;
 }
 ```
