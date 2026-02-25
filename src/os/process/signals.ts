@@ -35,7 +35,8 @@ export class SignalManager {
 
   /** Send a signal to a process. */
   send(pid: number, sig: number): void {
-    this._pending.push({ pid, sig });
+    // Deliver immediately — don't also queue in _pending or deliverPending()
+    // will deliver it a second time on the next scheduler tick.
     this._deliver(pid, sig);
   }
 

@@ -226,11 +226,14 @@ export class WindowManager {
       if (win.id === id) {
         win.app.onUnmount();
         this._windows.splice(i, 1);
-        if (this._focused === id) {
+        if (this._focused    === id) {
           this._focused = this._windows.length > 0
             ? this._windows[this._windows.length - 1].id
             : null;
         }
+        if (this._mouseCapture === id) this._mouseCapture = null;
+        if (this._dragging     === id) this._dragging     = null;
+        if (this._resizing     === id) this._resizing     = null;
         return;
       }
     }
@@ -241,6 +244,9 @@ export class WindowManager {
     if (!win || win.minimised) return;
     if (win.app.onBlur) win.app.onBlur();
     win.minimised = true;
+    if (this._mouseCapture === id) this._mouseCapture = null;
+    if (this._dragging     === id) this._dragging     = null;
+    if (this._resizing     === id) this._resizing     = null;
     if (this._focused === id) {
       var next: WMWindow | undefined;
       for (var i = this._windows.length - 1; i >= 0; i--) {
@@ -458,14 +464,16 @@ export class WindowManager {
           if      (btn1 && !prevBtn1)  evType = 'down';
           else if (!btn1 && prevBtn1)  evType = 'up';
           else                         evType = 'move';
-          dispWin.app.onMouse({
-            x:       cx - dispWin.x,
-            y:       cy - (dispWin.y + TITLE_H),
-            dx:      cx - prevX,
-            dy:      cy - prevY,
-            buttons: pkt.buttons,
-            type:    evType,
-          });
+          try {
+            dispWin.app.onMouse({
+              x:       cx - dispWin.x,
+              y:       cy - (dispWin.y + TITLE_H),
+              dx:      cx - prevX,
+              dy:      cy - prevY,
+              buttons: pkt.buttons,
+              type:    evType,
+            });
+          } catch (_e) {}
           if (evType !== 'move') this._wmDirty = true;
         }
       } else {
@@ -481,7 +489,7 @@ export class WindowManager {
       for (var k = 0; k < 32; k++) {
         var raw = kernel.readKeyEx();
         if (!raw) break;
-        focused.app.onKey(this._makeKeyEvent(raw));
+        try { focused.app.onKey(this._makeKeyEvent(raw)); } catch (_e) {}
         this._wmDirty = true;
       }
     } else {
@@ -574,7 +582,9 @@ export class WindowManager {
     var anyDirty = this._wmDirty;
     for (var ai = 0; ai < this._windows.length; ai++) {
       var wi = this._windows[ai];
-      if (!wi.minimised && wi.app.render(wi.canvas)) anyDirty = true;
+      if (!wi.minimised) {
+        try { if (wi.app.render(wi.canvas)) anyDirty = true; } catch (_e) {}
+      }
     }
 
     if (!anyDirty) return;   // ★ nothing changed — skip expensive composite+flip
