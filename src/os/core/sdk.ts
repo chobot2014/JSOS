@@ -847,6 +847,18 @@ function _patchFsWatch(): void {
   };
 }
 
+// ── Debug serial helper ───────────────────────────────────────────────────────
+
+function _debugSerial(level: string, args: unknown[]): void {
+  var msg = args.map(function(a) { return typeof a === 'string' ? a : JSON.stringify(a); }).join(' ');
+  var line = '[' + level + '] ' + msg + '\n';
+  for (var _di = 0; _di < line.length; _di++) kernel.serialPut(line.charCodeAt(_di));
+  // Also fire event bus so in-process listeners can pick it up
+  if ((sdk as any).events) {
+    try { sdk.events.emit('debug:event', { level: level.toLowerCase(), msg, ts: _sdkTimeNow() }); } catch (_e) {}
+  }
+}
+
 const sdk = {
 
   // ── Filesystem ─────────────────────────────────────────────────────────────
@@ -2271,22 +2283,17 @@ const sdk = {
   time: {
     /** Current time as Unix epoch milliseconds. */
     now(): number { return _sdkTimeNow(); },
-    /** Milliseconds elapsed since epoch value `t`. */
-    since(t: number): number { return _sdkTimeNow() - t; },
     /** OS uptime in milliseconds since boot. */
     uptime(): number { return kernel.getUptime ? kernel.getUptime() * 1000 : 0; },
-    /**
-     * Format a Unix epoch ms value as a human-readable string.
-     * fmt tokens: YYYY MM DD HH mm ss.  Default: 'YYYY-MM-DD HH:mm:ss'.
-     */
-    format(epochMs: number, fmt?: string): string {
-      var d = epochMs / 1000;
+    /** Current date/time as a structured object. */
+    date(epochMs?: number): { year: number; month: number; day: number; hour: number; minute: number; second: number; dow: number } {
+      var d = (epochMs !== undefined ? epochMs : _sdkTimeNow()) / 1000;
       var sec = Math.floor(d) % 60;
       var min = Math.floor(d / 60) % 60;
       var hr  = Math.floor(d / 3600) % 24;
       var days = Math.floor(d / 86400);
-      // Gregorian calendar from epoch days
-      var z  = days + 719468;
+      var dow = (days + 4) % 7; // 0=Sun
+      var z   = days + 719468;
       var era = Math.floor((z >= 0 ? z : z - 146096) / 146097);
       var doe = z - era * 146097;
       var yoe = Math.floor((doe - Math.floor(doe/1460) + Math.floor(doe/36524) - Math.floor(doe/146096)) / 365);
@@ -2296,14 +2303,43 @@ const sdk = {
       var dd  = doy - Math.floor((153 * mp + 2) / 5) + 1;
       var mm  = mp < 10 ? mp + 3 : mp - 9;
       if (mm <= 2) y++;
+      return { year: y, month: mm, day: dd, hour: hr, minute: min, second: sec, dow };
+    },
+    /**
+     * Milliseconds elapsed since epoch value `t`.
+     * If called with one numeric arg, returns elapsed ms (numeric).
+     */
+    since(t: number): number { return _sdkTimeNow() - t; },
+    /**
+     * Human-readable relative time string from an epoch ms value to now.
+     * e.g. 'just now', '5s ago', '3m ago', '2h ago', '4d ago'.
+     */
+    ago(epochMs: number): string {
+      var diff = Math.floor((_sdkTimeNow() - epochMs) / 1000);
+      if (diff < 5)  return 'just now';
+      if (diff < 60) return diff + 's ago';
+      var m = Math.floor(diff / 60);
+      if (m < 60) return m + 'm ago';
+      var h = Math.floor(m / 60);
+      if (h < 24) return h + 'h ago';
+      var days = Math.floor(h / 24);
+      if (days < 30) return days + 'd ago';
+      return Math.floor(days / 30) + 'mo ago';
+    },
+    /**
+     * Format a Unix epoch ms value as a human-readable string.
+     * fmt tokens: YYYY MM DD HH mm ss.  Default: 'YYYY-MM-DD HH:mm:ss'.
+     */
+    format(epochMs: number, fmt?: string): string {
+      var dt = sdk.time.date(epochMs);
       function p2(n: number) { return (n < 10 ? '0' : '') + n; }
       var f = fmt || 'YYYY-MM-DD HH:mm:ss';
-      return f.replace('YYYY', '' + y)
-              .replace('MM',   p2(mm))
-              .replace('DD',   p2(dd))
-              .replace('HH',   p2(hr))
-              .replace('mm',   p2(min))
-              .replace('ss',   p2(sec));
+      return f.replace('YYYY', '' + dt.year)
+              .replace('MM',   p2(dt.month))
+              .replace('DD',   p2(dt.day))
+              .replace('HH',   p2(dt.hour))
+              .replace('mm',   p2(dt.minute))
+              .replace('ss',   p2(dt.second));
     },
     /** Human-readable duration.  e.g. 90500 → '1m 30s', 3700000 → '1h 1m'. */
     duration(ms: number): string {
@@ -2330,28 +2366,39 @@ const sdk = {
    *   os.audio.play([{ freq: 261, duration: 150 }, { freq: 329, duration: 150 }]);
    */
   audio: {
-    /** Play a tone at `freq` Hz for `durationMs` milliseconds. */
-    beep(freq: number, durationMs?: number): void {
-      if (freq <= 0) { sdk.audio.stop(); return; }
+    /**
+     * Returns true — PC speaker is always available on i686.
+     * Can be used to guard audio code on architectures without it.
+     */
+    isAvailable(): boolean { return true; },
+    /** Start a continuous tone at `freq` Hz.  Call silence() to stop. */
+    tone(freq: number): void {
+      if (freq <= 0) { sdk.audio.silence(); return; }
       var divisor = Math.floor(1193180 / freq) & 0xFFFF;
       kernel.outb(0x43, 0xB6);
       kernel.outb(0x42, divisor & 0xFF);
       kernel.outb(0x42, (divisor >> 8) & 0xFF);
       kernel.outb(0x61, kernel.inb(0x61) | 0x03);
+    },
+    /** Stop any playing tone immediately. */
+    silence(): void {
+      kernel.outb(0x61, kernel.inb(0x61) & 0xFC);
+    },
+    /** Alias for silence() — more intuitive when paired with beep(). */
+    stop(): void { sdk.audio.silence(); },
+    /** Play a tone at `freq` Hz for `durationMs` milliseconds. */
+    beep(freq: number, durationMs?: number): void {
+      if (freq <= 0) { sdk.audio.silence(); return; }
+      sdk.audio.tone(freq);
       if (durationMs && durationMs > 0) {
-        var stop = sdk.audio.stop.bind(sdk.audio);
         sdk.process.coroutine('audio:beep', (function() {
           var endTicks = kernel.getTicks() + Math.ceil(durationMs / 10);
           return function(): 'done'|'pending' {
-            if (kernel.getTicks() >= endTicks) { stop(); return 'done'; }
+            if (kernel.getTicks() >= endTicks) { sdk.audio.silence(); return 'done'; }
             return 'pending';
           };
         })());
       }
-    },
-    /** Stop any playing tone immediately. */
-    stop(): void {
-      kernel.outb(0x61, kernel.inb(0x61) & 0xFC);
     },
     /**
      * Play a sequence of notes.  Each note: { freq, duration } in Hz / ms.
@@ -2369,12 +2416,12 @@ const sdk = {
       var noteEndTick = 0;
       return sdk.process.coroutine('audio:play', function(): 'done'|'pending' {
         var now = kernel.getTicks();
-        if (idx >= notes.length) { sdk.audio.stop(); return 'done'; }
+        if (idx >= notes.length) { sdk.audio.silence(); return 'done'; }
         if (now >= noteEndTick) {
           var note = notes[idx++];
           noteEndTick = now + Math.ceil(note.duration / 10);
-          if (note.freq > 0) sdk.audio.beep(note.freq);
-          else sdk.audio.stop();
+          if (note.freq > 0) sdk.audio.tone(note.freq);
+          else sdk.audio.silence();
         }
         return 'pending';
       });
@@ -2455,29 +2502,91 @@ const sdk = {
   // ── Persistent storage ────────────────────────────────────────────────────────
 
   /**
-   * Simple key-value persistent storage backed by the virtual filesystem.
-   * Values are JSON-serialised.  Stored under /etc/storage/<key>.json.
+   * Persistent storage — file-path based, disk-first with VFS fallback.
+   * Also includes a key-value convenience layer (get/set).
    *
    * Example:
+   *   os.storage.write('/data/notes.txt', 'hello');
+   *   os.storage.read('/data/notes.txt');       // → 'hello'
+   *   os.storage.readJSON('/config/app.json');  // → parsed object
+   *   os.storage.isPersistent();                // true when disk mounted
+   *
+   *   // Key-value layer:
    *   os.storage.set('last-file', '/home/user/notes.txt');
-   *   var path = os.storage.get<string>('last-file', '/');
+   *   os.storage.get<string>('last-file', '/');
    */
   storage: {
-    /** Get a stored value.  Returns `fallback` if not found. */
-    get<T>(key: string, fallback?: T): T {
-      try {
-        var txt = fs.readFile('/etc/storage/' + key + '.json');
-        return txt ? JSON.parse(txt) as T : (fallback as T);
-      } catch (_e) { return fallback as T; }
+    /** True when a persistent disk is mounted (writes survive reboot). */
+    isPersistent(): boolean {
+      return !!((_diskStorage as any).available && (_diskStorage as any).available());
     },
-    /** Store a value.  Creates /etc/storage/ if needed. */
+    /** Read a file as a string.  Returns null if not found. */
+    read(path: string): string | null {
+      try {
+        if (sdk.storage.isPersistent()) {
+          var v = (_diskStorage as any).read ? (_diskStorage as any).read(path) : null;
+          if (v !== null) return v;
+        }
+        return fs.readFile(path);
+      } catch (_e) { return null; }
+    },
+    /** Write a string to a file.  Returns true on success. */
+    write(path: string, data: string): boolean {
+      try {
+        if (sdk.storage.isPersistent() && (_diskStorage as any).write) {
+          return (_diskStorage as any).write(path, data);
+        }
+        return fs.writeFile(path, data);
+      } catch (_e) { return false; }
+    },
+    /** Append to a file (creates it if missing). */
+    append(path: string, data: string): boolean {
+      var existing = sdk.storage.read(path) || '';
+      return sdk.storage.write(path, existing + data);
+    },
+    /** Returns true if the path exists (file or directory). */
+    exists(path: string): boolean {
+      try { return fs.stat(path) !== null; } catch (_e) { return false; }
+    },
+    /** List names in a directory (defaults to '/'). */
+    list(path?: string): string[] {
+      try { return fs.readdir(path || '/') || []; } catch (_e) { return []; }
+    },
+    /** Delete a file. */
+    rm(path: string): boolean {
+      try { return !!(fs.rm(path)); } catch (_e) { return false; }
+    },
+    /** Create a directory (and parents). */
+    mkdir(path: string): boolean {
+      try { fs.mkdir(path); return true; } catch (_e) { return false; }
+    },
+    /** Read a file and JSON.parse it.  Returns null on error. */
+    readJSON<T>(path: string): T | null {
+      try {
+        var txt = sdk.storage.read(path);
+        return txt ? JSON.parse(txt) as T : null;
+      } catch (_e) { return null; }
+    },
+    /** JSON.stringify a value and write it. */
+    writeJSON(path: string, value: unknown, pretty?: boolean): boolean {
+      try {
+        return sdk.storage.write(path, JSON.stringify(value, null, pretty ? 2 : 0));
+      } catch (_e) { return false; }
+    },
+
+    // ── Key-value convenience layer ───────────────────────────────────────────
+    /** Get a stored value by key.  Returns `fallback` if not found. */
+    get<T>(key: string, fallback?: T): T {
+      return sdk.storage.readJSON<T>('/etc/storage/' + key + '.json') ?? (fallback as T);
+    },
+    /** Store a value by key. */
     set(key: string, value: unknown): void {
       fs.mkdir('/etc/storage');
-      fs.writeFile('/etc/storage/' + key + '.json', JSON.stringify(value));
+      sdk.storage.writeJSON('/etc/storage/' + key + '.json', value);
     },
-    /** Delete a stored value. */
+    /** Delete a stored value by key. */
     delete(key: string): void {
-      try { fs.rm('/etc/storage/' + key + '.json'); } catch (_e) {}
+      sdk.storage.rm('/etc/storage/' + key + '.json');
     },
     /** All stored keys. */
     keys(): string[] {
@@ -2487,7 +2596,7 @@ const sdk = {
                     .map(function(n: string) { return n.slice(0, -5); });
       } catch (_e) { return []; }
     },
-    /** Delete all stored values. */
+    /** Delete all stored key-value entries. */
     clear(): void {
       var ks = sdk.storage.keys();
       for (var _ki = 0; _ki < ks.length; _ki++) sdk.storage.delete(ks[_ki]);
@@ -2497,28 +2606,104 @@ const sdk = {
   // ── Debug ─────────────────────────────────────────────────────────────────────
 
   /**
-   * Debug utilities: serial output, breakpoints, event tracing.
+   * Debug utilities: structured logging to serial port + event bus.
    *
    * Example:
-   *   os.debug.print('state:', myObj);     // → serial port
-   *   os.debug.event('info', 'loaded');    // → 'debug:event' system event
-   *   var unsub = os.debug.onEvent(function(e) { logPanel.append(e.msg); });
+   *   os.debug.log('Loaded', { count: 5 });    // serial: [LOG] Loaded {"count":5}
+   *   os.debug.warn('Low memory:', free);
+   *   os.debug.assert(x > 0, 'x must be positive');
+   *   os.debug.measure('sort', () => array.sort());  // → elapsed ms
+   *   print(os.debug.inspect({ a: [1, 2] }));        // '{ a: [1, 2] }'
+   *   var unsub = os.debug.onEvent(e => panel.add(e.level + ': ' + e.msg));
    */
   debug: {
-    /** Write to the serial debug port (visible with QEMU '-serial stdio'). */
+    /** Log an informational message to serial and the debug event bus. */
+    log(...args: unknown[]): void  { _debugSerial('LOG',   args); },
+    /** Log a warning. */
+    warn(...args: unknown[]): void  { _debugSerial('WARN',  args); },
+    /** Log an error. */
+    error(...args: unknown[]): void { _debugSerial('ERROR', args); },
+    /** Write directly to the serial debug port (no level prefix). */
     print(...args: unknown[]): void {
       var line = args.map(function(a) { return typeof a === 'string' ? a : JSON.stringify(a); }).join(' ') + '\n';
       for (var _di = 0; _di < line.length; _di++) kernel.serialPut(line.charCodeAt(_di));
     },
+    /** Throw an Error if `cond` is falsy.  Message is included in the stack. */
+    assert(cond: boolean, message?: string): void {
+      if (!cond) {
+        var msg = 'Assertion failed' + (message ? ': ' + message : '');
+        sdk.debug.error(msg);
+        throw new Error(msg);
+      }
+    },
+    /** Capture an approximate stack trace as a string. */
+    trace(): string {
+      try { return (new Error()).stack || '(no stack)'; } catch (_e) { return '(no stack)'; }
+    },
+    /**
+     * Human-readable serialisation, similar to util.inspect.
+     * depth limits recursive expansion (default 2).
+     *
+     * Example:  os.debug.inspect({ a: [1, 2, 3], b: { c: true } })
+     *   // → '{ a: [1, 2, 3], b: { c: true } }'
+     */
+    inspect(value: unknown, depth?: number): string {
+      var maxDepth = depth !== undefined ? depth : 2;
+      function _ins(v: unknown, d: number): string {
+        if (v === null) return 'null';
+        if (v === undefined) return 'undefined';
+        var t = typeof v;
+        if (t === 'string') return JSON.stringify(v);
+        if (t === 'number' || t === 'boolean') return String(v);
+        if (t === 'function') return '[Function ' + ((v as any).name || 'anonymous') + ']';
+        if (Array.isArray(v)) {
+          if (d >= maxDepth) return '[Array(' + (v as any[]).length + ')]';
+          var aItems = (v as any[]).slice(0, 10).map(function(x) { return _ins(x, d + 1); });
+          if ((v as any[]).length > 10) aItems.push('... ' + ((v as any[]).length - 10) + ' more');
+          return '[' + aItems.join(', ') + ']';
+        }
+        if (t === 'object') {
+          if (d >= maxDepth) return '{...}';
+          var keys = Object.keys(v as object).slice(0, 8);
+          var pairs = keys.map(function(k) { return k + ': ' + _ins((v as any)[k], d + 1); });
+          if (Object.keys(v as object).length > 8) pairs.push('...');
+          return '{ ' + pairs.join(', ') + ' }';
+        }
+        return String(v);
+      }
+      return _ins(value, 0);
+    },
+    /**
+     * Measure execution time of a function.  Returns elapsed milliseconds.
+     *
+     * Example:  var ms = os.debug.measure('sort', () => bigArray.sort());
+     */
+    measure(label: string, fn: () => void): number {
+      var t0 = kernel.getTicks();
+      try { fn(); } catch (_e) {}
+      var elapsed = (kernel.getTicks() - t0) * 10; // ticks are ~10ms
+      sdk.debug.log('measure(' + label + '):', elapsed + 'ms');
+      return elapsed;
+    },
     /** Software breakpoint — no-op unless the kernel exposes debugBreak(). */
     break(): void {
       if ((kernel as any).debugBreak) (kernel as any).debugBreak();
+      else sdk.debug.log('BREAKPOINT');
     },
     /** JSON-dump an object to serial — handy for deep objects. */
     dump(label: string, obj: unknown): void {
       sdk.debug.print('[dump] ' + label + ': ' + JSON.stringify(obj, null, 2));
     },
-    /** Subscribe to debug events emitted via os.debug.event(). */
+    /** Approximate heap usage from the QuickJS runtime. */
+    heapSnapshot(): { total: number; free: number; used: number } {
+      try {
+        var mem = (globalThis as any).os?.memoryUsage?.() ||
+                  (typeof (globalThis as any).gc === 'function' ? { heapSize: 0, heapUsed: 0 } : null);
+        if (mem) return { total: mem.heapSize || 0, free: (mem.heapSize || 0) - (mem.heapUsed || 0), used: mem.heapUsed || 0 };
+      } catch (_e) {}
+      return { total: 0, free: 0, used: 0 };
+    },
+    /** Subscribe to debug events emitted via os.debug.log/warn/error/event(). */
     onEvent(handler: (ev: { level: string; msg: string; ts: number }) => void): () => void {
       return sdk.events.on('debug:event', handler);
     },
@@ -2615,6 +2800,21 @@ const sdk = {
       palette: number[], scale?: number,
     ): void {
       (canvas as any).drawSprite(x, y, pixels, pw, ph, palette, scale);
+    },
+    /**
+     * Allocate a new off-screen Canvas (not attached to any window).
+     * Useful for pre-rendering, double-buffering, or sprite sheets.
+     *
+     * Example:
+     *   var offscreen = os.canvas.create(200, 100);
+     *   var p = os.canvas.painter(offscreen);
+     *   p.fill(0xFF000000);
+     *   p.drawText(10, 10, 'Buffered', 0xFFFFFFFF);
+     *   // Then blit to a window canvas:
+     *   windowCanvas.blit(offscreen, 0, 0, destX, destY, 200, 100);
+     */
+    create(w: number, h: number): import('../ui/canvas.js').Canvas {
+      return new Canvas(w, h);
     },
   },
 
