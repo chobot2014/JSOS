@@ -693,12 +693,23 @@ export class WindowManager {
   }
 
   private _drawCursor(): void {
+    // Write directly into the screen buffer — avoids 209 individual setPixel()
+    // calls (each with a bounds-check + _bgra() call) per frame.
+    var buf = this._screen.getBuffer();
+    var sw  = this._screen.width;
+    var sh  = this._screen.height;
+    var BLACK = 0xFF000000;   // same bit pattern as Canvas._bgra(Colors.BLACK)
+    var WHITE = 0xFFFFFFFF;   // same bit pattern as Canvas._bgra(Colors.WHITE)
     for (var row = 0; row < CURSOR_H; row++) {
+      var py = this._cursorY + row;
+      if (py < 0 || py >= sh) continue;
+      var rowBase = py * sw;
       for (var col = 0; col < CURSOR_W; col++) {
         var v = CURSOR_PIXELS[row * CURSOR_W + col];
         if (v === 0) continue;
-        var color = v === 1 ? Colors.BLACK : Colors.WHITE;
-        this._screen.setPixel(this._cursorX + col, this._cursorY + row, color);
+        var px = this._cursorX + col;
+        if (px < 0 || px >= sw) continue;
+        buf[rowBase + px] = v === 1 ? BLACK : WHITE;
       }
     }
   }
