@@ -149,12 +149,36 @@ export function evalCalc(expr: string): number {
  * Supports: px, em, rem, pt, vw/vh (viewport 1920×1080), %, unitless.
  * Returns NaN if not a length.
  */
+function _splitCSSArgs(s: string): string[] {
+  var args: string[] = []; var depth = 0; var start = 0;
+  for (var i = 0; i < s.length; i++) {
+    if (s[i] === '(') depth++;
+    else if (s[i] === ')') depth--;
+    else if (s[i] === ',' && depth === 0) { args.push(s.slice(start, i)); start = i + 1; }
+  }
+  args.push(s.slice(start));
+  return args;
+}
 export function parseLengthPx(val: string, containerPx?: number): number {
   var v = val.trim();
   if (v === 'auto' || v === 'none') return 0;
   if (v.startsWith('calc(') || v.includes('calc(')) {
     var inner = v.replace(/^calc\(/, '').replace(/\)$/, '');
     return evalCalc(inner);
+  }
+  // min(), max(), clamp() CSS math functions (item 408)
+  if (v.startsWith('min(')) {
+    var ma = _splitCSSArgs(v.slice(4, -1)); var ma2 = ma.map(x => parseLengthPx(x, containerPx)).filter(x => !isNaN(x));
+    return ma2.length ? Math.min(...ma2) : NaN;
+  }
+  if (v.startsWith('max(')) {
+    var mb = _splitCSSArgs(v.slice(4, -1)); var mb2 = mb.map(x => parseLengthPx(x, containerPx)).filter(x => !isNaN(x));
+    return mb2.length ? Math.max(...mb2) : NaN;
+  }
+  if (v.startsWith('clamp(')) {
+    var mc = _splitCSSArgs(v.slice(6, -1));
+    var cMin = parseLengthPx(mc[0] || '0', containerPx); var cVal = parseLengthPx(mc[1] || '0', containerPx); var cMax = parseLengthPx(mc[2] || '0', containerPx);
+    return isNaN(cMin) || isNaN(cVal) || isNaN(cMax) ? NaN : Math.max(cMin, Math.min(cVal, cMax));
   }
   if (v.endsWith('px'))  return parseFloat(v);
   if (v.endsWith('rem')) return parseFloat(v) * 16;
@@ -378,8 +402,8 @@ export function parseInlineStyle(style: string): CSSProps {
         break;
       }
       case 'visibility': {
-        if (vl === 'hidden' || vl === 'collapse') p.hidden = true;
-        else if (vl === 'visible') p.hidden = false;
+        if (vl === 'hidden' || vl === 'collapse') { p.visibility = vl as CSSProps['visibility']; p.hidden = true; }
+        else { p.visibility = 'visible'; p.hidden = false; }
         break;
       }
       case 'opacity': {
@@ -483,6 +507,57 @@ export function parseInlineStyle(style: string): CSSProps {
       }
       case 'outline-width': { var owv2 = parseLengthPx(vl); if (!isNaN(owv2)) p.outlineWidth = owv2; break; }
       case 'outline-color': { var occ2 = parseCSSColor(vl); if (occ2 !== undefined) p.outlineColor = occ2; break; }
+      case 'outline-style': break; // stored as part of border render — ignored separately
+      case 'word-break': {
+        if (vl === 'break-all' || vl === 'break-word' || vl === 'keep-all' || vl === 'normal')
+          p.wordBreak = vl as CSSProps['wordBreak']; break;
+      }
+      case 'overflow-wrap': case 'word-wrap': {
+        if (vl === 'break-word' || vl === 'anywhere') p.overflowWrap = vl as CSSProps['overflowWrap'];
+        else p.overflowWrap = 'normal'; break;
+      }
+      case 'table-layout': {
+        if (vl === 'fixed') p.tableLayout = 'fixed'; else p.tableLayout = 'auto'; break;
+      }
+      case 'border-collapse': {
+        if (vl === 'collapse' || vl === 'separate') p.borderCollapse = vl; break;
+      }
+      case 'border-spacing': {
+        var bsv2 = parseLengthPx(vl); if (!isNaN(bsv2)) p.borderSpacing = bsv2; break;
+      }
+      case 'user-select': case '-webkit-user-select': case '-moz-user-select': case '-ms-user-select': {
+        if (vl === 'none' || vl === 'text' || vl === 'all') p.userSelect = vl as CSSProps['userSelect'];
+        else p.userSelect = 'auto'; break;
+      }
+      case 'appearance': case '-webkit-appearance': case '-moz-appearance': {
+        p.appearance = vl; break;
+      }
+      // ── Generated content / counters ─────────────────────────────────────
+      case 'content': { p.content = val; break; }
+      case 'counter-reset':     { p.counterReset     = val; break; }
+      case 'counter-increment': { p.counterIncrement = val; break; }
+
+      // border-[side] shorthands: map to unified border props (renderer uses single border)
+      case 'border-top': case 'border-right': case 'border-bottom': case 'border-left': {
+        var bsparts = val.trim().split(/\s+/);
+        for (var bspi = 0; bspi < bsparts.length; bspi++) {
+          var bsp = bsparts[bspi].toLowerCase();
+          if (bsp === 'none' || bsp === 'hidden') { p.borderWidth = 0; p.borderStyle = bsp; continue; }
+          var bswv = parseLengthPx(bsp);
+          if (!isNaN(bswv)) { p.borderWidth = bswv; continue; }
+          var bscc = parseCSSColor(bsp); if (bscc !== undefined) { p.borderColor = bscc; continue; }
+          if (bsp === 'solid' || bsp === 'dashed' || bsp === 'dotted' || bsp === 'double') p.borderStyle = bsp;
+        }
+        break;
+      }
+      case 'border-top-color': case 'border-right-color': case 'border-bottom-color': case 'border-left-color': {
+        var bscv = parseCSSColor(vl); if (bscv !== undefined) p.borderColor = bscv; break;
+      }
+      case 'border-top-style': case 'border-right-style': case 'border-bottom-style': case 'border-left-style': {
+        if (vl === 'none' || vl === 'hidden') { p.borderWidth = 0; p.borderStyle = vl; }
+        else if (vl === 'solid' || vl === 'dashed' || vl === 'dotted' || vl === 'double') p.borderStyle = vl;
+        break;
+      }
 
       // ── Position ──────────────────────────────────────────────────────────
       case 'position': {
@@ -500,7 +575,10 @@ export function parseInlineStyle(style: string): CSSProps {
         if (vl === 'left' || vl === 'right') p.float = vl;
         else if (vl === 'none') p.float = 'none'; break;
       }
-      case 'clear': break; // layout hint, handled in layout engine
+      case 'clear': {
+        if (vl === 'left' || vl === 'right' || vl === 'both') p.clear = vl as CSSProps['clear'];
+        else p.clear = 'none'; break;
+      }
 
       // ── Overflow ──────────────────────────────────────────────────────────
       case 'overflow': {
@@ -519,11 +597,30 @@ export function parseInlineStyle(style: string): CSSProps {
       // ── Shadow / visual effects ───────────────────────────────────────────
       case 'box-shadow':  { p.boxShadow  = vl === 'none' ? undefined : val; break; }
       case 'text-shadow': { p.textShadow = vl === 'none' ? undefined : val; break; }
+      case 'filter': case '-webkit-filter': {
+        p.filter = vl === 'none' ? undefined : val; break;
+      }
+      case 'clip-path': case '-webkit-clip-path': {
+        p.clipPath = vl === 'none' ? undefined : val; break;
+      }
+      case 'backdrop-filter': case '-webkit-backdrop-filter': {
+        p.backdropFilter = vl === 'none' ? undefined : val; break;
+      }
+      case 'mix-blend-mode': { p.mixBlendMode = vl === 'normal' ? undefined : vl; break; }
+      case 'resize': {
+        if (vl === 'none' || vl === 'both' || vl === 'horizontal' || vl === 'vertical')
+          p.resize = vl as CSSProps['resize'];
+        else p.resize = 'none'; break;
+      }
+      case 'will-change': { p.willChange = vl === 'auto' ? undefined : val; break; }
+      case 'contain':     { p.contain = vl === 'none' ? undefined : val; break; }
 
       // ── Transform / transition ────────────────────────────────────────────
-      case 'transform':  { p.transform  = val; break; }
-      case 'transition': { p.transition = val; break; }
-      case 'animation':  { p.animation  = val; break; }
+      case 'transform':         { p.transform        = val; break; }
+      case 'transform-origin':  { p.transformOrigin  = val; break; }
+      case '-webkit-transform-origin': { if (!p.transformOrigin) p.transformOrigin = val; break; }
+      case 'transition':        { p.transition        = val; break; }
+      case 'animation':         { p.animation         = val; break; }
 
       // ── Cursor / pointer events ───────────────────────────────────────────
       case 'cursor':         { p.cursor        = vl; break; }

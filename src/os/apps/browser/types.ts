@@ -259,9 +259,16 @@ export interface CSSProps {
   outlineWidth?:  number;
   outlineColor?:  number;
   // ── Visual ────────────────────────────────────────────────────────────────
-  opacity?:       number;    // 0..1 (undefined = fully opaque)
-  boxShadow?:     string;
-  textShadow?:    string;
+  opacity?:         number;    // 0..1 (undefined = fully opaque)
+  boxShadow?:       string;
+  textShadow?:      string;
+  filter?:          string;    // CSS filter() functions
+  clipPath?:        string;    // clip-path geometry
+  backdropFilter?:  string;    // backdrop-filter functions
+  mixBlendMode?:    string;    // mix-blend-mode
+  resize?:          'none' | 'both' | 'horizontal' | 'vertical';
+  willChange?:      string;    // compositing hint
+  contain?:         string;    // CSS contain
   // ── Positioning ───────────────────────────────────────────────────────────
   position?:      'static' | 'relative' | 'absolute' | 'fixed' | 'sticky';
   top?:           number;
@@ -274,12 +281,14 @@ export interface CSSProps {
   overflowX?:     'visible' | 'hidden' | 'scroll' | 'auto';
   overflowY?:     'visible' | 'hidden' | 'scroll' | 'auto';
   // ── Transform / transition / animation ───────────────────────────────────
-  transform?:     string;
-  transition?:    string;
-  animation?:     string;
+  transform?:       string;
+  transformOrigin?: string;   // e.g. '50% 50%', 'top left'
+  transition?:      string;
+  animation?:       string;
   // ── Cursor / pointer ──────────────────────────────────────────────────────
   cursor?:        string;
   pointerEvents?: 'auto' | 'none';
+  clear?:         'left' | 'right' | 'both' | 'none';
   // ── Flexbox ───────────────────────────────────────────────────────────────
   flexDirection?:  'row' | 'row-reverse' | 'column' | 'column-reverse';
   flexWrap?:       'nowrap' | 'wrap' | 'wrap-reverse';
@@ -305,6 +314,21 @@ export interface CSSProps {
   backgroundSize?:     string;
   backgroundPosition?: string;
   backgroundRepeat?:   string;
+  // ── Text overflow / wrapping ──────────────────────────────────────────────
+  wordBreak?:       'normal' | 'break-all' | 'break-word' | 'keep-all';
+  overflowWrap?:    'normal' | 'break-word' | 'anywhere';
+  // ── Table ─────────────────────────────────────────────────────────────────
+  tableLayout?:     'auto' | 'fixed';
+  borderCollapse?:  'separate' | 'collapse';
+  borderSpacing?:   number;   // px
+  // ── Visibility / interaction ──────────────────────────────────────────────
+  visibility?:      'visible' | 'hidden' | 'collapse';
+  userSelect?:      'none' | 'text' | 'all' | 'auto';
+  appearance?:      string;
+  // ── Generated content / counters ─────────────────────────────────────────
+  content?:           string;   // CSS content property (for ::before/::after)
+  counterReset?:      string;   // counter-reset: name [initial]
+  counterIncrement?:  string;   // counter-increment: name [step]
   // ── !important tracking (set of property names that carried !important) ──
   important?:     Set<string>;
 }

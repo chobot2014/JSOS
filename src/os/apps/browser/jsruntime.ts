@@ -16,7 +16,7 @@
 import { os } from '../../core/sdk.js';
 import type { FetchResponse } from '../../core/sdk.js';
 import {
-  VDocument, VElement, VEvent, VNode, VText,
+  VDocument, VElement, VEvent, VNode, VText, VRange,
   buildDOM, serializeDOM, _serializeEl, _walk, _matchSel,
 } from './dom.js';
 import { BrowserPerformance, BrowserPerformanceObserver } from './perf.js';
@@ -181,6 +181,8 @@ export function createPageJS(
   (doc as any)._readyState = 'loading';
   // document.compatMode (item 864) — always standards mode
   (doc as any).compatMode = 'CSS1Compat';
+  // document.documentMode (item 867) — IE compat shim: return 11 (IE11 compat)
+  (doc as any).documentMode = 11;
   (doc as any).characterSet = 'UTF-8';
   (doc as any).charset = 'UTF-8';
   // doc._styleSheets populated later after CSSStyleSheet_ class is defined
@@ -279,41 +281,42 @@ export function createPageJS(
 
   // ── window.location ───────────────────────────────────────────────────────
 
-  var _locationHashOverride: string | null = null;   // set when page JS changes hash directly
+  // Tracks URL overridden by pushState/replaceState/hash setter (without real navigation)
+  var _locationHrefOverride: string | null = null;
+  function _effectiveHref(): string { return _locationHrefOverride ?? cb.baseURL; }
+  function _locPart(part: 'pathname'|'hostname'|'protocol'|'host'|'search'|'hash'|'port'|'origin'): string {
+    try { return (new URL(_effectiveHref()) as any)[part]; }
+    catch(_) { return part === 'pathname' ? '/' : part === 'protocol' ? 'http:' : part === 'origin' ? 'null' : ''; }
+  }
 
   var location = {
-    get href(): string { return cb.baseURL; },
+    get href(): string { return _effectiveHref(); },
     set href(v: string) { cb.navigate(v); },
     assign(url: string)  { cb.navigate(url); },
     replace(url: string) { cb.navigate(url); },
-    reload()             { cb.navigate(cb.baseURL); },
-    get pathname(): string { try { return new URL(cb.baseURL).pathname; } catch(_) { return '/'; } },
-    get hostname(): string { try { return new URL(cb.baseURL).hostname; } catch(_) { return ''; } },
-    get protocol(): string { try { return new URL(cb.baseURL).protocol; } catch(_) { return 'http:'; } },
-    get host():     string { try { return new URL(cb.baseURL).host;     } catch(_) { return ''; } },
-    get search():   string { try { return new URL(cb.baseURL).search;   } catch(_) { return ''; } },
-    get hash():     string {
-      if (_locationHashOverride !== null) return _locationHashOverride;
-      try { return new URL(cb.baseURL).hash; } catch(_) { return ''; }
-    },
+    reload()             { cb.navigate(_effectiveHref()); },
+    get pathname(): string { return _locPart('pathname'); },
+    get hostname(): string { return _locPart('hostname'); },
+    get protocol(): string { return _locPart('protocol'); },
+    get host():     string { return _locPart('host'); },
+    get search():   string { return _locPart('search'); },
+    get hash():     string { return _locPart('hash'); },
     set hash(v: string) {
       var oldHash = location.hash;
       var newHash = v ? (v.startsWith('#') ? v : '#' + v) : '';
-      _locationHashOverride = newHash;
       if (oldHash !== newHash) {
-        var base = cb.baseURL.replace(/#.*$/, '');
-        var oldURL = base + oldHash;
-        var newURL = base + newHash;
-        // HashChangeEvent defined later in createPageJS; captured by closure, valid at call time
+        var oldHref = _effectiveHref();
+        var newHref = oldHref.replace(/#.*$/, '') + newHash;
+        _locationHrefOverride = newHref;
         try {
-          var hcev = new HashChangeEvent('hashchange', { bubbles: false, cancelable: false, oldURL, newURL });
+          var hcev = new HashChangeEvent('hashchange', { bubbles: false, cancelable: false, oldURL: oldHref, newURL: newHref });
           (win['dispatchEvent'] as (e: VEvent) => void)(hcev);
         } catch (_) {}
       }
     },
-    get port():     string { try { return new URL(cb.baseURL).port;     } catch(_) { return ''; } },
-    get origin():   string { try { return new URL(cb.baseURL).origin;   } catch(_) { return 'null'; } },
-    toString():     string { return cb.baseURL; },
+    get port():     string { return _locPart('port'); },
+    get origin():   string { return _locPart('origin'); },
+    toString():     string { return _effectiveHref(); },
   };
 
   // ── window.history ─────────────────────────────────────────────────────────
@@ -331,12 +334,25 @@ export function createPageJS(
     get length(): number { return this._stack.length; },
     get state(): unknown { return this._states[this._pos] ?? null; },
     pushState(state: unknown, _title: string, url: string) {
+      var oldHref = _locationHrefOverride ?? cb.baseURL;
       this._stack.splice(this._pos + 1); this._states.splice(this._pos + 1);
       this._stack.push(url); this._states.push(state);
-      this._pos = this._stack.length - 1; location.href = url;
+      this._pos = this._stack.length - 1;
+      // Update URL without triggering navigation (SPA routing)
+      _locationHrefOverride = url;
+      // Fire hashchange if only the hash component changed
+      try {
+        var oldU = new URL(oldHref); var newU = new URL(url, oldHref);
+        if (oldU.origin === newU.origin && oldU.pathname === newU.pathname &&
+            oldU.search === newU.search && oldU.hash !== newU.hash) {
+          var hcev2 = new HashChangeEvent('hashchange', { bubbles: false, cancelable: false, oldURL: oldHref, newURL: url });
+          (win['dispatchEvent'] as (e: VEvent) => void)(hcev2);
+        }
+      } catch (_) {}
     },
     replaceState(state: unknown, _title: string, url: string) {
       this._stack[this._pos] = url; this._states[this._pos] = state;
+      _locationHrefOverride = url;
     },
     back()    { if (this._pos > 0) { this._pos--; cb.navigate(this._stack[this._pos]); _firePopState(this._states[this._pos]); } },
     forward() { if (this._pos < this._stack.length - 1) { this._pos++; cb.navigate(this._stack[this._pos]); _firePopState(this._states[this._pos]); } },
@@ -436,6 +452,42 @@ export function createPageJS(
     },
     webdriver: false,        // navigator.webdriver — set false so sites don't detect automation
     pdfViewerEnabled: true,  // navigator.pdfViewerEnabled
+    // Web Authentication API stub — lets sites detect presence without crashing
+    credentials: {
+      get(_opts?: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError')); },
+      create(_opts?: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError')); },
+      store(_cred: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError')); },
+      preventSilentAccess(): Promise<void> { return Promise.resolve(); },
+    },
+    // Web HID API stub (item 541) — checked by many modern web apps
+    hid: {
+      getDevices(): Promise<unknown[]> { return Promise.resolve([]); },
+      requestDevice(_opts?: unknown): Promise<unknown[]> { return Promise.reject(new DOMException('NotSupportedError')); },
+      addEventListener(_t: string, _l: unknown) {}, removeEventListener(_t: string, _l: unknown) {},
+    },
+    // Web USB API stub (item 541)
+    usb: {
+      getDevices(): Promise<unknown[]> { return Promise.resolve([]); },
+      requestDevice(_opts?: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError')); },
+      addEventListener(_t: string, _l: unknown) {}, removeEventListener(_t: string, _l: unknown) {},
+    },
+    // Web Bluetooth API stub
+    bluetooth: {
+      getAvailability(): Promise<boolean> { return Promise.resolve(false); },
+      requestDevice(_opts?: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError')); },
+      getDevices(): Promise<unknown[]> { return Promise.resolve([]); },
+      addEventListener(_t: string, _l: unknown) {}, removeEventListener(_t: string, _l: unknown) {},
+    },
+    // Web Serial API stub
+    serial: {
+      getPorts(): Promise<unknown[]> { return Promise.resolve([]); },
+      requestPort(_opts?: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError')); },
+      addEventListener(_t: string, _l: unknown) {}, removeEventListener(_t: string, _l: unknown) {},
+    },
+    // Wake Lock API stub
+    wakeLock: {
+      request(_type?: string): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError')); },
+    },
   };
 
   // ── window.screen ─────────────────────────────────────────────────────────
@@ -1657,6 +1709,7 @@ export function createPageJS(
     disabled = false;
     media: { mediaText: string; length: number } = { mediaText: '', length: 0 };
     type = 'text/css';
+    _pendingImports: string[] = [];
 
     insertRule(rule: string, index = 0): number {
       var clampedIdx = Math.max(0, Math.min(index, this.cssRules.length));
@@ -1682,17 +1735,74 @@ export function createPageJS(
     replaceSync(text: string): void { this._parseText(text); }
 
     _parseText(text: string): void {
-      // Very simple CSS rule splitter — handles { } blocks
-      this.cssRules = [];
-      var re = /([^{]+)\{([^}]*)\}/g; var m: RegExpExecArray | null;
-      while ((m = re.exec(text)) !== null) {
-        var sel = m[1].trim(); var body = m[2].trim();
-        if (sel.startsWith('@media')) {
-          var mr = new CSSMediaRule_(sel.slice(6).trim()); mr.parentStyleSheet = this; this.cssRules.push(mr);
-        } else if (sel.startsWith('@keyframes') || sel.startsWith('@-webkit-keyframes')) {
-          var kr = new CSSKeyframesRule_(sel.replace(/@-?(?:webkit-)?keyframes\s*/, '').trim()); kr.parentStyleSheet = this; this.cssRules.push(kr);
-        } else {
-          var sr = new CSSStyleRule_(sel, body); sr.parentStyleSheet = this; this.cssRules.push(sr);
+      this.cssRules = []; this._pendingImports = [];
+      // Strip block comments
+      var stripped = text.replace(/\/\*[\s\S]*?\*\//g, '');
+      var i = 0; var L = stripped.length;
+      while (i < L) {
+        // Skip whitespace
+        while (i < L && stripped.charCodeAt(i) <= 32) i++;
+        if (i >= L) break;
+        // @charset / @namespace — skip to ;
+        if (/^@(?:charset|namespace)\b/i.test(stripped.slice(i))) {
+          var sc = stripped.indexOf(';', i); i = sc >= 0 ? sc + 1 : L; continue;
+        }
+        // @import — no block, ends with ;
+        if (/^@import\b/i.test(stripped.slice(i))) {
+          var sc2 = stripped.indexOf(';', i);
+          var importSrc = stripped.slice(i, sc2 >= 0 ? sc2 + 1 : L);
+          var urlM = importSrc.match(/@import\s+(?:url\(\s*)?['"]?([^'"()\s;]+)['"]?\s*\)?/i);
+          if (urlM) { var ir2 = new CSSImportRule_(urlM[1]); ir2.parentStyleSheet = this; this.cssRules.push(ir2); this._pendingImports.push(urlM[1]); }
+          i = sc2 >= 0 ? sc2 + 1 : L; continue;
+        }
+        // Find opening brace (or ; for property-less rules)
+        var brace = -1; var j = i;
+        while (j < L) {
+          if (stripped[j] === '{') { brace = j; break; }
+          if (stripped[j] === ';') { j++; break; }
+          j++;
+        }
+        if (brace < 0) { i = j; continue; }
+        // Collect selectors/at-rule header
+        var hdr = stripped.slice(i, brace).trim();
+        // Find matching closing brace (handles nesting)
+        var depth2 = 1; var k = brace + 1;
+        while (k < L && depth2 > 0) {
+          if (stripped[k] === '{') depth2++;
+          else if (stripped[k] === '}') depth2--;
+          k++;
+        }
+        var body2 = stripped.slice(brace + 1, k - 1);
+        i = k;
+        if (!hdr) continue;
+        var lhdr = hdr.toLowerCase();
+        if (lhdr.startsWith('@media')) {
+          var mr2 = new CSSMediaRule_(hdr.slice(6).trim()); mr2.parentStyleSheet = this;
+          var inner2 = new CSSStyleSheet_(); inner2._parseText(body2); mr2.cssRules = inner2.cssRules;
+          this.cssRules.push(mr2);
+        } else if (lhdr.startsWith('@keyframes') || lhdr.startsWith('@-webkit-keyframes')) {
+          var kr2 = new CSSKeyframesRule_(hdr.replace(/@-?(?:webkit-)?keyframes\s*/i, '').trim());
+          kr2.parentStyleSheet = this; this.cssRules.push(kr2);
+        } else if (lhdr.startsWith('@supports')) {
+          var sp2 = new CSSSupportsRule_(hdr.slice(9).trim()); sp2.parentStyleSheet = this;
+          var inner3 = new CSSStyleSheet_(); inner3._parseText(body2); sp2.cssRules = inner3.cssRules;
+          this.cssRules.push(sp2);
+        } else if (lhdr.startsWith('@layer')) {
+          // @layer — flatten inner rules into current sheet
+          var inner4 = new CSSStyleSheet_(); inner4._parseText(body2);
+          for (var lri = 0; lri < inner4.cssRules.length; lri++) this.cssRules.push(inner4.cssRules[lri]);
+        } else if (lhdr.startsWith('@font-face')) {
+          var ffr2 = new CSSFontFaceRule_(body2.trim()); ffr2.parentStyleSheet = this; this.cssRules.push(ffr2);
+          // Register font family so document.fonts is aware of it (item 430)
+          var ffFamily = (ffr2.style as any)['font-family'];
+          var ffSrc    = (ffr2.style as any)['src'];
+          if (ffFamily) {
+            var cleanFamily = ffFamily.replace(/^['"]|['"]$/g, '');
+            var ff3 = new FontFace_(cleanFamily, ffSrc || '');
+            _documentFonts.add(ff3);
+          }
+        } else if (!lhdr.startsWith('@')) {
+          var sr2 = new CSSStyleRule_(hdr, body2.trim()); sr2.parentStyleSheet = this; this.cssRules.push(sr2);
         }
       }
     }
@@ -1715,18 +1825,23 @@ export function createPageJS(
   class CSSStyleRule_ extends CSSRule_ {
     type = 1;
     selectorText = '';
+    important: Set<string> | undefined;
     style: CSSStyleDeclarationStub & { cssText: string } = { cssText: '' } as any;
     constructor(selector: string, body: string) {
       super();
       this.selectorText = selector;
       this.cssText = selector + ' { ' + body + ' }';
-      // Populate style with property: value pairs
+      // Populate style with property: value pairs; track !important
       body.split(';').forEach(pair => {
         var idx = pair.indexOf(':');
         if (idx < 0) return;
         var prop = pair.slice(0, idx).trim();
-        var val  = pair.slice(idx + 1).trim();
-        if (prop) (this.style as any)[prop] = val;
+        var raw  = pair.slice(idx + 1).trim();
+        if (!prop) return;
+        var isImp = /!\s*important\s*$/i.test(raw);
+        var val = isImp ? raw.replace(/!\s*important\s*$/i, '').trim() : raw;
+        (this.style as any)[prop] = val;
+        if (isImp) { if (!this.important) this.important = new Set(); this.important.add(prop); }
       });
       this.style.cssText = body;
     }
@@ -1774,7 +1889,19 @@ export function createPageJS(
   /** CSSFontFaceRule — @font-face rule (type=5) */
   class CSSFontFaceRule_ extends CSSRule_ {
     type = 5;
-    style: CSSStyleDeclarationStub & { cssText: string } = { cssText: '' } as any;
+    style: CSSStyleDeclarationStub & { cssText: string; 'font-family'?: string; src?: string } = { cssText: '' } as any;
+    constructor(body?: string) {
+      super();
+      if (body) {
+        body.split(';').forEach(pair => {
+          var ci = pair.indexOf(':'); if (ci < 0) return;
+          var p2 = pair.slice(0, ci).trim().toLowerCase();
+          var v  = pair.slice(ci + 1).replace(/!\s*important\s*$/i, '').trim();
+          if (p2 && v) (this.style as any)[p2] = v;
+        });
+        this.style.cssText = body;
+      }
+    }
   }
 
   /** CSSImportRule — @import rule (type=3) */
@@ -2124,30 +2251,55 @@ export function createPageJS(
 
   // ── window.getComputedStyle — full CSS cascade (item 577) ────────────────
 
-  function getComputedStyle(el: VElement, _pseudoElt?: string | null): any {
-    // Build a merged style map: stylesheet rules (in order), then inline styles
-    var merged = new Map<string, string>();
+  // CSS inherited properties set (used for 'unset' keyword resolution in getComputedStyle)
+  var _CSS_INHERITED = new Set(['color','font','font-family','font-size','font-style','font-variant','font-weight',
+    'font-stretch','line-height','letter-spacing','word-spacing','text-align','text-indent','text-transform',
+    'white-space','word-break','overflow-wrap','word-wrap','list-style','list-style-type','list-style-position',
+    'cursor','direction','visibility','caption-side','border-collapse','border-spacing','empty-cells',
+    'quotes','orphans','widows','page-break-inside','pointer-events']);
 
-    function applyRuleStyle(ruleStyle: any): void {
-      if (!ruleStyle || typeof ruleStyle !== 'object') return;
-      for (var p in ruleStyle) {
-        if (p === 'cssText') continue;
-        if (ruleStyle[p]) merged.set(p, ruleStyle[p]);
-      }
+  // Calculate CSS specificity as a numeric score (a*10000 + b*100 + c)
+  // where a=IDs, b=classes/attrs/pseudoClasses, c=elements/pseudoElements
+  function _calcSpecificity(sel: string): number {
+    // Remove :not() contents (contributes inner selector specificity) and :is()/:where()
+    var s = sel.replace(/:not\(([^)]*)\)/g, ' $1').replace(/:(?:is|where)\([^)]*\)/g, '');
+    var a = (s.match(/#[\w-]+/g) || []).length;
+    var b = (s.match(/\.([\w-]+)|\[[\w-]+|\:(?!not|is|where|has|nth-child|nth-of-type|nth-last-child|nth-last-of-type)[a-z-]+/g) || []).length;
+    var c = (s.match(/(?:^|\s|>|\+|~)([a-z][\w-]*)|::[a-z-]+/g) || []).length;
+    return a * 10000 + b * 100 + c;
+  }
+
+  function getComputedStyle(el: VElement, _pseudoElt?: string | null): any {
+    // Collect all matching rules with specificity for proper cascade ordering
+    // Each entry: { specificity, sourceOrder, style, important: Set<string> }
+    var matched: Array<{ spec: number; order: number; style: any; important: Set<string> | undefined }> = [];
+    var order = 0;
+
+    function collectRule(rule: any, spec: number): void {
+      matched.push({ spec, order: order++, style: rule.style, important: rule.important as Set<string> | undefined });
     }
 
     function walkRules(rules: Array<any>): void {
       for (var rule of rules) {
         if (!rule) continue;
         if (rule.type === 1 && rule.selectorText) {
-          // CSSStyleRule — test each comma-separated selector
+          // CSSStyleRule — test each comma-separated selector, take max specificity
           var sels = (rule.selectorText as string).split(',');
+          var maxSpec = -1;
           for (var s = 0; s < sels.length; s++) {
-            try { if (_matchSel(sels[s].trim(), el)) { applyRuleStyle(rule.style); break; } } catch (_) {}
+            var selTrim = sels[s].trim();
+            try { if (_matchSel(selTrim, el)) { var sp = _calcSpecificity(selTrim); if (sp > maxSpec) maxSpec = sp; } } catch (_) {}
           }
+          if (maxSpec >= 0) collectRule(rule, maxSpec);
         } else if (rule.type === 4 && rule.cssRules) {
-          // @media — apply unconditionally (we treat all media queries as matching)
-          walkRules(rule.cssRules);
+          // @media — evaluate condition against viewport (item 373)
+          var mCond: string = rule.conditionText || (rule.media && rule.media.mediaText) || '';
+          if (!mCond || _evalMediaQuery(mCond)) walkRules(rule.cssRules);
+        } else if (rule.type === 12 && rule.cssRules) {
+          // @supports — evaluate condition; default permissive for unknown props
+          var sCond: string = rule.conditionText || '';
+          var sMatches = !sCond || (typeof CSS_ !== 'undefined' ? CSS_.supports(sCond) : true);
+          if (sMatches) walkRules(rule.cssRules);
         }
       }
     }
@@ -2159,26 +2311,79 @@ export function createPageJS(
       walkRules(sheet.cssRules ?? []);
     }
 
-    // Inline el._style overrides stylesheet rules
+    // Sort: normal rules by specificity then source order LOW→HIGH (later/higher wins)
+    matched.sort((a, b2) => a.spec !== b2.spec ? a.spec - b2.spec : a.order - b2.order);
+
+    // Apply matched rules in cascade order; !important props tracked separately
+    var merged = new Map<string, string>();
+    var importantMerged = new Map<string, string>();
+
+    for (var mi = 0; mi < matched.length; mi++) {
+      var m = matched[mi];
+      var ruleStyle = m.style;
+      if (!ruleStyle || typeof ruleStyle !== 'object') continue;
+      for (var p in ruleStyle) {
+        if (p === 'cssText') continue;
+        var v = ruleStyle[p]; if (!v) continue;
+        if (m.important && m.important.has(p)) importantMerged.set(p, v);
+        else merged.set(p, v);
+      }
+    }
+
+    // !important always wins; merge on top of normal
+    importantMerged.forEach((v, p) => merged.set(p, v));
+
+    // Inline el._style overrides stylesheet rules (inline !important would win but we treat all inline as highest)
     var inlineMap = (el._style as any)._map as Map<string, string> | undefined;
     if (inlineMap) { inlineMap.forEach((v, p) => { if (v) merged.set(p, v); }); }
 
     // CSS custom property (var()) resolver — walks ancestor chain
+    // First collect --* vars from this element's matched rules + inline into localVars
+    var localVars = new Map<string, string>();
+    merged.forEach((v, p) => { if (p.startsWith('--')) localVars.set(p, v); });
+    if (inlineMap) { inlineMap.forEach((v, p) => { if (p.startsWith('--') && v) localVars.set(p, v); }); }
+    (el as any)._cssVarCache = localVars; // cache for ancestor resolution of descendants
+
     function resolveVar(name: string, fallback: string): string {
-      var n: VElement | null = el;
+      // Check this element's own vars (from sheet rules + inline)
+      var lv = localVars.get(name); if (lv !== undefined) return lv;
+      // Walk ancestors
+      var n: VElement | null = el.parentNode instanceof VElement ? el.parentNode as VElement : null;
       while (n) {
+        var vc = (n as any)._cssVarCache as Map<string, string> | undefined;
+        if (vc) { var vvc = vc.get(name); if (vvc !== undefined) return vvc; }
         var vm = (n._style as any)._map as Map<string, string> | undefined;
         if (vm) { var vv = vm.get(name); if (vv !== undefined) return vv; }
         n = n.parentNode instanceof VElement ? n.parentNode as VElement : null;
       }
-      return fallback;
+      return fallback !== undefined ? fallback : '';
     }
     function resolveValue(val: string): string {
       if (!val || val.indexOf('var(') === -1) return val;
       return val.replace(/var\(\s*(--[\w-]+)(?:\s*,\s*([^)]*))?\)/g,
         (_m: string, name: string, fb: string) => resolveVar(name, fb || ''));
     }
-    function resolve(prop: string): string { return resolveValue(merged.get(prop) ?? ''); }
+
+    // Resolve `inherit` keyword by walking parent chain
+    function resolveInherit(prop: string): string {
+      var n: VElement | null = el.parentNode instanceof VElement ? el.parentNode as VElement : null;
+      while (n) {
+        var pm = (n._style as any)._map as Map<string, string> | undefined;
+        if (pm) { var pv = pm.get(prop); if (pv && pv !== 'inherit') return resolveValue(pv); }
+        n = n.parentNode instanceof VElement ? n.parentNode as VElement : null;
+      }
+      return '';
+    }
+
+    function resolve(prop: string): string {
+      var raw = merged.get(prop) ?? '';
+      if (!raw) return '';
+      var kw = raw.trim().toLowerCase();
+      if (kw === 'inherit') return resolveInherit(prop);
+      if (kw === 'initial' || kw === 'revert') return '';
+      if (kw === 'unset') return _CSS_INHERITED.has(prop) ? resolveInherit(prop) : '';
+      return resolveValue(raw);
+    }
 
     return new Proxy({} as Record<string, string>, {
       get(_t, k: string) {
@@ -2235,6 +2440,19 @@ export function createPageJS(
       return new Promise<void>(resolve => setTimeout_(resolve, 0));
     },
   };
+
+  // ── requestIdleCallback / cancelIdleCallback (item 545) ───────────────────
+  var _idleCbs = new Map<number, number>(); var _idleCbNext = 1;
+  function requestIdleCallback(fn: (deadline: { timeRemaining(): number; didTimeout: boolean }) => void, opts?: { timeout?: number }): number {
+    var id = _idleCbNext++;
+    var deadline = { timeRemaining(): number { return 50; }, didTimeout: false };
+    var timer = setTimeout_(() => { _idleCbs.delete(id); try { fn(deadline); } catch (_) {} }, opts?.timeout ?? 1);
+    _idleCbs.set(id, timer);
+    return id;
+  }
+  function cancelIdleCallback(id: number): void {
+    var timer = _idleCbs.get(id); if (timer != null) { clearTimeout_(timer); _idleCbs.delete(id); }
+  }
 
   // ── window.crypto (basic) ─────────────────────────────────────────────────
 
@@ -2689,13 +2907,17 @@ export function createPageJS(
 
   // ── Selection API stub (item 581) ─────────────────────────────────────────
 
+  var _selectionRanges: VRange[] = [];
   var _selection: {
     type: string; rangeCount: number; isCollapsed: boolean;
     anchorNode: VElement | null; anchorOffset: number; focusNode: VElement | null; focusOffset: number;
-    getRangeAt(i: number): unknown;
-    addRange(range: unknown): void;
+    getRangeAt(i: number): VRange | null;
+    addRange(range: VRange): void;
     removeAllRanges(): void;
+    removeRange(range: VRange): void;
     collapse(node: VElement | null, offset?: number): void;
+    collapseToStart(): void;
+    collapseToEnd(): void;
     toString(): string;
     selectAllChildren(node: VElement): void;
     containsNode(node: VElement, partlyContained?: boolean): boolean;
@@ -2706,17 +2928,28 @@ export function createPageJS(
   } = {
     type: 'None', rangeCount: 0, isCollapsed: true,
     anchorNode: null, anchorOffset: 0, focusNode: null, focusOffset: 0,
-    getRangeAt(_i: number): unknown { return null; },
-    addRange(_range: unknown): void {},
-    removeAllRanges(): void {},
-    collapse(node: VElement | null, _offset = 0): void { this.anchorNode = node; this.focusNode = node; },
-    toString(): string { return ''; },
-    selectAllChildren(_node: VElement): void {},
-    containsNode(_node: VElement, _partlyContained = false): boolean { return false; },
-    deleteFromDocument(): void {},
-    extend(_node: VElement, _offset = 0): void {},
+    getRangeAt(i: number): VRange | null { return _selectionRanges[i] ?? null; },
+    addRange(range: VRange): void {
+      _selectionRanges = [range];
+      this.rangeCount = 1; this.type = range.collapsed ? 'Caret' : 'Range';
+      this.anchorNode = range.startContainer as VElement | null; this.anchorOffset = range.startOffset;
+      this.focusNode  = range.endContainer as VElement | null;   this.focusOffset  = range.endOffset;
+      this.isCollapsed = range.collapsed;
+    },
+    removeAllRanges(): void { _selectionRanges = []; this.rangeCount = 0; this.type = 'None'; this.isCollapsed = true; },
+    removeRange(range: VRange): void { _selectionRanges = _selectionRanges.filter(r => r !== range); this.rangeCount = _selectionRanges.length; },
+    collapse(node: VElement | null, offset = 0): void {
+      var r = new VRange(); if (node) { r.setStart(node, offset); r.collapse(true); } this.addRange(r);
+    },
+    collapseToStart(): void { if (_selectionRanges[0]) { _selectionRanges[0].collapse(true); this.addRange(_selectionRanges[0]); } },
+    collapseToEnd(): void { if (_selectionRanges[0]) { _selectionRanges[0].collapse(false); this.addRange(_selectionRanges[0]); } },
+    toString(): string { return _selectionRanges.map(r => r.toString()).join(''); },
+    selectAllChildren(node: VElement): void { var r = new VRange(); r.selectNodeContents(node); this.addRange(r); },
+    containsNode(node: VElement, _partlyContained = false): boolean { return _selectionRanges.some(r => r.startContainer === node || r.endContainer === node); },
+    deleteFromDocument(): void { _selectionRanges.forEach(r => r.deleteContents()); this.removeAllRanges(); },
+    extend(node: VElement, offset = 0): void { if (_selectionRanges[0]) { _selectionRanges[0].setEnd(node, offset); this.addRange(_selectionRanges[0]); } },
     setBaseAndExtent(aNode: VElement, aOffset: number, fNode: VElement, fOffset: number): void {
-      this.anchorNode = aNode; this.anchorOffset = aOffset; this.focusNode = fNode; this.focusOffset = fOffset;
+      var r = new VRange(); r.setStart(aNode, aOffset); r.setEnd(fNode, fOffset); this.addRange(r);
     },
     modify(_alter: string, _direction: string, _granularity: string): void {},
   };
@@ -2991,6 +3224,8 @@ export function createPageJS(
     HTMLCollection:      Array,
     NodeList:            Array,
     DocumentFragment:    DocumentFragment_,
+    Range:               VRange,       // new Range() and instanceof Range checks (item 580)
+    StaticRange:         VRange,       // StaticRange alias
     WeakRef:             WeakRefImpl,
     FinalizationRegistry: FinalizationRegistryImpl,
 
@@ -2999,10 +3234,19 @@ export function createPageJS(
     outerWidth: 1024, outerHeight: 768,
     devicePixelRatio: 1,
     screenX: 0, screenY: 0,
+    screenLeft: 0, screenTop: 0,
     get scrollX() { return 0; },
     get scrollY() { return cb.getScrollY(); },
     get pageXOffset() { return 0; },
     get pageYOffset() { return cb.getScrollY(); },
+
+    // Gamepad API stub (item 63 / 541)
+    getGamepads(): unknown[] { return []; },
+
+    // File System Access API stubs
+    showOpenFilePicker(_opts?: unknown): Promise<unknown[]> { return Promise.reject(new DOMException('NotSupportedError')); },
+    showSaveFilePicker(_opts?: unknown): Promise<unknown>  { return Promise.reject(new DOMException('NotSupportedError')); },
+    showDirectoryPicker(_opts?: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError')); },
 
     // Storage
     localStorage:  _localStorage,
@@ -3078,10 +3322,16 @@ export function createPageJS(
     visualViewport: _visualViewport,
     getSelection: (): unknown => _selection,   // window.getSelection (item 581)
     matchMedia: (q: string) => _makeMediaQueryList(q),
-    open:     (_url: string) => { win.location = { href: _url }; cb.navigate(_url); return null; },
+    open:     (url?: string, _target?: string, _features?: string) => { if (url && url !== 'about:blank') cb.navigate(url); return null; },
     close:    () => {},
+    stop:     () => {},    // cancel page load
+    find:     (_str?: string): boolean => false,
     focus:    () => {},
     blur:     () => {},
+    moveTo:   (_x: number, _y: number): void => {},
+    moveBy:   (_dx: number, _dy: number): void => {},
+    resizeTo: (_w: number, _h: number): void => {},
+    resizeBy: (_dw: number, _dh: number): void => {},
     scrollTo: (x: number, y: number) => cb.scrollTo(x, y),
     scrollBy: (_x: number, dy: number) => cb.scrollTo(0, cb.getScrollY() + dy),
     scroll:   (x: number, y: number) => cb.scrollTo(x, y),
@@ -3089,8 +3339,9 @@ export function createPageJS(
     confirm:  (msg: unknown): boolean => cb.confirm(String(msg ?? '')),
     prompt:   (msg: unknown, def: unknown): string => cb.prompt(String(msg ?? ''), String(def ?? '')),
     print:    () => {},
-    name:     '',           // window.name (item 865)
-    status:   '',           // window.status (item 865)
+    name:          '',           // window.name (item 865)
+    status:        '',           // window.status (item 865)
+    defaultStatus: '',           // window.defaultStatus (item 865)
     onpopstate: null as unknown,   // window.onpopstate (item 499)
     onerror: null as unknown,      // window.onerror
     /** Navigation API (Chrome 102+, item 712) */
@@ -3352,10 +3603,32 @@ export function createPageJS(
 
   // Populate doc.styleSheets from <style> and <link rel="stylesheet"> (item 579)
   {
+    // Helper: fetch and merge @import-ed CSS files (item 374)
+    function _processImports(sheet: CSSStyleSheet_, baseURL: string): void {
+      if (!sheet._pendingImports.length) return;
+      var imports = sheet._pendingImports.slice(); sheet._pendingImports = [];
+      for (var _ii = 0; _ii < imports.length; _ii++) {
+        (function(_impURL: string) {
+          var _absURL = _impURL.startsWith('http') ? _impURL : _resolveURL(_impURL, baseURL);
+          os.fetchAsync(_absURL, (resp: FetchResponse | null) => {
+            if (resp && resp.status === 200) {
+              var _impSheet = new CSSStyleSheet_(); _impSheet._parseText(resp.bodyText);
+              // Prepend imported rules before the sheet's own rules
+              sheet.cssRules = (_impSheet.cssRules as any[]).concat(sheet.cssRules);
+              // Recursively process @imports from the imported sheet
+              _processImports(_impSheet, _absURL);
+              doc._dirty = true;
+            }
+          });
+        })(imports[_ii]);
+      }
+    }
+
     var _styleTags2 = doc.querySelectorAll('style');
     for (var _stEl2 of _styleTags2) {
       var _sheet2 = new CSSStyleSheet_(); _sheet2.ownerNode = _stEl2;
       _sheet2._parseText(_stEl2.textContent || ''); doc._styleSheets.push(_sheet2);
+      _processImports(_sheet2, _baseHref);
     }
     var _linkTags2 = doc.querySelectorAll('link[rel]');
     for (var _lnEl2 of _linkTags2) {
@@ -3369,6 +3642,7 @@ export function createPageJS(
             os.fetchAsync(_cssURL, (resp: FetchResponse | null) => {
               if (resp && resp.status === 200) {
                 _sheet._parseText(resp.bodyText);
+                _processImports(_sheet, _cssURL);
                 doc._dirty = true;
                 try { _lnEl.dispatchEvent(new VEvent('load')); } catch(_) {}
               } else {

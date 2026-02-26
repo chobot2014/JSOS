@@ -410,6 +410,11 @@ export function computeElementStyle(
     whiteSpace:    inherited.whiteSpace,
     listStyleType: inherited.listStyleType,
     cursor:        inherited.cursor,
+    wordBreak:     inherited.wordBreak,
+    overflowWrap:  inherited.overflowWrap,
+    visibility:    inherited.visibility,
+    borderCollapse: inherited.borderCollapse,
+    borderSpacing:  inherited.borderSpacing,
   };
 
   // ── Choose candidate set: indexed fast-path or full linear scan ────────────
@@ -521,11 +526,12 @@ function mergeProps(target: CSSProps, src: CSSProps, importantOnly?: Set<string>
   // ── Positioning ───────────────────────────────────────────────────────────
   set('position', src.position); set('top', src.top); set('right', src.right);
   set('bottom', src.bottom); set('left', src.left); set('zIndex', src.zIndex);
-  set('float', src.float); set('overflow', src.overflow);
+  set('float', src.float); set('clear', src.clear);
+  set('overflow', src.overflow);
   set('overflowX', src.overflowX); set('overflowY', src.overflowY);
   // ── Transform / transition ────────────────────────────────────────────────
-  set('transform', src.transform); set('transition', src.transition);
-  set('animation', src.animation);
+  set('transform', src.transform); set('transformOrigin', src.transformOrigin);
+  set('transition', src.transition); set('animation', src.animation);
   // ── Cursor / pointer ──────────────────────────────────────────────────────
   set('cursor', src.cursor); set('pointerEvents', src.pointerEvents);
   // ── Flexbox ───────────────────────────────────────────────────────────────
@@ -543,4 +549,16 @@ function mergeProps(target: CSSProps, src: CSSProps, importantOnly?: Set<string>
   // ── Background ────────────────────────────────────────────────────────────
   set('backgroundImage', src.backgroundImage); set('backgroundSize', src.backgroundSize);
   set('backgroundPosition', src.backgroundPosition); set('backgroundRepeat', src.backgroundRepeat);
+  // ── Text wrapping / table / visibility ───────────────────────────────────
+  set('wordBreak', src.wordBreak); set('overflowWrap', src.overflowWrap);
+  set('tableLayout', src.tableLayout); set('borderCollapse', src.borderCollapse);
+  set('borderSpacing', src.borderSpacing);
+  set('visibility', src.visibility);
+  set('userSelect', src.userSelect); set('appearance', src.appearance);
+  set('content', src.content);
+  set('counterReset', src.counterReset); set('counterIncrement', src.counterIncrement);
+  // ── Visual effects ───────────────────────────────────────────────────────────
+  set('filter', src.filter); set('clipPath', src.clipPath);
+  set('backdropFilter', src.backdropFilter); set('mixBlendMode', src.mixBlendMode);
+  set('resize', src.resize); set('willChange', src.willChange); set('contain', src.contain);
 }

@@ -267,6 +267,27 @@ export class VText extends VNode {
   nodeType = 3; nodeName = '#text'; data: string;
   constructor(d: string) { super(); this.data = d; }
   cloneNode(_deep = false): VText { return new VText(this.data); }
+  get nodeValue(): string { return this.data; }
+  set nodeValue(v: string) { this.data = v; if (this.ownerDocument) this.ownerDocument._dirty = true; }
+  get textContent(): string { return this.data; }
+  set textContent(v: string) { this.data = v; if (this.ownerDocument) this.ownerDocument._dirty = true; }
+  get length(): number { return this.data.length; }
+  get wholeText(): string { return this.data; }
+  splitText(offset: number): VText {
+    var before = this.data.slice(0, offset); var after = this.data.slice(offset);
+    this.data = before;
+    var newNode = new VText(after); newNode.ownerDocument = this.ownerDocument; newNode.parentNode = this.parentNode;
+    if (this.parentNode) {
+      var idx = this.parentNode.childNodes.indexOf(this); if (idx >= 0) this.parentNode.childNodes.splice(idx + 1, 0, newNode as any);
+    }
+    if (this.ownerDocument) this.ownerDocument._dirty = true;
+    return newNode;
+  }
+  substringData(offset: number, count: number): string { return this.data.slice(offset, offset + count); }
+  appendData(data: string): void { this.data += data; if (this.ownerDocument) this.ownerDocument._dirty = true; }
+  insertData(offset: number, data: string): void { this.data = this.data.slice(0, offset) + data + this.data.slice(offset); if (this.ownerDocument) this.ownerDocument._dirty = true; }
+  deleteData(offset: number, count: number): void { this.data = this.data.slice(0, offset) + this.data.slice(offset + count); if (this.ownerDocument) this.ownerDocument._dirty = true; }
+  replaceData(offset: number, count: number, data: string): void { this.data = this.data.slice(0, offset) + data + this.data.slice(offset + count); if (this.ownerDocument) this.ownerDocument._dirty = true; }
 }
 
 // ── VStyleMap + proxy ─────────────────────────────────────────────────────────
@@ -396,6 +417,9 @@ export class VElement extends VNode {
   get alt():       string  { return this._attrs.get('alt')   || ''; }
   get disabled():  boolean { return this._attrs.has('disabled'); }     set disabled(v: boolean)  { if (v) this.setAttribute('disabled', ''); else this.removeAttribute('disabled'); }
   get checked():   boolean { return this._attrs.has('checked'); }      set checked(v: boolean)   { if (v) this.setAttribute('checked', ''); else this.removeAttribute('checked'); }
+  _indeterminate = false;
+  get indeterminate(): boolean { return this._indeterminate; }
+  set indeterminate(v: boolean) { this._indeterminate = v; }
   get hidden():    boolean { var s = this._style._map.get('display'); return s === 'none' || this._attrs.has('hidden'); }
   set hidden(v: boolean)  { if (v) this._style.setProperty('display', 'none'); else this._style.removeProperty('display'); }
   get title():     string  { return this._attrs.get('title') || ''; }  set title(v: string)     { this.setAttribute('title', v); }
@@ -421,6 +445,21 @@ export class VElement extends VNode {
   set enterKeyHint(v: string) { this.setAttribute('enterkeyhint', v); }
   get inputMode(): string { return this._attrs.get('inputmode') ?? ''; }
   set inputMode(v: string) { this.setAttribute('inputmode', v); }
+  get lang(): string { return this._attrs.get('lang') ?? ''; }
+  set lang(v: string) { this.setAttribute('lang', v); }
+  get dir(): string { return this._attrs.get('dir') ?? ''; }
+  set dir(v: string) { this.setAttribute('dir', v); }
+  get slot(): string { return this._attrs.get('slot') ?? ''; }
+  set slot(v: string) { this.setAttribute('slot', v); }
+  get accessKey(): string { return this._attrs.get('accesskey') ?? ''; }
+  set accessKey(v: string) { this.setAttribute('accesskey', v); }
+  get accessKeyLabel(): string { return this._attrs.get('accesskey') ?? ''; }
+  get part(): { add(...p: string[]): void; remove(...p: string[]): void; contains(p: string): boolean; toString(): string; value: string } {
+    return {
+      get value() { return ''; },
+      add() {}, remove() {}, contains() { return false; }, toString() { return ''; },
+    };
+  }
 
   // on* property handlers
   get onclick():  ((e: VEvent) => void) | null { return this._onHandlers['click']  ?? null; }
@@ -467,6 +506,34 @@ export class VElement extends VNode {
   }
   hasAttribute(name: string): boolean { return this._attrs.has(name.toLowerCase()); }
   getAttributeNames(): string[] { return [...this._attrs.keys()]; }
+  /** element.attributes — live NamedNodeMap-like object (item 566) */
+  get attributes(): any {
+    var self = this;
+    var attrObjs = () => [...self._attrs.entries()].map(([k, v]) => ({ name: k, localName: k, value: v, specified: true, ownerElement: self, prefix: null, namespaceURI: null }));
+    return new Proxy({}, {
+      get(_t, k) {
+        var arr = attrObjs();
+        if (k === 'length') return arr.length;
+        if (k === 'item') return (i: number) => arr[i] ?? null;
+        if (k === 'getNamedItem') return (n: string) => arr.find(a => a.name === n.toLowerCase()) ?? null;
+        if (k === 'setNamedItem') return (a: { name: string; value: string }) => { self.setAttribute(a.name, a.value); return null; };
+        if (k === 'removeNamedItem') return (n: string) => { self.removeAttribute(n); return null; };
+        if (k === Symbol.iterator) return function* () { yield* arr; };
+        if (typeof k === 'string') {
+          var idx = parseInt(k, 10);
+          if (!isNaN(idx)) return arr[idx] ?? undefined;
+          return arr.find(a => a.name === k) ?? undefined;
+        }
+        return undefined;
+      },
+      has(_t, k) {
+        var arr = attrObjs();
+        if (k === 'length' || k === 'item' || k === 'getNamedItem' || k === 'setNamedItem' || k === 'removeNamedItem' || k === Symbol.iterator) return true;
+        if (typeof k === 'string') { var idx = parseInt(k, 10); if (!isNaN(idx)) return idx < arr.length; return arr.some(a => a.name === k); }
+        return false;
+      },
+    });
+  }
   // Namespaced attribute variants — ignore namespace, treat as plain attributes
   getAttributeNS(_ns: string | null, name: string): string | null { return this.getAttribute(name); }
   setAttributeNS(_ns: string | null, name: string, value: string): void { this.setAttribute(name, value); }
@@ -539,13 +606,17 @@ export class VElement extends VNode {
     this.parentNode.removeChild(this);
   }
   insertAdjacentHTML(pos: string, html: string): void {
+    var p = pos.toLowerCase();
     var frag = _parseFragment(html, this.ownerDocument);
-    if (pos === 'beforeend') { for (var n of frag) this.appendChild(n); }
-    else if (pos === 'afterbegin') { for (var n2 of frag.reverse()) this.insertBefore(n2, this.firstChild); }
+    if (p === 'beforeend') { for (var n of frag) this.appendChild(n); }
+    else if (p === 'afterbegin') { for (var n2 of frag.reverse()) this.insertBefore(n2, this.firstChild); }
     else if (this.parentNode) {
-      for (var n3 of (pos === 'beforebegin' ? frag : frag)) {
-        if (pos === 'beforebegin') this.parentNode.insertBefore(n3, this);
-        else this.parentNode.insertBefore(n3, this.nextSibling);
+      if (p === 'afterend') {
+        // Capture nextSibling before loop; insertions must not shift the target
+        var _ref = this.nextSibling as VElement | null;
+        for (var n3 of frag) this.parentNode.insertBefore(n3, _ref);
+      } else { // beforebegin
+        for (var n4 of frag) this.parentNode.insertBefore(n4, this);
       }
     }
   }
@@ -624,6 +695,38 @@ export class VElement extends VNode {
   // Convenience getters used by forms
   get form(): VElement | null { return this.closest('form'); }
   get elements(): VElement[] { return this.querySelectorAll('input,textarea,select,button'); }
+
+  // ── <select> element API (item 601) ──────────────────────────────────────
+  /** Returns all <option> children for <select> and <datalist> elements. */
+  get options(): VElement[] { return this.querySelectorAll('option'); }
+  get selectedOptions(): VElement[] { return this.options.filter(o => (o as any).selected || o.hasAttribute('selected')); }
+  get multiple(): boolean { return this._attrs.has('multiple'); }
+  set multiple(v: boolean) { if (v) this.setAttribute('multiple', ''); else this.removeAttribute('multiple'); }
+  /** selectedIndex: first selected option index, or -1 if none. Stored as _selectedIndex for mutation. */
+  get selectedIndex(): number {
+    var _si = (this as any)._selectedIndex;
+    if (typeof _si === 'number') return _si;
+    var opts = this.options;
+    for (var i = 0; i < opts.length; i++) { if ((opts[i] as any).selected || opts[i].hasAttribute('selected')) return i; }
+    return opts.length > 0 ? 0 : -1;
+  }
+  set selectedIndex(v: number) {
+    (this as any)._selectedIndex = v;
+    var opts = this.options;
+    for (var i = 0; i < opts.length; i++) { (opts[i] as any).selected = (i === v); }
+    if (this.ownerDocument) this.ownerDocument._dirty = true;
+  }
+
+  // ── <template> element (item 584 adjacent) ────────────────────────────────
+  /** HTMLTemplateElement.content — returns the document fragment of the template */
+  get content(): VElement {
+    if (this.tagName.toLowerCase() !== 'template') return this;
+    var frag = new VElement('#document-fragment');
+    frag.nodeType = 11;
+    frag.ownerDocument = this.ownerDocument;
+    for (var ch of this.childNodes) { frag.childNodes.push(ch); }
+    return frag;
+  }
   focus(_opts?: { preventScroll?: boolean }): void {
     var doc = this.ownerDocument;
     if (doc && doc._activeElement !== this) {
@@ -719,6 +822,35 @@ export class VElement extends VNode {
   get noValidate(): boolean { return this._attrs.has('novalidate'); } set noValidate(v: boolean) { if (v) this.setAttribute('novalidate', ''); else this.removeAttribute('novalidate'); }
   get acceptCharset(): string { return this._attrs.get('accept-charset') || ''; }
   // elements getter already defined above (in form-input area)
+
+  // <label> htmlFor — reads/writes the `for` attribute
+  get htmlFor(): string { return this._attrs.get('for') || ''; }
+  set htmlFor(v: string) { this.setAttribute('for', v); }
+  get control(): VElement | null {
+    var id = this.htmlFor; if (!id || !this.ownerDocument) return null;
+    return this.ownerDocument.getElementById(id);
+  }
+
+  // Input / form-control common properties
+  get autocomplete(): string { return this._attrs.get('autocomplete') || ''; }
+  set autocomplete(v: string) { this.setAttribute('autocomplete', v); }
+  get list(): VElement | null {
+    var id = this._attrs.get('list'); if (!id || !this.ownerDocument) return null;
+    return this.ownerDocument.getElementById(id);
+  }
+
+  // Form-override attributes on <input>, <button>, <select>, <textarea>
+  get formAction(): string  { return this._attrs.get('formaction') || ''; }  set formAction(v: string)  { this.setAttribute('formaction', v); }
+  get formMethod(): string  { return this._attrs.get('formmethod') || ''; }  set formMethod(v: string)  { this.setAttribute('formmethod', v); }
+  get formEnctype(): string { return this._attrs.get('formenctype') || ''; } set formEnctype(v: string) { this.setAttribute('formenctype', v); }
+  get formNoValidate(): boolean { return this._attrs.has('formnovalidate'); } set formNoValidate(v: boolean) { if (v) this.setAttribute('formnovalidate', ''); else this.removeAttribute('formnovalidate'); }
+  get formTarget(): string  { return this._attrs.get('formtarget') || ''; }  set formTarget(v: string)  { this.setAttribute('formtarget', v); }
+
+  // HTMLInputElement/HTMLButtonElement — `defaultValue` and `defaultChecked`
+  get defaultValue(): string { return this._attrs.get('value') || ''; }
+  set defaultValue(v: string) { this.setAttribute('value', v); }
+  get defaultChecked(): boolean { return this._attrs.has('checked'); }
+  set defaultChecked(v: boolean) { if (v) this.setAttribute('checked', ''); else this.removeAttribute('checked'); }
 
   // HTMLInputElement-like — scrollIntoView etc.
   scrollIntoView(): void {}
@@ -1020,6 +1152,125 @@ export class VElement extends VNode {
   set outerText(v: string) { if (this.parentNode) { var t = new VText(v); t.parentNode = this.parentNode; t.ownerDocument = this.ownerDocument; var idx = this.parentNode.childNodes.indexOf(this as any); if (idx >= 0) this.parentNode.childNodes.splice(idx, 1, t as any); } }
 }
 
+// ── VRange ────────────────────────────────────────────────────────────────────
+// DOM Range API (item 580) — full surface for SPA/framework compatibility
+
+export class VRange {
+  startContainer: VNode | null = null;
+  startOffset: number = 0;
+  endContainer: VNode | null = null;
+  endOffset: number = 0;
+  collapsed: boolean = true;
+  commonAncestorContainer: VNode | null = null;
+
+  private _updateCollapsed(): void {
+    this.collapsed = this.startContainer === this.endContainer && this.startOffset === this.endOffset;
+    // commonAncestorContainer: walk up from startContainer and endContainer to find common ancestor
+    if (this.startContainer === this.endContainer) {
+      this.commonAncestorContainer = this.startContainer;
+    } else if (this.startContainer) {
+      // Simple approximation: use parentNode of startContainer
+      this.commonAncestorContainer = this.startContainer.parentNode ?? this.startContainer;
+    }
+  }
+
+  setStart(node: VNode, offset: number): void {
+    this.startContainer = node; this.startOffset = offset; this._updateCollapsed();
+  }
+  setEnd(node: VNode, offset: number): void {
+    this.endContainer = node; this.endOffset = offset; this._updateCollapsed();
+  }
+  setStartBefore(node: VNode): void {
+    var p = node.parentNode; if (!p) return;
+    this.startContainer = p; this.startOffset = p.childNodes.indexOf(node as any);
+    this._updateCollapsed();
+  }
+  setStartAfter(node: VNode): void {
+    var p = node.parentNode; if (!p) return;
+    this.startContainer = p; this.startOffset = p.childNodes.indexOf(node as any) + 1;
+    this._updateCollapsed();
+  }
+  setEndBefore(node: VNode): void {
+    var p = node.parentNode; if (!p) return;
+    this.endContainer = p; this.endOffset = p.childNodes.indexOf(node as any);
+    this._updateCollapsed();
+  }
+  setEndAfter(node: VNode): void {
+    var p = node.parentNode; if (!p) return;
+    this.endContainer = p; this.endOffset = p.childNodes.indexOf(node as any) + 1;
+    this._updateCollapsed();
+  }
+  selectNode(node: VNode): void {
+    this.setStartBefore(node); this.setEndAfter(node);
+  }
+  selectNodeContents(node: VNode): void {
+    this.startContainer = node; this.startOffset = 0;
+    this.endContainer = node; this.endOffset = node.childNodes.length;
+    this._updateCollapsed();
+  }
+  collapse(toStart = true): void {
+    if (toStart) { this.endContainer = this.startContainer; this.endOffset = this.startOffset; }
+    else { this.startContainer = this.endContainer; this.startOffset = this.endOffset; }
+    this.collapsed = true;
+    this.commonAncestorContainer = this.startContainer;
+  }
+  cloneRange(): VRange {
+    var r = new VRange();
+    r.startContainer = this.startContainer; r.startOffset = this.startOffset;
+    r.endContainer = this.endContainer; r.endOffset = this.endOffset;
+    r.collapsed = this.collapsed; r.commonAncestorContainer = this.commonAncestorContainer;
+    return r;
+  }
+  detach(): void { this.startContainer = this.endContainer = this.commonAncestorContainer = null; }
+  toString(): string {
+    if (this.startContainer instanceof VText) return (this.startContainer as VText).data.slice(this.startOffset, this.endOffset);
+    if (this.startContainer instanceof VElement) {
+      var texts: string[] = [];
+      _walk(this.startContainer as VElement, (n: VNode) => { if (n instanceof VText) texts.push((n as VText).data); });
+      return texts.join('');
+    }
+    return '';
+  }
+  // Content manipulation — stub implementations that are safe (no-ops or minimal)
+  deleteContents(): void {}
+  extractContents(): any { return { nodeType: 11, childNodes: [], appendChild() {}, querySelectorAll() { return []; } }; }
+  cloneContents(): any { return this.extractContents(); }
+  insertNode(node: VNode): void {
+    var sc = this.startContainer;
+    if (!sc) return;
+    if (sc instanceof VText) {
+      // Split text node and insert before the second half
+      var t = sc as VText;
+      var parent = t.parentNode; if (!parent) return;
+      var after = t.splitText(this.startOffset);
+      var idx = parent.childNodes.indexOf(after as any);
+      parent.childNodes.splice(idx, 0, node as any);
+      node.parentNode = parent; node.ownerDocument = t.ownerDocument;
+    } else if (sc.childNodes) {
+      var ref = sc.childNodes[this.startOffset] ?? null;
+      (sc as any).insertBefore(node, ref);
+    }
+  }
+  surroundContents(node: VElement): void {
+    var sc = this.startContainer; if (!sc || !sc.parentNode) return;
+    var p = sc.parentNode;
+    var idx = p.childNodes.indexOf(sc as any);
+    if (idx >= 0) { p.childNodes.splice(idx, 1, node as any); node.parentNode = p; node.ownerDocument = p.ownerDocument; node.appendChild(sc); }
+  }
+  isPointInRange(node: VNode, _offset: number): boolean { return node === this.startContainer || node === this.endContainer; }
+  compareBoundaryPoints(_how: number, _sourceRange: VRange): number { return 0; }
+  comparePoint(_node: VNode, _offset: number): number { return 0; }
+  getBoundingClientRect(): DOMRect { return { x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0, toJSON() { return {}; } } as DOMRect; }
+  getClientRects(): DOMRect[] { return []; }
+  createContextualFragment(html: string): any {
+    var doc = (this.startContainer?.ownerDocument ?? null) as any;
+    var nodes = _parseFragment(html, doc);
+    var frag = { nodeType: 11, childNodes: nodes as any[], ownerDocument: doc, querySelectorAll: (sel: string) => _matchSel ? nodes.filter((n: VNode) => n instanceof VElement && _matchSel(sel, n as VElement)) : [] };
+    nodes.forEach((n: VNode) => { n.parentNode = frag as any; });
+    return frag;
+  }
+}
+
 // ── VDocument ─────────────────────────────────────────────────────────────────
 
 export class VDocument extends VNode {
@@ -1090,6 +1341,10 @@ export class VDocument extends VNode {
   }
   hasFocus(): boolean { return true; }
   execCommand(_cmd: string, _show?: boolean, _val?: string): boolean { return false; }
+  queryCommandState(_cmd: string): boolean { return false; }
+  queryCommandEnabled(_cmd: string): boolean { return false; }
+  queryCommandSupported(_cmd: string): boolean { return false; }
+  designMode = 'off';
   getSelection(): unknown { return (this as any)._selectionRef ?? null; }
   /**
    * Legacy document.createEvent() + initEvent() pattern.
@@ -1124,7 +1379,7 @@ export class VDocument extends VNode {
     }
     return ev;
   }
-  createRange(): any { return { selectNodeContents() {}, collapse() {}, toString() { return ''; }, commonAncestorContainer: null, startContainer: null, endContainer: null, startOffset: 0, endOffset: 0, collapsed: true, detach() {}, cloneRange() { return this; }, deleteContents() {}, selectNode() {}, surroundContents() {} }; }
+  createRange(): VRange { var r = new VRange(); r.startContainer = this.body; r.endContainer = this.body; r.commonAncestorContainer = this.body; return r; }
   importNode(node: VNode, deep = false): VNode { return node.cloneNode(deep); }
   adoptNode(node: VNode): VNode { if (node.parentNode) node.parentNode.removeChild(node); node.ownerDocument = this; return node; }
 
@@ -1184,6 +1439,10 @@ export class VDocument extends VNode {
   exitPointerLock(): void {}
   exitFullscreen(): Promise<void> { return Promise.resolve(); }
   exitPictureInPicture(): Promise<void> { return Promise.resolve(); }
+  startViewTransition(callback?: () => Promise<void> | void): any {
+    var done = callback ? Promise.resolve().then(callback).catch(() => {}) : Promise.resolve();
+    return { ready: Promise.resolve(), finished: done, updateCallbackDone: done, skipTransition(): void {} };
+  }
   get fullscreenElement(): VElement | null { return null; }
   get pointerLockElement(): VElement | null { return null; }
   get pictureInPictureElement(): VElement | null { return null; }
@@ -1257,19 +1516,67 @@ export class VDocument extends VNode {
     };
   }
 
-  createTreeWalker(root: VElement, _whatToShow?: number, _filter?: unknown): any {
-    var nodes: VNode[] = [];
+  createTreeWalker(root: VNode, whatToShow = 0xFFFFFFFF, filter?: { acceptNode?: (node: VNode) => number } | null): any {
+    // Collect all nodes respecting whatToShow mask
+    function collectNodes(node: VNode, out: VNode[]): void {
+      for (var c of node.childNodes) {
+        var show = false;
+        if ((whatToShow & 1) && c instanceof VElement) show = true;
+        else if ((whatToShow & 4) && c instanceof VText) show = true;
+        else if ((whatToShow & 0x80) && (c as any).nodeType === 8) show = true;
+        else if (whatToShow === 0xFFFFFFFF) show = true;
+        if (show) {
+          var accept = filter?.acceptNode ? filter.acceptNode(c) : 1; // FILTER_ACCEPT=1
+          if (accept === 1) out.push(c);
+        }
+        collectNodes(c, out);
+      }
+    }
+    var nodes: VNode[] = [root];
+    collectNodes(root, nodes);
     var idx = 0;
-    _walk(root, el => nodes.push(el));
     return {
+      root,
+      whatToShow,
+      filter: filter ?? null,
       currentNode: root as VNode,
-      nextNode(): VNode | null { if (idx < nodes.length) { this.currentNode = nodes[idx++]; return this.currentNode; } return null; },
-      previousNode(): VNode | null { if (idx > 1) { this.currentNode = nodes[--idx - 1]; return this.currentNode; } return null; },
-      firstChild(): VNode | null { return root.firstChild; },
-      parentNode(): VNode | null { return null; },
+      nextNode(): VNode | null {
+        if (idx < nodes.length - 1) { idx++; this.currentNode = nodes[idx]; return this.currentNode; }
+        return null;
+      },
+      previousNode(): VNode | null {
+        if (idx > 0) { idx--; this.currentNode = nodes[idx]; return this.currentNode; }
+        return null;
+      },
+      firstChild(): VNode | null {
+        var fc = (this.currentNode.childNodes ?? [])[0] ?? null;
+        if (fc) { this.currentNode = fc; idx = nodes.indexOf(fc); } return fc;
+      },
+      lastChild(): VNode | null {
+        var ch = this.currentNode.childNodes ?? [];
+        var lc = ch[ch.length - 1] ?? null;
+        if (lc) { this.currentNode = lc; idx = nodes.indexOf(lc); } return lc;
+      },
+      parentNode(): VNode | null {
+        var p = this.currentNode.parentNode;
+        if (p) { this.currentNode = p; idx = nodes.indexOf(p); } return p;
+      },
+      nextSibling(): VNode | null {
+        var p = this.currentNode.parentNode; if (!p) return null;
+        var si = p.childNodes.indexOf(this.currentNode as any);
+        var ns = si >= 0 ? p.childNodes[si + 1] ?? null : null;
+        if (ns) { this.currentNode = ns as VNode; idx = nodes.indexOf(ns as VNode); } return ns as VNode | null;
+      },
+      previousSibling(): VNode | null {
+        var p = this.currentNode.parentNode; if (!p) return null;
+        var si = p.childNodes.indexOf(this.currentNode as any);
+        var ps2 = si > 0 ? p.childNodes[si - 1] ?? null : null;
+        if (ps2) { this.currentNode = ps2 as VNode; idx = nodes.indexOf(ps2 as VNode); } return ps2 as VNode | null;
+      },
     };
   }
-  createNodeIterator(root: VElement, _whatToShow?: number): any { return this.createTreeWalker(root, _whatToShow); }
+  createNodeIterator(root: VElement, whatToShow?: number, filter?: unknown): any { return this.createTreeWalker(root, whatToShow, filter as any); }
+
 }
 
 // ── DOM walker + CSS selector engine ──────────────────────────────────────────
@@ -1341,15 +1648,19 @@ function _matchSimple(part: string, el: VElement): boolean {
       if (i < n && part[i] === ']') { i++; if (!el.hasAttribute(attr)) return false; }
       else {
         var op = ''; if (i < n && part[i] !== '=') { op = part[i++]; } if (i < n && part[i] === '=') i++;
-        var q2 = ''; if (i < n && (part[i] === '"' || part[i] === "'")) { var qc = part[i++]; while (i < n && part[i] !== qc) q2 += part[i++]; if (i < n) i++; } else { while (i < n && part[i] !== ']') q2 += part[i++]; }
+        var q2 = ''; if (i < n && (part[i] === '"' || part[i] === "'")) { var qc = part[i++]; while (i < n && part[i] !== qc) q2 += part[i++]; if (i < n) i++; } else { while (i < n && part[i] !== ']' && part[i] !== ' ') q2 += part[i++]; }
+        // Case-insensitive flag `i` — [attr=val i]
+        while (i < n && part[i] === ' ') i++;
+        var caseI = false; if (i < n && part[i].toLowerCase() === 'i' && (i + 1 >= n || part[i + 1] === ']')) { caseI = true; i++; }
         if (i < n && part[i] === ']') i++;
         var av = el.getAttribute(attr) || '';
-        if (op === '')  { if (av !== q2) return false; }
-        else if (op === '^') { if (!av.startsWith(q2)) return false; }
-        else if (op === '$') { if (!av.endsWith(q2)) return false; }
-        else if (op === '*') { if (!av.includes(q2)) return false; }
-        else if (op === '~') { if (!av.split(/\s+/).includes(q2)) return false; }
-        else if (op === '|') { if (av !== q2 && !av.startsWith(q2 + '-')) return false; }
+        var q2c = caseI ? q2.toLowerCase() : q2; var avc = caseI ? av.toLowerCase() : av;
+        if (op === '')  { if (avc !== q2c) return false; }
+        else if (op === '^') { if (!avc.startsWith(q2c)) return false; }
+        else if (op === '$') { if (!avc.endsWith(q2c)) return false; }
+        else if (op === '*') { if (!avc.includes(q2c)) return false; }
+        else if (op === '~') { if (!avc.split(/\s+/).includes(q2c)) return false; }
+        else if (op === '|') { if (avc !== q2c && !avc.startsWith(q2c + '-')) return false; }
       }
     }
     else if (c === ':') {
@@ -1372,10 +1683,12 @@ function _matchPseudo(pseudo: string, _arg: string, el: VElement): boolean {
     if (s === 'even') { return index % 2 === 0; }
     var plain = parseInt(s, 10);
     if (!isNaN(plain) && s.indexOf('n') < 0) return index === plain;
-    var m = s.match(/^(-?\d*)n(?:\s*\+\s*(\d+))?$/);
+    // Parse `An+B`, `An-B`, `-n+B`, `n`, `n+B`, etc.
+    var m = s.match(/^(-?\d*)\s*n\s*([+-]\s*\d+)?$/);
     if (m) {
       var a = m[1] === '' ? 1 : m[1] === '-' ? -1 : parseInt(m[1], 10);
-      var b = m[2] ? parseInt(m[2], 10) : 0;
+      var bStr = m[2] ? m[2].replace(/\s/g, '') : '0';
+      var b = parseInt(bStr, 10); if (isNaN(b)) b = 0;
       if (a === 0) return index === b;
       var rem = (index - b); return rem % a === 0 && rem / a >= 0;
     }
@@ -1403,11 +1716,38 @@ function _matchPseudo(pseudo: string, _arg: string, el: VElement): boolean {
   if (pseudo === 'read-only')      return el.hasAttribute('readonly') || el.hasAttribute('disabled');
   if (pseudo === 'read-write')     return !el.hasAttribute('readonly') && !el.hasAttribute('disabled');
   if (pseudo === 'root')           return el.tagName === 'HTML';
-  if (pseudo === 'target')         return false;
+  if (pseudo === 'target')         {
+    // :target — element's id matches the URL hash
+    var hash = (el.ownerDocument as any)?._locationHash ?? '';
+    return !!(el.id && hash && hash.replace(/^#/, '') === el.id);
+  }
   if (pseudo === 'link')           return el.tagName === 'A' && el.hasAttribute('href');
+  if (pseudo === 'any-link')       return (el.tagName === 'A' || el.tagName === 'AREA') && el.hasAttribute('href');
   if (pseudo === 'visited')        return false;
+  if (pseudo === 'local-link')     return (el.tagName === 'A' || el.tagName === 'AREA') && el.hasAttribute('href');
   if (pseudo === 'active')         return false;
   if (pseudo === 'hover')          return false;
+  if (pseudo === 'in-range')       {
+    var inTag = el.tagName.toLowerCase(); if (inTag !== 'input') return false;
+    var inVal = parseFloat(el.value ?? ''); if (isNaN(inVal)) return false;
+    var minA = el.getAttribute('min'); var maxA = el.getAttribute('max');
+    var inMin = minA !== null ? parseFloat(minA) : -Infinity;
+    var inMax = maxA !== null ? parseFloat(maxA) : Infinity;
+    return inVal >= inMin && inVal <= inMax;
+  }
+  if (pseudo === 'out-of-range')   {
+    var orTag = el.tagName.toLowerCase(); if (orTag !== 'input') return false;
+    var orVal = parseFloat(el.value ?? ''); if (isNaN(orVal)) return false;
+    var orMinA = el.getAttribute('min'); var orMaxA = el.getAttribute('max');
+    var orMin = orMinA !== null ? parseFloat(orMinA) : -Infinity;
+    var orMax = orMaxA !== null ? parseFloat(orMaxA) : Infinity;
+    return orVal < orMin || orVal > orMax;
+  }
+  if (pseudo === 'indeterminate')  {
+    var inTag2 = el.tagName.toLowerCase(); var inType = el.getAttribute('type')?.toLowerCase();
+    return inTag2 === 'input' && inType === 'checkbox' && !!(el as any)._indeterminate;
+  }
+  if (pseudo === 'default')        return el.hasAttribute('checked') || el.hasAttribute('selected') || el.hasAttribute('default');
   if (pseudo === 'focus')          return el.ownerDocument?._activeElement === el;
   if (pseudo === 'focus-within')   { var ae = el.ownerDocument?._activeElement; return !!(ae && el.contains(ae)); }
   if (pseudo === 'focus-visible')  return el.ownerDocument?._activeElement === el;
@@ -1418,6 +1758,18 @@ function _matchPseudo(pseudo: string, _arg: string, el: VElement): boolean {
   }
   if (pseudo === 'has')            { var alts = _arg.split(','); return alts.some(alt => el.querySelectorAll(alt.trim()).length > 0); }
   if (pseudo === 'scope')          return true;  // :scope means the root element of the selector context
+  if (pseudo === 'lang')           { // :lang(value) — match element's language
+    var tgt = _arg.trim().toLowerCase();
+    var n: any = el;
+    while (n) { var l = (n._attrs as Map<string, string>)?.get('lang'); if (l !== undefined) return l.toLowerCase().startsWith(tgt); n = n.parentNode; }
+    return false;
+  }
+  if (pseudo === 'dir')            { // :dir(ltr|rtl) — match element's directionality
+    var dir = _arg.trim().toLowerCase();
+    var n2: any = el;
+    while (n2) { var d = (n2._attrs as Map<string, string>)?.get('dir'); if (d !== undefined) return d.toLowerCase() === dir; n2 = n2.parentNode; }
+    return dir === 'ltr'; // default LTR
+  }
   // pseudo-elements — don't filter elements by them
   if (pseudo === 'before' || pseudo === 'after' || pseudo === 'first-line' || pseudo === 'first-letter' || pseudo === 'selection' || pseudo === 'placeholder') return true;
   return true; // unknown pseudo — ignore
@@ -1458,50 +1810,190 @@ function _escapeAttr(s: string): string { return s.replace(/&/g, '&amp;').replac
 /** Serialize the document body back to an HTML string for re-parsing */
 export function serializeDOM(doc: VDocument): string { return _serialize(doc.body.childNodes); }
 
+// ── Named HTML entity table (item 350) ───────────────────────────────────────
+
+const _HTML_ENTITIES: Record<string, string> = {
+  // Basic
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'",
+  // Whitespace / punctuation
+  nbsp: '\u00a0', shy: '\u00ad', ensp: '\u2002', emsp: '\u2003', thinsp: '\u2009',
+  ndash: '\u2013', mdash: '\u2014', lsquo: '\u2018', rsquo: '\u2019', sbquo: '\u201a',
+  ldquo: '\u201c', rdquo: '\u201d', bdquo: '\u201e', laquo: '\u00ab', raquo: '\u00bb',
+  lsaquo: '\u2039', rsaquo: '\u203a', hellip: '\u2026', prime: '\u2032', Prime: '\u2033',
+  bull: '\u2022', middot: '\u00b7', permil: '\u2030',
+  // Symbols / currency
+  copy: '\u00a9', reg: '\u00ae', trade: '\u2122', euro: '\u20ac', pound: '\u00a3',
+  yen: '\u00a5', cent: '\u00a2', curren: '\u00a4',
+  // Math
+  deg: '\u00b0', plusmn: '\u00b1', times: '\u00d7', divide: '\u00f7',
+  sup1: '\u00b9', sup2: '\u00b2', sup3: '\u00b3', frac12: '\u00bd',
+  frac14: '\u00bc', frac34: '\u00be', micro: '\u00b5', para: '\u00b6', sect: '\u00a7',
+  infin: '\u221e', ne: '\u2260', le: '\u2264', ge: '\u2265', asymp: '\u2248',
+  equiv: '\u2261', cong: '\u2245', prop: '\u221d', there4: '\u2234',
+  sdot: '\u22c5', sum: '\u2211', prod: '\u220f', int: '\u222b',
+  radic: '\u221a', minus: '\u2212', lowast: '\u2217', oplus: '\u2295', otimes: '\u2297',
+  // Arrows
+  larr: '\u2190', uarr: '\u2191', rarr: '\u2192', darr: '\u2193', harr: '\u2194',
+  lArr: '\u21d0', uArr: '\u21d1', rArr: '\u21d2', dArr: '\u21d3', hArr: '\u21d4',
+  // Shapes / specials
+  spades: '\u2660', clubs: '\u2663', hearts: '\u2665', diams: '\u2666',
+  dagger: '\u2020', Dagger: '\u2021', oline: '\u203e', frasl: '\u2044',
+  // Letters with diacritics (most commonly used)
+  Agrave: '\u00c0', Aacute: '\u00c1', Acirc: '\u00c2', Atilde: '\u00c3', Auml: '\u00c4', Aring: '\u00c5', AElig: '\u00c6',
+  Ccedil: '\u00c7', Egrave: '\u00c8', Eacute: '\u00c9', Ecirc: '\u00ca', Euml: '\u00cb',
+  Igrave: '\u00cc', Iacute: '\u00cd', Icirc: '\u00ce', Iuml: '\u00cf',
+  ETH: '\u00d0', Ntilde: '\u00d1', Ograve: '\u00d2', Oacute: '\u00d3', Ocirc: '\u00d4', Otilde: '\u00d5', Ouml: '\u00d6',
+  Oslash: '\u00d8', Ugrave: '\u00d9', Uacute: '\u00da', Ucirc: '\u00db', Uuml: '\u00dc',
+  Yacute: '\u00dd', THORN: '\u00de', szlig: '\u00df',
+  agrave: '\u00e0', aacute: '\u00e1', acirc: '\u00e2', atilde: '\u00e3', auml: '\u00e4', aring: '\u00e5', aelig: '\u00e6',
+  ccedil: '\u00e7', egrave: '\u00e8', eacute: '\u00e9', ecirc: '\u00ea', euml: '\u00eb',
+  igrave: '\u00ec', iacute: '\u00ed', icirc: '\u00ee', iuml: '\u00ef',
+  eth: '\u00f0', ntilde: '\u00f1', ograve: '\u00f2', oacute: '\u00f3', ocirc: '\u00f4', otilde: '\u00f5', ouml: '\u00f6',
+  oslash: '\u00f8', ugrave: '\u00f9', uacute: '\u00fa', ucirc: '\u00fb', uuml: '\u00fc',
+  yacute: '\u00fd', thorn: '\u00fe', yuml: '\u00ff',
+  // Greek letters
+  Alpha: '\u0391', Beta: '\u0392', Gamma: '\u0393', Delta: '\u0394', Epsilon: '\u0395', Zeta: '\u0396', Eta: '\u0397',
+  Theta: '\u0398', Iota: '\u0399', Kappa: '\u039a', Lambda: '\u039b', Mu: '\u039c', Nu: '\u039d', Xi: '\u039e',
+  Omicron: '\u039f', Pi: '\u03a0', Rho: '\u03a1', Sigma: '\u03a3', Tau: '\u03a4', Upsilon: '\u03a5', Phi: '\u03a6',
+  Chi: '\u03a7', Psi: '\u03a8', Omega: '\u03a9',
+  alpha: '\u03b1', beta: '\u03b2', gamma: '\u03b3', delta: '\u03b4', epsilon: '\u03b5', zeta: '\u03b6', eta: '\u03b7',
+  theta: '\u03b8', iota: '\u03b9', kappa: '\u03ba', lambda: '\u03bb', mu: '\u03bc', nu: '\u03bd', xi: '\u03be',
+  omicron: '\u03bf', pi: '\u03c0', rho: '\u03c1', sigmaf: '\u03c2', sigma: '\u03c3', tau: '\u03c4', upsilon: '\u03c5',
+  phi: '\u03c6', chi: '\u03c7', psi: '\u03c8', omega: '\u03c9',
+  thetasym: '\u03d1', upsih: '\u03d2', piv: '\u03d6',
+  // Misc
+  OElig: '\u0152', oelig: '\u0153', Scaron: '\u0160', scaron: '\u0161', Yuml: '\u0178',
+  fnof: '\u0192', circ: '\u02c6', tilde: '\u02dc',
+  zwj: '\u200d', zwnj: '\u200c', lrm: '\u200e', rlm: '\u200f',
+  forall: '\u2200', part: '\u2202', exist: '\u2203', empty: '\u2205', nabla: '\u2207',
+  isin: '\u2208', notin: '\u2209', ni: '\u220b', and: '\u2227', or: '\u2228', cap: '\u2229', cup: '\u222a',
+  sim: '\u223c', sub: '\u2282', sup: '\u2283', nsub: '\u2284', sube: '\u2286', supe: '\u2287',
+  oplus2: '\u2295', image: '\u2111', real: '\u211c', weierp: '\u2118', alefsym: '\u2135',
+  angle: '\u2220', and2: '\u2227', or2: '\u2228',
+  lceil: '\u2308', rceil: '\u2309', lfloor: '\u230a', rfloor: '\u230b',
+  lang: '\u27e8', rang: '\u27e9',
+};
+
+function _decodeEntities(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#\d+|[\w]+);/gi, (_m, entity: string) => {
+    if (entity[0] === '#') {
+      var cp = entity[1] === 'x' || entity[1] === 'X'
+        ? parseInt(entity.slice(2), 16)
+        : parseInt(entity.slice(1), 10);
+      return isNaN(cp) ? _m : String.fromCodePoint(cp);
+    }
+    return _HTML_ENTITIES[entity] ?? _m;
+  });
+}
+
 // ── Fragment parser (for innerHTML / insertAdjacentHTML) ──────────────────────
 
 function _parseFragment(html: string, doc: VDocument | null): VNode[] {
-  // minimal re-entrant parser — doesn't handle scripts/styles, just structure
+  // HTML parser with raw-text element support (script/style/textarea/title)
+  var _RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'noscript', 'noembed']);
+  // Implicit self-closing: opening X closes current Y (item 359)
+  var _IMPLICIT_CLOSE: Record<string, string[]> = {
+    p:         ['p'],
+    li:        ['li'],
+    dt:        ['dt','dd'],
+    dd:        ['dd','dt'],
+    tr:        ['tr'],
+    td:        ['td','th'],
+    th:        ['th','td'],
+    option:    ['option'],
+    optgroup:  ['optgroup','option'],
+    colgroup:  ['colgroup'],
+    caption:   ['caption'],
+    thead:     ['thead','tbody','tfoot'],
+    tbody:     ['thead','tbody','tfoot'],
+    tfoot:     ['thead','tbody','tfoot'],
+  };
   var nodes: VNode[] = [];
   var stack: VElement[] = [];
   var cur = () => stack[stack.length - 1] as VElement | undefined;
 
   function pushText(t: string): void {
+    if (!t) return;
     var vt = new VText(t); vt.ownerDocument = doc;
     var p = cur(); if (p) p.childNodes.push(vt); else nodes.push(vt); vt.parentNode = p ?? null;
   }
-  function open(tag: string, attrs: Map<string, string>, self: boolean): void {
+  function open(tag: string, attrs: Map<string, string>, self: boolean): VElement {
+    // Implicit close: before opening `tag`, close tags it automatically closes (item 359)
+    var _autoClose = _IMPLICIT_CLOSE[tag];
+    if (_autoClose) {
+      // Find the closest ancestor that would be auto-closed (only close if at same nesting)
+      for (var _ac = stack.length - 1; _ac >= 0; _ac--) {
+        if (_autoClose.includes(stack[_ac].tagName.toLowerCase())) { stack.splice(_ac); break; }
+        // Stop looking if we hit a block-level boundary (table/ul/ol/dl/select)
+        var _bt = stack[_ac].tagName.toLowerCase();
+        if (/^(table|ul|ol|dl|select|div|article|section|aside|main|nav|header|footer|body)$/.test(_bt)) break;
+      }
+    }
     var el = new VElement(tag); el.ownerDocument = doc;
     attrs.forEach((v, k) => el._attrs.set(k, v));
     var p = cur(); if (p) { el.parentNode = p; p.childNodes.push(el); } else { nodes.push(el); }
     if (!self && !_VOID.has(tag)) stack.push(el);
+    return el;
   }
   function close(tag: string): void {
-    for (var i = stack.length - 1; i >= 0; i--) { if (stack[i].tagName === tag.toUpperCase()) { stack.splice(i); return; } }
+    for (var k = stack.length - 1; k >= 0; k--) { if (stack[k].tagName === tag.toUpperCase()) { stack.splice(k); return; } }
+  }
+
+  // Parse a tag token starting at position `pos` (after '<'), return [tagName, attrMap, isClose, isSelf, endIndex]
+  function parseTag(pos: number): [string, Map<string, string>, boolean, boolean, number] | null {
+    // Find tag end, respecting quoted attribute values
+    var j = pos; var inQ = ''; var endIdx = -1;
+    while (j < html.length) {
+      var c = html[j];
+      if (inQ) { if (c === inQ) inQ = ''; j++; continue; }
+      if (c === '"' || c === "'") { inQ = c; j++; continue; }
+      if (c === '>') { endIdx = j; break; }
+      j++;
+    }
+    if (endIdx < 0) return null;
+    var inner = html.slice(pos, endIdx).trim();
+    if (inner.startsWith('!') || inner.startsWith('?')) return ['', new Map(), false, false, endIdx + 1];
+    var isClose = inner.startsWith('/'); if (isClose) inner = inner.slice(1).trimStart();
+    var isSelf  = inner.endsWith('/'); if (isSelf) inner = inner.slice(0, -1);
+    var tagM = inner.match(/^([\w-]+)(.*)/s);
+    if (!tagM) return ['', new Map(), false, false, endIdx + 1];
+    var tagName = tagM[1].toLowerCase(); var attrStr = tagM[2];
+    var amap = new Map<string, string>();
+    var ar = /\s+([\w:-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+)))?/g; var am: RegExpExecArray | null;
+    while ((am = ar.exec(attrStr)) !== null) amap.set(am[1].toLowerCase(), _decodeEntities(am[2] ?? am[3] ?? am[4] ?? ''));
+    return [tagName, amap, isClose, isSelf, endIdx + 1];
   }
 
   var i = 0; var n = html.length;
   while (i < n) {
     if (html[i] === '<') {
-      var end = html.indexOf('>', i); if (end < 0) break;
-      var inner = html.slice(i + 1, end).trim();
-      if (inner.startsWith('!') || inner.startsWith('?')) { i = end + 1; continue; }
-      var isClose = inner.startsWith('/'); if (isClose) inner = inner.slice(1);
-      var isSelf  = inner.endsWith('/'); if (isSelf) inner = inner.slice(0, -1);
-      var tagM = inner.match(/^([\w-]+)(.*)/s);
-      if (!tagM) { i = end + 1; continue; }
-      var tagName = tagM[1].toLowerCase();
-      var attrStr = tagM[2];
-      // parse attrs
-      var amap = new Map<string, string>();
-      var ar = /\s+([\w-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+)))?/g; var am: RegExpExecArray | null;
-      while ((am = ar.exec(attrStr)) !== null) amap.set(am[1], am[2] ?? am[3] ?? am[4] ?? '');
-      if (isClose) close(tagName); else open(tagName, amap, isSelf);
-      i = end + 1;
+      var res = parseTag(i + 1); if (!res) break;
+      var [tagName, amap, isClose, isSelf, nextI] = res;
+      i = nextI;
+      if (!tagName) continue; // comment/PI
+      if (isClose) { close(tagName); }
+      else {
+        var el = open(tagName, amap, isSelf);
+        // Raw-text element: consume until </tagName>
+        if (!isSelf && _RAW_TEXT.has(tagName)) {
+          var closeTag = '</' + tagName; var ci = html.toLowerCase().indexOf(closeTag, i);
+          var rawContent = ci >= 0 ? html.slice(i, ci) : html.slice(i);
+          if (rawContent) {
+            var vt = new VText(rawContent); vt.ownerDocument = doc; vt.parentNode = el; el.childNodes.push(vt);
+          }
+          i = ci >= 0 ? ci : html.length;
+          // pop stack entry for this raw-text element
+          var si = stack.indexOf(el); if (si >= 0) stack.splice(si);
+          // skip the close tag
+          if (ci >= 0) {
+            var cend = html.indexOf('>', i); i = cend >= 0 ? cend + 1 : html.length;
+          }
+        }
+      }
     } else {
       var start = i; while (i < n && html[i] !== '<') i++;
       var raw = html.slice(start, i);
-      raw = raw.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&nbsp;/g,' ').replace(/&#(\d+);/g, (_,nc) => String.fromCharCode(+nc)).replace(/&#x([0-9a-f]+);/gi, (_,nc) => String.fromCharCode(parseInt(nc,16)));
+      raw = _decodeEntities(raw);
       pushText(raw);
     }
   }
