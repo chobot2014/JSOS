@@ -340,7 +340,45 @@ export interface TCPConnection {
   recvSeq:    number;
   sendBuf:    number[];
   recvBuf:    number[];
-  window:     number;
+  window:     number;   // remote receive window
+
+  // ── Nagle algorithm ─────────────────────────────────────────────────────────
+  /** False = TCP_NODELAY: disable Nagle, send each chunk immediately. */
+  nagle:        boolean;
+  /** MSS: maximum segment payload we will send in one segment. Default 1460. */
+  mss:          number;
+  /** Data corked by Nagle waiting for a full MSS or ACK of prior data. */
+  nagleBuf:     number[];
+
+  // ── RTO / Retransmit ─────────────────────────────────────────────────────────
+  /** SND.UNA: sequence number of the oldest unacknowledged byte. */
+  sndUna:       number;
+  /** Smoothed RTT estimate (ticks × 8, fixed-point). */
+  srtt:         number;
+  /** RTT variance (ticks × 4, fixed-point). */
+  rttvar:       number;
+  /** Current retransmission timeout in ticks (min 10, max 6000 ticks). */
+  rtoTicks:     number;
+  /** Absolute tick at which RTO fires; -1 = no outstanding data. */
+  rtoDead:      number;
+  /** Segment saved for retransmit (flags, seq, payload). */
+  rtxFlags:     number;
+  rtxSeq:       number;
+  rtxPayload:   number[];
+
+  // ── Duplicate ACK / fast retransmit ─────────────────────────────────────────
+  dupAcks:      number;   // consecutive dup-ACK count
+  lastAckSeq:   number;   // last ACK seq (dup detection)
+
+  // ── Zero-window probe (persist timer) ───────────────────────────────────────
+  /** Absolute tick for next zero-window probe; -1 = not needed. */
+  persistDead:  number;
+  /** Probe backoff iteration count. */
+  persistCount: number;
+
+  // ── TIME_WAIT ────────────────────────────────────────────────────────────────
+  /** Absolute tick when TIME_WAIT expires; -1 = not in TIME_WAIT. */
+  timeWaitDead: number;
 }
 
 // ── Socket ────────────────────────────────────────────────────────────────────
@@ -493,68 +531,234 @@ export class NetworkStack {
 
   private _randSeq(): number { return (Math.floor(Math.random() * 0x7fffffff)) >>> 0; }
 
+  private _tcpMakeConn(state: TCPState, localPort: number,
+                        remoteIP: IPv4Address, remotePort: number,
+                        iss: number, recvSeq: number): TCPConnection {
+    return {
+      id: this.nextConn++, state,
+      localIP: this.ip, localPort,
+      remoteIP, remotePort,
+      sendSeq: iss, recvSeq,
+      sndUna: iss,
+      sendBuf: [], recvBuf: [], window: 65535,
+      nagle: true, mss: 1460, nagleBuf: [],
+      srtt: 0, rttvar: 0, rtoTicks: 100, rtoDead: -1,
+      rtxFlags: 0, rtxSeq: iss, rtxPayload: [],
+      dupAcks: 0, lastAckSeq: iss,
+      persistDead: -1, persistCount: 0,
+      timeWaitDead: -1,
+    };
+  }
+
   private _tcpAccept(listener: Socket, ip: IPv4Packet, seg: TCPSegment): void {
     var iss = this._randSeq();
-    var conn: TCPConnection = {
-      id: this.nextConn++, state: 'SYN_RECEIVED',
-      localIP: this.ip, localPort: seg.dstPort,
-      remoteIP: ip.src, remotePort: seg.srcPort,
-      sendSeq: iss, recvSeq: seg.seq + 1,
-      sendBuf: [], recvBuf: [], window: 65535,
-    };
+    var conn = this._tcpMakeConn('SYN_RECEIVED', seg.dstPort, ip.src, seg.srcPort, iss, (seg.seq + 1) >>> 0);
     this.connections.set(conn.id, conn);
     this._sendTCPSeg(conn, TCP_SYN | TCP_ACK, []);
     conn.sendSeq = (conn.sendSeq + 1) >>> 0;
+    conn.sndUna  = conn.sendSeq;  // SYN consumed
+  }
+
+  /** Update smoothed RTT (Jacobson/Karels algorithm, ticks units). */
+  private _tcpUpdateRTT(conn: TCPConnection, measuredTicks: number): void {
+    if (conn.srtt === 0) {
+      // First measurement
+      conn.srtt   = measuredTicks * 8;
+      conn.rttvar = measuredTicks * 4;
+    } else {
+      var delta = measuredTicks - (conn.srtt >> 3);
+      conn.srtt   = (conn.srtt + delta) | 0;
+      if (delta < 0) delta = -delta;
+      conn.rttvar = (conn.rttvar + ((delta - (conn.rttvar >> 2)) >> 2)) | 0;
+    }
+    // RTO = SRTT + 4*RTTVAR; clamp 10–6000 ticks (~100 ms – 60 s)
+    var rto = (conn.srtt >> 3) + (conn.rttvar >> 2);
+    conn.rtoTicks = Math.max(10, Math.min(6000, rto));
+  }
+
+  /** Clear retransmit state after all data is acknowledged. */
+  private _tcpClearRetransmit(conn: TCPConnection): void {
+    conn.rtxPayload = [];
+    conn.rtoDead    = -1;
   }
 
   private _tcpStateMachine(conn: TCPConnection, ip: IPv4Packet, seg: TCPSegment): void {
+    // RST handling: abort any half-open/established connection (items 249, 249)
+    if (seg.flags & TCP_RST) {
+      conn.state = 'CLOSED';
+      this._tcpClearRetransmit(conn);
+      this.connections.delete(conn.id);
+      return;
+    }
+
     switch (conn.state) {
       case 'SYN_RECEIVED':
-        if (seg.flags & TCP_ACK) conn.state = 'ESTABLISHED';
+        if (seg.flags & TCP_ACK) {
+          conn.state = 'ESTABLISHED';
+          conn.sndUna = seg.ack;
+          conn.lastAckSeq = seg.ack;
+        }
         break;
-      case 'ESTABLISHED':
+
+      case 'ESTABLISHED': {
+        // ── Window update ──────────────────────────────────────────────────
+        var newWindow = seg.window;
+        if (newWindow > 0 && conn.persistDead >= 0) {
+          // Remote window re-opened: cancel persist timer
+          conn.persistDead  = -1;
+          conn.persistCount = 0;
+          // Flush any corked nagle data
+          this._tcpFlushNagle(conn);
+        } else if (newWindow === 0 && conn.persistDead < 0) {
+          // Remote window just closed: arm persist timer (~5 s)
+          conn.persistDead  = kernel.getTicks() + 500;
+          conn.persistCount = 0;
+        }
+        conn.window = newWindow;
+
+        // ── ACK processing ─────────────────────────────────────────────────
+        if ((seg.flags & TCP_ACK) && seg.ack !== 0) {
+          // Detect new vs duplicate ACK
+          var ackAdvanced = (((seg.ack - conn.sndUna) & 0x7fffffff) > 0);
+          if (ackAdvanced) {
+            // New ACK — update RTT roughly (using RTO ticks as sent-time proxy)
+            if (conn.rtoDead >= 0) {
+              var elapsed = conn.rtoTicks - Math.max(0, conn.rtoDead - kernel.getTicks());
+              if (elapsed > 0) this._tcpUpdateRTT(conn, elapsed);
+            }
+            conn.sndUna     = seg.ack;
+            conn.lastAckSeq = seg.ack;
+            conn.dupAcks    = 0;
+            // Cancel RTO if all data acked
+            if (conn.sndUna === conn.sendSeq) {
+              this._tcpClearRetransmit(conn);
+              this._tcpFlushNagle(conn); // drain any waiting data
+            } else {
+              // Restart RTO for remaining unacked data
+              conn.rtoDead = kernel.getTicks() + conn.rtoTicks;
+            }
+          } else if (seg.ack === conn.lastAckSeq) {
+            // Duplicate ACK
+            conn.dupAcks++;
+            if (conn.dupAcks >= 3 && conn.rtxPayload.length > 0) {
+              // Fast retransmit (item 254): 3 dup ACKs → retransmit lost segment
+              this._tcpRetransmit(conn);
+              conn.dupAcks = 0;
+              conn.rtoTicks = Math.min(conn.rtoTicks * 2, 6000); // inflate cwnd proxy
+            }
+          }
+        }
+
+        // ── Data delivery ──────────────────────────────────────────────────
         if (seg.payload.length > 0) {
-          // push.apply mutates in-place (O(new)) vs concat which copies the
-          // entire existing buffer into a new array every segment (O(total)).
           Array.prototype.push.apply(conn.recvBuf, seg.payload);
           conn.recvSeq = (conn.recvSeq + seg.payload.length) >>> 0;
-          // Deliver to socket's recvQueue
-          var sock = this._findSockForConn(conn);
-          if (sock) sock.recvQueue.push(bytesToStr(seg.payload));
+          var sockD = this._findSockForConn(conn);
+          if (sockD) sockD.recvQueue.push(bytesToStr(seg.payload));
           this._sendTCPSeg(conn, TCP_ACK, []);
         }
+
+        // ── FIN handling ───────────────────────────────────────────────────
         if (seg.flags & TCP_FIN) {
           conn.recvSeq = (conn.recvSeq + 1) >>> 0;
           conn.state = 'CLOSE_WAIT';
           this._sendTCPSeg(conn, TCP_ACK, []);
         }
         break;
+      }
+
       case 'FIN_WAIT_1':
-        if (seg.flags & TCP_ACK) conn.state = 'FIN_WAIT_2';
+        if ((seg.flags & TCP_ACK) && (((seg.ack - conn.sndUna) & 0x7fffffff) > 0)) {
+          conn.sndUna = seg.ack;
+          conn.state  = 'FIN_WAIT_2';
+        }
+        if (seg.flags & TCP_FIN) {
+          // Simultaneous close
+          conn.recvSeq = (conn.recvSeq + 1) >>> 0;
+          this._sendTCPSeg(conn, TCP_ACK, []);
+          conn.state = 'CLOSING';
+        }
         break;
+
       case 'FIN_WAIT_2':
         if (seg.flags & TCP_FIN) {
           conn.recvSeq = (conn.recvSeq + 1) >>> 0;
           this._sendTCPSeg(conn, TCP_ACK, []);
+          // Enter TIME_WAIT — 2 MSL, simulated at 200 ticks (~2 s)
+          conn.state        = 'TIME_WAIT';
+          conn.timeWaitDead = kernel.getTicks() + 200;
+        }
+        break;
+
+      case 'CLOSING':
+        if (seg.flags & TCP_ACK) {
+          conn.state        = 'TIME_WAIT';
+          conn.timeWaitDead = kernel.getTicks() + 200;
+        }
+        break;
+
+      case 'LAST_ACK':
+        if (seg.flags & TCP_ACK) {
           conn.state = 'CLOSED';
           this.connections.delete(conn.id);
         }
         break;
+
       case 'SYN_SENT':
         if ((seg.flags & (TCP_SYN | TCP_ACK)) === (TCP_SYN | TCP_ACK)) {
-          conn.recvSeq = (seg.seq + 1) >>> 0;
-          conn.state = 'ESTABLISHED';
+          conn.recvSeq    = (seg.seq + 1) >>> 0;
+          conn.sndUna     = seg.ack;
+          conn.lastAckSeq = seg.ack;
+          conn.window     = seg.window;
+          conn.state      = 'ESTABLISHED';
+          // Honour remote MSS option if present (simplified: use 1460 default)
           this._sendTCPSeg(conn, TCP_ACK, []);
+          this._tcpClearRetransmit(conn); // SYN acked
         }
         break;
     }
   }
 
-  private _sendTCPSeg(conn: TCPConnection, flags: number, payload: number[]): void {
+  /** Retransmit the saved unacknowledged segment (RTO or fast-retransmit). */
+  private _tcpRetransmit(conn: TCPConnection): void {
+    if (conn.rtxPayload.length === 0 && conn.rtxFlags === 0) return;
     var raw = buildTCP({
       srcPort: conn.localPort, dstPort: conn.remotePort,
-      seq: conn.sendSeq, ack: conn.recvSeq,
-      flags, window: conn.window, urgent: 0, payload,
+      seq: conn.rtxSeq, ack: conn.recvSeq,
+      flags: conn.rtxPayload.length > 0 ? (TCP_PSH | TCP_ACK) : conn.rtxFlags,
+      window: conn.window, urgent: 0,
+      payload: conn.rtxPayload,
+    }, conn.localIP, conn.remoteIP);
+    this._sendIPv4({
+      ihl: 5, dscp: 0, ecn: 0, id: this.idCounter++,
+      flags: 2, fragOff: 0, ttl: 64, protocol: PROTO_TCP,
+      src: conn.localIP, dst: conn.remoteIP, payload: raw,
+    });
+    // Restart RTO with backoff
+    conn.rtoTicks = Math.min(conn.rtoTicks * 2, 6000);
+    conn.rtoDead  = kernel.getTicks() + conn.rtoTicks;
+    this.stats.tcpTx++;
+  }
+
+  /** Flush Nagle buffer: send if window and either no unacked data or buf >= MSS. */
+  private _tcpFlushNagle(conn: TCPConnection): void {
+    if (conn.nagleBuf.length === 0) return;
+    var inflight = (conn.sendSeq - conn.sndUna) & 0x7fffffff;
+    var canSend  = !conn.nagle                   // TCP_NODELAY: always send
+                || inflight === 0               // no unacked data: send
+                || conn.nagleBuf.length >= conn.mss; // full segment: send
+    if (canSend && conn.window > 0) {
+      var chunk = conn.nagleBuf.splice(0, Math.min(conn.nagleBuf.length, conn.mss, conn.window));
+      this._sendTCPSeg(conn, TCP_PSH | TCP_ACK, chunk);
+    }
+  }
+
+  private _sendTCPSeg(conn: TCPConnection, flags: number, payload: number[]): void {
+    var seq = conn.sendSeq;
+    var raw = buildTCP({
+      srcPort: conn.localPort, dstPort: conn.remotePort,
+      seq, ack: conn.recvSeq,
+      flags, window: 65535, urgent: 0, payload,
     }, conn.localIP, conn.remoteIP);
     this._sendIPv4({
       ihl: 5, dscp: 0, ecn: 0, id: this.idCounter++,
@@ -562,7 +766,21 @@ export class NetworkStack {
       src: conn.localIP, dst: conn.remoteIP,
       payload: raw,
     });
-    if (payload.length > 0) conn.sendSeq = (conn.sendSeq + payload.length) >>> 0;
+    if (payload.length > 0) {
+      // Save for potential retransmit
+      conn.rtxSeq     = seq;
+      conn.rtxFlags   = flags;
+      conn.rtxPayload = payload.slice();
+      conn.sendSeq    = (seq + payload.length) >>> 0;
+      // Arm RTO if not already running
+      if (conn.rtoDead < 0) conn.rtoDead = kernel.getTicks() + conn.rtoTicks;
+    } else if (flags & (TCP_SYN | TCP_FIN)) {
+      // SYN/FIN consume one sequence number
+      conn.rtxSeq   = seq;
+      conn.rtxFlags = flags;
+      conn.rtxPayload = [];
+      if (conn.rtoDead < 0) conn.rtoDead = kernel.getTicks() + conn.rtoTicks;
+    }
     this.stats.tcpTx++;
   }
 
@@ -761,13 +979,7 @@ export class NetworkStack {
     if (!sock.localPort) sock.localPort = this.nextEph++;
     if (sock.type === 'tcp') {
       var iss = this._randSeq();
-      var conn: TCPConnection = {
-        id: this.nextConn++, state: 'SYN_SENT',
-        localIP: sock.localIP, localPort: sock.localPort,
-        remoteIP, remotePort,
-        sendSeq: iss, recvSeq: 0,
-        sendBuf: [], recvBuf: [], window: 65535,
-      };
+      var conn = this._tcpMakeConn('SYN_SENT', sock.localPort, remoteIP, remotePort, iss, 0);
       this.connections.set(conn.id, conn);
       this._sendTCPSeg(conn, TCP_SYN, []);
       conn.sendSeq = (conn.sendSeq + 1) >>> 0;
@@ -788,12 +1000,23 @@ export class NetworkStack {
     return true;
   }
 
+  /**
+   * Set TCP_NODELAY on a socket.
+   * When noDelay=true, Nagle is disabled and each send() goes out immediately.
+   */
+  setNoDelay(sock: Socket, noDelay: boolean): void {
+    var conn = this._connForSock(sock);
+    if (conn) conn.nagle = !noDelay;
+  }
+
   send(sock: Socket, data: string): boolean {
     var bytes = strToBytes(data);
     if (sock.type === 'tcp') {
       var conn = this._connForSock(sock);
       if (!conn || conn.state !== 'ESTABLISHED') return false;
-      this._sendTCPSeg(conn, TCP_PSH | TCP_ACK, bytes);
+      // Nagle: push into nagleBuf, then try to flush
+      Array.prototype.push.apply(conn.nagleBuf, bytes);
+      this._tcpFlushNagle(conn);
     } else {
       if (!sock.remoteIP || !sock.remotePort) return false;
       var udpPkt = buildUDP(sock.localPort, sock.remotePort, bytes);
@@ -1075,6 +1298,70 @@ export class NetworkStack {
       (bcast >>>  8) & 0xff,
        bcast         & 0xff,
     ], 0);
+  }
+
+  // ─── TCP Timer Tick ──────────────────────────────────────────────────────────
+
+  /**
+   * Call ~10× per second to handle all TCP timers:
+   *   • RTO expiry → retransmit with backoff
+   *   • Zero-window persist probes
+   *   • TIME_WAIT expiry → connection cleanup
+   *
+   * Wire into main.ts kernel event loop or WM tick.
+   */
+  tcpTick(): void {
+    var now = kernel.getTicks();
+    var toDelete: number[] = [];
+
+    this.connections.forEach((conn, id) => {
+      // ── TIME_WAIT cleanup ──────────────────────────────────────────────────
+      if (conn.state === 'TIME_WAIT') {
+        if (conn.timeWaitDead >= 0 && now >= conn.timeWaitDead) {
+          toDelete.push(id);
+        }
+        return; // no other timers needed in TIME_WAIT
+      }
+
+      // Only process live states
+      if (conn.state !== 'ESTABLISHED' &&
+          conn.state !== 'FIN_WAIT_1'  &&
+          conn.state !== 'CLOSE_WAIT'  &&
+          conn.state !== 'SYN_SENT') return;
+
+      // ── RTO expiry → retransmit ────────────────────────────────────────────
+      if (conn.rtoDead >= 0 && now >= conn.rtoDead) {
+        this._tcpRetransmit(conn);
+      }
+
+      // ── Zero-window persist probe ──────────────────────────────────────────
+      if (conn.persistDead >= 0 && now >= conn.persistDead) {
+        // Send a 1-byte probe at sndUna to trigger a fresh window advertisement
+        var probeByte = conn.rtxPayload.length > 0 ? [conn.rtxPayload[0]] : [0];
+        var raw = buildTCP({
+          srcPort: conn.localPort,
+          dstPort: conn.remotePort,
+          seq:     conn.sndUna,
+          ack:     conn.recvSeq,
+          flags:   TCP_PSH | TCP_ACK,
+          window:  65535,
+          urgent:  0,
+          payload: probeByte,
+        }, conn.localIP, conn.remoteIP);
+        this._sendIPv4({
+          ihl: 5, dscp: 0, ecn: 0, id: this.idCounter++, flags: 2, fragOff: 0,
+          ttl: 64, protocol: 6, src: conn.localIP, dst: conn.remoteIP, payload: raw,
+        });
+        this.stats.tcpTx++;
+
+        // Exponential backoff: 5 s, 10 s, 20 s, … cap at 60 s (in ticks)
+        conn.persistCount++;
+        var delay = Math.min(500 * Math.pow(2, conn.persistCount), 6000);
+        conn.persistDead = now + delay;
+      }
+    });
+
+    toDelete.forEach(id => this.connections.delete(id));
   }
 }
 
