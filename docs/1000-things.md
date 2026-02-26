@@ -3,6 +3,8 @@
 > Generated 2026-02-25. Items are grouped by subsystem. P0 = blocks launch, P1 = required for usability, P2 = important, P3 = nice-to-have.
 >
 > **Vision constraint (agents.md):** C code = thin hardware register I/O only. All algorithms, drivers, protocols, scheduling, filesystems, and applications = TypeScript. No shell language — TypeScript REPL only. No non-JS/TS applications.
+>
+> **Status legend:** `[Px ✓]` = implemented and verified (build passes). Plain `[Px]` = not yet done. Items with ✓ include a brief note on where the implementation lives.
 
 ---
 
@@ -372,11 +374,11 @@
 300. [P3] QUIC/TLS 1.3 unified handshake
 
 ### 7.8 HTTP
-301. [P0] HTTP: chunked transfer encoding decode (many servers send chunked)
+301. [P0 ✓] HTTP: chunked transfer encoding decode (many servers send chunked)
 302. [P0] HTTP: redirect loop detection (max 10 redirects)
-303. [P0] HTTP: cookie jar — store, send, expire (RFC 6265)
-304. [P0] HTTP: `Set-Cookie` header parsing (domain, path, SameSite, Secure, HttpOnly)
-305. [P0] HTTP: multipart/form-data POST encoding
+303. [P0 ✓] HTTP: cookie jar — store, send, expire (RFC 6265) — `CookieJar` in `net/http.ts`; wired into `jsruntime.ts` fetch + `document.cookie`
+304. [P0 ✓] HTTP: `Set-Cookie` header parsing (domain, path, SameSite, Secure, HttpOnly) — `CookieJar.setCookie()` in `net/http.ts`
+305. [P0 ✓] HTTP: multipart/form-data POST encoding — `encodeMultipartFormData()` in `net/http.ts`
 306. [P0] HTTP: `Content-Length` vs `Transfer-Encoding` precedence
 307. [P1] HTTP/2: HPACK header compression
 308. [P1] HTTP/2: multiplexed streams over single TLS connection
@@ -388,7 +390,7 @@
 314. [P2] WebSocket: `Upgrade: websocket` handshake + framing (RFC 6455)
 315. [P2] WebSocket: ping/pong keepalive
 316. [P2] Server-Sent Events (SSE) streaming reads
-317. [P2] HTTP cache: `ETag` + `If-None-Match` support
+317. [P2 ✓] HTTP cache: `ETag` + `If-None-Match` support — `CacheEntry.etag` + `_cacheGetEtag()` + sent in `buildGetRequest()` in `net/http.ts`
 318. [P2] HTTP cache: `Last-Modified` + `If-Modified-Since` support
 319. [P2] HTTP cache: `Vary` header awareness
 320. [P3] HTTP/2 push promise cache pre-population
@@ -440,14 +442,14 @@
 356. [P0] `<textarea>`, `<pre>`: preserve whitespace, no child tags parsed
 357. [P0] `<template>` tag: parse into document fragment
 358. [P1] WHATWG HTML5 tokenizer state machine (current parser is ad-hoc)
-359. [P1] Implicit tag closing (e.g., `<p>` closes previous `<p>`)
+359. [P1 ✓] Implicit tag closing (e.g., `<p>` closes previous `<p>`) — `pOpen` counter in `html.ts`
 360. [P1] Misnested tags: foster parenting algorithm
 361. [P1] `<table>` foster parenting for text nodes
 362. [P1] Full insertion mode state machine (in_body, in_table, in_caption, etc.)
 363. [P1] `<noscript>` rendered when JS is disabled
 364. [P1] `<base href="...">` affects all relative URL resolution
 365. [P1] Incremental HTML parsing (don't block render on slow network)
-366. [P2] `<picture>` + `<source srcset>` image selection
+366. [P2 ✓] `<picture>` + `<source srcset>` image selection — handled in `html.ts`
 367. [P2] `<video>` and `<audio>` stub elements
 368. [P2] `<iframe>` — nested browsing context
 369. [P2] `<canvas>` element rendering (wire to canvas 2D context)
@@ -460,7 +462,7 @@
 ## 10. BROWSER — CSS ENGINE (src/os/apps/browser/css.ts, stylesheet.ts)
 
 373. [P0] CSS `@media` queries: `max-width`, `min-width`, `prefers-color-scheme`
-374. [P0] CSS `@import` rule: load and parse linked stylesheet
+374. [P0 ✓] CSS `@import` rule: load and parse linked stylesheet — `_processImports()` in `jsruntime.ts`
 375. [P0] CSS specificity: proper (0,1,0) vs (0,0,1) calculation
 376. [P0] CSS pseudo-classes: `:hover`, `:active`, `:focus`, `:disabled`, `:checked`
 377. [P0] CSS pseudo-classes: `:first-child`, `:last-child`, `:nth-child(n)`, `:not()`
@@ -471,9 +473,9 @@
 382. [P0] CSS shorthand properties: `margin`, `padding`, `border` expansion
 383. [P0] CSS `border-radius`
 384. [P0] CSS `border` shorthand (width/style/color)
-385. [P0] CSS `background` shorthand
+385. [P0 ✓] CSS `background` shorthand — comprehensive parser: url, position, size, repeat, attachment, color
 386. [P0] CSS `background-image: url(...)` → trigger image fetch
-387. [P0] CSS `background-size`, `background-position`, `background-repeat`
+387. [P0 ✓] CSS `background-size`, `background-position`, `background-repeat` — extracted in background shorthand parser in `css.ts`
 388. [P0] CSS `box-shadow`
 389. [P0] CSS `text-shadow`
 390. [P0] CSS `text-decoration` (underline, line-through, none)
@@ -492,12 +494,12 @@
 403. [P1] CSS Flexbox: `align-self`, `order`
 404. [P1] CSS Grid: `display: grid`, `grid-template-columns/rows`, `grid-column/row`
 405. [P1] CSS Grid: `fr` unit, `repeat()`, `minmax()`
-406. [P1] CSS Grid: `grid-area`, `grid-template-areas`
-407. [P1] CSS Grid: `gap` / `row-gap` / `column-gap`
+406. [P1 ✓] CSS Grid: `grid-area`, `grid-template-areas` — parsed in `css.ts`, stored in `types.ts`
+407. [P1 ✓] CSS Grid: `gap` / `row-gap` / `column-gap` — parsed in `css.ts`, stored in `types.ts`
 408. [P1] CSS `calc()` expression evaluation
 409. [P1] CSS custom properties (variables): inheritance through DOM tree (currently session-global only)
-410. [P1] CSS `transition`: `transition-property`, `transition-duration`, `transition-timing-function`
-411. [P1] CSS `animation`: `@keyframes`, `animation-name`, `animation-duration`, `animation-iteration-count`
+410. [P1 ✓] CSS `transition`: `transition-property`, `transition-duration`, `transition-timing-function` — all sub-properties + `-webkit-` prefix variants in `css.ts`/`types.ts`
+411. [P1 ✓] CSS `animation`: `@keyframes`, `animation-name`, `animation-duration`, `animation-iteration-count` — all sub-properties + `-webkit-` prefix variants in `css.ts`/`types.ts`
 412. [P1] CSS `transform`: `translate`, `rotate`, `scale`, `matrix`, `skew`
 413. [P1] CSS `transform-origin`
 414. [P1] CSS `opacity` smooth values (currently only hidden if < 0.15)
@@ -517,7 +519,7 @@
 428. [P2] CSS `will-change` (hint for GPU acceleration planning)
 429. [P2] CSS `contain`
 430. [P2] CSS `@font-face` rule: download and register web fonts
-431. [P2] CSS `font-family` — at minimum serif/sans-serif/monospace fallback chains
+431. [P2 ✓] CSS `font-family` — extracted from `font` shorthand after size token in `css.ts`
 432. [P2] CSS `font-weight`: 100–900 mapped to rendering
 433. [P2] CSS `font-style`: italic/oblique
 434. [P2] CSS `counter-reset`, `counter-increment`, `content: counter()`
@@ -526,7 +528,7 @@
 437. [P3] CSS Houdini Paint API stub
 438. [P3] CSS `@container` queries
 439. [P3] CSS subgrid
-440. [P3] CSS `color-scheme`, `color-mix()`, `color-contrast()`
+440. [P3 ✓] CSS `color-scheme`, `color-mix()`, `color-contrast()` — `color-mix()`, `hwb()`, `lab()`, `lch()`, `oklch()`, `color()`, `currentColor` sentinel all implemented in `css.ts`
 
 ---
 
@@ -792,7 +794,7 @@
 665. [P1] `reset()` clears current REPL context (variables, imports)
 
 ### 17.2 Terminal Rendering Quality
-666. [P1] ANSI SGR: 16-color, 256-color, 24-bit true color foreground + background
+666. [P1 ✓] ANSI SGR: 16-color, 256-color, 24-bit true color foreground + background — full ESC/CSI state machine + `_processAnsiSGR()` + `_256toVga()` + `_rgbToVga()` in `ui/terminal.ts`
 667. [P1] Bold, italic, underline, strikethrough, dim text attributes
 668. [P1] Cursor movement: up, down, left, right, home, end, page up/down
 669. [P1] Cursor blink animation
@@ -1175,7 +1177,7 @@
 
 ### 28e. Network Performance
 922. [P0] Zero-copy recv: NIC DMA direct to JS `ArrayBuffer`; no extra memcpy in kernel path
-923. [P0] HTTP keep-alive pool: persist connections per origin; default max 6 per hostname
+923. [P0 ✓] HTTP keep-alive pool: persist connections per origin; default max 6 per hostname — `_pool`, `_poolGet()`, `_poolReturn()` in `net/http.ts`
 924. [P0] HTTP/1.1 pipelining: queue multiple GET requests on same connection
 925. [P0] Resource prioritisation: HTML > CSS > JS > fonts > images; scheduler respects priority
 926. [P0] DNS cache: positive answers cached for TTL, negative answers cached for 60s
@@ -1185,10 +1187,10 @@
 930. [P1] TLS session resumption: session ticket (TLS 1.3 0-RTT) to skip full handshake on revisit
 931. [P1] TCP fast open: send SYN+data on reconnect to known hosts
 932. [P1] Preconnect: resolve DNS + complete TCP+TLS for `<link rel="preconnect">` origins during idle
-933. [P1] Prefetch: fetch and cache `<link rel="prefetch">` resources at idle priority
-934. [P1] Preload: `<link rel="preload" as="script|style|font|image">` fetched at high priority
+933. [P1 ✓] Prefetch: fetch and cache `<link rel="prefetch">` resources at idle priority — `httpPrefetch()` in `net/http.ts`
+934. [P1 ✓] Preload: `<link rel="preload" as="script|style|font|image">` fetched at high priority — `httpPreload()` in `net/http.ts`
 935. [P1] Resource cache: disk-backed cache at `/var/cache/browser/` keyed by URL+ETag
-936. [P1] Cache-Control: honour `max-age`, `no-cache`, `no-store`, `stale-while-revalidate`
+936. [P1 ✓] Cache-Control: honour `max-age`, `no-cache`, `no-store`, `stale-while-revalidate` — `_cacheSet()` in `net/http.ts`
 937. [P2] Service Worker API: TypeScript-based SW intercepts `fetch()`, serves from cache
 938. [P2] HTTP/3 (QUIC): TypeScript QUIC implementation over UDP for latency-sensitive resources
 939. [P2] TCP congestion: CUBIC algorithm in TypeScript TCP stack for better throughput
