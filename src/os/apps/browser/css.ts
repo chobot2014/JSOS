@@ -378,9 +378,16 @@ export function parseInlineStyle(style: string): CSSProps {
     val = resolveCSSVars(val);
     var vl = val.toLowerCase().trim();
 
-    // Handle global keywords
-    if (vl === 'inherit' || vl === 'initial' || vl === 'unset' || vl === 'revert') {
-      // Mark as explicit reset — let cascade handle it via !important tracking
+    // Handle global keywords — track in _inherit/_initial sets for cascade resolution
+    if (vl === 'inherit' || vl === 'unset') {
+      if (!p._inherit) p._inherit = new Set();
+      p._inherit.add(prop);
+      if (isImportant) { if (!important) important = new Set(); important.add(prop); }
+      continue;
+    }
+    if (vl === 'initial' || vl === 'revert') {
+      if (!p._initial) p._initial = new Set();
+      p._initial.add(prop);
       if (isImportant) { if (!important) important = new Set(); important.add(prop); }
       continue;
     }

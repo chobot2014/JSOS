@@ -373,6 +373,232 @@ function splitSelectors(sel: string): string[] {
 
 // ── Cascade ───────────────────────────────────────────────────────────────────
 
+// Maps CSS property name strings → CSSProps field name(s) they affect.
+// Used to resolve 'inherit'/'initial' cascaded keyword markers.
+var _CSS_PROP_MAP: Record<string, Array<keyof CSSProps>> = {
+  'color':                    ['color'],
+  'background-color':         ['bgColor'],
+  'background-image':         ['backgroundImage'],
+  'background-repeat':        ['backgroundRepeat'],
+  'background-size':          ['backgroundSize'],
+  'background-position':      ['backgroundPosition'],
+  'font-size':                ['fontScale'],
+  'font-weight':              ['bold', 'fontWeight'],
+  'font-style':               ['italic'],
+  'font-family':              ['fontFamily'],
+  'font-variant':             ['fontVariant'],
+  'font-kerning':             ['fontKerning'],
+  'line-height':              ['lineHeight'],
+  'letter-spacing':           ['letterSpacing'],
+  'word-spacing':             ['wordSpacing'],
+  'text-align':               ['align'],
+  'text-transform':           ['textTransform'],
+  'text-decoration':          ['underline', 'strike', 'textDecoration'],
+  'text-overflow':            ['textOverflow'],
+  'text-indent':              ['textIndent'],
+  'text-shadow':              ['textShadow'],
+  'white-space':              ['whiteSpace'],
+  'word-break':               ['wordBreak'],
+  'overflow-wrap':            ['overflowWrap'],
+  'vertical-align':           ['verticalAlign'],
+  'list-style-type':          ['listStyleType'],
+  'cursor':                   ['cursor'],
+  'visibility':               ['visibility'],
+  'border-collapse':          ['borderCollapse'],
+  'border-spacing':           ['borderSpacing'],
+  'hyphens':                  ['hyphens'],
+  'quotes':                   ['quotes'],
+  'color-scheme':             ['colorScheme'],
+  'display':                  ['display'],
+  'box-sizing':               ['boxSizing'],
+  'width':                    ['width'],
+  'height':                   ['height'],
+  'min-width':                ['minWidth'],
+  'min-height':               ['minHeight'],
+  'max-width':                ['maxWidth'],
+  'max-height':               ['maxHeight'],
+  'padding-top':              ['paddingTop'],
+  'padding-right':            ['paddingRight'],
+  'padding-bottom':           ['paddingBottom'],
+  'padding-left':             ['paddingLeft'],
+  'margin-top':               ['marginTop'],
+  'margin-right':             ['marginRight'],
+  'margin-bottom':            ['marginBottom'],
+  'margin-left':              ['marginLeft'],
+  'border-width':             ['borderWidth'],
+  'border-style':             ['borderStyle'],
+  'border-color':             ['borderColor'],
+  'border-radius':            ['borderRadius'],
+  'border-top-left-radius':   ['borderTopLeftRadius'],
+  'border-top-right-radius':  ['borderTopRightRadius'],
+  'border-bottom-right-radius': ['borderBottomRightRadius'],
+  'border-bottom-left-radius': ['borderBottomLeftRadius'],
+
+  'outline-width':            ['outlineWidth'],
+  'outline-color':            ['outlineColor'],
+  'opacity':                  ['opacity'],
+  'box-shadow':               ['boxShadow'],
+  'filter':                   ['filter'],
+  'clip-path':                ['clipPath'],
+  'position':                 ['position'],
+  'top':                      ['top'],
+  'right':                    ['right'],
+  'bottom':                   ['bottom'],
+  'left':                     ['left'],
+  'z-index':                  ['zIndex'],
+  'overflow':                 ['overflow', 'overflowX', 'overflowY'],
+  'overflow-x':               ['overflowX'],
+  'overflow-y':               ['overflowY'],
+  'flex-direction':           ['flexDirection'],
+  'flex-wrap':                ['flexWrap'],
+  'flex-grow':                ['flexGrow'],
+  'flex-shrink':              ['flexShrink'],
+  'flex-basis':               ['flexBasis'],
+  'align-items':              ['alignItems'],
+  'align-self':               ['alignSelf'],
+  'justify-content':          ['justifyContent'],
+  'gap':                      ['gap'],
+  'row-gap':                  ['rowGap'],
+  'column-gap':               ['columnGap'],
+  'grid-template-columns':    ['gridTemplateColumns'],
+  'grid-template-rows':       ['gridTemplateRows'],
+  'grid-area':                ['gridArea'],
+  'grid-column':              ['gridColumn'],
+  'grid-row':                 ['gridRow'],
+  'transform':                ['transform'],
+  'transform-origin':         ['transformOrigin'],
+  'object-fit':               ['objectFit'],
+  'object-position':          ['objectPosition'],
+  'aspect-ratio':             ['aspectRatio'],
+  'pointer-events':           ['pointerEvents'],
+  'touch-action':             ['touchAction'],
+  'fill':                     ['fill'],
+  'stroke':                   ['stroke'],
+  'stroke-width':             ['strokeWidth'],
+  'float':                    ['float'],
+  'clear':                    ['clear'],
+  'content':                  ['content'],
+  'user-select':              ['userSelect'],
+  'indent':                   ['indent'],
+};
+
+/**
+ * After mergeProps, apply any 'inherit'/'initial'/'unset'/'revert' keyword
+ * markers recorded in _inherit/_initial Sets during CSS parsing.
+ * - _inherit: set result[field] = inherited[field] (or delete if parent undefined)
+ * - _initial: delete result[field] (renderer falls back to browser default)
+ */
+function _applyKeywords(result: CSSProps, props: CSSProps, inherited: CSSProps): void {
+  if (props._inherit) props._inherit.forEach(cssProp => {
+    var fields = _CSS_PROP_MAP[cssProp];
+    if (!fields) return;
+    fields.forEach(f => {
+      var v = (inherited as Record<string, unknown>)[f as string];
+      if (v !== undefined) (result as Record<string, unknown>)[f as string] = v;
+      else delete (result as Record<string, unknown>)[f as string];
+    });
+  });
+  if (props._initial) props._initial.forEach(cssProp => {
+    var fields = _CSS_PROP_MAP[cssProp];
+    if (!fields) return;
+    fields.forEach(f => delete (result as Record<string, unknown>)[f as string]);
+  });
+}
+
+/**
+ * Resolve a CSS `content` property value to a plain string for rendering.
+ * Handles: "string" literals, 'single-quoted' literals, none/normal (→''), attr(x).
+ * Returns empty string for url() or unrecognised values.
+ */
+function _resolveContentValue(raw: string, attrs?: Map<string, string>): string {
+  raw = raw.trim();
+  if (!raw || raw === 'none' || raw === 'normal') return '';
+  // Concatenated strings/tokens (e.g. "«" " " attr(title))
+  var out = '';
+  var i = 0;
+  while (i < raw.length) {
+    while (i < raw.length && raw[i] === ' ') i++;  // skip gaps
+    if (i >= raw.length) break;
+    var ch = raw[i];
+    if (ch === '"' || ch === "'") {
+      // quoted string literal
+      var q = ch; i++;
+      while (i < raw.length && raw[i] !== q) {
+        if (raw[i] === '\\' && i + 1 < raw.length) { i++; out += raw[i]; }
+        else out += raw[i];
+        i++;
+      }
+      if (i < raw.length) i++;  // skip closing quote
+    } else if (raw.slice(i, i + 5).toLowerCase() === 'attr(') {
+      // attr(name) — look up element attribute
+      i += 5;
+      var attrEnd = raw.indexOf(')', i);
+      if (attrEnd < 0) { i = raw.length; break; }
+      var attrName = raw.slice(i, attrEnd).trim().toLowerCase();
+      out += attrs ? (attrs.get(attrName) ?? '') : '';
+      i = attrEnd + 1;
+    } else if (raw.slice(i, i + 4).toLowerCase() === 'url(') {
+      // url(...) — skip (images not supported in pseudo content)
+      var urlEnd = raw.indexOf(')', i + 4);
+      i = urlEnd >= 0 ? urlEnd + 1 : raw.length;
+    } else if (raw.slice(i, i + 8).toLowerCase() === 'counter(') {
+      // counter() — skip for now
+      var cnt = raw.indexOf(')', i + 8);
+      i = cnt >= 0 ? cnt + 1 : raw.length;
+    } else {
+      // bare word — check for "open-quote"/"close-quote"
+      var tok = '';
+      while (i < raw.length && raw[i] !== ' ' && raw[i] !== '"' && raw[i] !== "'") tok += raw[i++];
+      if (tok === 'open-quote')  out += '\u201C';
+      else if (tok === 'close-quote') out += '\u201D';
+      // else: other bare words (no-open-quote etc.) → ignore
+    }
+  }
+  return out;
+}
+
+/**
+ * Find ::before / ::after content for an element based on the given stylesheets.
+ * Used by the HTML parser to inject generated content spans.
+ * Returns '' for each pseudo-element that has no matching rule.
+ */
+export function getPseudoContent(
+  tag:   string,
+  id:    string,
+  cls:   string[],
+  attrs: Map<string, string>,
+  sheets: CSSRule[],
+  index?: RuleIndex | null,
+): { before: string; after: string } {
+  var before = '';
+  var after  = '';
+  var beforeSpec = -1;
+  var afterSpec  = -1;
+  var candidates = index ? candidateRules(index, tag, id, cls) : sheets;
+  for (var ri = 0; ri < candidates.length; ri++) {
+    var rule = candidates[ri]!;
+    if (!rule.props.content) continue;   // skip rules without content
+    for (var si = 0; si < rule.sels.length; si++) {
+      var sel = rule.sels[si]!.trim();
+      // Only act on ::before / ::after pseudo-elements
+      var pem = sel.match(/::?(before|after)\s*$/i);
+      if (!pem) continue;
+      // Strip pseudo-element suffix → check if host element matches
+      var hostSel = sel.slice(0, sel.length - pem[0].length).trim() || '*';
+      if (!matchesSingleSel(tag, id, cls, attrs, hostSel)) continue;
+      var which = pem[1]!.toLowerCase();
+      var resolved = _resolveContentValue(rule.props.content, attrs);
+      if (which === 'before' && rule.spec > beforeSpec) {
+        before = resolved; beforeSpec = rule.spec;
+      } else if (which === 'after' && rule.spec > afterSpec) {
+        after = resolved;  afterSpec  = rule.spec;
+      }
+      break;  // only one selector per rule matches per pseudo
+    }
+  }
+  return { before, after };
+}
+
 /**
  * Compute the cascaded CSSProps for an element, given:
  *  - tag, id, cls  — element descriptor
@@ -452,12 +678,14 @@ export function computeElementStyle(
       importantRules.push(match);
     }
     mergeProps(result, match.props);
+    _applyKeywords(result, match.props, inherited);
   }
 
   // ── Inline style wins over normal sheet rules ──────────────────────────────
   if (inlineStyle) {
     var inlineParsed = parseInlineStyle(inlineStyle);
     mergeProps(result, inlineParsed);
+    _applyKeywords(result, inlineParsed, inherited);
     // Inline !important overrides even !important sheet rules
     if (inlineParsed.important && inlineParsed.important.size > 0) {
       // already applied above — nothing more to do
@@ -470,6 +698,7 @@ export function computeElementStyle(
   importantRules.sort((a, b) => a.spec !== b.spec ? a.spec - b.spec : a.order - b.order);
   for (var ii = 0; ii < importantRules.length; ii++) {
     mergeProps(result, importantRules[ii]!.props, importantRules[ii]!.props.important);
+    _applyKeywords(result, importantRules[ii]!.props, inherited);
   }
 
   return result;

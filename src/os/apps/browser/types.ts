@@ -395,6 +395,12 @@ export interface CSSProps {
   strokeWidth?:     number;
   // ── !important tracking (set of property names that carried !important) ──
   important?:     Set<string>;
+  // ── Global keyword tracking for cascade resolution ──────────────────────
+  _inherit?:      Set<string>;  // CSS prop names flagged 'inherit' or 'unset' (inheritable)
+  _initial?:      Set<string>;  // CSS prop names flagged 'initial' or 'revert'
+  // ── Pseudo-element content (resolved during HTML parsing, not cascade) ───
+  _pseudoBefore?: string;  // resolved text of ::before { content: "..." }
+  _pseudoAfter?:  string;  // resolved text of ::after  { content: "..." }
 }
 
 // ── Layout ────────────────────────────────────────────────────────────────────

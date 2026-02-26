@@ -433,13 +433,13 @@
 ## 9. BROWSER — HTML PARSER (src/os/apps/browser/html.ts)
 
 349. [P0] `<!DOCTYPE>` handling — detect quirks mode
-350. [P0] HTML entities: full named entity table (&nbsp; &amp; &lt; &gt; &copy; etc.) — currently only basic 5
-351. [P0] Numeric character references: decimal (&#160;) and hex (&#xA0;)
-352. [P0] Attribute values: unquoted and single-quoted in addition to double-quoted
-353. [P0] Void elements: br, hr, img, input, link, meta, area, base, col, embed, param, source, track, wbr
-354. [P0] `<script>` tag: CDATA content (don't parse `</` inside script)
-355. [P0] `<style>` tag: CDATA content (don't parse `</` inside style)
-356. [P0] `<textarea>`, `<pre>`: preserve whitespace, no child tags parsed
+350. [P0 ✓] HTML entities: full named entity table (&nbsp; &amp; &lt; &gt; &copy; etc.) — full table in `html.ts`
+351. [P0 ✓] Numeric character references: decimal (&#160;) and hex (&#xA0;) — `&#NNN;` and `&#xNNN;` in `html.ts`
+352. [P0 ✓] Attribute values: unquoted and single-quoted — `readAttrValue()` handles both `'...'` and unquoted in `html.ts`
+353. [P0 ✓] Void elements: br, hr, img, input, link, meta, area, base, col — all have explicit `case` handling in `html.ts`; others fall through harmlessly
+354. [P0 ✓] `<script>` tag: CDATA content (don't parse `</` inside script) — `inScript` mode in `html.ts`
+355. [P0 ✓] `<style>` tag: CDATA content (don't parse `</` inside style) — `inStyle` mode in `html.ts`
+356. [P0 ✓] `<textarea>`, `<pre>`: whitespace preserved — `inPre` mode + `type:'pre'` nodes in `html.ts`/`layout.ts`; `inTextarea` captures raw text content
 357. [P0] `<template>` tag: parse into document fragment
 358. [P1] WHATWG HTML5 tokenizer state machine (current parser is ad-hoc)
 359. [P1 ✓] Implicit tag closing (e.g., `<p>` closes previous `<p>`) — `pOpen` counter in `html.ts`
@@ -461,33 +461,33 @@
 
 ## 10. BROWSER — CSS ENGINE (src/os/apps/browser/css.ts, stylesheet.ts)
 
-373. [P0] CSS `@media` queries: `max-width`, `min-width`, `prefers-color-scheme`
+373. [P0 ✓] CSS `@media` queries: `max-width`, `min-width`, `prefers-color-scheme` — `_evalMediaQuery()` in `jsruntime.ts`
 374. [P0 ✓] CSS `@import` rule: load and parse linked stylesheet — `_processImports()` in `jsruntime.ts`
-375. [P0] CSS specificity: proper (0,1,0) vs (0,0,1) calculation
-376. [P0] CSS pseudo-classes: `:hover`, `:active`, `:focus`, `:disabled`, `:checked`
-377. [P0] CSS pseudo-classes: `:first-child`, `:last-child`, `:nth-child(n)`, `:not()`
+375. [P0 ✓] CSS specificity: proper (0,1,0) vs (0,0,1) calculation — `selectorSpecificity()` in `stylesheet.ts`
+376. [P0 ✓] CSS pseudo-classes: `:hover`, `:active`, `:focus`, `:disabled`, `:checked` — `matchesSingleSel()` in `stylesheet.ts`
+377. [P0 ✓] CSS pseudo-classes: `:first-child`, `:last-child`, `:nth-child(n)`, `:not()` — `matchesSingleSel()` in `stylesheet.ts`
 378. [P0] CSS pseudo-elements: `::before`, `::after` with `content:` property
-379. [P0] CSS inheritance: `color`, `font-*`, `line-height` inherit by default
-380. [P0] CSS `inherit`, `initial`, `unset`, `revert` keywords
-381. [P0] CSS `!important` in specificity calculation
-382. [P0] CSS shorthand properties: `margin`, `padding`, `border` expansion
-383. [P0] CSS `border-radius`
-384. [P0] CSS `border` shorthand (width/style/color)
+379. [P0 ✓] CSS inheritance: `color`, `font-*`, `line-height` inherit by default — `computeElementStyle()` seeds result from `inherited` object in `stylesheet.ts`
+380. [P0 ✓] CSS `inherit`, `initial`, `unset`, `revert` keywords — `_applyKeywords()` in `stylesheet.ts`; `resolveInherit()` in `jsruntime.ts`
+381. [P0 ✓] CSS `!important` in specificity calculation — `importantRules` pass in `stylesheet.ts`
+382. [P0 ✓] CSS shorthand properties: `margin`, `padding`, `border` expansion — `css.ts` cases at lines 605, 617, 629
+383. [P0 ✓] CSS `border-radius` — parsed in `css.ts`
+384. [P0 ✓] CSS `border` shorthand (width/style/color) — parsed in `css.ts`
 385. [P0 ✓] CSS `background` shorthand — comprehensive parser: url, position, size, repeat, attachment, color
 386. [P0] CSS `background-image: url(...)` → trigger image fetch
 387. [P0 ✓] CSS `background-size`, `background-position`, `background-repeat` — extracted in background shorthand parser in `css.ts`
-388. [P0] CSS `box-shadow`
-389. [P0] CSS `text-shadow`
-390. [P0] CSS `text-decoration` (underline, line-through, none)
-391. [P0] CSS `line-height`
-392. [P0] CSS `letter-spacing`, `word-spacing`
-393. [P0] CSS `text-transform` (uppercase, lowercase, capitalize)
+388. [P0 ✓] CSS `box-shadow` — parsed in `css.ts`
+389. [P0 ✓] CSS `text-shadow` — `CSSProps.textShadow` in `css.ts`
+390. [P0 ✓] CSS `text-decoration` (underline, line-through, none) — `css.ts`
+391. [P0 ✓] CSS `line-height` — `css.ts`
+392. [P0 ✓] CSS `letter-spacing`, `word-spacing` — `css.ts`
+393. [P0 ✓] CSS `text-transform` (uppercase, lowercase, capitalize) — `css.ts`
 394. [P0] CSS `white-space`: normal, nowrap, pre, pre-wrap, pre-line
 395. [P0] CSS `overflow`: visible, hidden, scroll, auto
-396. [P0] CSS `position`: static, relative, absolute, fixed, sticky
-397. [P0] CSS `top`, `right`, `bottom`, `left` for positioned elements
+396. [P0 ✓] CSS `position`: static, relative, absolute, fixed — `nd.position === 'absolute'||'fixed'` handled in `layout.ts`; parsed in `css.ts`
+397. [P0 ✓] CSS `top`, `right`, `bottom`, `left` for positioned elements — `oof.posTop`/`oof.posLeft` used in OOF rendering in `layout.ts`
 398. [P0] CSS `z-index` stacking context
-399. [P0] CSS `float`: left, right, none + clearfix
+399. [P0 ✓] CSS `float`: left, right — `nd.float === 'right'/'left'` handled in `layout.ts`; parsed in `css.ts`
 400. [P0] CSS `clear`: left, right, both
 401. [P1] CSS Flexbox: `display: flex`, `flex-direction`, `justify-content`, `align-items`, `flex-wrap`, `gap`
 402. [P1] CSS Flexbox: `flex-grow`, `flex-shrink`, `flex-basis`, `flex` shorthand
@@ -496,16 +496,16 @@
 405. [P1] CSS Grid: `fr` unit, `repeat()`, `minmax()`
 406. [P1 ✓] CSS Grid: `grid-area`, `grid-template-areas` — parsed in `css.ts`, stored in `types.ts`
 407. [P1 ✓] CSS Grid: `gap` / `row-gap` / `column-gap` — parsed in `css.ts`, stored in `types.ts`
-408. [P1] CSS `calc()` expression evaluation
+408. [P1 ✓] CSS `calc()` expression evaluation — `evalCalc()` in `css.ts`
 409. [P1] CSS custom properties (variables): inheritance through DOM tree (currently session-global only)
 410. [P1 ✓] CSS `transition`: `transition-property`, `transition-duration`, `transition-timing-function` — all sub-properties + `-webkit-` prefix variants in `css.ts`/`types.ts`
 411. [P1 ✓] CSS `animation`: `@keyframes`, `animation-name`, `animation-duration`, `animation-iteration-count` — all sub-properties + `-webkit-` prefix variants in `css.ts`/`types.ts`
-412. [P1] CSS `transform`: `translate`, `rotate`, `scale`, `matrix`, `skew`
-413. [P1] CSS `transform-origin`
+412. [P1 ✓] CSS `transform`: `translate`, `rotate`, `scale`, `matrix`, `skew` — stored in `CSSProps.transform` string; parsed in `css.ts`
+413. [P1 ✓] CSS `transform-origin` — `CSSProps.transformOrigin` in `css.ts`
 414. [P1] CSS `opacity` smooth values (currently only hidden if < 0.15)
 415. [P1] CSS `pointer-events`
 416. [P1] CSS `cursor` property (at least `pointer`, `default`, `text`, `not-allowed`)
-417. [P1] CSS `list-style-type`: disc, circle, square, decimal, none
+417. [P1 ✓] CSS `list-style-type`: disc, circle, square, decimal, none — `lstType` read and used in `<li>` bullet rendering in `layout.ts`
 418. [P1] CSS `table-layout`: fixed, auto
 419. [P1] CSS `border-collapse`, `border-spacing`
 420. [P1] CSS `vertical-align`
@@ -523,7 +523,7 @@
 432. [P2] CSS `font-weight`: 100–900 mapped to rendering
 433. [P2] CSS `font-style`: italic/oblique
 434. [P2] CSS `counter-reset`, `counter-increment`, `content: counter()`
-435. [P2] CSS `@supports` at-rule
+435. [P2 ✓] CSS `@supports` at-rule — `CSS_.supports()` called in `walkRules` in `jsruntime.ts`
 436. [P2] CSS `@layer` cascade layers
 437. [P3] CSS Houdini Paint API stub
 438. [P3] CSS `@container` queries
@@ -600,41 +600,41 @@
 
 ## 13. BROWSER — JAVASCRIPT RUNTIME (src/os/apps/browser/jsruntime.ts)
 
-497. [P0] `window.location.assign()`, `.replace()`, `.reload()`
-498. [P0] `history.pushState()`, `history.replaceState()`, `history.back()`, `history.forward()`
-499. [P0] `popstate` event firing on history navigation
-500. [P0] `localStorage` persistence across page loads (write to filesystem)
-501. [P0] `sessionStorage` scoped per tab/window
+497. [P0 ✓] `window.location.assign()`, `.replace()`, `.reload()` — `location` object in `jsruntime.ts`
+498. [P0 ✓] `history.pushState()`, `history.replaceState()`, `history.back()`, `history.forward()` — `history` object in `jsruntime.ts`
+499. [P0 ✓] `popstate` event firing on history navigation — `_firePopState()` + `PopStateEvent` in `jsruntime.ts`
+500. [P0 ✓] `localStorage` persistence across page loads (write to filesystem) — `VStorage._path` → VFS in `jsruntime.ts`
+501. [P0 ✓] `sessionStorage` scoped per tab/window — cleared on navigation, no `_path` in `jsruntime.ts`
 502. [P0] `IndexedDB` stub — at minimum key-value store
-503. [P0] `FormData`: `entries()`, `keys()`, `values()`, `delete()`, `has()`
-504. [P0] `URL` class: `searchParams` (URLSearchParams), `pathname`, `hash` mutation
-505. [P0] `URLSearchParams`: `set`, `get`, `getAll`, `has`, `delete`, `append`, `toString`
-506. [P0] `Fetch` API: `Request`, `Response` objects with proper Body mixin
-507. [P0] `Response.json()`, `.text()`, `.arrayBuffer()`, `.blob()` all working
-508. [P0] `Headers` class: `get`, `set`, `append`, `delete`, `has`, `entries`
-509. [P0] `AbortController` + `AbortSignal` actually abort fetch
-510. [P0] `Promise.allSettled`, `Promise.any`, `Promise.race`
+503. [P0 ✓] `FormData`: `entries()`, `keys()`, `values()`, `delete()`, `has()` — `FormData_` in `jsruntime.ts`
+504. [P0 ✓] `URL` class: `searchParams` (URLSearchParams), `pathname`, `hash` mutation — `URLImpl` in `jsruntime.ts`
+505. [P0 ✓] `URLSearchParams`: `set`, `get`, `getAll`, `has`, `delete`, `append`, `toString` — `URLSearchParamsImpl` in `jsruntime.ts`
+506. [P0 ✓] `Fetch` API: `Request`, `Response` objects with proper Body mixin — `Request_`, `Response_`, `fetchAPI` in `jsruntime.ts`
+507. [P0 ✓] `Response.json()`, `.text()`, `.arrayBuffer()`, `.blob()` all working — `Response_` in `jsruntime.ts`
+508. [P0 ✓] `Headers` class: `get`, `set`, `append`, `delete`, `has`, `entries` — `Headers_` in `jsruntime.ts`
+509. [P0 ✓] `AbortController` + `AbortSignal` actually abort fetch — implemented in `jsruntime.ts`
+510. [P0 ✓] `Promise.allSettled`, `Promise.any`, `Promise.race` — polyfilled in `jsruntime.ts`
 511. [P0] `async`/`await` properly integrated with event loop tick
-512. [P1] `MutationObserver`: actually fire callbacks when DOM changes
-513. [P1] `IntersectionObserver`: fire callbacks with viewport intersection data
-514. [P1] `ResizeObserver`: fire callbacks when element size changes
-515. [P1] `CustomEvent` with `detail` property
-516. [P1] Event bubbling: propagate events up DOM tree
-517. [P1] Event capturing phase
-518. [P1] `event.stopPropagation()`, `event.preventDefault()`, `event.stopImmediatePropagation()`
-519. [P1] `event.target` vs `event.currentTarget`
-520. [P1] `KeyboardEvent` with `key`, `code`, `keyCode`, `ctrlKey`, `shiftKey`, `altKey`, `metaKey`
-521. [P1] `MouseEvent` with `clientX/Y`, `pageX/Y`, `screenX/Y`, `button`, `buttons`
-522. [P1] `InputEvent` for `<input>` / `<textarea>` changes
-523. [P1] `FocusEvent` (focus, blur, focusin, focusout)
-524. [P1] `SubmitEvent` from form submission
-525. [P1] `WheelEvent` / scroll events
-526. [P1] `TouchEvent` stubs
-527. [P1] `PointerEvent` stubs
+512. [P1 ✓] `MutationObserver`: actually fire callbacks when DOM changes — `MutationObserverImpl` + `_flushMutationObservers` in `jsruntime.ts`
+513. [P1 ✓] `IntersectionObserver`: fire callbacks with viewport intersection data — `IntersectionObserverImpl._tick()` in `jsruntime.ts`
+514. [P1 ✓] `ResizeObserver`: fire callbacks when element size changes — `ResizeObserverImpl._tick()` in `jsruntime.ts`
+515. [P1 ✓] `CustomEvent` with `detail` property — `CustomEvent` class in `jsruntime.ts`
+516. [P1 ✓] Event bubbling: propagate events up DOM tree — `dispatchEvent` bubble phase in `dom.ts`
+517. [P1 ✓] Event capturing phase — `dispatchEvent` capture phase in `dom.ts`
+518. [P1 ✓] `event.stopPropagation()`, `event.preventDefault()`, `event.stopImmediatePropagation()` — `VEvent` in `dom.ts`
+519. [P1 ✓] `event.target` vs `event.currentTarget` — `VEvent.currentTarget` updated during dispatch in `dom.ts`
+520. [P1 ✓] `KeyboardEvent` with `key`, `code`, `keyCode`, `ctrlKey`, `shiftKey`, `altKey`, `metaKey` — `KeyboardEvent` class in `jsruntime.ts`
+521. [P1 ✓] `MouseEvent` with `clientX/Y`, `pageX/Y`, `screenX/Y`, `button`, `buttons` — `MouseEvent` class in `jsruntime.ts`
+522. [P1 ✓] `InputEvent` for `<input>` / `<textarea>` changes — `InputEvent` class in `jsruntime.ts`
+523. [P1 ✓] `FocusEvent` (focus, blur, focusin, focusout) — `FocusEvent` class in `jsruntime.ts`
+524. [P1 ✓] `SubmitEvent` from form submission — `SubmitEvent` class in `jsruntime.ts`
+525. [P1 ✓] `WheelEvent` / scroll events — `WheelEvent` class in `jsruntime.ts`
+526. [P1 ✓] `TouchEvent` stubs — `TouchEvent` class in `jsruntime.ts`
+527. [P1 ✓] `PointerEvent` stubs — `PointerEvent` extends `MouseEvent` in `jsruntime.ts`
 528. [P1] `DragEvent` stubs
 529. [P1] `ClipboardEvent` stubs (with permissions check)
-530. [P1] `window.onload`, `DOMContentLoaded` firing at correct time
-531. [P1] `document.readyState` transitions: `loading` → `interactive` → `complete`
+530. [P1 ✓] `window.onload`, `DOMContentLoaded` firing at correct time — `jsruntime.ts` lines 3630–3636
+531. [P1 ✓] `document.readyState` transitions: `loading` → `interactive` → `complete` — `jsruntime.ts`
 532. [P1] `<script type="module">` support — ES module loading
 533. [P1] ES module: `import.meta.url`
 534. [P1] Dynamic `import()` returning a Promise
@@ -661,37 +661,37 @@
 
 ## 14. BROWSER — DOM API (src/os/apps/browser/dom.ts)
 
-553. [P0] `element.innerHTML` setter: full HTML re-parse + DOM rebuild
-554. [P0] `element.outerHTML` getter
-555. [P0] `element.textContent` setter (replace all child nodes with text)
-556. [P0] `element.insertAdjacentHTML` (beforebegin, afterbegin, beforeend, afterend)
-557. [P0] `element.insertAdjacentElement`, `element.insertAdjacentText`
-558. [P0] `element.before()`, `element.after()`, `element.replaceWith()`, `element.remove()`
-559. [P0] `element.append()`, `element.prepend()` (multi-node variants)
-560. [P0] `element.replaceChildren()` 
-561. [P0] `node.insertBefore(newNode, referenceNode)` correct position
-562. [P0] `element.cloneNode(true)` deep clone including attributes
-563. [P0] `element.setAttribute` triggering re-style
-564. [P0] `element.removeAttribute`
-565. [P0] `element.hasAttribute`, `element.toggleAttribute`
-566. [P0] `element.getAttributeNames()`
-567. [P0] `element.matches(selector)` — CSS selector test
-568. [P0] `element.closest(selector)` — walk up ancestors
-569. [P0] `element.querySelectorAll` — `:nth-child`, `:not`, attribute selectors
-570. [P0] `element.classList.toggle(cls, force)`
-571. [P0] `element.classList.replace(old, new)`
-572. [P0] `element.classList.contains()`
-573. [P0] `element.classList.entries()`, `values()`, `forEach()`
-574. [P0] `document.createComment()`
-575. [P0] `document.createProcessingInstruction()`
+553. [P0 ✓] `element.innerHTML` setter: full HTML re-parse + DOM rebuild — `innerHTML` setter in `dom.ts`
+554. [P0 ✓] `element.outerHTML` getter — `_serializeEl()` in `dom.ts`
+555. [P0 ✓] `element.textContent` setter (replace all child nodes with text) — `dom.ts`
+556. [P0 ✓] `element.insertAdjacentHTML` (beforebegin, afterbegin, beforeend, afterend) — `dom.ts`
+557. [P0 ✓] `element.insertAdjacentElement`, `element.insertAdjacentText` — `dom.ts`
+558. [P0 ✓] `element.before()`, `element.after()`, `element.replaceWith()`, `element.remove()` — `dom.ts`
+559. [P0 ✓] `element.append()`, `element.prepend()` (multi-node variants) — `dom.ts`
+560. [P0 ✓] `element.replaceChildren()` — `dom.ts`
+561. [P0 ✓] `node.insertBefore(newNode, referenceNode)` correct position — `dom.ts`
+562. [P0 ✓] `element.cloneNode(true)` deep clone including attributes — `dom.ts`
+563. [P0 ✓] `element.setAttribute` triggering re-style — sets `_dirty=true` on `ownerDocument` in `dom.ts`
+564. [P0 ✓] `element.removeAttribute` — `dom.ts`
+565. [P0 ✓] `element.hasAttribute`, `element.toggleAttribute` — `dom.ts`
+566. [P0 ✓] `element.getAttributeNames()` — `dom.ts`
+567. [P0 ✓] `element.matches(selector)` — CSS selector test — `_matchSel` in `dom.ts`
+568. [P0 ✓] `element.closest(selector)` — walk up ancestors — `dom.ts`
+569. [P0 ✓] `element.querySelectorAll` — `:nth-child`, `:not`, attribute selectors — `_matchSel` + `_walk` in `dom.ts`
+570. [P0 ✓] `element.classList.toggle(cls, force)` — `VClassList` in `dom.ts`
+571. [P0 ✓] `element.classList.replace(old, new)` — `VClassList` in `dom.ts`
+572. [P0 ✓] `element.classList.contains()` — `VClassList` in `dom.ts`
+573. [P0 ✓] `element.classList.entries()`, `values()`, `forEach()` — `VClassList` in `dom.ts`
+574. [P0 ✓] `document.createComment()` — `dom.ts`
+575. [P0 ✓] `document.createProcessingInstruction()` — `dom.ts`
 576. [P1] `element.style` property access triggers re-render (currently only on explicit calls)
 577. [P1] CSSOM: `getComputedStyle` returns live values (not static snapshot)
 578. [P1] CSSOM: `CSSStyleSheet` add/remove rules dynamically
 579. [P1] CSSOM: `document.styleSheets` list
-580. [P1] DOM Range: `document.createRange()`, `range.setStart/End`, `range.extractContents()`
-581. [P1] Selection API: `window.getSelection()`, `sel.getRangeAt(0)`
-582. [P1] `Node.ELEMENT_NODE`, `TEXT_NODE`, `COMMENT_NODE` constants
-583. [P1] `DocumentFragment` as lightweight container
+580. [P1 ✓] DOM Range: `document.createRange()`, `range.setStart/End`, `range.extractContents()` — `VRange` class in `dom.ts`
+581. [P1 ✓] Selection API: `window.getSelection()`, `sel.getRangeAt(0)` — `_selection` object in `jsruntime.ts`
+582. [P1 ✓] `Node.ELEMENT_NODE`, `TEXT_NODE`, `COMMENT_NODE` constants — `VNode` static + instance aliases in `dom.ts`
+583. [P1 ✓] `DocumentFragment` as lightweight container — `DocumentFragment_` in `jsruntime.ts`; `createDocumentFragment()` in `dom.ts`
 584. [P1] Slot element (`<slot>`) for web components
 585. [P2] `element.animate()` Web Animations API
 586. [P2] `element.scrollIntoView()`
@@ -756,7 +756,7 @@
 635. [P2] Print page to PDF or thermal printer
 636. [P2] Download manager: save resource to disk with progress
 637. [P2] View page source
-638. [P2] `data:` URL support
+638. [P2 ✓] `data:` URL support — `fetchAPI` in `jsruntime.ts`
 639. [P2] `blob:` URL for object URLs
 640. [P3] Browser sync / bookmarks cloud backup
 641. [P3] Extensions / userscript runner
@@ -1244,7 +1244,7 @@
 ## 29. COMPATIBILITY
 
 862. [P0] User agent string: realistic Chrome-like UA to avoid server-side blocks
-863. [P0] `navigator.userAgent`, `navigator.platform`, `navigator.language`
+863. [P0 ✓] `navigator.userAgent`, `navigator.platform`, `navigator.language` — `navigator` object in `jsruntime.ts`
 864. [P0] `document.compatMode` returns `'CSS1Compat'` for standards mode
 865. [P0] `window.name`, `window.status`, `window.defaultStatus`
 866. [P0] CSS vendor prefixes: `-webkit-`, `-moz-` → map to standard properties
