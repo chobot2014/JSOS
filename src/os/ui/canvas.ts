@@ -405,6 +405,30 @@ export class Canvas {
     }
   }
 
+  /**
+   * Draw text using the 8×8 bitmap font scaled by `scale` pixels per dot.
+   * scale=1 → normal 8×8; scale=2 → 16×16; scale=3 → 24×24.
+   */
+  drawTextScaled(x: number, y: number, text: string, color: PixelColor, scale: number): void {
+    if (scale <= 1) { this.drawText(x, y, text, color); return; }
+    var cx = x;
+    for (var ti = 0; ti < text.length; ti++) {
+      var code = text.charCodeAt(ti);
+      if (code < 0x20 || code > 0x7E) { cx += 8 * scale; continue; }
+      var base = (code - 0x20) * 8;
+      for (var row = 0; row < 8; row++) {
+        var byte = FONT_DATA_8x8[base + row];
+        if (!byte) continue;
+        for (var col = 0; col < 8; col++) {
+          if (byte & (0x80 >> col)) {
+            this.fillRect(cx + col * scale, y + row * scale, scale, scale, color);
+          }
+        }
+      }
+      cx += 8 * scale;
+    }
+  }
+
   measureText(text: string, font = defaultFont): { width: number; height: number } {
     return font.measureText(text);
   }

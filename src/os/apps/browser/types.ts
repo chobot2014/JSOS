@@ -24,19 +24,28 @@ export interface InlineSpan {
   mark?:      boolean;
   underline?: boolean;
   color?:     number;   // explicit CSS color (ARGB)
+  fontScale?: number;  // pixel-scale factor (1=8px, 2=16px, 3=24px)
 }
 
 export type BlockType =
   | 'block' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6'
-  | 'hr' | 'li' | 'pre' | 'p-break' | 'blockquote' | 'widget' | 'summary';
+  | 'hr' | 'li' | 'pre' | 'p-break' | 'blockquote' | 'widget' | 'summary'
+  | 'aside'       // float:right/left — rendered as a boxed indented block
+  | 'flex-row';   // display:flex row — children rendered inline
 
 export interface RenderNode {
-  type:       BlockType;
-  spans:      InlineSpan[];
-  indent?:    number;
-  widget?:    WidgetBlueprint;
-  textAlign?: 'left' | 'center' | 'right';
-  bgColor?:   number;   // CSS background-color (ARGB)
+  type:         BlockType;
+  spans:        InlineSpan[];
+  indent?:      number;
+  widget?:      WidgetBlueprint;
+  textAlign?:   'left' | 'center' | 'right';
+  bgColor?:     number;    // CSS background-color (ARGB)
+  float?:       'left' | 'right';
+  marginTop?:   number;    // px — extra space before block
+  marginBottom?: number;   // px — extra space after block
+  paddingLeft?:  number;   // px — left indent for block content
+  boxWidth?:    number;    // px — constrained column width (0=full)
+  children?:    RenderNode[];  // sub-nodes (flex-row children)
 }
 
 // ── Rendered output ───────────────────────────────────────────────────────────
@@ -53,6 +62,7 @@ export interface RenderedSpan {
   underline?: boolean;
   searchHit?: boolean;
   hitIdx?:    number;
+  fontScale?: number;  // pixel-scale factor for scaled text rendering
 }
 
 export interface RenderedLine {
@@ -161,14 +171,26 @@ export interface ParseResult {
 // ── CSS ───────────────────────────────────────────────────────────────────────
 
 export interface CSSProps {
-  color?:     number;
-  bgColor?:   number;
-  bold?:      boolean;
-  italic?:    boolean;
-  underline?: boolean;
-  strike?:    boolean;
-  align?:     'left' | 'center' | 'right';
-  hidden?:    boolean;
+  color?:       number;
+  bgColor?:     number;
+  bold?:        boolean;
+  italic?:      boolean;
+  underline?:   boolean;
+  strike?:      boolean;
+  align?:       'left' | 'center' | 'right';
+  hidden?:      boolean;
+  // Layout
+  float?:       'left' | 'right';
+  display?:     'flex' | 'inline-flex' | 'grid' | 'inline-block' | 'inline' | 'block' | 'none';
+  paddingLeft?: number;   // px
+  paddingRight?: number;
+  paddingTop?:  number;
+  paddingBottom?: number;
+  marginTop?:   number;
+  marginBottom?: number;
+  width?:       number;   // px (0 = auto)
+  maxWidth?:    number;
+  indent?:      number;   // derived: padding-left / CHAR_W
 }
 
 // ── Layout ────────────────────────────────────────────────────────────────────

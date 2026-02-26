@@ -123,8 +123,55 @@ export function parseInlineStyle(style: string): CSSProps {
         if (vl === 'center' || vl === 'right' || vl === 'left')
           p.align = vl as 'left' | 'center' | 'right';
         break;
-      case 'display':    if (vl === 'none')                    p.hidden = true; break;
+      case 'display':
+        if (vl === 'none')                             p.hidden  = true;
+        else if (vl === 'flex' || vl === 'inline-flex') p.display = vl as 'flex';
+        else if (vl === 'grid')                        p.display = 'grid';
+        else if (vl === 'inline-block')                p.display = 'inline-block';
+        break;
       case 'visibility': if (vl === 'hidden' || vl === 'collapse') p.hidden = true; break;
+      case 'float':
+        if (vl === 'left' || vl === 'right') p.float = vl;
+        break;
+      case 'padding-left': case 'padding-inline-start': {
+        var plv = parseFloat(vl); if (plv > 0) p.paddingLeft = plv;
+        break;
+      }
+      case 'padding-right': case 'padding-inline-end': {
+        var prv = parseFloat(vl); if (prv > 0) p.paddingRight = prv;
+        break;
+      }
+      case 'padding-top': {
+        var ptv = parseFloat(vl); if (ptv > 0) p.paddingTop = ptv;
+        break;
+      }
+      case 'padding-bottom': {
+        var pbv = parseFloat(vl); if (pbv > 0) p.paddingBottom = pbv;
+        break;
+      }
+      case 'padding': {
+        var pavg = parseFloat(vl); if (pavg > 0) {
+          p.paddingTop = pavg; p.paddingBottom = pavg;
+          p.paddingLeft = pavg; p.paddingRight = pavg;
+        }
+        break;
+      }
+      case 'margin-top': {
+        var mtv = parseFloat(vl); if (!isNaN(mtv) && mtv > 0) p.marginTop = mtv;
+        break;
+      }
+      case 'margin-bottom': {
+        var mbv = parseFloat(vl); if (!isNaN(mbv) && mbv > 0) p.marginBottom = mbv;
+        break;
+      }
+      case 'width': {
+        if (vl !== 'auto' && vl !== '100%') { var wv = parseFloat(vl); if (wv > 0) p.width = wv; }
+        break;
+      }
+      case 'max-width': {
+        if (vl !== 'none') { var mwv = parseFloat(vl); if (mwv > 0) p.maxWidth = mwv; }
+        break;
+      }
     }
   }
   return p;

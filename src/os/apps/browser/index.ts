@@ -18,7 +18,7 @@ import {
 } from '../../core/sdk.js';
 
 import {
-  TOOLBAR_H, STATUSBAR_H, FINDBAR_H, CHAR_W, CHAR_H, LINE_H, CONTENT_PAD,
+  TOOLBAR_H, STATUSBAR_H, FINDBAR_H, CHAR_W, CHAR_H, LINE_H, CONTENT_PAD, TAB_BAR_H,
   CLR_TOOLBAR_BG, CLR_TOOLBAR_BD, CLR_STATUS_BG, CLR_STATUS_TXT,
   CLR_URL_BG, CLR_URL_FOCUS, CLR_BTN_BG, CLR_BTN_TXT, CLR_BODY, CLR_BG,
   CLR_LINK, CLR_LINK_HOV, CLR_VISITED, CLR_HR, CLR_INPUT_BD, CLR_INPUT_BG,
@@ -39,9 +39,34 @@ import { parseURL, urlEncode, encodeFormData, decodeBMP, readPNGDimensions, deco
 import { parseHTML }    from './html.js';
 import { parseStylesheet, type CSSRule } from './stylesheet.js';
 import { decodePNG }    from './img-png.js';
+import { decodeJPEG }   from './img-jpeg.js';
 import { layoutNodes }  from './layout.js';
 import { aboutJsosHTML, errorHTML, jsonViewerHTML } from './pages.js';
 import { createPageJS, type PageJS } from './jsruntime.js';
+
+// ── TabState — per-tab browseable snapshot ────────────────────────────────────
+
+interface TabState {
+  url:           string;
+  title:         string;
+  history:       HistoryEntry[];
+  histIdx:       number;
+  pageLines:     RenderedLine[];
+  widgets:       PositionedWidget[];
+  scrollY:       number;
+  maxScrollY:    number;
+  loading:       boolean;
+  status:        string;
+  hoverHref:     string;
+  forms:         FormState[];
+  focusedWidget: number;
+  imgCache:      Map<string, DecodedImage | null>;
+  imgsFetching:  boolean;
+  pageJS:        PageJS | null;
+  jsStartMs:     number;
+  pageSource:    string;
+  pageBaseURL:   string;
+}
 
 // ── BrowserApp ────────────────────────────────────────────────────────────────
 
@@ -99,14 +124,92 @@ export class BrowserApp implements App {
   private _pageJS: PageJS | null = null;
   private _jsStartMs = 0;
 
+  // ── Tabs ───────────────────────────────────────────────────────────────────
+  private _tabs:    TabState[] = [];
+  private _curTab   = 0;
+
+  private _makeBlankTab(url: string): TabState {
+    return {
+      url, title: url, history: [{ url, title: url }], histIdx: 0,
+      pageLines: [], widgets: [], scrollY: 0, maxScrollY: 0,
+      loading: false, status: '', hoverHref: '', forms: [],
+      focusedWidget: -1, imgCache: new Map(), imgsFetching: false,
+      pageJS: null, jsStartMs: 0, pageSource: '', pageBaseURL: '',
+    };
+  }
+
+  private _saveTab(): void {
+    if (!this._tabs.length) return;
+    this._tabs[this._curTab] = {
+      url: this._pageURL, title: this._pageTitle,
+      history: this._history, histIdx: this._histIdx,
+      pageLines: this._pageLines, widgets: this._widgets,
+      scrollY: this._scrollY, maxScrollY: this._maxScrollY,
+      loading: this._loading, status: this._status,
+      hoverHref: this._hoverHref, forms: this._forms,
+      focusedWidget: this._focusedWidget,
+      imgCache: this._imgCache, imgsFetching: this._imgsFetching,
+      pageJS: this._pageJS, jsStartMs: this._jsStartMs,
+      pageSource: this._pageSource, pageBaseURL: this._pageBaseURL,
+    };
+  }
+
+  private _loadTab(idx: number): void {
+    var t = this._tabs[idx];
+    this._pageURL = t.url; this._pageTitle = t.title;
+    this._history = t.history; this._histIdx = t.histIdx;
+    this._pageLines = t.pageLines; this._widgets = t.widgets;
+    this._scrollY = t.scrollY; this._maxScrollY = t.maxScrollY;
+    this._loading = t.loading; this._status = t.status;
+    this._hoverHref = t.hoverHref; this._forms = t.forms;
+    this._focusedWidget = t.focusedWidget;
+    this._imgCache = t.imgCache; this._imgsFetching = t.imgsFetching;
+    this._pageJS = t.pageJS; this._jsStartMs = t.jsStartMs;
+    this._pageSource = t.pageSource; this._pageBaseURL = t.pageBaseURL;
+  }
+
+  private _newTabAction(url = 'about:blank'): void {
+    if (this._tabs.length >= 8) return;  // max 8 tabs
+    this._saveTab();
+    this._tabs.push(this._makeBlankTab(url));
+    this._curTab = this._tabs.length - 1;
+    this._loadTab(this._curTab);
+    this._navigate(url);
+    this._dirty = true;
+  }
+
+  private _switchTabAction(idx: number): void {
+    if (idx < 0 || idx >= this._tabs.length || idx === this._curTab) return;
+    this._saveTab();
+    this._curTab = idx;
+    this._loadTab(idx);
+    this._dirty = true;
+  }
+
+  private _closeTabAction(idx: number): void {
+    if (this._tabs.length <= 1) return;
+    if (this._tabs[idx]?.pageJS) { this._tabs[idx]!.pageJS!.dispose(); }
+    this._tabs.splice(idx, 1);
+    if (this._curTab >= this._tabs.length) this._curTab = this._tabs.length - 1;
+    this._loadTab(this._curTab);
+    this._dirty = true;
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   onMount(win: WMWindow): void {
     this._win = win;
+    // Initialize first tab
+    this._tabs = [this._makeBlankTab('about:jsos')];
+    this._curTab = 0;
+    this._loadTab(0);
     this._navigate('about:jsos');
   }
 
   onUnmount(): void {
+    for (var ti = 0; ti < this._tabs.length; ti++) {
+      if (this._tabs[ti].pageJS) this._tabs[ti].pageJS!.dispose();
+    }
     if (this._pageJS) { this._pageJS.dispose(); this._pageJS = null; }
     this._win = null;
   }
@@ -206,6 +309,11 @@ export class BrowserApp implements App {
     if (ch === '\x12') { this._reload(); return; }
     if (ch === '\x04') { this._addBookmark(); return; }
     if (ch === '\x06') { this._openFind(); return; }
+    if (ch === '\x14') { this._newTabAction(); return; }                     // Ctrl+T
+    if (ch === '\x17') { this._closeTabAction(this._curTab); return; }       // Ctrl+W
+    if (ch === '\x09' && event.ctrl) {                                       // Ctrl+Tab
+      this._switchTabAction((this._curTab + 1) % this._tabs.length); return;
+    }
 
     if (ch === ' ')           { this._scrollBy(this._contentH()); return; }
     if (ch === 'b' || ch === 'B') { this._goBack();    return; }
@@ -221,12 +329,31 @@ export class BrowserApp implements App {
   onMouse(event: MouseEvent): void {
     if (!this._win) return;
 
-    var contentY0 = TOOLBAR_H;
+    var contentY0 = TAB_BAR_H + TOOLBAR_H;
     var contentY1 = this._win.height - STATUSBAR_H - (this._findMode ? FINDBAR_H : 0);
     var sbX       = this._win.width - 12;
 
+    // Tab bar click handling
+    if (event.type === 'down' && event.y >= 0 && event.y < TAB_BAR_H) {
+      var nTabs = this._tabs.length;
+      var newBtnW = 22;
+      var tabAreaW = (this._win?.width || 800) - newBtnW;
+      var tabW = nTabs > 0 ? Math.min(160, Math.max(60, Math.floor(tabAreaW / nTabs))) : tabAreaW;
+      var clickedTab = Math.floor(event.x / tabW);
+      if (clickedTab >= 0 && clickedTab < nTabs) {
+        var clsX = clickedTab * tabW + tabW - 14;
+        if (event.x >= clsX && event.x < clsX + 10) {
+          this._closeTabAction(clickedTab); return;
+        }
+        this._switchTabAction(clickedTab); return;
+      }
+      // New tab button
+      if (event.x >= nTabs * tabW) { this._newTabAction(); return; }
+      return;
+    }
+
     // Toolbar hover
-    if (event.y >= 5 && event.y <= 24) {
+    if (event.y >= TAB_BAR_H + 5 && event.y <= TAB_BAR_H + 24) {
       var hb = -1;
       if      (event.x >= 4  && event.x <= 25) hb = 0;
       else if (event.x >= 28 && event.x <= 49) hb = 1;
@@ -248,7 +375,7 @@ export class BrowserApp implements App {
 
     if (event.type === 'down') {
       // Toolbar buttons
-      if (event.y >= 5 && event.y <= 24) {
+      if (event.y >= TAB_BAR_H + 5 && event.y <= TAB_BAR_H + 24) {
         if (event.x >= 4  && event.x <= 25) { this._goBack();    return; }
         if (event.x >= 28 && event.x <= 49) { this._goForward(); return; }
         if (event.x >= 52 && event.x <= 73) { this._reload();    return; }
@@ -327,6 +454,7 @@ export class BrowserApp implements App {
     if (!this._dirty) return false;
     this._dirty = false;
 
+    this._drawTabBar(canvas);
     this._drawToolbar(canvas);
     this._drawContent(canvas);
     this._drawStatusBar(canvas);
@@ -336,31 +464,74 @@ export class BrowserApp implements App {
 
   private _contentH(): number {
     if (!this._win) return 400;
-    return this._win.height - TOOLBAR_H - STATUSBAR_H - (this._findMode ? FINDBAR_H : 0);
+    return this._win.height - TAB_BAR_H - TOOLBAR_H - STATUSBAR_H - (this._findMode ? FINDBAR_H : 0);
+  }
+
+  private _drawTabBar(canvas: Canvas): void {
+    var w    = canvas.width;
+    var nTabs = this._tabs.length;
+    canvas.fillRect(0, 0, w, TAB_BAR_H, CLR_TOOLBAR_BG);
+    canvas.drawLine(0, TAB_BAR_H - 1, w, TAB_BAR_H - 1, CLR_TOOLBAR_BD);
+
+    var newBtnW = 22;
+    var tabAreaW = w - newBtnW;
+    var tabW = nTabs > 0 ? Math.min(160, Math.max(60, Math.floor(tabAreaW / nTabs))) : tabAreaW;
+
+    for (var ti = 0; ti < nTabs; ti++) {
+      var tx      = ti * tabW;
+      var isAct   = ti === this._curTab;
+      var tabBg   = isAct ? CLR_BG : CLR_TOOLBAR_BG;
+      canvas.fillRect(tx, 1, tabW - 1, TAB_BAR_H - 1, tabBg);
+      if (isAct) {
+        // Active tab: erase bottom border to merge with content area
+        canvas.fillRect(tx, TAB_BAR_H - 1, tabW - 1, 1, CLR_BG);
+      }
+      // Left border
+      canvas.fillRect(tx, 1, 1, TAB_BAR_H - 2, CLR_TOOLBAR_BD);
+      // Right border  
+      canvas.fillRect(tx + tabW - 1, 1, 1, TAB_BAR_H - 2, CLR_TOOLBAR_BD);
+
+      var t       = this._tabs[ti];
+      var label   = t.loading ? 'Loading...' : (t.title || t.url || 'New Tab');
+      var maxCh   = Math.max(1, Math.floor((tabW - 20) / CHAR_W));
+      var display = label.length > maxCh ? label.slice(0, maxCh - 1) + '\u2026' : label;
+      var txtClr  = isAct ? CLR_BTN_TXT : CLR_STATUS_TXT;
+      canvas.drawText(tx + 4, 7, display, txtClr);
+
+      // Close button (×)
+      var clsX = tx + tabW - 14;
+      canvas.drawText(clsX, 7, 'x', txtClr);
+    }
+
+    // New tab button (+)
+    var ntx = nTabs * tabW;
+    canvas.fillRect(ntx, 1, newBtnW, TAB_BAR_H - 2, CLR_TOOLBAR_BG);
+    canvas.drawText(ntx + 6, 7, '+', CLR_BTN_TXT);
   }
 
   private _drawToolbar(canvas: Canvas): void {
-    var w = canvas.width;
-    canvas.fillRect(0, 0, w, TOOLBAR_H, CLR_TOOLBAR_BG);
-    canvas.drawLine(0, TOOLBAR_H - 1, w, TOOLBAR_H - 1, CLR_TOOLBAR_BD);
+    var w   = canvas.width;
+    var tbY = TAB_BAR_H;  // toolbar top Y offset
+    canvas.fillRect(0, tbY, w, TOOLBAR_H, CLR_TOOLBAR_BG);
+    canvas.drawLine(0, tbY + TOOLBAR_H - 1, w, tbY + TOOLBAR_H - 1, CLR_TOOLBAR_BD);
 
     // Back button
-    canvas.fillRect(4, 5, 22, 20, this._hoverBtn === 0 ? 0xFFC4C6CA : CLR_BTN_BG);
-    canvas.drawText(10, 11, '<', this._histIdx > 0 ? CLR_BTN_TXT : CLR_HR);
+    canvas.fillRect(4, tbY + 5, 22, 20, this._hoverBtn === 0 ? 0xFFC4C6CA : CLR_BTN_BG);
+    canvas.drawText(10, tbY + 11, '<', this._histIdx > 0 ? CLR_BTN_TXT : CLR_HR);
 
     // Forward button
-    canvas.fillRect(28, 5, 22, 20, this._hoverBtn === 1 ? 0xFFC4C6CA : CLR_BTN_BG);
-    canvas.drawText(35, 11, '>', this._histIdx < this._history.length - 1 ? CLR_BTN_TXT : CLR_HR);
+    canvas.fillRect(28, tbY + 5, 22, 20, this._hoverBtn === 1 ? 0xFFC4C6CA : CLR_BTN_BG);
+    canvas.drawText(35, tbY + 11, '>', this._histIdx < this._history.length - 1 ? CLR_BTN_TXT : CLR_HR);
 
     // Reload/Stop button
-    canvas.fillRect(52, 5, 22, 20, this._hoverBtn === 2 ? 0xFFC4C6CA : CLR_BTN_BG);
-    canvas.drawText(58, 11, this._loading ? 'X' : 'R', CLR_BTN_TXT);
+    canvas.fillRect(52, tbY + 5, 22, 20, this._hoverBtn === 2 ? 0xFFC4C6CA : CLR_BTN_BG);
+    canvas.drawText(58, tbY + 11, this._loading ? 'X' : 'R', CLR_BTN_TXT);
 
     // URL bar
     var urlX = 76;
     var urlW = w - urlX - 4;
-    canvas.fillRect(urlX, 5, urlW, 20, CLR_URL_BG);
-    canvas.drawRect(urlX, 5, urlW, 20, this._urlBarFocus ? CLR_URL_FOCUS : CLR_TOOLBAR_BD);
+    canvas.fillRect(urlX, tbY + 5, urlW, 20, CLR_URL_BG);
+    canvas.drawRect(urlX, tbY + 5, urlW, 20, this._urlBarFocus ? CLR_URL_FOCUS : CLR_TOOLBAR_BD);
 
     var display  = this._urlBarFocus ? this._urlInput : this._pageURL;
     var maxChars = Math.max(1, Math.floor((urlW - 8) / CHAR_W));
@@ -373,27 +544,27 @@ export class BrowserApp implements App {
       }
       var showTxt = display.slice(this._urlScrollOff, this._urlScrollOff + maxChars);
       if (this._urlAllSelected) {
-        canvas.fillRect(urlX + 2, 7, urlW - 4, 16, CLR_URL_FOCUS);
-        canvas.drawText(urlX + 4, 12, showTxt, 0xFFFFFFFF);
+        canvas.fillRect(urlX + 2, tbY + 7, urlW - 4, 16, CLR_URL_FOCUS);
+        canvas.drawText(urlX + 4, tbY + 12, showTxt, 0xFFFFFFFF);
       } else {
-        canvas.drawText(urlX + 4, 12, showTxt, CLR_BODY);
+        canvas.drawText(urlX + 4, tbY + 12, showTxt, CLR_BODY);
       }
       if ((this._cursorBlink >> 4) % 2 === 0) {
         var ccx = urlX + 4 + (this._urlCursorPos - this._urlScrollOff) * CHAR_W;
         if (ccx >= urlX + 2 && ccx <= urlX + urlW - 4) {
-          canvas.fillRect(ccx, 10, 1, CHAR_H, this._urlAllSelected ? 0xFFFFFFFF : CLR_BODY);
+          canvas.fillRect(ccx, tbY + 10, 1, CHAR_H, this._urlAllSelected ? 0xFFFFFFFF : CLR_BODY);
         }
       }
     } else {
       var showTxt2 = display.length > maxChars ? display.slice(display.length - maxChars) : display;
-      canvas.drawText(urlX + 4, 12, showTxt2, CLR_BODY);
+      canvas.drawText(urlX + 4, tbY + 12, showTxt2, CLR_BODY);
     }
   }
 
   private _drawContent(canvas: Canvas): void {
     var w  = canvas.width;
     var ch = this._contentH();
-    var y0 = TOOLBAR_H;
+    var y0 = TAB_BAR_H + TOOLBAR_H;
 
     canvas.fillRect(0, y0, w, ch, CLR_BG);
 
@@ -439,19 +610,27 @@ export class BrowserApp implements App {
           clr = this._visited.has(span.href) ? CLR_VISITED
               : span.href === this._hoverHref ? CLR_LINK_HOV : CLR_LINK;
         }
-        if (span.codeBg) canvas.fillRect(span.x - 1, absY - 1, span.text.length * CHAR_W + 2, CHAR_H + 2, CLR_CODE_BG);
-        if (span.mark)   canvas.fillRect(span.x, absY - 1, span.text.length * CHAR_W, CHAR_H + 2, CLR_MARK_BG);
+        var sc  = span.fontScale || 1;
+        var sCW = CHAR_W * sc;
+        var sCH = CHAR_H * sc;
+        if (span.codeBg) canvas.fillRect(span.x - 1, absY - 1, span.text.length * sCW + 2, sCH + 2, CLR_CODE_BG);
+        if (span.mark)   canvas.fillRect(span.x, absY - 1, span.text.length * sCW, sCH + 2, CLR_MARK_BG);
         if (span.searchHit) {
           var hc = span.hitIdx === this._findCur ? CLR_FIND_CUR : CLR_FIND_MATCH;
-          canvas.fillRect(span.x, absY - 1, span.text.length * CHAR_W, CHAR_H + 2, hc);
+          canvas.fillRect(span.x, absY - 1, span.text.length * sCW, sCH + 2, hc);
         }
-        canvas.drawText(span.x, absY, span.text, clr);
-        if (span.bold)      canvas.drawText(span.x + 1, absY, span.text, clr);
-        if (span.href)      canvas.drawLine(span.x, absY + CHAR_H, span.x + span.text.length * CHAR_W, absY + CHAR_H, clr);
-        if (span.underline) canvas.drawLine(span.x, absY + CHAR_H, span.x + span.text.length * CHAR_W, absY + CHAR_H, clr);
+        if (sc > 1) {
+          canvas.drawTextScaled(span.x, absY, span.text, clr, sc);
+          if (span.bold) canvas.drawTextScaled(span.x + sc, absY, span.text, clr, sc);
+        } else {
+          canvas.drawText(span.x, absY, span.text, clr);
+          if (span.bold) canvas.drawText(span.x + 1, absY, span.text, clr);
+        }
+        if (span.href)      canvas.drawLine(span.x, absY + sCH, span.x + span.text.length * sCW, absY + sCH, clr);
+        if (span.underline) canvas.drawLine(span.x, absY + sCH, span.x + span.text.length * sCW, absY + sCH, clr);
         if (span.del) {
-          var mY = absY + Math.floor(CHAR_H / 2);
-          canvas.drawLine(span.x, mY, span.x + span.text.length * CHAR_W, mY, CLR_DEL);
+          var mY = absY + Math.floor(sCH / 2);
+          canvas.drawLine(span.x, mY, span.x + span.text.length * sCW, mY, CLR_DEL);
         }
       }
     }
@@ -863,6 +1042,10 @@ export class BrowserApp implements App {
           if (rawBytes.length > 8 && rawBytes[0] === 0x89 && rawBytes[1] === 0x50) {
             try { decoded = decodePNG(new Uint8Array(rawBytes)); } catch (_e) {}
           }
+          // Try JPEG
+          if (!decoded && rawBytes.length > 3 && rawBytes[0] === 0xFF && rawBytes[1] === 0xD8) {
+            try { decoded = decodeJPEG(new Uint8Array(rawBytes)); } catch (_e) {}
+          }
           if (!decoded) {
             var pngDim0 = readPNGDimensions(rawBytes);
             if (pngDim0) {
@@ -900,8 +1083,11 @@ export class BrowserApp implements App {
             } else if (b0 === 0x89 && b1 === 0x50) {
               // PNG — full decode using inline TypeScript PNG decoder
               try { imgDecoded = decodePNG(new Uint8Array(resp.body)); } catch (_e) {}
+            } else if (b0 === 0xFF && b1 === 0xD8) {
+              // JPEG — full decode using inline TypeScript JPEG decoder
+              try { imgDecoded = decodeJPEG(new Uint8Array(resp.body)); } catch (_e) {}
             } else {
-              // JPEG/other — read dimensions only, show sized placeholder
+              // Other — read dimensions only, show sized placeholder
               var pDim = readPNGDimensions(resp.body);
               if (pDim) {
                 ww.imgNatW = pDim.w; ww.pw = Math.min(pDim.w, 600);

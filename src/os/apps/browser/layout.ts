@@ -44,17 +44,18 @@ export function flowSpans(
   }
 
   function addWord(word: string, sp: InlineSpan): void {
+    var cw   = CHAR_W * (sp.fontScale || 1);  // scaled char width
     var clr  = spanColor(sp);
     var nspc = curX > xLeft;
-    var spcW = nspc ? CHAR_W : 0;
-    if (curX + spcW + word.length * CHAR_W > maxX && curX > xLeft) {
+    var spcW = nspc ? cw : 0;
+    if (curX + spcW + word.length * cw > maxX && curX > xLeft) {
       commitLine(); nspc = false; spcW = 0;
     }
     while (word.length > 0) {
-      var avail = Math.max(1, Math.floor((maxX - curX - spcW) / CHAR_W));
+      var avail = Math.max(1, Math.floor((maxX - curX - spcW) / cw));
       if (avail <= 0 && curX > xLeft) {
         commitLine(); nspc = false; spcW = 0;
-        avail = Math.max(1, Math.floor((maxX - xLeft) / CHAR_W));
+        avail = Math.max(1, Math.floor((maxX - xLeft) / cw));
       }
       var chunk   = word.slice(0, avail);
       var display = (nspc ? ' ' : '') + chunk;
@@ -65,8 +66,9 @@ export function flowSpans(
       if (sp.mark)      rsp.mark      = true;
       if (sp.code)      rsp.codeBg    = true;
       if (sp.underline) rsp.underline = true;
+      if (sp.fontScale) rsp.fontScale = sp.fontScale;
       curLine.push(rsp);
-      curX  += display.length * CHAR_W;
+      curX  += display.length * cw;
       word   = word.slice(chunk.length);
       nspc   = false; spcW = 0;
     }
@@ -136,13 +138,14 @@ export function layoutNodes(
     }
 
     if (/^h[1-6]$/.test(nd.type)) {
-      var level = parseInt(nd.type[1]!, 10);
-      var hClr  = level === 1 ? CLR_H1 : level === 2 ? CLR_H2 : CLR_H3;
-      var lhH   = level <= 2 ? LINE_H + 8 : level <= 4 ? LINE_H + 4 : LINE_H + 2;
-      if (y > CONTENT_PAD) blank(level <= 2 ? LINE_H : LINE_H >> 1);
+      var level  = parseInt(nd.type[1]!, 10);
+      var hClr   = level === 1 ? CLR_H1 : level === 2 ? CLR_H2 : CLR_H3;
+      var hScale = level === 1 ? 3 : level <= 3 ? 2 : 1;
+      var lhH    = 8 * hScale + 4;
+      if (y > CONTENT_PAD) blank(level <= 2 ? LINE_H * hScale : LINE_H >> 1);
       var hSpans = nd.spans.length > 0
-        ? nd.spans.map(s => ({ ...s, bold: true }))
-        : [{ text: '(untitled)', bold: true, color: undefined as (number | undefined) }];
+        ? nd.spans.map(s => ({ ...s, bold: true, fontScale: hScale }))
+        : [{ text: '(untitled)', bold: true, fontScale: hScale, color: undefined as (number | undefined) }];
       commit(flowSpans(hSpans, xLeft, maxX, lhH, hClr));
       blank(level <= 2 ? LINE_H >> 1 : 2);
       continue;
@@ -182,10 +185,37 @@ export function layoutNodes(
       blank(LINE_H >> 1); continue;
     }
 
-    if (nd.type === 'block') {
-      var bgColor = nd.bgColor;
-      commit(flowSpans(nd.spans, xLeft, maxX, LINE_H, CLR_BODY,
-                       bgColor ? { bgColor } : undefined));
+    if (nd.type === 'block' || nd.type === 'aside') {
+      // Pre-margin
+      var preMargin  = nd.marginTop  ? Math.max(1, Math.round(nd.marginTop  / LINE_H)) * LINE_H >> 1 : 0;
+      var postMargin = nd.marginBottom ? Math.max(1, Math.round(nd.marginBottom / LINE_H)) * LINE_H >> 1 : 0;
+      if (preMargin  > 0) blank(preMargin);
+
+      var bgColor   = nd.bgColor;
+      var blkLeft   = xLeft + (nd.paddingLeft ? Math.round(nd.paddingLeft / CHAR_W) * CHAR_W : 0);
+      var blkMaxX   = maxX;
+
+      if (nd.float === 'right') {
+        // Float right: render as a visually boxed right-side block
+        var asideW   = Math.min(maxX - xLeft, 200);  // cap aside to 200px
+        var asideX   = maxX - asideW;
+        var borderY0 = y;
+        commit(flowSpans(nd.spans, asideX + 4, maxX - 4, LINE_H, CLR_BODY,
+                         bgColor ? { bgColor } : undefined));
+        // Draw border around the aside block
+        lines.push({ y: borderY0, nodes: [], lineH: 0 }); // spacer marker
+        blank(2);
+      } else if (nd.float === 'left') {
+        // Float left: render as an indented aside
+        var fLeftW = Math.min(160, (maxX - xLeft) >> 1);
+        commit(flowSpans(nd.spans, xLeft + 4, xLeft + fLeftW - 4, LINE_H, CLR_BODY,
+                         bgColor ? { bgColor } : undefined));
+        blank(2);
+      } else {
+        commit(flowSpans(nd.spans, blkLeft, blkMaxX, LINE_H, CLR_BODY,
+                         bgColor ? { bgColor } : undefined));
+      }
+      if (postMargin > 0) blank(postMargin);
       continue;
     }
 

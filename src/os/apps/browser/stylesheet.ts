@@ -347,12 +347,22 @@ export function computeElementStyle(
 }
 
 function mergeProps(target: CSSProps, src: CSSProps): void {
-  if (src.color     !== undefined) target.color     = src.color;
-  if (src.bgColor   !== undefined) target.bgColor   = src.bgColor;
-  if (src.bold      !== undefined) target.bold      = src.bold;
-  if (src.italic    !== undefined) target.italic    = src.italic;
-  if (src.underline !== undefined) target.underline = src.underline;
-  if (src.strike    !== undefined) target.strike    = src.strike;
-  if (src.align     !== undefined) target.align     = src.align;
-  if (src.hidden    !== undefined) target.hidden    = src.hidden;
+  if (src.color        !== undefined) target.color        = src.color;
+  if (src.bgColor      !== undefined) target.bgColor      = src.bgColor;
+  if (src.bold         !== undefined) target.bold         = src.bold;
+  if (src.italic       !== undefined) target.italic       = src.italic;
+  if (src.underline    !== undefined) target.underline    = src.underline;
+  if (src.strike       !== undefined) target.strike       = src.strike;
+  if (src.align        !== undefined) target.align        = src.align;
+  if (src.hidden       !== undefined) target.hidden       = src.hidden;
+  if (src.float        !== undefined) target.float        = src.float;
+  if (src.display      !== undefined) target.display      = src.display;
+  if (src.paddingLeft  !== undefined) target.paddingLeft  = src.paddingLeft;
+  if (src.paddingRight !== undefined) target.paddingRight = src.paddingRight;
+  if (src.paddingTop   !== undefined) target.paddingTop   = src.paddingTop;
+  if (src.paddingBottom !== undefined) target.paddingBottom = src.paddingBottom;
+  if (src.marginTop    !== undefined) target.marginTop    = src.marginTop;
+  if (src.marginBottom !== undefined) target.marginBottom = src.marginBottom;
+  if (src.width        !== undefined) target.width        = src.width;
+  if (src.maxWidth     !== undefined) target.maxWidth     = src.maxWidth;
 }

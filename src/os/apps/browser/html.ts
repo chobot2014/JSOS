@@ -145,6 +145,16 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     if (p.strike)    curCSS.strike    = true;
     if (p.align)     curCSS.align     = p.align;
     if (p.hidden)  { curCSS.hidden    = true; skipDepth++; }
+    // Layout properties (block-level)
+    if (p.float        !== undefined) curCSS.float        = p.float;
+    if (p.display      !== undefined) curCSS.display      = p.display;
+    if (p.paddingLeft  !== undefined) curCSS.paddingLeft  = p.paddingLeft;
+    if (p.paddingTop   !== undefined) curCSS.paddingTop   = p.paddingTop;
+    if (p.paddingBottom !== undefined) curCSS.paddingBottom = p.paddingBottom;
+    if (p.marginTop    !== undefined) curCSS.marginTop    = p.marginTop;
+    if (p.marginBottom !== undefined) curCSS.marginBottom = p.marginBottom;
+    if (p.width        !== undefined) curCSS.width        = p.width;
+    if (p.maxWidth     !== undefined) curCSS.maxWidth     = p.maxWidth;
   }
   function popCSS(): void {
     if (cssStack.length > 0) {
@@ -197,7 +207,13 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
         merged.push({ ...sp });
       }
     }
-    nodes.push({ type: 'block', spans: merged });
+    var blk: RenderNode = { type: 'block', spans: merged };
+    if (curCSS.bgColor   !== undefined) blk.bgColor     = curCSS.bgColor;
+    if (curCSS.float)                   blk.float       = curCSS.float;
+    if (curCSS.marginTop)               blk.marginTop   = curCSS.marginTop;
+    if (curCSS.marginBottom)            blk.marginBottom = curCSS.marginBottom;
+    if (curCSS.paddingLeft)             blk.paddingLeft = curCSS.paddingLeft;
+    nodes.push(blk);
     inlineSpans = [];
   }
 

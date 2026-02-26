@@ -1,5 +1,6 @@
 // ── Layout constants ──────────────────────────────────────────────────────────
 
+export const TAB_BAR_H   = 22;
 export const TOOLBAR_H   = 30;
 export const STATUSBAR_H = 14;
 export const FINDBAR_H   = 22;
