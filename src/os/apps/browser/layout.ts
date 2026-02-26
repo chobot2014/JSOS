@@ -123,6 +123,9 @@ function _layoutNodesImpl(
   var xLeft = CONTENT_PAD;
   var maxX  = contentW - CONTENT_PAD;
 
+  // Absolutely/fixed-positioned elements collected separately (out-of-flow)
+  var oofNodes: RenderNode[] = [];
+
   function blank(h: number): void {
     lines.push({ y, nodes: [], lineH: h }); y += h;
   }
@@ -132,24 +135,68 @@ function _layoutNodesImpl(
     }
   }
 
+  // ── Text transform helper ────────────────────────────────────────────────────
+  function applyTextTransform(text: string, transform: string | undefined): string {
+    if (!transform || transform === 'none') return text;
+    if (transform === 'uppercase')  return text.toUpperCase();
+    if (transform === 'lowercase')  return text.toLowerCase();
+    if (transform === 'capitalize') return text.replace(/\b\w/g, function(c) { return c.toUpperCase(); });
+    return text;
+  }
+
+  // ── Apply text transform to span array ──────────────────────────────────────
+  function transformSpans(spans: InlineSpan[], tt: string | undefined): InlineSpan[] {
+    if (!tt || tt === 'none') return spans;
+    return spans.map(function(sp) {
+      return sp.text ? { ...sp, text: applyTextTransform(sp.text, tt) } : sp;
+    });
+  }
+
+  // ── Resolve line height for a node ──────────────────────────────────────────
+  function nodeLineH(nd: RenderNode): number {
+    return nd.lineHeight ? Math.max(LINE_H, Math.round(nd.lineHeight)) : LINE_H;
+  }
+
+  // ── Margin collapsing: last bottom margin collapses with next top margin ─────
+  var lastBottomMargin = 0;
+  function collapseMargin(newTop: number): number {
+    // Collapsed margin = max of the two; only positive margins collapse
+    var collapsed = Math.max(lastBottomMargin, newTop);
+    lastBottomMargin = 0;
+    return collapsed;
+  }
+
   for (var i = 0; i < nodes.length; i++) {
     var nd = nodes[i];
 
-    if (nd.type === 'p-break') { blank(LINE_H >> 1); continue; }
+    // ── Out-of-flow: absolute / fixed positioned elements ─────────────────────
+    if (nd.position === 'absolute' || nd.position === 'fixed') {
+      oofNodes.push(nd); continue;
+    }
+
+    if (nd.type === 'p-break') {
+      lastBottomMargin = Math.max(lastBottomMargin, LINE_H >> 1);
+      continue;
+    }
 
     if (nd.type === 'hr') {
-      lines.push({ y, nodes: [], lineH: 3, hrLine: true }); y += 8; continue;
+      lines.push({ y, nodes: [], lineH: 3, hrLine: true }); y += 8;
+      lastBottomMargin = 0; continue;
     }
 
     if (nd.type === 'pre') {
       var preText  = nd.spans[0]?.text ?? '';
+      var rawLines = preText.split('\n');
       var maxPreCh = Math.max(1, Math.floor((maxX - xLeft) / CHAR_W));
-      var preDisp  = preText.length > maxPreCh
-        ? preText.slice(0, maxPreCh - 1) + '\u00BB'   // » truncation marker
-        : preText;
-      lines.push({ y, nodes: [{ x: xLeft, text: preDisp, color: CLR_PRE_TXT }],
-                   lineH: LINE_H, preBg: true });
-      y += LINE_H; continue;
+      for (var pli = 0; pli < rawLines.length; pli++) {
+        var preDisp = rawLines[pli].length > maxPreCh
+          ? rawLines[pli].slice(0, maxPreCh - 1) + '\u00BB'
+          : rawLines[pli];
+        lines.push({ y, nodes: [{ x: xLeft, text: preDisp || ' ', color: CLR_PRE_TXT }],
+                     lineH: LINE_H, preBg: true });
+        y += LINE_H;
+      }
+      lastBottomMargin = 0; continue;
     }
 
     if (/^h[1-6]$/.test(nd.type)) {
@@ -157,80 +204,141 @@ function _layoutNodesImpl(
       var hClr   = level === 1 ? CLR_H1 : level === 2 ? CLR_H2 : CLR_H3;
       var hScale = level === 1 ? 3 : level <= 3 ? 2 : 1;
       var lhH    = 8 * hScale + 4;
-      if (y > CONTENT_PAD) blank(level <= 2 ? LINE_H * hScale : LINE_H >> 1);
-      var hSpans = nd.spans.length > 0
-        ? nd.spans.map(s => ({ ...s, bold: true, fontScale: hScale }))
-        : [{ text: '(untitled)', bold: true, fontScale: hScale, color: undefined as (number | undefined) }];
+      var hPre   = collapseMargin(level <= 2 ? LINE_H * hScale : LINE_H >> 1);
+      if (y > CONTENT_PAD && hPre > 0) blank(hPre);
+      var hSpans = (nd.spans.length > 0 ? nd.spans : [{ text: nd.type.toUpperCase(), color: undefined as (number | undefined) }])
+        .map(function(s) { return { ...s, text: applyTextTransform(s.text, nd.textTransform), bold: true, fontScale: hScale }; });
       commit(flowSpans(hSpans, xLeft, maxX, lhH, hClr));
-      blank(level <= 2 ? LINE_H >> 1 : 2);
+      lastBottomMargin = level <= 2 ? LINE_H >> 1 : 2;
       continue;
     }
 
     // <summary> renders like an <h3> but with a ▶ prefix
     if (nd.type === 'summary') {
-      if (y > CONTENT_PAD) blank(LINE_H >> 1);
+      var sTop = collapseMargin(LINE_H >> 1);
+      if (y > CONTENT_PAD && sTop > 0) blank(sTop);
       var prefix: InlineSpan = { text: '\u25B6 ', bold: true };
-      var sSpans = [prefix, ...nd.spans.map(s => ({ ...s, bold: true }))];
+      var sSpans = [prefix, ...nd.spans.map(function(s) { return { ...s, text: applyTextTransform(s.text, nd.textTransform), bold: true }; })];
       commit(flowSpans(sSpans, xLeft, maxX, LINE_H + 4, CLR_H3));
-      blank(2); continue;
+      lastBottomMargin = 2; continue;
     }
 
     if (nd.type === 'li') {
       var depth    = (nd.indent || 0) + 1;
       var bxLeft   = xLeft + (depth - 1) * (CHAR_W * 3);
       var txLeft   = bxLeft + CHAR_W * 3;
+      // List style type from CSS
+      var lstType  = (nd as RenderNode & { listStyleType?: string }).listStyleType;
       var bullets  = ['\u2022', '\u25E6', '\u25AA'];
-      var bullet   = (bullets[Math.min(depth - 1, 2)] || '\u2022') + ' ';
-      var bulletR: RenderedSpan = { x: bxLeft, text: bullet, color: CLR_BODY };
-      if (nd.spans.length === 0) {
-        lines.push({ y, nodes: [bulletR], lineH: LINE_H }); y += LINE_H;
-      } else {
-        var itemLines = flowSpans(nd.spans, txLeft, maxX, LINE_H, CLR_BODY);
-        if (itemLines.length > 0) itemLines[0].nodes.unshift(bulletR);
-        else itemLines = [{ y: 0, nodes: [bulletR], lineH: LINE_H }];
-        commit(itemLines);
+      var bullet   = lstType === 'decimal' ? (String(i) + '. ') :
+                     lstType === 'none' ? '' :
+                     (bullets[Math.min(depth - 1, 2)] || '\u2022') + ' ';
+      var liSpans  = transformSpans(nd.spans, nd.textTransform);
+      var lineHere = nodeLineH(nd);
+      if (bullet) {
+        var bulletR: RenderedSpan = { x: bxLeft, text: bullet, color: CLR_BODY };
+        if (liSpans.length === 0) {
+          lines.push({ y, nodes: [bulletR], lineH: lineHere }); y += lineHere;
+        } else {
+          var itemLines = flowSpans(liSpans, txLeft, maxX, lineHere, CLR_BODY);
+          if (itemLines.length > 0) itemLines[0].nodes.unshift(bulletR);
+          else itemLines = [{ y: 0, nodes: [bulletR], lineH: lineHere }];
+          commit(itemLines);
+        }
+      } else if (liSpans.length > 0) {
+        commit(flowSpans(liSpans, txLeft, maxX, lineHere, CLR_BODY));
       }
-      continue;
+      lastBottomMargin = 0; continue;
     }
 
     if (nd.type === 'blockquote') {
-      var bqLeft = xLeft + CHAR_W * 4;
-      commit(flowSpans(nd.spans, bqLeft, maxX - CHAR_W * 2, LINE_H, CLR_QUOTE_TXT,
+      var bqLeft    = xLeft + CHAR_W * 4;
+      var bqSpans   = transformSpans(nd.spans, nd.textTransform);
+      var bqTop     = collapseMargin(nd.marginTop || 0);
+      if (bqTop > 0) blank(bqTop);
+      commit(flowSpans(bqSpans, bqLeft, maxX - CHAR_W * 2, nodeLineH(nd), CLR_QUOTE_TXT,
                        { quoteBg: true, quoteBar: true }));
-      blank(LINE_H >> 1); continue;
+      lastBottomMargin = nd.marginBottom || (LINE_H >> 1);
+      continue;
+    }
+
+    if (nd.type === 'flex-row' && nd.children) {
+      // ── Flex-row: render children side by side ─────────────────────────────
+      var fChildren = nd.children;
+      var gap       = nd.gap ?? 8;
+      var fRowY0    = y;
+      var maxChildH = 0;
+      var fxLeft    = xLeft + (nd.paddingLeft || 0);
+      var fxAvail   = (nd.boxWidth ? Math.min(maxX, xLeft + nd.boxWidth) : maxX) - fxLeft - (nd.paddingRight || 0);
+      // Simple even distribution — respect flexGrow
+      var totalGrow = 0;
+      for (var fi = 0; fi < fChildren.length; fi++) totalGrow += (fChildren[fi].flexGrow || 1);
+      if (totalGrow === 0) totalGrow = fChildren.length;
+      var flexUsedGap = gap * Math.max(0, fChildren.length - 1);
+      var unitW = (fxAvail - flexUsedGap) / totalGrow;
+      var fCurX = fxLeft;
+      var fChildLines: { x: number; cw: number; cl: RenderedLine[] }[] = [];
+      // Collect each child's rendered lines
+      for (var fci = 0; fci < fChildren.length; fci++) {
+        var fc    = fChildren[fci];
+        var fcGrow = fc.flexGrow || 1;
+        var cw    = Math.floor(unitW * fcGrow);
+        var cLines = flowSpans(transformSpans(fc.spans, fc.textTransform), 0, cw, nodeLineH(fc), CLR_BODY,
+                               fc.bgColor !== undefined ? { bgColor: fc.bgColor } : undefined);
+        fChildLines.push({ x: fCurX, cw, cl: cLines });
+        if (cLines.length * nodeLineH(fc) > maxChildH) maxChildH = cLines.length * nodeLineH(fc);
+        fCurX += cw + gap;
+      }
+      // Stamp child lines at their x-offset
+      for (var fci2 = 0; fci2 < fChildLines.length; fci2++) {
+        var fc2 = fChildLines[fci2];
+        for (var cli2 = 0; cli2 < fc2.cl.length; cli2++) {
+          var cl2 = fc2.cl[cli2]!;
+          var shifted = cl2.nodes.map(function(n) { return { ...n, x: n.x + fc2.x }; });
+          lines.push({ y: fRowY0 + cli2 * (cl2.lineH || LINE_H), nodes: shifted, lineH: cl2.lineH,
+                       bgColor: cl2.bgColor, preBg: cl2.preBg });
+        }
+      }
+      y = fRowY0 + maxChildH;
+      lastBottomMargin = nd.marginBottom || 0;
+      continue;
     }
 
     if (nd.type === 'block' || nd.type === 'aside') {
-      // Pre-margin
-      var preMargin  = nd.marginTop  ? Math.max(1, Math.round(nd.marginTop  / LINE_H)) * LINE_H >> 1 : 0;
-      var postMargin = nd.marginBottom ? Math.max(1, Math.round(nd.marginBottom / LINE_H)) * LINE_H >> 1 : 0;
-      if (preMargin  > 0) blank(preMargin);
+      // ── Margin collapsing ────────────────────────────────────────────────────
+      var preMarginRaw  = nd.marginTop  || 0;
+      var postMarginRaw = nd.marginBottom || 0;
+      var preM  = collapseMargin(preMarginRaw);
+      if (preM  > 0) blank(preM);
 
       var bgColor   = nd.bgColor;
       var blkLeft   = xLeft + (nd.paddingLeft ? Math.round(nd.paddingLeft / CHAR_W) * CHAR_W : 0);
-      var blkMaxX   = maxX;
+      var blkRight  = nd.paddingRight ? Math.round(nd.paddingRight / CHAR_W) * CHAR_W : 0;
+      var blkMaxX   = (nd.boxWidth ? Math.min(maxX, xLeft + nd.boxWidth) : maxX) - blkRight;
+      var lh        = nodeLineH(nd);
+      var ndSpans   = transformSpans(nd.spans, nd.textTransform);
 
       if (nd.float === 'right') {
         // Float right: render as a visually boxed right-side block
-        var asideW   = Math.min(maxX - xLeft, 200);  // cap aside to 200px
+        var asideW   = nd.boxWidth ? Math.min(nd.boxWidth, maxX - xLeft) : Math.min(maxX - xLeft, 200);
         var asideX   = maxX - asideW;
         var borderY0 = y;
-        commit(flowSpans(nd.spans, asideX + 4, maxX - 4, LINE_H, CLR_BODY,
-                         bgColor ? { bgColor } : undefined));
-        // Draw border around the aside block
-        lines.push({ y: borderY0, nodes: [], lineH: 0 }); // spacer marker
+        commit(flowSpans(ndSpans, asideX + 4, maxX - 4, lh, CLR_BODY,
+                         bgColor !== undefined ? { bgColor } : undefined));
+        lines.push({ y: borderY0, nodes: [], lineH: 0 });
         blank(2);
       } else if (nd.float === 'left') {
         // Float left: render as an indented aside
-        var fLeftW = Math.min(160, (maxX - xLeft) >> 1);
-        commit(flowSpans(nd.spans, xLeft + 4, xLeft + fLeftW - 4, LINE_H, CLR_BODY,
-                         bgColor ? { bgColor } : undefined));
+        var fLeftW = nd.boxWidth ? Math.min(nd.boxWidth, (maxX - xLeft) >> 1) : Math.min(160, (maxX - xLeft) >> 1);
+        commit(flowSpans(ndSpans, xLeft + 4, xLeft + fLeftW - 4, lh, CLR_BODY,
+                         bgColor !== undefined ? { bgColor } : undefined));
         blank(2);
       } else {
-        commit(flowSpans(nd.spans, blkLeft, blkMaxX, LINE_H, CLR_BODY,
-                         bgColor ? { bgColor } : undefined));
+        // Normal block flow
+        var flowOpts = bgColor !== undefined ? { bgColor } : undefined;
+        commit(flowSpans(ndSpans, blkLeft, blkMaxX, lh, CLR_BODY, flowOpts));
       }
-      if (postMargin > 0) blank(postMargin);
+      lastBottomMargin = postMarginRaw;
       continue;
     }
 
@@ -312,6 +420,23 @@ function _layoutNodesImpl(
         blank(4);
       }
       continue;
+    }
+  }
+
+  // ── Out-of-flow (position:absolute/fixed) node rendering ─────────────────
+  for (var oi = 0; oi < oofNodes.length; oi++) {
+    var oof      = oofNodes[oi];
+    var oofX     = oof.posLeft !== undefined ? (xLeft + oof.posLeft) : xLeft;
+    var oofY     = oof.posTop  !== undefined ? oof.posTop : 0;
+    var oofMaxX  = oof.boxWidth ? Math.min(oofX + oof.boxWidth, maxX) : maxX;
+    var oofLh    = nodeLineH(oof);
+    var oofSpans = transformSpans(oof.spans, oof.textTransform);
+    var oofLines = flowSpans(oofSpans, oofX, oofMaxX, oofLh, CLR_BODY,
+                             oof.bgColor !== undefined ? { bgColor: oof.bgColor } : undefined);
+    for (var ol = 0; ol < oofLines.length; ol++) {
+      var oofLine = oofLines[ol];
+      lines.push({ y: oofY, nodes: oofLine.nodes, lineH: oofLine.lineH });
+      oofY += oofLine.lineH;
     }
   }
 

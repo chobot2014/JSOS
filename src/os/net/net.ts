@@ -1081,14 +1081,8 @@ export class NetworkStack {
     sock.remoteIP   = remoteIP;
     sock.remotePort = remotePort;
     if (!sock.localPort) sock.localPort = this.nextEph++;
-    var iss = this._randSeq();
-    var conn: TCPConnection = {
-      id: this.nextConn++, state: 'SYN_SENT',
-      localIP: sock.localIP, localPort: sock.localPort,
-      remoteIP, remotePort,
-      sendSeq: iss, recvSeq: 0,
-      sendBuf: [], recvBuf: [], window: 65535,
-    };
+    var iss  = this._randSeq();
+    var conn = this._tcpMakeConn('SYN_SENT', sock.localPort, remoteIP, remotePort, iss, 0);
     this.connections.set(conn.id, conn);
     this._sendTCPSeg(conn, TCP_SYN, []);
     conn.sendSeq = (conn.sendSeq + 1) >>> 0;

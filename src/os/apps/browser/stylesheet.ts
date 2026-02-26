@@ -141,10 +141,88 @@ function matchesCompound(
       }
       rest = rest.slice(atM[0].length);
     } else if (rest[0] === ':') {
-      // Pseudo-class — skip (we don't track DOM state like :hover)
-      var psM = rest.match(/^:+([a-zA-Z-]+)(?:\([^)]*\))?/);
-      if (psM) rest = rest.slice(psM[0].length);
-      else     return false;
+      // Pseudo-class / pseudo-element handling
+      // We evaluate structural pseudo-classes (first-child, last-child, nth-child,
+      // not) and state pseudo-classes (:hover, :focus, :active, :checked, :disabled)
+      // as best-effort based on available context.
+      var psM = rest.match(/^::?([a-zA-Z-]+)(?:\(([^)]*)\))?/);
+      if (psM) {
+        var psName = psM[1]!.toLowerCase();
+        var psArg  = psM[2] || '';
+        rest = rest.slice(psM[0].length);
+        // Pseudo-elements (::before, ::after) — match the host element
+        if (psName === 'before' || psName === 'after' ||
+            psName === 'first-line' || psName === 'first-letter') {
+          // always match (host element rule applies)
+        }
+        // State pseudo-classes — always match (can't track hover/focus here)
+        else if (psName === 'hover' || psName === 'focus' || psName === 'active' ||
+                 psName === 'focus-within' || psName === 'focus-visible') {
+          // match (optimistic: apply styles as if in state)
+        }
+        // Form pseudo-classes
+        else if (psName === 'checked' || psName === 'selected') {
+          var chk = attrs.get('checked'); if (chk === undefined) return false;
+        }
+        else if (psName === 'disabled') {
+          if (!attrs.has('disabled')) return false;
+        }
+        else if (psName === 'enabled') {
+          if (attrs.has('disabled')) return false;
+        }
+        else if (psName === 'required') {
+          if (!attrs.has('required')) return false;
+        }
+        else if (psName === 'optional') {
+          if (attrs.has('required')) return false;
+        }
+        else if (psName === 'placeholder-shown') {
+          if (!attrs.has('placeholder')) return false;
+        }
+        // Link pseudo-classes
+        else if (psName === 'link' || psName === 'any-link') {
+          if (tag !== 'a' && tag !== 'area' && tag !== 'link') return false;
+        }
+        else if (psName === 'visited') {
+          // can't tell — always miss to be safe
+        }
+        // Structural pseudo-classes — pass: we don't have DOM sibling info here
+        else if (psName === 'first-child' || psName === 'last-child' ||
+                 psName === 'only-child'  || psName === 'first-of-type' ||
+                 psName === 'last-of-type' || psName === 'only-of-type' ||
+                 psName === 'nth-child'   || psName === 'nth-last-child' ||
+                 psName === 'nth-of-type' || psName === 'nth-last-of-type') {
+          // Optimistic: assume match (rare false positives acceptable)
+        }
+        // :not() negation
+        else if (psName === 'not' && psArg) {
+          // if the argument selector matches, the element does NOT match :not()
+          if (matchesCompound(tag, id, cls, attrs, psArg.trim())) return false;
+        }
+        // :is() / :where() / :has() — accept if any arg matches
+        else if (psName === 'is' || psName === 'where') {
+          var isArgs = psArg.split(',');
+          var anyMatch = false;
+          for (var ii = 0; ii < isArgs.length; ii++) {
+            if (matchesCompound(tag, id, cls, attrs, isArgs[ii]!.trim())) { anyMatch = true; break; }
+          }
+          if (!anyMatch) return false;
+        }
+        else if (psName === 'has') {
+          // :has() requires DOM tree — optimistic pass
+        }
+        // :root
+        else if (psName === 'root') {
+          if (tag !== 'html') return false;
+        }
+        // :empty — can't tell without children
+        else if (psName === 'empty') { /* pass */ }
+        else {
+          // Unknown pseudo-class — conservative pass (don't reject)
+        }
+      } else {
+        return false;
+      }
     } else {
       break;
     }
@@ -316,26 +394,35 @@ export function computeElementStyle(
   inlineStyle: string,
   index?:      RuleIndex,
 ): CSSProps {
-  // Start with inherited properties
+  // ── Inherited starting values (CSS-spec inheritable properties) ────────────
   var result: CSSProps = {
-    color:  inherited.color,
-    bold:   inherited.bold,
-    italic: inherited.italic,
-    align:  inherited.align,
+    color:         inherited.color,
+    bold:          inherited.bold,
+    italic:        inherited.italic,
+    align:         inherited.align,
+    fontScale:     inherited.fontScale,
+    fontFamily:    inherited.fontFamily,
+    fontWeight:    inherited.fontWeight,
+    lineHeight:    inherited.lineHeight,
+    letterSpacing: inherited.letterSpacing,
+    wordSpacing:   inherited.wordSpacing,
+    textTransform: inherited.textTransform,
+    whiteSpace:    inherited.whiteSpace,
+    listStyleType: inherited.listStyleType,
+    cursor:        inherited.cursor,
   };
 
-  // Choose candidate set: indexed fast-path or full linear scan
+  // ── Choose candidate set: indexed fast-path or full linear scan ────────────
   var candidates: CSSRule[] = index
     ? candidateRules(index, tag, id, cls)
     : sheets;
 
-  // Collect matching rules
+  // ── Collect matching rules ─────────────────────────────────────────────────
   var matches: { props: CSSProps; spec: number; order: number }[] = [];
   for (var ri = 0; ri < candidates.length; ri++) {
     var rule = candidates[ri]!;
     for (var si = 0; si < rule.sels.length; si++) {
       if (matchesSingleSel(tag, id, cls, attrs, rule.sels[si]!)) {
-        // Preserve source order index (must use original sheets array when indexed)
         var srcOrder = index ? sheets.indexOf(rule) : ri;
         matches.push({ props: rule.props, spec: rule.spec, order: srcOrder });
         break;
@@ -343,17 +430,36 @@ export function computeElementStyle(
     }
   }
 
-  // Sort by specificity then source order
+  // ── Sort by specificity then source order ──────────────────────────────────
   matches.sort((a, b) => a.spec !== b.spec ? a.spec - b.spec : a.order - b.order);
 
-  // Apply in cascade order (lower specificity first, overridden by higher)
+  // ── Apply normal rules in cascade order ───────────────────────────────────
+  // !important rules are collected separately and applied after inline styles
+  var importantRules: { props: CSSProps; spec: number; order: number }[] = [];
   for (var mi = 0; mi < matches.length; mi++) {
-    mergeProps(result, matches[mi]!.props);
+    var match = matches[mi]!;
+    if (match.props.important && match.props.important.size > 0) {
+      importantRules.push(match);
+    }
+    mergeProps(result, match.props);
   }
 
-  // Inline style wins over everything
+  // ── Inline style wins over normal sheet rules ──────────────────────────────
   if (inlineStyle) {
-    mergeProps(result, parseInlineStyle(inlineStyle));
+    var inlineParsed = parseInlineStyle(inlineStyle);
+    mergeProps(result, inlineParsed);
+    // Inline !important overrides even !important sheet rules
+    if (inlineParsed.important && inlineParsed.important.size > 0) {
+      // already applied above — nothing more to do
+    }
+  }
+
+  // ── !important sheet rules override inline normal style ───────────────────
+  // (but NOT inline !important, which was already applied above)
+  // Sort important rules same as normal rules
+  importantRules.sort((a, b) => a.spec !== b.spec ? a.spec - b.spec : a.order - b.order);
+  for (var ii = 0; ii < importantRules.length; ii++) {
+    mergeProps(result, importantRules[ii]!.props, importantRules[ii]!.props.important);
   }
 
   return result;
@@ -370,24 +476,71 @@ export function buildSheetIndex(rules: CSSRule[]): RuleIndex {
   return buildRuleIndex(rules);
 }
 
-function mergeProps(target: CSSProps, src: CSSProps): void {
-  if (src.color        !== undefined) target.color        = src.color;
-  if (src.bgColor      !== undefined) target.bgColor      = src.bgColor;
-  if (src.bold         !== undefined) target.bold         = src.bold;
-  if (src.italic       !== undefined) target.italic       = src.italic;
-  if (src.underline    !== undefined) target.underline    = src.underline;
-  if (src.strike       !== undefined) target.strike       = src.strike;
-  if (src.align        !== undefined) target.align        = src.align;
-  if (src.hidden       !== undefined) target.hidden       = src.hidden;
-  if (src.float        !== undefined) target.float        = src.float;
-  if (src.display      !== undefined) target.display      = src.display;
-  if (src.paddingLeft  !== undefined) target.paddingLeft  = src.paddingLeft;
-  if (src.paddingRight !== undefined) target.paddingRight = src.paddingRight;
-  if (src.paddingTop   !== undefined) target.paddingTop   = src.paddingTop;
-  if (src.paddingBottom !== undefined) target.paddingBottom = src.paddingBottom;
-  if (src.marginTop    !== undefined) target.marginTop    = src.marginTop;
-  if (src.marginBottom !== undefined) target.marginBottom = src.marginBottom;
-  if (src.width        !== undefined) target.width        = src.width;
-  if (src.maxWidth     !== undefined) target.maxWidth     = src.maxWidth;
-  if (src.fontScale    !== undefined) target.fontScale    = src.fontScale;
+function mergeProps(target: CSSProps, src: CSSProps, importantOnly?: Set<string>): void {
+  // Helper: only apply if no existing !important blocks it, and if we're
+  // allowed to apply (either it's not guarded by importantOnly, or it IS important).
+  function set<K extends keyof CSSProps>(k: K, v: CSSProps[K]): void {
+    if (v === undefined) return;
+    if (importantOnly && !importantOnly.has(k as string)) return;
+    // Don't overwrite a target value that was set by !important in a later rule
+    // (handled by the cascade ordering — sort ensures higher-spec goes last)
+    (target as Record<string, unknown>)[k as string] = v;
+  }
+  // ── Text ──────────────────────────────────────────────────────────────────
+  set('color', src.color); set('bgColor', src.bgColor);
+  set('bold', src.bold); set('italic', src.italic);
+  set('underline', src.underline); set('strike', src.strike);
+  set('align', src.align); set('hidden', src.hidden);
+  set('fontScale', src.fontScale); set('fontFamily', src.fontFamily);
+  set('fontWeight', src.fontWeight); set('lineHeight', src.lineHeight);
+  set('letterSpacing', src.letterSpacing); set('wordSpacing', src.wordSpacing);
+  set('textTransform', src.textTransform); set('textDecoration', src.textDecoration);
+  set('textOverflow', src.textOverflow); set('whiteSpace', src.whiteSpace);
+  set('verticalAlign', src.verticalAlign); set('listStyleType', src.listStyleType);
+  // ── Box model ─────────────────────────────────────────────────────────────
+  set('display', src.display); set('boxSizing', src.boxSizing);
+  set('width', src.width); set('height', src.height);
+  set('minWidth', src.minWidth); set('minHeight', src.minHeight);
+  set('maxWidth', src.maxWidth); set('maxHeight', src.maxHeight);
+  set('paddingTop', src.paddingTop); set('paddingRight', src.paddingRight);
+  set('paddingBottom', src.paddingBottom); set('paddingLeft', src.paddingLeft);
+  set('marginTop', src.marginTop); set('marginRight', src.marginRight);
+  set('marginBottom', src.marginBottom); set('marginLeft', src.marginLeft);
+  set('indent', src.indent);
+  // ── Border ────────────────────────────────────────────────────────────────
+  set('borderWidth', src.borderWidth); set('borderStyle', src.borderStyle);
+  set('borderColor', src.borderColor); set('borderRadius', src.borderRadius);
+  set('borderTopLeftRadius', src.borderTopLeftRadius);
+  set('borderTopRightRadius', src.borderTopRightRadius);
+  set('borderBottomRightRadius', src.borderBottomRightRadius);
+  set('borderBottomLeftRadius', src.borderBottomLeftRadius);
+  set('outlineWidth', src.outlineWidth); set('outlineColor', src.outlineColor);
+  // ── Visual ────────────────────────────────────────────────────────────────
+  set('opacity', src.opacity); set('boxShadow', src.boxShadow);
+  set('textShadow', src.textShadow);
+  // ── Positioning ───────────────────────────────────────────────────────────
+  set('position', src.position); set('top', src.top); set('right', src.right);
+  set('bottom', src.bottom); set('left', src.left); set('zIndex', src.zIndex);
+  set('float', src.float); set('overflow', src.overflow);
+  set('overflowX', src.overflowX); set('overflowY', src.overflowY);
+  // ── Transform / transition ────────────────────────────────────────────────
+  set('transform', src.transform); set('transition', src.transition);
+  set('animation', src.animation);
+  // ── Cursor / pointer ──────────────────────────────────────────────────────
+  set('cursor', src.cursor); set('pointerEvents', src.pointerEvents);
+  // ── Flexbox ───────────────────────────────────────────────────────────────
+  set('flexDirection', src.flexDirection); set('flexWrap', src.flexWrap);
+  set('justifyContent', src.justifyContent); set('alignItems', src.alignItems);
+  set('alignContent', src.alignContent); set('flexGrow', src.flexGrow);
+  set('flexShrink', src.flexShrink); set('flexBasis', src.flexBasis);
+  set('alignSelf', src.alignSelf); set('order', src.order);
+  set('gap', src.gap); set('rowGap', src.rowGap); set('columnGap', src.columnGap);
+  // ── Grid ──────────────────────────────────────────────────────────────────
+  set('gridTemplateColumns', src.gridTemplateColumns);
+  set('gridTemplateRows', src.gridTemplateRows);
+  set('gridColumn', src.gridColumn); set('gridRow', src.gridRow);
+  set('gridArea', src.gridArea);
+  // ── Background ────────────────────────────────────────────────────────────
+  set('backgroundImage', src.backgroundImage); set('backgroundSize', src.backgroundSize);
+  set('backgroundPosition', src.backgroundPosition); set('backgroundRepeat', src.backgroundRepeat);
 }

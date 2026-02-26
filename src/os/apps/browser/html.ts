@@ -5,6 +5,101 @@ import type {
 import { parseInlineStyle } from './css.js';
 import { type CSSRule, computeElementStyle } from './stylesheet.js';
 
+// ── HTML5 Named Entity Table (items 350–351) ──────────────────────────────────
+// ISO 8859-1, HTML 4 + common HTML5 named character references.
+
+const _ENTITIES: Record<string, string> = {
+  // Essential
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'",
+  // Spaces / invisible
+  nbsp: '\u00A0', ensp: '\u2002', emsp: '\u2003', thinsp: '\u2009',
+  zwnj: '\u200C', zwj: '\u200D', lrm: '\u200E', rlm: '\u200F',
+  // Latin-1 supplement
+  iexcl: '\u00A1', cent: '\u00A2', pound: '\u00A3', curren: '\u00A4',
+  yen: '\u00A5', brvbar: '\u00A6', sect: '\u00A7', uml: '\u00A8',
+  copy: '\u00A9', ordf: '\u00AA', laquo: '\u00AB', not: '\u00AC',
+  shy: '\u00AD', reg: '\u00AE', macr: '\u00AF', deg: '\u00B0',
+  plusmn: '\u00B1', sup2: '\u00B2', sup3: '\u00B3', acute: '\u00B4',
+  micro: '\u00B5', para: '\u00B6', middot: '\u00B7', cedil: '\u00B8',
+  sup1: '\u00B9', ordm: '\u00BA', raquo: '\u00BB', frac14: '\u00BC',
+  frac12: '\u00BD', frac34: '\u00BE', iquest: '\u00BF',
+  Agrave: '\u00C0', Aacute: '\u00C1', Acirc: '\u00C2', Atilde: '\u00C3',
+  Auml: '\u00C4', Aring: '\u00C5', AElig: '\u00C6', Ccedil: '\u00C7',
+  Egrave: '\u00C8', Eacute: '\u00C9', Ecirc: '\u00CA', Euml: '\u00CB',
+  Igrave: '\u00CC', Iacute: '\u00CD', Icirc: '\u00CE', Iuml: '\u00CF',
+  ETH: '\u00D0', Ntilde: '\u00D1', Ograve: '\u00D2', Oacute: '\u00D3',
+  Ocirc: '\u00D4', Otilde: '\u00D5', Ouml: '\u00D6', times: '\u00D7',
+  Oslash: '\u00D8', Ugrave: '\u00D9', Uacute: '\u00DA', Ucirc: '\u00DB',
+  Uuml: '\u00DC', Yacute: '\u00DD', THORN: '\u00DE', szlig: '\u00DF',
+  agrave: '\u00E0', aacute: '\u00E1', acirc: '\u00E2', atilde: '\u00E3',
+  auml: '\u00E4', aring: '\u00E5', aelig: '\u00E6', ccedil: '\u00E7',
+  egrave: '\u00E8', eacute: '\u00E9', ecirc: '\u00EA', euml: '\u00EB',
+  igrave: '\u00EC', iacute: '\u00ED', icirc: '\u00EE', iuml: '\u00EF',
+  eth: '\u00F0', ntilde: '\u00F1', ograve: '\u00F2', oacute: '\u00F3',
+  ocirc: '\u00F4', otilde: '\u00F5', ouml: '\u00F6', divide: '\u00F7',
+  oslash: '\u00F8', ugrave: '\u00F9', uacute: '\u00FA', ucirc: '\u00FB',
+  uuml: '\u00FC', yacute: '\u00FD', thorn: '\u00FE', yuml: '\u00FF',
+  // Greek
+  Alpha: '\u0391', Beta: '\u0392', Gamma: '\u0393', Delta: '\u0394',
+  Epsilon: '\u0395', Zeta: '\u0396', Eta: '\u0397', Theta: '\u0398',
+  Iota: '\u0399', Kappa: '\u039A', Lambda: '\u039B', Mu: '\u039C',
+  Nu: '\u039D', Xi: '\u039E', Omicron: '\u039F', Pi: '\u03A0',
+  Rho: '\u03A1', Sigma: '\u03A3', Tau: '\u03A4', Upsilon: '\u03A5',
+  Phi: '\u03A6', Chi: '\u03A7', Psi: '\u03A8', Omega: '\u03A9',
+  alpha: '\u03B1', beta: '\u03B2', gamma: '\u03B3', delta: '\u03B4',
+  epsilon: '\u03B5', zeta: '\u03B6', eta: '\u03B7', theta: '\u03B8',
+  iota: '\u03B9', kappa: '\u03BA', lambda: '\u03BB', mu: '\u03BC',
+  nu: '\u03BD', xi: '\u03BE', omicron: '\u03BF', pi: '\u03C0',
+  rho: '\u03C1', sigmaf: '\u03C2', sigma: '\u03C3', tau: '\u03C4',
+  upsilon: '\u03C5', phi: '\u03C6', chi: '\u03C7', psi: '\u03C8',
+  omega: '\u03C9', thetasym: '\u03D1', upsih: '\u03D2', piv: '\u03D6',
+  // General punctuation / typography
+  bull: '\u2022', hellip: '\u2026', prime: '\u2032', Prime: '\u2033',
+  oline: '\u203E', frasl: '\u2044',
+  ndash: '\u2013', mdash: '\u2014', lsquo: '\u2018', rsquo: '\u2019',
+  sbquo: '\u201A', ldquo: '\u201C', rdquo: '\u201D', bdquo: '\u201E',
+  dagger: '\u2020', Dagger: '\u2021', trade: '\u2122',
+  lsaquo: '\u2039', rsaquo: '\u203A',
+  // Letterlike / math
+  weierp: '\u2118', image: '\u2111', real: '\u211C', alefsym: '\u2135',
+  larr: '\u2190', uarr: '\u2191', rarr: '\u2192', darr: '\u2193',
+  harr: '\u2194', crarr: '\u21B5',
+  lArr: '\u21D0', uArr: '\u21D1', rArr: '\u21D2', dArr: '\u21D3', hArr: '\u21D4',
+  forall: '\u2200', part: '\u2202', exist: '\u2203', empty: '\u2205',
+  nabla: '\u2207', isin: '\u2208', notin: '\u2209', ni: '\u220B',
+  prod: '\u220F', sum: '\u2211', minus: '\u2212', lowast: '\u2217',
+  radic: '\u221A', prop: '\u221D', infin: '\u221E', ang: '\u2220',
+  and: '\u2227', or: '\u2228', cap: '\u2229', cup: '\u222A',
+  int: '\u222B', there4: '\u2234', sim: '\u223C', cong: '\u2245',
+  asymp: '\u2248', ne: '\u2260', equiv: '\u2261', le: '\u2264', ge: '\u2265',
+  sub: '\u2282', sup: '\u2283', nsub: '\u2284', sube: '\u2286', supe: '\u2287',
+  oplus: '\u2295', otimes: '\u2297', perp: '\u22A5', sdot: '\u22C5',
+  // Shapes / suits
+  loz: '\u25CA', spades: '\u2660', clubs: '\u2663', hearts: '\u2665',
+  diams: '\u2666',
+  // Geometric / misc
+  lceil: '\u2308', rceil: '\u2309', lfloor: '\u230A', rfloor: '\u230B',
+  lang: '\u2329', rang: '\u232A',
+  // OE / special letters
+  OElig: '\u0152', oelig: '\u0153', Scaron: '\u0160', scaron: '\u0161',
+  Yuml: '\u0178', fnof: '\u0192', circ: '\u02C6', tilde: '\u02DC',
+};
+
+/**
+ * Decode HTML entities in a raw text node.
+ * Handles named entities, decimal &#NNN; and hex &#xNNN; references.
+ * O(n log m) — single regex pass over text + Map lookup.
+ */
+function _decodeEntities(raw: string): string {
+  return raw.replace(/&(?:([a-zA-Z][a-zA-Z0-9]*)|#([0-9]{1,7})|#x([0-9a-fA-F]{1,6}));/g,
+    (_m: string, name: string, dec: string, hex: string): string => {
+      if (name) { var r = _ENTITIES[name]; return r !== undefined ? r : _m; }
+      if (dec)  return String.fromCodePoint(parseInt(dec, 10));
+      if (hex)  return String.fromCodePoint(parseInt(hex, 16));
+      return _m;
+    });
+}
+
 // ── Tokeniser ─────────────────────────────────────────────────────────────────
 
 export function tokenise(html: string): HtmlToken[] {
@@ -72,27 +167,7 @@ export function tokenise(html: string): HtmlToken[] {
       var start = i;
       while (i < n && html[i] !== '<') i++;
       var raw = html.slice(start, i);
-      var dec = raw
-        .replace(/&amp;/g,    '&')   .replace(/&lt;/g,  '<')
-        .replace(/&gt;/g,     '>')   .replace(/&quot;/g, '"')
-        .replace(/&#39;/g,    "'")   .replace(/&apos;/g, "'")
-        .replace(/&nbsp;/g,   ' ')   .replace(/&mdash;/g, '\u2014')
-        .replace(/&ndash;/g,  '\u2013').replace(/&hellip;/g, '\u2026')
-        .replace(/&laquo;/g,  '\u00AB').replace(/&raquo;/g, '\u00BB')
-        .replace(/&copy;/g,   '\u00A9').replace(/&reg;/g, '\u00AE')
-        .replace(/&trade;/g,  '\u2122').replace(/&ldquo;/g, '\u201C')
-        .replace(/&rdquo;/g,  '\u201D').replace(/&lsquo;/g, '\u2018')
-        .replace(/&rsquo;/g,  '\u2019').replace(/&bull;/g,  '\u2022')
-        .replace(/&middot;/g, '\u00B7').replace(/&times;/g, '\u00D7')
-        .replace(/&divide;/g, '\u00F7').replace(/&plusmn;/g, '\u00B1')
-        .replace(/&deg;/g,    '\u00B0').replace(/&micro;/g, '\u00B5')
-        .replace(/&para;/g,   '\u00B6').replace(/&sect;/g,  '\u00A7')
-        .replace(/&dagger;/g, '\u2020').replace(/&Dagger;/g, '\u2021')
-        .replace(/&loz;/g,    '\u25CA').replace(/&spades;/g, '\u2660')
-        .replace(/&clubs;/g,  '\u2663').replace(/&hearts;/g, '\u2665')
-        .replace(/&diams;/g,  '\u2666')
-        .replace(/&#(\d+);/g,        (_m: string, nc: string) => String.fromCharCode(parseInt(nc, 10)))
-        .replace(/&#x([0-9a-f]+);/gi, (_m: string, nc: string) => String.fromCharCode(parseInt(nc, 16)));
+      var dec = _decodeEntities(raw);
       tokens.push({ kind: 'text', tag: '', text: dec, attrs: new Map() });
     }
   }
@@ -137,30 +212,88 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
 
   function pushCSS(p: CSSProps): void {
     cssStack.push({ ...curCSS });
+    // ── Text / font ────────────────────────────────────────────────────────
     if (p.color     !== undefined) curCSS.color     = p.color;
     if (p.bgColor   !== undefined) curCSS.bgColor   = p.bgColor;
-    if (p.bold)      curCSS.bold      = true;
-    if (p.italic)    curCSS.italic    = true;
-    if (p.underline) curCSS.underline = true;
-    if (p.strike)    curCSS.strike    = true;
-    if (p.align)     curCSS.align     = p.align;
-    if (p.hidden)  { curCSS.hidden    = true; skipDepth++; }
-    // Layout properties (block-level)
-    if (p.float        !== undefined) curCSS.float        = p.float;
+    if (p.bold      !== undefined) curCSS.bold      = p.bold;
+    if (p.italic    !== undefined) curCSS.italic    = p.italic;
+    if (p.underline !== undefined) curCSS.underline = p.underline;
+    if (p.strike    !== undefined) curCSS.strike    = p.strike;
+    if (p.align     !== undefined) curCSS.align     = p.align;
+    if (p.hidden) { curCSS.hidden = true; skipDepth++; }
+    else if (p.hidden === false && curCSS.hidden) { curCSS.hidden = false; skipDepth = Math.max(0, skipDepth - 1); }
+    if (p.fontScale     !== undefined) curCSS.fontScale     = p.fontScale;
+    if (p.fontFamily    !== undefined) curCSS.fontFamily    = p.fontFamily;
+    if (p.fontWeight    !== undefined) curCSS.fontWeight    = p.fontWeight;
+    if (p.lineHeight    !== undefined) curCSS.lineHeight    = p.lineHeight;
+    if (p.letterSpacing !== undefined) curCSS.letterSpacing = p.letterSpacing;
+    if (p.wordSpacing   !== undefined) curCSS.wordSpacing   = p.wordSpacing;
+    if (p.textTransform !== undefined) curCSS.textTransform = p.textTransform;
+    if (p.textDecoration !== undefined) curCSS.textDecoration = p.textDecoration;
+    if (p.textOverflow  !== undefined) curCSS.textOverflow  = p.textOverflow;
+    if (p.whiteSpace    !== undefined) curCSS.whiteSpace    = p.whiteSpace;
+    if (p.verticalAlign !== undefined) curCSS.verticalAlign = p.verticalAlign;
+    if (p.listStyleType !== undefined) curCSS.listStyleType = p.listStyleType;
+    // ── Layout ─────────────────────────────────────────────────────────────
     if (p.display      !== undefined) curCSS.display      = p.display;
-    if (p.paddingLeft  !== undefined) curCSS.paddingLeft  = p.paddingLeft;
-    if (p.paddingTop   !== undefined) curCSS.paddingTop   = p.paddingTop;
-    if (p.paddingBottom !== undefined) curCSS.paddingBottom = p.paddingBottom;
-    if (p.marginTop    !== undefined) curCSS.marginTop    = p.marginTop;
-    if (p.marginBottom !== undefined) curCSS.marginBottom = p.marginBottom;
+    if (p.boxSizing    !== undefined) curCSS.boxSizing    = p.boxSizing;
+    if (p.float        !== undefined) curCSS.float        = p.float;
     if (p.width        !== undefined) curCSS.width        = p.width;
+    if (p.height       !== undefined) curCSS.height       = p.height;
+    if (p.minWidth     !== undefined) curCSS.minWidth     = p.minWidth;
+    if (p.minHeight    !== undefined) curCSS.minHeight    = p.minHeight;
     if (p.maxWidth     !== undefined) curCSS.maxWidth     = p.maxWidth;
+    if (p.maxHeight    !== undefined) curCSS.maxHeight    = p.maxHeight;
+    if (p.paddingTop    !== undefined) curCSS.paddingTop    = p.paddingTop;
+    if (p.paddingRight  !== undefined) curCSS.paddingRight  = p.paddingRight;
+    if (p.paddingBottom !== undefined) curCSS.paddingBottom = p.paddingBottom;
+    if (p.paddingLeft   !== undefined) curCSS.paddingLeft   = p.paddingLeft;
+    if (p.marginTop    !== undefined) curCSS.marginTop    = p.marginTop;
+    if (p.marginRight  !== undefined) curCSS.marginRight  = p.marginRight;
+    if (p.marginBottom !== undefined) curCSS.marginBottom = p.marginBottom;
+    if (p.marginLeft   !== undefined) curCSS.marginLeft   = p.marginLeft;
+    // ── Border / visual ────────────────────────────────────────────────────
+    if (p.borderWidth  !== undefined) curCSS.borderWidth  = p.borderWidth;
+    if (p.borderStyle  !== undefined) curCSS.borderStyle  = p.borderStyle;
+    if (p.borderColor  !== undefined) curCSS.borderColor  = p.borderColor;
+    if (p.borderRadius !== undefined) curCSS.borderRadius = p.borderRadius;
+    if (p.opacity      !== undefined) curCSS.opacity      = p.opacity;
+    if (p.boxShadow    !== undefined) curCSS.boxShadow    = p.boxShadow;
+    if (p.textShadow   !== undefined) curCSS.textShadow   = p.textShadow;
+    // ── Position ───────────────────────────────────────────────────────────
+    if (p.position !== undefined) curCSS.position = p.position;
+    if (p.top      !== undefined) curCSS.top      = p.top;
+    if (p.right    !== undefined) curCSS.right    = p.right;
+    if (p.bottom   !== undefined) curCSS.bottom   = p.bottom;
+    if (p.left     !== undefined) curCSS.left     = p.left;
+    if (p.zIndex   !== undefined) curCSS.zIndex   = p.zIndex;
+    if (p.overflow !== undefined) curCSS.overflow = p.overflow;
+    // ── Flex ───────────────────────────────────────────────────────────────
+    if (p.flexDirection  !== undefined) curCSS.flexDirection  = p.flexDirection;
+    if (p.flexWrap       !== undefined) curCSS.flexWrap       = p.flexWrap;
+    if (p.justifyContent !== undefined) curCSS.justifyContent = p.justifyContent;
+    if (p.alignItems     !== undefined) curCSS.alignItems     = p.alignItems;
+    if (p.flexGrow       !== undefined) curCSS.flexGrow       = p.flexGrow;
+    if (p.flexShrink     !== undefined) curCSS.flexShrink     = p.flexShrink;
+    if (p.flexBasis      !== undefined) curCSS.flexBasis      = p.flexBasis;
+    if (p.alignSelf      !== undefined) curCSS.alignSelf      = p.alignSelf;
+    if (p.order          !== undefined) curCSS.order          = p.order;
+    if (p.gap            !== undefined) curCSS.gap            = p.gap;
+    // ── Transform / cursor ─────────────────────────────────────────────────
+    if (p.transform     !== undefined) curCSS.transform     = p.transform;
+    if (p.cursor        !== undefined) curCSS.cursor        = p.cursor;
+    if (p.pointerEvents !== undefined) curCSS.pointerEvents = p.pointerEvents;
+    // ── Background extras ──────────────────────────────────────────────────
+    if (p.backgroundImage    !== undefined) curCSS.backgroundImage    = p.backgroundImage;
+    if (p.backgroundSize     !== undefined) curCSS.backgroundSize     = p.backgroundSize;
+    if (p.backgroundPosition !== undefined) curCSS.backgroundPosition = p.backgroundPosition;
+    if (p.backgroundRepeat   !== undefined) curCSS.backgroundRepeat   = p.backgroundRepeat;
   }
   function popCSS(): void {
     if (cssStack.length > 0) {
-      var prev = { ...curCSS };
+      var prev = cssStack[cssStack.length - 1]!;
+      if (curCSS.hidden && !prev.hidden) skipDepth = Math.max(0, skipDepth - 1);
       curCSS = cssStack.pop()!;
-      if (prev.hidden && !curCSS.hidden) skipDepth = Math.max(0, skipDepth - 1);
     }
   }
 
@@ -209,10 +342,46 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     }
     var blk: RenderNode = { type: 'block', spans: merged };
     if (curCSS.bgColor   !== undefined) blk.bgColor     = curCSS.bgColor;
-    if (curCSS.float)                   blk.float       = curCSS.float;
+    if (curCSS.float && curCSS.float !== 'none') blk.float = curCSS.float;
     if (curCSS.marginTop)               blk.marginTop   = curCSS.marginTop;
     if (curCSS.marginBottom)            blk.marginBottom = curCSS.marginBottom;
-    if (curCSS.paddingLeft)             blk.paddingLeft = curCSS.paddingLeft;
+    if (curCSS.marginLeft)              blk.marginLeft   = curCSS.marginLeft;
+    if (curCSS.marginRight)             blk.marginRight  = curCSS.marginRight;
+    if (curCSS.paddingLeft)             blk.paddingLeft  = curCSS.paddingLeft;
+    if (curCSS.paddingRight)            blk.paddingRight  = curCSS.paddingRight;
+    if (curCSS.paddingTop)              blk.paddingTop    = curCSS.paddingTop;
+    if (curCSS.paddingBottom)           blk.paddingBottom = curCSS.paddingBottom;
+    if (curCSS.align)                   blk.textAlign    = curCSS.align;
+    if (curCSS.width  && curCSS.width > 0) blk.boxWidth  = curCSS.width;
+    if (curCSS.height && curCSS.height > 0) blk.height   = curCSS.height;
+    if (curCSS.minHeight !== undefined) blk.minHeight  = curCSS.minHeight;
+    if (curCSS.maxHeight !== undefined) blk.maxHeight  = curCSS.maxHeight;
+    if (curCSS.borderRadius !== undefined) blk.borderRadius = curCSS.borderRadius;
+    if (curCSS.borderWidth  !== undefined) blk.borderWidth  = curCSS.borderWidth;
+    if (curCSS.borderColor  !== undefined) blk.borderColor  = curCSS.borderColor;
+    if (curCSS.borderStyle  !== undefined) blk.borderStyle  = curCSS.borderStyle;
+    if (curCSS.opacity  !== undefined) blk.opacity  = curCSS.opacity;
+    if (curCSS.boxShadow)              blk.boxShadow  = curCSS.boxShadow;
+    if (curCSS.position && curCSS.position !== 'static') {
+      blk.position = curCSS.position;
+      if (curCSS.top    !== undefined) blk.posTop    = curCSS.top;
+      if (curCSS.right  !== undefined) blk.posRight  = curCSS.right;
+      if (curCSS.bottom !== undefined) blk.posBottom = curCSS.bottom;
+      if (curCSS.left   !== undefined) blk.posLeft   = curCSS.left;
+      if (curCSS.zIndex !== undefined) blk.zIndex    = curCSS.zIndex;
+    }
+    if (curCSS.overflow !== undefined) blk.overflow  = curCSS.overflow;
+    if (curCSS.whiteSpace !== undefined) blk.whiteSpace = curCSS.whiteSpace;
+    if (curCSS.textTransform !== undefined) blk.textTransform = curCSS.textTransform;
+    if (curCSS.lineHeight !== undefined) blk.lineHeight = curCSS.lineHeight;
+    if (curCSS.flexDirection)  blk.flexDirection  = curCSS.flexDirection;
+    if (curCSS.flexWrap)       blk.flexWrap       = curCSS.flexWrap;
+    if (curCSS.justifyContent) blk.justifyContent = curCSS.justifyContent;
+    if (curCSS.alignItems)     blk.alignItems     = curCSS.alignItems;
+    if (curCSS.gap !== undefined) blk.gap          = curCSS.gap;
+    if (curCSS.flexGrow  !== undefined) blk.flexGrow  = curCSS.flexGrow;
+    if (curCSS.alignSelf !== undefined) blk.alignSelf = curCSS.alignSelf;
+    if (curCSS.order     !== undefined) blk.order     = curCSS.order;
     nodes.push(blk);
     inlineSpans = [];
   }

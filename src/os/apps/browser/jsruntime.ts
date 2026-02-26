@@ -80,15 +80,46 @@ interface TimerEntry {
   delay:    number;
 }
 
-// ── Storage (per-origin, in-memory) ──────────────────────────────────────────
+// ── Storage (per-origin, in-memory + optional VFS persistence) ───────────────
 
 class VStorage {
   _data: Map<string, string> = new Map();
+  _path: string = '';   // set to VFS path to enable persistence
+
+  /** Load from VFS. Silently no-ops if path not set or file missing. */
+  _load(): void {
+    if (!this._path) return;
+    try {
+      var raw = os.fs.read(this._path);
+      if (!raw) return;
+      var obj = JSON.parse(raw);
+      this._data.clear();
+      for (var k in obj) {
+        if (typeof k === 'string' && typeof obj[k] === 'string') {
+          this._data.set(k, obj[k]);
+        }
+      }
+    } catch (_) {}
+  }
+
+  /** Persist current data to VFS. Silently no-ops if path not set. */
+  _save(): void {
+    if (!this._path) return;
+    try {
+      var obj: Record<string, string> = {};
+      this._data.forEach((v, k) => { obj[k] = v; });
+      // Ensure parent directory exists
+      var dir = this._path.slice(0, this._path.lastIndexOf('/'));
+      if (dir) try { os.fs.mkdir(dir); } catch (_) {}
+      os.fs.write(this._path, JSON.stringify(obj));
+    } catch (_) {}
+  }
+
   get length(): number { return this._data.size; }
-  setItem(k: string, v: string): void { this._data.set(String(k), String(v)); }
+  setItem(k: string, v: string): void { this._data.set(String(k), String(v)); this._save(); }
   getItem(k: string): string | null { return this._data.get(String(k)) ?? null; }
-  removeItem(k: string): void { this._data.delete(String(k)); }
-  clear(): void { this._data.clear(); }
+  removeItem(k: string): void { this._data.delete(String(k)); this._save(); }
+  clear(): void { this._data.clear(); this._save(); }
   key(n: number): string | null { return [...this._data.keys()][n] ?? null; }
 }
 
@@ -106,8 +137,35 @@ export function createPageJS(
   // Skip pages with no JS
   if (scripts.length === 0) return null;
 
+  // ── Initialise per-origin localStorage (item 500) ─────────────────────────
+  // Derive a VFS-safe origin key from the base URL (e.g. "http_example.com_80")
+  try {
+    var _originURL  = new URL(cb.baseURL);
+    var _originKey  = (_originURL.protocol.replace(':', '') + '_' +
+                       _originURL.hostname + '_' +
+                       (_originURL.port || (_originURL.protocol === 'https:' ? '443' : '80')))
+                      .replace(/[^a-zA-Z0-9_.-]/g, '_');
+    var _lsPath = '/user/localStorage/' + _originKey + '.json';
+    if (_localStorage._path !== _lsPath) {
+      _localStorage._data.clear();
+      _localStorage._path = _lsPath;
+      _localStorage._load();
+    }
+  } catch (_) {
+    // Non-URL base (e.g. file:///...) — in-memory only
+    _localStorage._path = '';
+    _localStorage._data.clear();
+  }
+  // sessionStorage is always cleared on new page load (session-scoped)
+  _sessionStorage._data.clear();
+  _sessionStorage._path = '';
+
   // Build virtual DOM from the full page HTML
   var doc = buildDOM(fullHTML);
+  // document.compatMode (item 864) — always standards mode
+  (doc as any).compatMode = 'CSS1Compat';
+  (doc as any).characterSet = 'UTF-8';
+  (doc as any).charset = 'UTF-8';
 
   // Timer machinery
   var timers: TimerEntry[] = [];
@@ -180,14 +238,21 @@ export function createPageJS(
   // ── window.navigator ───────────────────────────────────────────────────────
 
   var navigator = {
-    userAgent:  'JSOS Browser/1.0 (QuickJS)',
-    platform:   'JSOS',
+    userAgent:  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 JSOS/1.0',
+    platform:   'Linux x86_64',
     language:   'en-US',
-    languages:  ['en-US'],
+    languages:  ['en-US', 'en'],
+    vendor:     'JSOS',
+    appName:    'Netscape',
+    appVersion: '5.0 (X11)',
+    product:    'Gecko',
     cookieEnabled: true,
     onLine:     true,
+    hardwareConcurrency: 1,
+    maxTouchPoints: 0,
     geolocation: { getCurrentPosition(_s: unknown, e: ((err: unknown) => void) | undefined) { if (e) e({ code: 1, message: 'Not supported' }); }, watchPosition(_s: unknown, e: ((err: unknown) => void) | undefined) { if (e) e({ code: 1, message: 'Not supported' }); return 0; }, clearWatch() {} },
     sendBeacon() { return false; },
+    vibrate()   { return false; },
   };
 
   // ── window.screen ─────────────────────────────────────────────────────────
@@ -627,6 +692,8 @@ export function createPageJS(
     confirm:  (msg: unknown): boolean => cb.confirm(String(msg ?? '')),
     prompt:   (msg: unknown, def: unknown): string => cb.prompt(String(msg ?? ''), String(def ?? '')),
     print:    () => {},
+    name:     '',           // window.name (item 865)
+    status:   '',           // window.status (item 865)
     postMessage: () => {},
     dispatchEvent: (ev: VEvent) => doc.dispatchEvent(ev),
     addEventListener:    (t: string, fn: (e: VEvent) => void) => doc.addEventListener(t, fn),

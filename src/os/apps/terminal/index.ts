@@ -123,6 +123,11 @@ export class TerminalApp implements App {
   private _inputBuf = '';
   private _dirty = true;   // track whether canvas has been modified
 
+  // ── Input history (items 642–644) ─────────────────────────────────────────
+  private _history:    string[] = [];   // oldest at index 0
+  private _historyPos: number   = -1;  // -1 = no traversal, 0..n-1 = browsing
+  private _historyDraft = '';          // saved live input while browsing
+
   onMount(win: WMWindow): void {
     this._win  = win;
     this._term = new CanvasTerminal(win.canvas);
@@ -138,13 +143,48 @@ export class TerminalApp implements App {
 
   onKey(event: KeyEvent): void {
     if (!this._term) return;
-    var ch = event.ch;
-    if (!ch || ch.length === 0) return;
-    this._dirty = true;   // any keystroke modifies the canvas
+    var ch  = event.ch;
+    var key = event.key;
+    this._dirty = true;
+
+    // ── History navigation (items 642–643) ─────────────────────────────────
+    if (key === 'ArrowUp') {
+      if (this._history.length === 0) return;
+      if (this._historyPos < 0) {
+        // Start browsing: save the current draft
+        this._historyDraft = this._inputBuf;
+        this._historyPos   = this._history.length - 1;
+      } else if (this._historyPos > 0) {
+        this._historyPos--;
+      }
+      this._replaceInput(this._history[this._historyPos]);
+      return;
+    }
+    if (key === 'ArrowDown') {
+      if (this._historyPos < 0) return;
+      if (this._historyPos < this._history.length - 1) {
+        this._historyPos++;
+        this._replaceInput(this._history[this._historyPos]);
+      } else {
+        // Reached the bottom — restore draft
+        this._historyPos = -1;
+        this._replaceInput(this._historyDraft);
+      }
+      return;
+    }
+
+    // Any non-arrow input exits history browsing mode
+    this._historyPos = -1;
 
     if (ch === '\n' || ch === '\r') {
       this._term.print('\n');
-      this._eval(this._inputBuf.trim());
+      var cmd = this._inputBuf.trim();
+      this._eval(cmd);
+      // Push to history (skip empty and duplicate of last entry)
+      if (cmd && (this._history.length === 0 || this._history[this._history.length - 1] !== cmd)) {
+        this._history.push(cmd);
+        if (this._history.length > 500) this._history.shift();  // cap history size
+      }
       this._inputBuf = '';
       this._printPrompt();
     } else if (ch === '\b') {
@@ -156,6 +196,16 @@ export class TerminalApp implements App {
       this._inputBuf += ch;
       this._term.print(ch);
     }
+  }
+
+  /** Erase the current input on screen and replace with newVal. */
+  private _replaceInput(newVal: string): void {
+    if (!this._term) return;
+    // Erase existing input with backspaces
+    for (var i = 0; i < this._inputBuf.length; i++) this._term.print('\b');
+    // Print new value
+    this._inputBuf = newVal;
+    this._term.print(newVal);
   }
 
   onMouse(_event: MouseEvent): void { /* no-op for terminal */ }

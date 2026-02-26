@@ -33,6 +33,7 @@ import { registerCommands } from '../ui/commands.js';
 import { QJSJITHook } from '../process/qjs-jit.js';
 import { JITOSKernels } from '../process/jit-os.js';
 import { _registerJITStats } from './sdk.js';
+import { writebackTimer } from '../fs/buffer-cache.js';
 
 declare var kernel: import('./kernel.js').KernelAPI; // kernel.js is in core/
 
@@ -341,6 +342,8 @@ function main(): void {
       for (;;) {
         kernel.yield();          // cooperative scheduler tick — unblock sleeping threads
         wmInst.tick();           // poll input, render, composite, flip
+        init.tick(kernel.getUptime());          // respawn crashed services (item 718)
+        writebackTimer.tick(kernel.getTicks()); // flush dirty blocks every 30 s (item 189)
         kernel.sleep(16);        // halt CPU until next ~2 timer ticks (~20 ms)
       }
     }

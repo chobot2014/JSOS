@@ -33,7 +33,8 @@ import {
   dnsPollReplyAsync,
   dnsCancelAsync,
 } from '../net/dns.js';
-import { parseHttpResponse } from '../net/http.js';
+import { parseHttpResponse, cookieJar } from '../net/http.js';
+import { config, getHostname, getDnsServers, getTimezone } from './config.js';
 import { JSProcess, listProcesses } from '../process/jsprocess.js';
 import { ProcessSupervisor, supervisor as _defaultSupervisor } from '../process/supervisor.js';
 import { ipc, Pipe } from '../ipc/ipc.js';
@@ -273,6 +274,12 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       if (f.opts.headers) {
         for (var k in f.opts.headers) extraHdrs += k + ': ' + f.opts.headers[k] + '\r\n';
       }
+      // Inject cookies from the jar for this origin
+      var _cookieHdr = cookieJar.getCookieHeader(
+        f.parsed.host, f.parsed.path, f.parsed.protocol === 'https');
+      if (_cookieHdr && !extraHdrs.toLowerCase().includes('cookie:')) {
+        extraHdrs += 'Cookie: ' + _cookieHdr + '\r\n';
+      }
       var _rawBody = f.opts.body;
       var bodyStr = _rawBody
         ? (typeof _rawBody === 'string'
@@ -329,6 +336,21 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       if (!resp) {
         f.callback(null, 'Could not parse HTTP response from ' + f.fetchIP);
         return 'done';
+      }
+
+      // Process Set-Cookie headers from response
+      var _setCookieHdr = resp.headers.get('set-cookie');
+      if (_setCookieHdr) {
+        var _scVals = _setCookieHdr.split('\n');
+        for (var _sci = 0; _sci < _scVals.length; _sci++) {
+          if (_scVals[_sci].trim()) {
+            cookieJar.setCookie(_scVals[_sci].trim(), {
+              host: f.parsed.host,
+              path: f.parsed.path,
+              secure: f.parsed.protocol === 'https',
+            });
+          }
+        }
       }
 
       // Redirect handling
@@ -1009,6 +1031,57 @@ const sdk = {
       return fs.writeFile(path, pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value));
     },
 
+    // ── Symlinks (item 176) ─────────────────────────────────────────────────
+    /** Create a symbolic link at `linkPath` pointing to `target`. */
+    symlink(target: string, linkPath: string): boolean {
+      return fs.symlink(target, linkPath);
+    },
+    /** Read the target of a symlink. Returns null if not a symlink. */
+    readlink(path: string): string | null {
+      return fs.readlink(path);
+    },
+
+    // ── File Descriptor API (items 173-174) ─────────────────────────────────
+    /**
+     * Open a file and return a file descriptor (≥ 3).
+     * flags: O_RDONLY=0, O_WRONLY=1, O_RDWR=2, O_APPEND=0x400,
+     *        O_CREAT=0x40, O_TRUNC=0x200, O_CLOEXEC=0x80000, O_NONBLOCK=0x800.
+     */
+    open(path: string, flags?: number): number {
+      return fs.open(path, flags);
+    },
+    /** Close a file descriptor. */
+    close(fd: number): boolean {
+      return fs.close(fd);
+    },
+    /** Read up to `count` characters from fd. Returns null on error. */
+    readFd(fd: number, count: number): string | null {
+      return fs.readFd(fd, count);
+    },
+    /** Write data to fd at current position. */
+    writeFd(fd: number, data: string): boolean {
+      return fs.writeFd(fd, data);
+    },
+    /** Seek within fd. whence: 'set' | 'cur' | 'end'. Returns new position. */
+    seek(fd: number, offset: number, whence?: 'set' | 'cur' | 'end'): number {
+      return fs.seek(fd, offset, whence);
+    },
+    /** Duplicate a file descriptor. Returns new fd or -1. */
+    dup(fd: number): number {
+      return fs.dup(fd);
+    },
+    /** Duplicate fd to a specific target fd (dup2 semantic). */
+    dup2(fd: number, newFd: number): number {
+      return fs.dup2(fd, newFd);
+    },
+    /**
+     * fcntl operations (item 174).
+     * cmd: 'getfl' | 'setfl' | 'getfd' | 'setfd' | 'dupfd'
+     */
+    fcntl(fd: number, cmd: 'getfl' | 'setfl' | 'getfd' | 'setfd' | 'dupfd', arg?: number): number {
+      return fs.fcntl(fd, cmd, arg);
+    },
+
     /**
      * Persistent FAT32/FAT16 disk storage.
      * Only available when a block device is present.
@@ -1283,6 +1356,43 @@ const sdk = {
         stringNative: os?.stringNative    ?? false,
       };
     },
+  },
+
+  // ── Machine configuration (items 920, 924) ────────────────────────────────────
+
+  config: {
+    /**
+     * Read a configuration value.
+     * @param key  Key name or dot-path (e.g. 'network.dns.primary').
+     * @param def  Default value returned when key is absent.
+     */
+    get<T = string>(key: string, def?: T): T {
+      return config.get(key, def as any) as T;
+    },
+    /**
+     * Write a configuration value and persist to /etc/config.json.
+     */
+    set(key: string, value: string | number | boolean | string[] | null): void {
+      config.set(key, value);
+    },
+    /** Return a shallow copy of all configuration entries. */
+    getAll(): Record<string, unknown> {
+      return config.getAll();
+    },
+    /** Remove a key from configuration. */
+    delete(key: string): void {
+      config.delete(key);
+    },
+    /** Force reload from /etc/config.json. */
+    reload(): void {
+      config.reload();
+    },
+    /** Shorthand: machine hostname. */
+    hostname(): string { return getHostname(); },
+    /** Shorthand: DNS server list. */
+    dnsServers(): string[] { return getDnsServers(); },
+    /** Shorthand: timezone string (IANA). */
+    timezone(): string { return getTimezone(); },
   },
 
   // ── Multi-process ────────────────────────────────────────────────────────────
@@ -1570,7 +1680,7 @@ const sdk = {
     /** Returns the currently logged-in user. */
     whoami(): User | null { return users.getCurrentUser(); },
     /** Log in as user (returns false on bad password). */
-    login(name: string, pw: string): boolean { return users.login(name, pw); },
+    login(name: string, pw: string): boolean { return users.login(name, pw) !== null; },
     /** Log out and return to the root session. */
     logout(): void { users.logout(); },
     /** Switch user context (root only, or matching credentials). */

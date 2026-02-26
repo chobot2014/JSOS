@@ -29,12 +29,16 @@ export interface Service {
 }
 
 export interface ServiceInstance {
-  service: Service;
-  pid?: number;
-  state: ServiceState;
-  startTime?: number;
-  exitCode?: number;
-  restarts: number;
+  service:      Service;
+  pid?:         number;
+  state:        ServiceState;
+  startTime?:   number;
+  exitCode?:    number;
+  restarts:     number;
+  /** Current exponential-backoff delay before next respawn (ms). Starts at 1 000 ms. */
+  backoffMs:    number;
+  /** Uptime (ms) at which a pending respawn should fire. -1 = no pending respawn. */
+  nextRespawn:  number;
 }
 
 export class InitSystem {
@@ -63,8 +67,10 @@ export class InitSystem {
     this.services.set(service.name, service);
     this.serviceInstances.set(service.name, {
       service,
-      state: 'stopped',
-      restarts: 0
+      state:       'stopped',
+      restarts:    0,
+      backoffMs:   1000,
+      nextRespawn: -1,
     });
   }
 
@@ -103,6 +109,9 @@ export class InitSystem {
       instance.pid = startResult.value;
       instance.state = 'running';
       instance.startTime = kernel.getUptime();
+      // Reset backoff on successful start (item 718)
+      instance.backoffMs   = 1000;
+      instance.nextRespawn = -1;
 
       return { success: true };
     } catch (error) {
@@ -317,6 +326,73 @@ export class InitSystem {
    */
   getCurrentRunlevel(): RunLevel {
     return this.currentRunlevel;
+  }
+
+  // ── Respawn with backoff (item 718) ────────────────────────────────────────
+
+  /** Maximum respawn backoff: 60 s (60 000 ms). */
+  private static readonly MAX_BACKOFF_MS = 60_000;
+
+  /**
+   * Call this whenever a service process exits.
+   * If the restart policy warrants it, schedules a respawn after the
+   * current backoff delay, then doubles the delay (up to MAX_BACKOFF_MS).
+   *
+   * @param serviceName  Name of the service that exited.
+   * @param exitCode     Exit code (0 = clean exit, !0 = crash/error).
+   */
+  handleExit(serviceName: string, exitCode: number): void {
+    var instance = this.serviceInstances.get(serviceName);
+    if (!instance) return;
+
+    instance.state    = 'failed';
+    instance.exitCode = exitCode;
+    instance.pid      = undefined;
+
+    var policy = instance.service.restartPolicy;
+    var shouldRespawn =
+      policy === 'always' ||
+      (policy === 'on-failure' && exitCode !== 0);
+
+    if (!shouldRespawn) {
+      instance.state = 'stopped';
+      return;
+    }
+
+    // Schedule respawn
+    instance.nextRespawn = kernel.getUptime() + instance.backoffMs;
+    kernel.serialPut(
+      '[init] service ' + serviceName + ' exited (code=' + exitCode + '),' +
+      ' respawning in ' + instance.backoffMs + ' ms\n'
+    );
+
+    // Double backoff for next crash, capped at MAX_BACKOFF_MS
+    instance.backoffMs = Math.min(instance.backoffMs * 2, InitSystem.MAX_BACKOFF_MS);
+    instance.restarts++;
+  }
+
+  /**
+   * Called from the kernel timer tick (e.g. every 100 ms).
+   * Fires any pending respawns whose delay has elapsed.
+   *
+   * @param nowMs  Current uptime in milliseconds (kernel.getUptime()).
+   */
+  tick(nowMs: number): void {
+    for (var [name, inst] of this.serviceInstances) {
+      if (inst.nextRespawn < 0 || nowMs < inst.nextRespawn) continue;
+
+      inst.nextRespawn = -1;
+      kernel.serialPut('[init] respawning ' + name + ' (attempt ' + inst.restarts + ')\n');
+
+      var result = this.startService(name);
+      if (!result.success) {
+        // startService failed — schedule another attempt with current backoff
+        kernel.serialPut('[init] respawn of ' + name + ' failed: ' + (result.error || '?') + '\n');
+        inst.state      = 'failed';
+        inst.nextRespawn = nowMs + inst.backoffMs;
+        inst.backoffMs   = Math.min(inst.backoffMs * 2, InitSystem.MAX_BACKOFF_MS);
+      }
+    }
   }
 }
 

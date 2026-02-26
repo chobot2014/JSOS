@@ -38,14 +38,51 @@ export interface RenderNode {
   spans:        InlineSpan[];
   indent?:      number;
   widget?:      WidgetBlueprint;
-  textAlign?:   'left' | 'center' | 'right';
+  textAlign?:   'left' | 'center' | 'right' | 'justify';
   bgColor?:     number;    // CSS background-color (ARGB)
   float?:       'left' | 'right';
   marginTop?:   number;    // px — extra space before block
   marginBottom?: number;   // px — extra space after block
+  marginLeft?:  number;    // px — left margin
+  marginRight?: number;    // px — right margin
   paddingLeft?:  number;   // px — left indent for block content
+  paddingRight?: number;
+  paddingTop?:   number;
+  paddingBottom?: number;
   boxWidth?:    number;    // px — constrained column width (0=full)
   children?:    RenderNode[];  // sub-nodes (flex-row children)
+  // Extended CSS box model
+  height?:       number;
+  minHeight?:    number;
+  maxHeight?:    number;
+  borderRadius?: number;
+  borderWidth?:  number;
+  borderColor?:  number;
+  borderStyle?:  string;
+  opacity?:      number;
+  boxShadow?:    string;
+  // Positioning
+  position?:     'static' | 'relative' | 'absolute' | 'fixed' | 'sticky';
+  posTop?:       number;
+  posRight?:     number;
+  posBottom?:    number;
+  posLeft?:      number;
+  zIndex?:       number;
+  overflow?:     'visible' | 'hidden' | 'scroll' | 'auto';
+  // Text presentation
+  whiteSpace?:   'normal' | 'nowrap' | 'pre' | 'pre-wrap' | 'pre-line';
+  textTransform?: 'none' | 'uppercase' | 'lowercase' | 'capitalize';
+  lineHeight?:   number;
+  // Flex container
+  flexDirection?:  'row' | 'row-reverse' | 'column' | 'column-reverse';
+  flexWrap?:       'nowrap' | 'wrap' | 'wrap-reverse';
+  justifyContent?: string;
+  alignItems?:     string;
+  gap?:            number;
+  // Flex child
+  flexGrow?:    number;
+  order?:       number;
+  alignSelf?:   string;
 }
 
 // ── Rendered output ───────────────────────────────────────────────────────────
@@ -171,27 +208,105 @@ export interface ParseResult {
 // ── CSS ───────────────────────────────────────────────────────────────────────
 
 export interface CSSProps {
-  color?:       number;
-  bgColor?:     number;
-  bold?:        boolean;
-  italic?:      boolean;
-  underline?:   boolean;
-  strike?:      boolean;
-  align?:       'left' | 'center' | 'right';
-  hidden?:      boolean;
-  // Layout
-  float?:       'left' | 'right';
-  display?:     'flex' | 'inline-flex' | 'grid' | 'inline-block' | 'inline' | 'block' | 'none';
-  paddingLeft?: number;   // px
-  paddingRight?: number;
-  paddingTop?:  number;
+  // ── Text ──────────────────────────────────────────────────────────────────
+  color?:         number;
+  bgColor?:       number;
+  bold?:          boolean;
+  italic?:        boolean;
+  underline?:     boolean;
+  strike?:        boolean;
+  align?:         'left' | 'center' | 'right' | 'justify';
+  hidden?:        boolean;
+  fontScale?:     number;    // text magnification: 0.75 | 1 | 2 | 3
+  fontFamily?:    string;
+  fontWeight?:    number;    // 100–900 (400=normal, 700=bold)
+  lineHeight?:    number;    // px
+  letterSpacing?: number;    // px
+  wordSpacing?:   number;    // px
+  textTransform?: 'none' | 'uppercase' | 'lowercase' | 'capitalize';
+  textDecoration?: string;   // 'none' | 'underline' | 'line-through' | 'overline'
+  textOverflow?:  'clip' | 'ellipsis';
+  whiteSpace?:    'normal' | 'nowrap' | 'pre' | 'pre-wrap' | 'pre-line';
+  verticalAlign?: string;
+  listStyleType?: string;
+  // ── Box model ─────────────────────────────────────────────────────────────
+  display?:       'flex' | 'inline-flex' | 'grid' | 'inline-block' | 'inline' | 'block' | 'none' | 'table' | 'table-row' | 'table-cell';
+  boxSizing?:     'content-box' | 'border-box';
+  width?:         number;    // px (0 = auto)
+  height?:        number;    // px (0 = auto)
+  minWidth?:      number;
+  minHeight?:     number;
+  maxWidth?:      number;
+  maxHeight?:     number;
+  paddingTop?:    number;
+  paddingRight?:  number;
   paddingBottom?: number;
-  marginTop?:   number;
-  marginBottom?: number;
-  width?:       number;   // px (0 = auto)
-  maxWidth?:    number;
-  indent?:      number;   // derived: padding-left / CHAR_W
-  fontScale?:   number;   // text magnification: 0.75 | 1 | 2 | 3
+  paddingLeft?:   number;
+  marginTop?:     number;
+  marginRight?:   number;
+  marginBottom?:  number;
+  marginLeft?:    number;
+  indent?:        number;    // derived: paddingLeft / CHAR_W
+  // ── Border ────────────────────────────────────────────────────────────────
+  borderWidth?:   number;
+  borderStyle?:   string;
+  borderColor?:   number;
+  borderRadius?:  number;
+  borderTopLeftRadius?:     number;
+  borderTopRightRadius?:    number;
+  borderBottomLeftRadius?:  number;
+  borderBottomRightRadius?: number;
+  outlineWidth?:  number;
+  outlineColor?:  number;
+  // ── Visual ────────────────────────────────────────────────────────────────
+  opacity?:       number;    // 0..1 (undefined = fully opaque)
+  boxShadow?:     string;
+  textShadow?:    string;
+  // ── Positioning ───────────────────────────────────────────────────────────
+  position?:      'static' | 'relative' | 'absolute' | 'fixed' | 'sticky';
+  top?:           number;
+  right?:         number;
+  bottom?:        number;
+  left?:          number;
+  zIndex?:        number;
+  float?:         'left' | 'right' | 'none';
+  overflow?:      'visible' | 'hidden' | 'scroll' | 'auto';
+  overflowX?:     'visible' | 'hidden' | 'scroll' | 'auto';
+  overflowY?:     'visible' | 'hidden' | 'scroll' | 'auto';
+  // ── Transform / transition / animation ───────────────────────────────────
+  transform?:     string;
+  transition?:    string;
+  animation?:     string;
+  // ── Cursor / pointer ──────────────────────────────────────────────────────
+  cursor?:        string;
+  pointerEvents?: 'auto' | 'none';
+  // ── Flexbox ───────────────────────────────────────────────────────────────
+  flexDirection?:  'row' | 'row-reverse' | 'column' | 'column-reverse';
+  flexWrap?:       'nowrap' | 'wrap' | 'wrap-reverse';
+  justifyContent?: string;
+  alignItems?:     string;
+  alignContent?:   string;
+  flexGrow?:       number;
+  flexShrink?:     number;
+  flexBasis?:      number;   // px; 0 = auto
+  alignSelf?:      string;
+  order?:          number;
+  gap?:            number;
+  rowGap?:         number;
+  columnGap?:      number;
+  // ── Grid ──────────────────────────────────────────────────────────────────
+  gridTemplateColumns?: string;
+  gridTemplateRows?:    string;
+  gridColumn?:          string;
+  gridRow?:             string;
+  gridArea?:            string;
+  // ── Background ────────────────────────────────────────────────────────────
+  backgroundImage?:    string;
+  backgroundSize?:     string;
+  backgroundPosition?: string;
+  backgroundRepeat?:   string;
+  // ── !important tracking (set of property names that carried !important) ──
+  important?:     Set<string>;
 }
 
 // ── Layout ────────────────────────────────────────────────────────────────────

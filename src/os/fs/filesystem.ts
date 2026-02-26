@@ -14,7 +14,7 @@ function uptime(): number {
   return typeof kernel !== 'undefined' ? kernel.getUptime() : 0;
 }
 
-export type FileType = 'file' | 'directory';
+export type FileType = 'file' | 'directory' | 'symlink';
 
 /** Interface that any virtual filesystem must implement to be mounted. */
 export interface VFSMount {
@@ -25,13 +25,15 @@ export interface VFSMount {
 }
 
 export interface FileEntry {
-  name: string;
-  type: FileType;
-  content: string;
-  size: number;
-  created: number;
-  modified: number;
+  name:        string;
+  type:        FileType;
+  content:     string;
+  size:        number;
+  created:     number;
+  modified:    number;
   permissions: string;
+  /** Set when type === 'symlink' — target path of the symbolic link. */
+  linkTarget?: string;
 }
 
 export interface DirectoryEntry {
@@ -47,10 +49,38 @@ function isDir(entry: FileEntry | DirectoryEntry): entry is DirectoryEntry {
   return entry.type === 'directory';
 }
 
+function isSymlink(entry: FileEntry | DirectoryEntry): entry is FileEntry {
+  return entry.type === 'symlink';
+}
+
+// ── File Descriptor constants (items 173-174) ─────────────────────────────────
+export const O_RDONLY   = 0x0000;
+export const O_WRONLY   = 0x0001;
+export const O_RDWR     = 0x0002;
+export const O_APPEND   = 0x0400;
+export const O_CLOEXEC  = 0x80000;
+export const O_NONBLOCK = 0x0800;
+export const O_TRUNC    = 0x0200;
+export const O_CREAT    = 0x0040;
+
+export interface FdEntry {
+  fd:       number;
+  path:     string;
+  pos:      number;
+  flags:    number;   // O_RDONLY / O_WRONLY / O_RDWR
+  cloexec:  boolean;  // FD_CLOEXEC flag
+  nonblock: boolean;  // O_NONBLOCK flag
+}
+
+/** Maximum symlink resolution depth (item 176). */
+const MAX_SYMLINK_DEPTH = 40;
+
 export class FileSystem {
   private root: DirectoryEntry;
   private currentPath: string = '/';
-  private mounts = new Map<string, VFSMount>(); // mountpoint -> handler
+  private mounts  = new Map<string, VFSMount>(); // mountpoint -> handler
+  private fds     = new Map<number, FdEntry>();   // fd table (item 173)
+  private nextFd  = 3;   // 0/1/2 reserved for stdin/stdout/stderr
 
   /** Mount a virtual filesystem at a path prefix (e.g. '/proc'). */
   mountVFS(mountpoint: string, vfs: VFSMount): void {
@@ -402,8 +432,10 @@ export class FileSystem {
     return '/' + resolved.join('/');
   }
 
-  /** Navigate to a directory entry by path */
-  private navigate(path: string): FileEntry | DirectoryEntry | null {
+  /** Navigate to a directory entry by path, following symlinks (item 176). */
+  private navigate(path: string, followLast = true, depth = 0): FileEntry | DirectoryEntry | null {
+    if (depth > MAX_SYMLINK_DEPTH) return null; // symlink loop guard
+
     var resolved = this.resolvePath(path);
     if (resolved === '/') return this.root;
 
@@ -414,6 +446,19 @@ export class FileSystem {
       if (!isDir(current)) return null;
       var child = current.children.get(parts[i]);
       if (!child) return null;
+
+      // Follow symlink, unless this is the last component and followLast=false
+      var isLast = (i === parts.length - 1);
+      if (isSymlink(child) && (followLast || !isLast)) {
+        var target = (child as FileEntry).linkTarget || '';
+        // Resolve relative symlinks relative to the parent directory
+        if (target[0] !== '/') {
+          var parentParts = parts.slice(0, i);
+          target = (parentParts.length > 0 ? '/' + parentParts.join('/') : '') + '/' + target;
+        }
+        return this.navigate(target, followLast, depth + 1);
+      }
+
       current = child;
     }
 
@@ -640,6 +685,203 @@ export class FileSystem {
 
     walk(basePath || '/');
     return results;
+  }
+
+  // ── Symlinks (item 176) ───────────────────────────────────────────────────
+
+  /**
+   * Create a symbolic link at `linkPath` pointing to `target`.
+   * `target` may be an absolute or relative path.
+   */
+  symlink(target: string, linkPath: string): boolean {
+    var resolved = this.resolvePath(linkPath);
+    if (resolved === '/') return false;
+
+    var parts      = resolved.split('/').filter(function(p) { return p.length > 0; });
+    var name       = parts[parts.length - 1];
+    var parentPath = '/' + parts.slice(0, -1).join('/');
+
+    var parent = this.navigate(parentPath);
+    if (!parent || !isDir(parent)) return false;
+    if (parent.children.has(name)) return false; // already exists
+
+    var now = uptime();
+    var entry: FileEntry = {
+      name, type: 'symlink',
+      content: '', size: target.length,
+      created: now, modified: now,
+      permissions: 'lrwxrwxrwx',
+      linkTarget: target,
+    };
+    parent.children.set(name, entry);
+    return true;
+  }
+
+  /**
+   * Read the target of a symbolic link (does NOT follow the link).
+   * Returns null if path does not exist or is not a symlink.
+   */
+  readlink(path: string): string | null {
+    var entry = this.navigate(path, false); // followLast=false
+    if (!entry || !isSymlink(entry)) return null;
+    return (entry as FileEntry).linkTarget || '';
+  }
+
+  // ── File Descriptor API (items 173-174) ───────────────────────────────────
+
+  /**
+   * Open a file and return a file descriptor (≥ 3).
+   * flags: OR of O_RDONLY/O_WRONLY/O_RDWR, O_CREAT, O_TRUNC, O_APPEND,
+   *        O_CLOEXEC, O_NONBLOCK.
+   * Returns -1 on failure.
+   */
+  open(path: string, flags = O_RDONLY): number {
+    var accMode = flags & 0x3; // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
+    var create  = (flags & O_CREAT) !== 0;
+    var trunc   = (flags & O_TRUNC) !== 0;
+
+    if (create && !this.exists(path)) {
+      if (!this.writeFile(path, '')) return -1;
+    } else if (!this.exists(path)) {
+      return -1;
+    }
+
+    if (trunc && accMode !== O_RDONLY) {
+      this.writeFile(path, '');
+    }
+
+    var resolved = this.resolvePath(path);
+    var entry: FdEntry = {
+      fd:       this.nextFd++,
+      path:     resolved,
+      pos:      (flags & O_APPEND) ? this._fileSize(resolved) : 0,
+      flags,
+      cloexec:  (flags & O_CLOEXEC)  !== 0,
+      nonblock: (flags & O_NONBLOCK) !== 0,
+    };
+    this.fds.set(entry.fd, entry);
+    return entry.fd;
+  }
+
+  /** Close a file descriptor. Returns true on success. */
+  close(fd: number): boolean {
+    return this.fds.delete(fd);
+  }
+
+  /** Read up to `count` bytes from fd at current position. */
+  readFd(fd: number, count: number): string | null {
+    var fde = this.fds.get(fd);
+    if (!fde) return null;
+    if ((fde.flags & 0x3) === O_WRONLY) return null; // write-only
+    var content = this.readFile(fde.path);
+    if (content === null) return null;
+    var chunk = content.substring(fde.pos, fde.pos + count);
+    fde.pos += chunk.length;
+    return chunk;
+  }
+
+  /** Write data to fd at current position. */
+  writeFd(fd: number, data: string): boolean {
+    var fde = this.fds.get(fd);
+    if (!fde) return false;
+    if ((fde.flags & 0x3) === O_RDONLY) return false; // read-only
+    var content = this.readFile(fde.path) || '';
+
+    var newContent: string;
+    if (fde.flags & O_APPEND) {
+      newContent = content + data;
+      fde.pos    = newContent.length;
+    } else {
+      newContent = content.substring(0, fde.pos) + data +
+                   content.substring(fde.pos + data.length);
+      fde.pos   += data.length;
+    }
+    return this.writeFile(fde.path, newContent);
+  }
+
+  /** Seek to an absolute position within fd. Returns new position or -1. */
+  seek(fd: number, offset: number, whence: 'set' | 'cur' | 'end' = 'set'): number {
+    var fde = this.fds.get(fd);
+    if (!fde) return -1;
+    var fileLen = this._fileSize(fde.path);
+    var newPos: number;
+    if      (whence === 'set') newPos = offset;
+    else if (whence === 'cur') newPos = fde.pos + offset;
+    else                       newPos = fileLen  + offset;
+    if (newPos < 0) newPos = 0;
+    fde.pos = newPos;
+    return newPos;
+  }
+
+  /**
+   * Duplicate a file descriptor (item 173).
+   * Returns a new fd ≥ 3 that shares the same open-file state (path, pos, flags).
+   */
+  dup(fd: number): number {
+    var src = this.fds.get(fd);
+    if (!src) return -1;
+    var newFd = this.nextFd++;
+    this.fds.set(newFd, { ...src, fd: newFd });
+    return newFd;
+  }
+
+  /**
+   * Duplicate fd to a specific target fd (dup2 semantic).
+   * If newFd is already open, it is closed first.
+   * Returns newFd on success, -1 on failure.
+   */
+  dup2(fd: number, newFd: number): number {
+    var src = this.fds.get(fd);
+    if (!src || fd === newFd) return fd === newFd ? newFd : -1;
+    this.fds.delete(newFd); // close target if open
+    this.fds.set(newFd, { ...src, fd: newFd });
+    if (newFd >= this.nextFd) this.nextFd = newFd + 1;
+    return newFd;
+  }
+
+  /**
+   * fcntl-style control (item 174).
+   * Supported commands:
+   *   'getfl'  — return current flags
+   *   'setfl'  — set flags (only O_NONBLOCK, O_APPEND writable after open)
+   *   'getfd'  — return 1 if FD_CLOEXEC is set, else 0
+   *   'setfd'  — set FD_CLOEXEC flag (arg & 1 = cloexec)
+   *   'dupfd'  — duplicate fd, choose lowest fd ≥ arg
+   */
+  fcntl(fd: number, cmd: 'getfl' | 'setfl' | 'getfd' | 'setfd' | 'dupfd', arg = 0): number {
+    var fde = this.fds.get(fd);
+    if (!fde) return -1;
+    switch (cmd) {
+      case 'getfl':
+        return fde.flags;
+      case 'setfl': {
+        // Only allow changing O_NONBLOCK and O_APPEND after open
+        var mask = O_NONBLOCK | O_APPEND;
+        fde.flags     = (fde.flags & ~mask) | (arg & mask);
+        fde.nonblock  = (fde.flags & O_NONBLOCK) !== 0;
+        return 0;
+      }
+      case 'getfd':
+        return fde.cloexec ? 1 : 0;
+      case 'setfd':
+        fde.cloexec = (arg & 1) !== 0;
+        return 0;
+      case 'dupfd': {
+        // Find lowest available fd ≥ arg
+        var minFd = Math.max(arg, 3);
+        while (this.fds.has(minFd)) minFd++;
+        this.fds.set(minFd, { ...fde, fd: minFd });
+        if (minFd >= this.nextFd) this.nextFd = minFd + 1;
+        return minFd;
+      }
+    }
+  }
+
+  /** Helper: return the byte length of a file, or 0. */
+  private _fileSize(resolvedPath: string): number {
+    var e = this.navigate(resolvedPath);
+    if (!e || isDir(e)) return 0;
+    return (e as FileEntry).content.length;
   }
 }
 
