@@ -37,7 +37,7 @@ import type {
 
 import { parseURL, urlEncode, encodeFormData, decodeBMP, readPNGDimensions, decodeBase64 } from './utils.js';
 import { parseHTML }    from './html.js';
-import { parseStylesheet, type CSSRule } from './stylesheet.js';
+import { parseStylesheet, type CSSRule, resetCSSVars } from './stylesheet.js';
 import { decodePNG }    from './img-png.js';
 import { decodeJPEG }   from './img-jpeg.js';
 import { layoutNodes }  from './layout.js';
@@ -1337,6 +1337,9 @@ export class BrowserApp implements App {
   // ── Page display ──────────────────────────────────────────────────────────
 
   private _showHTML(html: string, fallbackTitle: string, url: string): void {
+    // ── Reset CSS variable registry for new page ─────────────────────────────
+    resetCSSVars();
+
     // ── Pass 1: collect <style> blocks + <link rel="stylesheet"> hrefs ────────
     var r = parseHTML(html);
     this._forms       = r.forms;

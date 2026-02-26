@@ -1,5 +1,47 @@
 import type { CSSProps } from './types.js';
 
+// ── CSS Custom Properties (CSS variables) ─────────────────────────────────────
+
+/** Page-level CSS variable registry. Cleared on each navigation. */
+var _cssVars: Record<string, string> = Object.create(null);
+
+/** Reset all CSS variables (call when navigating to a new page). */
+export function resetCSSVars(): void { _cssVars = Object.create(null); }
+
+/** Bulk-register CSS variables (use for :root / html / body declarations). */
+export function setCSSVar(name: string, value: string): void { _cssVars[name] = value; }
+
+/**
+ * Scan a CSS text block for `--name: value` declarations and register them.
+ * Works with raw CSS text from :root{} blocks etc.
+ */
+export function registerCSSVarBlock(block: string): void {
+  var lines = block.split(';');
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (!line.startsWith('--')) continue;
+    var colon = line.indexOf(':');
+    if (colon < 0) continue;
+    var name = line.slice(0, colon).trim();
+    var val  = line.slice(colon + 1).trim();
+    if (name && val) _cssVars[name] = val;
+  }
+}
+
+/**
+ * Resolve `var(--name)` and `var(--name, fallback)` references in a CSS value.
+ * Returns the substituted string (unchanged if no var() present).
+ */
+export function resolveCSSVars(value: string): string {
+  if (value.indexOf('var(') < 0) return value;
+  return value.replace(/var\(\s*(--[^,)]+)\s*(?:,\s*([^)]+))?\s*\)/g,
+    (_: string, name: string, fallback: string | undefined) => {
+      var resolved = _cssVars[name.trim()];
+      if (resolved !== undefined) return resolveCSSVars(resolved.trim());  // recursive
+      return fallback !== undefined ? resolveCSSVars(fallback.trim()) : '';
+    });
+}
+
 // ── Named CSS colors ──────────────────────────────────────────────────────────
 
 var _CSS_NAMED: Record<string, number> = {
@@ -96,6 +138,12 @@ export function parseInlineStyle(style: string): CSSProps {
     if (col < 0) continue;
     var prop = decls[di].slice(0, col).trim().toLowerCase();
     var val  = decls[di].slice(col + 1).trim();
+
+    // Register CSS custom property
+    if (prop.startsWith('--')) { _cssVars[prop] = val; continue; }
+
+    // Resolve var() references before processing
+    val = resolveCSSVars(val);
     var vl   = val.toLowerCase();
     switch (prop) {
       case 'color': {
@@ -170,6 +218,26 @@ export function parseInlineStyle(style: string): CSSProps {
       }
       case 'max-width': {
         if (vl !== 'none') { var mwv = parseFloat(vl); if (mwv > 0) p.maxWidth = mwv; }
+        break;
+      }
+      case 'font-size': {
+        // Map CSS font-size to fontScale: <12px=0.75, 12-15=1, 16-23=2, >=24=3
+        var fsv = parseFloat(vl);
+        if (!isNaN(fsv)) {
+          // Handle em/rem — treat 1em = 16px
+          if (vl.endsWith('em')) fsv = fsv * 16;
+          else if (vl.endsWith('%')) fsv = (fsv / 100) * 16;
+          p.fontScale = fsv < 12 ? 0.75 : fsv < 16 ? 1 : fsv < 24 ? 2 : 3;
+        } else if (vl === 'small' || vl === 'x-small') { p.fontScale = 0.75; }
+        else if (vl === 'medium') { p.fontScale = 1; }
+        else if (vl === 'large' || vl === 'x-large') { p.fontScale = 2; }
+        else if (vl === 'xx-large') { p.fontScale = 3; }
+        break;
+      }
+      case 'opacity': {
+        // Opacity < 0.15 hides; we keep it simple
+        var opv = parseFloat(vl);
+        if (!isNaN(opv) && opv < 0.15) p.hidden = true;
         break;
       }
     }

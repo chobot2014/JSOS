@@ -8,8 +8,83 @@
 
 import { net, strToBytes, bytesToStr } from './net.js';
 import { TLSSocket } from './tls.js';
+import { httpDecompress } from './deflate.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
+
+// ── HTTP response cache (per-session, keyed by full URL) ──────────────────────
+
+interface CacheEntry {
+  response: HttpResponse;
+  expiry:   number;  // kernel.getTicks() target
+}
+
+var _httpCache = new Map<string, CacheEntry>();
+
+export function httpCacheClear(): void { _httpCache.clear(); }
+
+function _cacheGet(url: string): HttpResponse | null {
+  var e = _httpCache.get(url);
+  if (!e) return null;
+  if (kernel.getTicks() > e.expiry) { _httpCache.delete(url); return null; }
+  return e.response;
+}
+
+function _cacheSet(url: string, resp: HttpResponse): void {
+  // Only cache successful, cacheable responses: 200 OK, static content types
+  if (resp.status !== 200) return;
+  var ct = resp.headers.get('content-type') || '';
+  var cc = resp.headers.get('cache-control') || '';
+  if (cc.includes('no-store')) return;
+  // Default TTL: 60 seconds (6000 ticks at 100 Hz)
+  var maxAge = 6000;
+  var m = cc.match(/max-age=([\d]+)/);
+  if (m) maxAge = Math.min(parseInt(m[1]) * 100, 36000);  // cap at 1 hr
+  // Only cache JS, CSS, fonts, images — not HTML (dynamic)
+  var cacheable = ct.includes('javascript') || ct.includes('css') ||
+                  ct.includes('font') || ct.includes('image') ||
+                  ct.includes('json');
+  if (!cacheable) return;
+  _httpCache.set(url, { response: resp, expiry: kernel.getTicks() + maxAge });
+}
+
+// ── HTTP connection pool (keep-alive sockets) ─────────────────────────────────
+
+interface PooledSocket {
+  sock:       import('./net.js').Socket | null;
+  tls:        TLSSocket | null;
+  host:       string;
+  port:       number;
+  https:      boolean;
+  expiry:     number;  // idle timeout (100 ticks = 1 s)
+}
+
+var _pool: PooledSocket[] = [];
+var _MAX_POOL = 8;
+
+function _poolGet(host: string, port: number, https: boolean): PooledSocket | null {
+  var now = kernel.getTicks();
+  for (var i = _pool.length - 1; i >= 0; i--) {
+    var p = _pool[i];
+    if (p.host === host && p.port === port && p.https === https && now < p.expiry) {
+      _pool.splice(i, 1);
+      return p;
+    }
+    if (now >= p.expiry) { _pool.splice(i, 1); }  // evict stale
+  }
+  return null;
+}
+
+function _poolReturn(p: PooledSocket): void {
+  if (_pool.length >= _MAX_POOL) { _poolClose(p); return; }
+  p.expiry = kernel.getTicks() + 300;  // 3-second idle window
+  _pool.push(p);
+}
+
+function _poolClose(p: PooledSocket): void {
+  if (p.tls) p.tls.close();
+  else if (p.sock) net.close(p.sock);
+}
 
 export interface HttpResponse {
   status:  number;
@@ -19,11 +94,13 @@ export interface HttpResponse {
 
 // ── HTTP request builder ──────────────────────────────────────────────────────
 
-function buildGetRequest(host: string, path: string): number[] {
+function buildGetRequest(host: string, path: string, keepAlive = true): number[] {
   var req = 'GET ' + path + ' HTTP/1.1\r\n' +
             'Host: ' + host + '\r\n' +
-            'Connection: close\r\n' +
+            'Connection: ' + (keepAlive ? 'keep-alive' : 'close') + '\r\n' +
             'User-Agent: JSOS/1.0\r\n' +
+            'Accept-Encoding: gzip, deflate\r\n' +
+            'Accept: text/html,application/xhtml+xml,*/*;q=0.9\r\n' +
             '\r\n';
   return strToBytes(req);
 }
@@ -33,8 +110,9 @@ function buildPostRequest(
     contentType = 'application/x-www-form-urlencoded'): number[] {
   var header = 'POST ' + path + ' HTTP/1.1\r\n' +
                'Host: ' + host + '\r\n' +
-               'Connection: close\r\n' +
+               'Connection: keep-alive\r\n' +
                'User-Agent: JSOS/1.0\r\n' +
+               'Accept-Encoding: gzip, deflate\r\n' +
                'Content-Type: ' + contentType + '\r\n' +
                'Content-Length: ' + body.length + '\r\n' +
                '\r\n';
@@ -84,6 +162,10 @@ export function parseHttpResponse(data: number[]): HttpResponse | null {
     body = decodeChunked(body);
   }
 
+  // Decompress Content-Encoding: gzip / deflate
+  var ce = headers.get('content-encoding') || '';
+  if (ce) body = httpDecompress(body, ce);
+
   return { status, headers, body };
 }
 
@@ -124,10 +206,21 @@ function decodeChunked(body: number[]): number[] {
  */
 export function httpGet(
     host: string, ip: string, port: number = 80, path: string = '/'): HttpResponse | null {
-  var sock = net.createSocket('tcp');
-  if (!net.connect(sock, ip, port)) { net.close(sock); return null; }
+  // Check response cache
+  var cacheKey = 'http://' + host + path;
+  var cached = _cacheGet(cacheKey);
+  if (cached) return cached;
 
-  var req = buildGetRequest(host, path);
+  // Try to reuse pooled keep-alive connection
+  var pooled = _poolGet(host, port, false);
+  var sock = pooled?.sock ?? null;
+
+  if (!sock) {
+    sock = net.createSocket('tcp');
+    if (!net.connect(sock, ip, port)) { net.close(sock); return null; }
+  }
+
+  var req = buildGetRequest(host, path, true);
   if (!net.sendBytes(sock, req)) { net.close(sock); return null; }
 
   // Accumulate response into a chunk list — avoid O(n²) concat on every packet
@@ -141,16 +234,24 @@ export function httpGet(
       deadline = kernel.getTicks() + 100;  // reset on new data
     }
   }
-  net.close(sock);
 
-  if (chunks.length === 0) return null;
-  // Flatten once at the end — single O(n) pass, no intermediate copies
+  if (chunks.length === 0) { net.close(sock); return null; }
   var buf: number[] = [];
   for (var ci = 0; ci < chunks.length; ci++) {
     var ch = chunks[ci];
     for (var cj = 0; cj < ch.length; cj++) buf.push(ch[cj]);
   }
-  return parseHttpResponse(buf);
+  var resp = parseHttpResponse(buf);
+  if (!resp) { net.close(sock); return null; }
+
+  // Return socket to pool unless server said to close
+  var connHdr = resp.headers.get('connection') || '';
+  if (connHdr.toLowerCase() !== 'close') {
+    _poolReturn({ sock, tls: null, host, port, https: false, expiry: 0 });
+  } else { net.close(sock); }
+
+  _cacheSet(cacheKey, resp);
+  return resp;
 }
 
 // ── HTTPS GET ─────────────────────────────────────────────────────────────────
@@ -164,14 +265,26 @@ export function httpGet(
 export function httpsGet(
     host: string, ip: string, port: number = 443, path: string = '/'):
     { tlsOk: boolean; response: HttpResponse | null } {
-  var tls = new TLSSocket(host);
-  if (!tls.handshake(ip, port)) {
-    tls.close();
-    return { tlsOk: false, response: null };
+  // Check response cache
+  var cacheKey = 'https://' + host + path;
+  var cached = _cacheGet(cacheKey);
+  if (cached) return { tlsOk: true, response: cached };
+
+  // Try to reuse a pooled TLS connection
+  var pooled = _poolGet(host, port, true);
+  var tls: TLSSocket;
+  if (pooled?.tls) {
+    tls = pooled.tls;
+  } else {
+    tls = new TLSSocket(host);
+    if (!tls.handshake(ip, port)) {
+      tls.close();
+      return { tlsOk: false, response: null };
+    }
   }
 
   // Send HTTP request over TLS
-  var req = buildGetRequest(host, path);
+  var req = buildGetRequest(host, path, true);
   if (!tls.write(req)) {
     tls.close();
     return { tlsOk: true, response: null };
@@ -187,15 +300,24 @@ export function httpsGet(
       tlsDeadline = kernel.getTicks() + 100;  // reset on new data
     }
   }
-  tls.close();
 
-  if (tlsChunks.length === 0) return { tlsOk: true, response: null };
+  if (tlsChunks.length === 0) { tls.close(); return { tlsOk: true, response: null }; }
   var tlsBuf: number[] = [];
   for (var tci = 0; tci < tlsChunks.length; tci++) {
     var tch = tlsChunks[tci];
     for (var tcj = 0; tcj < tch.length; tcj++) tlsBuf.push(tch[tcj]);
   }
-  return { tlsOk: true, response: parseHttpResponse(tlsBuf) };
+  var resp2 = parseHttpResponse(tlsBuf);
+  if (!resp2) { tls.close(); return { tlsOk: true, response: null }; }
+
+  // Return TLS socket to pool unless server closed
+  var connHdr2 = resp2.headers.get('connection') || '';
+  if (connHdr2.toLowerCase() !== 'close') {
+    _poolReturn({ sock: null, tls, host, port, https: true, expiry: 0 });
+  } else { tls.close(); }
+
+  _cacheSet(cacheKey, resp2);
+  return { tlsOk: true, response: resp2 };
 }
 
 // ── Plain HTTP POST ───────────────────────────────────────────────────────────

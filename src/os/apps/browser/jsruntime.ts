@@ -358,6 +358,85 @@ export function createPageJS(
     parseFromString(html: string, _type: string) { return buildDOM(html); }
   }
 
+  // ── TextEncoder / TextDecoder ─────────────────────────────────────────────
+
+  class TextEncoder_ {
+    readonly encoding = 'utf-8';
+    encode(str: string): Uint8Array {
+      var out: number[] = [];
+      for (var i = 0; i < str.length; ) {
+        var cp = str.codePointAt(i)!;
+        if (cp < 0x80) { out.push(cp); i++; }
+        else if (cp < 0x800) { out.push(0xC0 | (cp >> 6), 0x80 | (cp & 63)); i++; }
+        else if (cp < 0x10000) { out.push(0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63)); i++; }
+        else { out.push(0xF0 | (cp >> 18), 0x80 | ((cp >> 12) & 63), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63)); i += 2; }
+      }
+      return new Uint8Array(out);
+    }
+    encodeInto(str: string, dest: Uint8Array): { read: number; written: number } {
+      var enc = this.encode(str); var n = Math.min(enc.length, dest.length);
+      dest.set(enc.subarray(0, n)); return { read: n, written: n };
+    }
+  }
+
+  class TextDecoder_ {
+    readonly encoding: string;
+    constructor(enc = 'utf-8') { this.encoding = enc.toLowerCase(); }
+    decode(buf?: Uint8Array | ArrayBuffer | null): string {
+      if (!buf) return '';
+      var bytes = buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf;
+      var out = ''; var i = 0;
+      while (i < bytes.length) {
+        var b = bytes[i];
+        if (b < 0x80) { out += String.fromCharCode(b); i++; }
+        else if ((b & 0xE0) === 0xC0) { out += String.fromCodePoint(((b & 0x1F) << 6) | (bytes[i+1] & 0x3F)); i += 2; }
+        else if ((b & 0xF0) === 0xE0) { out += String.fromCodePoint(((b & 0x0F) << 12) | ((bytes[i+1] & 0x3F) << 6) | (bytes[i+2] & 0x3F)); i += 3; }
+        else if ((b & 0xF8) === 0xF0) { out += String.fromCodePoint(((b & 0x07) << 18) | ((bytes[i+1] & 0x3F) << 12) | ((bytes[i+2] & 0x3F) << 6) | (bytes[i+3] & 0x3F)); i += 4; }
+        else { out += '\uFFFD'; i++; }
+      }
+      return out;
+    }
+  }
+
+  // ── HTMLCanvasElement (2D context stub) ───────────────────────────────────
+
+  class HTMLCanvas {
+    width = 300; height = 150;
+    _ctx: any = null;
+    getContext(type: string): any {
+      if (type !== '2d') return null;
+      if (this._ctx) return this._ctx;
+      var noop = () => {}; var self = this;
+      this._ctx = {
+        canvas: this,
+        fillStyle: '#000', strokeStyle: '#000', lineWidth: 1, globalAlpha: 1,
+        font: '10px sans-serif', textAlign: 'left', textBaseline: 'alphabetic',
+        shadowBlur: 0, shadowColor: 'transparent', shadowOffsetX: 0, shadowOffsetY: 0,
+        lineCap: 'butt', lineJoin: 'miter', miterLimit: 10, lineDashOffset: 0,
+        globalCompositeOperation: 'source-over',
+        save: noop, restore: noop,
+        scale: noop, rotate: noop, translate: noop, transform: noop, setTransform: noop, resetTransform: noop,
+        clearRect: noop, fillRect: noop, strokeRect: noop,
+        beginPath: noop, closePath: noop, moveTo: noop, lineTo: noop,
+        bezierCurveTo: noop, quadraticCurveTo: noop, arc: noop, arcTo: noop, ellipse: noop, rect: noop,
+        fill: noop, stroke: noop, clip: noop,
+        fillText: noop, strokeText: noop,
+        measureText: (text: string) => ({ width: text.length * 6, actualBoundingBoxAscent: 10, actualBoundingBoxDescent: 2, fontBoundingBoxAscent: 10, fontBoundingBoxDescent: 2 }),
+        drawImage: noop, putImageData: noop,
+        createImageData: (w: number, h: number) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+        getImageData: (x: number, y: number, w: number, h: number) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+        createPattern: () => ({}), createLinearGradient: () => ({ addColorStop: noop }), createRadialGradient: () => ({ addColorStop: noop }),
+        setLineDash: noop, getLineDash: () => [],
+        isPointInPath: () => false, isPointInStroke: () => false,
+        get width() { return self.width; }, get height() { return self.height; },
+      };
+      return this._ctx;
+    }
+    toDataURL(_type?: string): string { return 'data:image/png;base64,'; }
+    toBlob(cb: (b: Blob | null) => void): void { cb(null); }
+    getBoundingClientRect() { return { x:0, y:0, width:this.width, height:this.height, top:0, left:0, right:this.width, bottom:this.height }; }
+  }
+
   // ── Build the global window object ────────────────────────────────────────
 
   var win: Record<string, unknown> = {
@@ -400,6 +479,15 @@ export function createPageJS(
     IntersectionObserver,
     ResizeObserver,
     DOMParser,
+    TextEncoder: TextEncoder_,
+    TextDecoder: TextDecoder_,
+    HTMLCanvasElement: HTMLCanvas,
+
+    // Viewport
+    innerWidth: 1024, innerHeight: 768,
+    outerWidth: 1024, outerHeight: 768,
+    devicePixelRatio: 1,
+    screenX: 0, screenY: 0, pageXOffset: 0, pageYOffset: 0,
 
     // Storage
     localStorage:  _localStorage,
@@ -464,6 +552,16 @@ export function createPageJS(
     queueMicrotask: (fn: () => void) => setTimeout_( fn, 0),
     structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
   };
+
+  // ── Patch doc.createElement to return HTMLCanvas for <canvas> ─────────────
+
+  {
+    var _origCreateElement = doc.createElement.bind(doc);
+    doc.createElement = function(tag: string) {
+      if (tag.toLowerCase() === 'canvas') return new HTMLCanvas() as any;
+      return _origCreateElement(tag);
+    };
+  }
 
   // ── Wire on* attribute handlers ───────────────────────────────────────────
 

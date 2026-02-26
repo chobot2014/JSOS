@@ -191,6 +191,7 @@ export interface CSSProps {
   width?:       number;   // px (0 = auto)
   maxWidth?:    number;
   indent?:      number;   // derived: padding-left / CHAR_W
+  fontScale?:   number;   // text magnification: 0.75 | 1 | 2 | 3
 }
 
 // ── Layout ────────────────────────────────────────────────────────────────────

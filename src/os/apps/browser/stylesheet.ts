@@ -19,7 +19,9 @@
  */
 
 import type { CSSProps } from './types.js';
-import { parseCSSColor, parseInlineStyle } from './css.js';
+import { parseCSSColor, parseInlineStyle, registerCSSVarBlock, resolveCSSVars, resetCSSVars } from './css.js';
+
+export { resetCSSVars };
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -365,4 +367,5 @@ function mergeProps(target: CSSProps, src: CSSProps): void {
   if (src.marginBottom !== undefined) target.marginBottom = src.marginBottom;
   if (src.width        !== undefined) target.width        = src.width;
   if (src.maxWidth     !== undefined) target.maxWidth     = src.maxWidth;
+  if (src.fontScale    !== undefined) target.fontScale    = src.fontScale;
 }

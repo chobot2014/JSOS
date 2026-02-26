@@ -110,6 +110,16 @@ export class VNode {
     if (v) { var t = new VText(v); t.parentNode = this; t.ownerDocument = this.ownerDocument; this.childNodes.push(t); }
     if (this.ownerDocument) this.ownerDocument._dirty = true;
   }
+  /** Returns true if this node is in a document (has ownerDocument set). */
+  get isConnected(): boolean { return this.ownerDocument !== null; }
+  /** Checks if this node contains another (inclusive). */
+  contains(other: VNode | null): boolean {
+    if (!other) return false;
+    var n: VNode | null = other;
+    while (n) { if (n === this) return true; n = n.parentNode; }
+    return false;
+  }
+  getRootNode(): VNode { var n: VNode = this; while (n.parentNode) n = n.parentNode; return n; }
 }
 
 // ── VText ─────────────────────────────────────────────────────────────────────
@@ -289,6 +299,64 @@ export class VElement extends VNode {
 
   // HTMLInputElement-like — scrollIntoView etc.
   scrollIntoView(): void {}
+
+  // ── Layout/size stubs needed by many JS frameworks ────────────────────────────
+
+  /** Approximate bounding rect — used by JS frameworks checking visibility. */
+  getBoundingClientRect(): { x: number; y: number; width: number; height: number; top: number; left: number; right: number; bottom: number } {
+    // Return a plausible rect so visibility checks don't all return zero
+    return { x: 0, y: 0, width: 200, height: 20, top: 0, left: 0, right: 200, bottom: 20 };
+  }
+  get offsetWidth():  number { return 200; }
+  get offsetHeight(): number { return 20; }
+  get offsetTop():    number { return 0; }
+  get offsetLeft():   number { return 0; }
+  get offsetParent(): VElement | null { return this.parentNode instanceof VElement ? this.parentNode as VElement : null; }
+  get clientWidth():  number { return 200; }
+  get clientHeight(): number { return 20; }
+  get clientTop():    number { return 0; }
+  get clientLeft():   number { return 0; }
+  scrollTop = 0;
+  scrollLeft = 0;
+  get scrollWidth():  number { return 200; }
+  get scrollHeight(): number { return 20; }
+
+  // ── dataset: data-* attribute access ─────────────────────────────────────────
+
+  get dataset(): Record<string, string> {
+    var self = this;
+    return new Proxy({} as Record<string, string>, {
+      get(_t: Record<string, string>, k: string): string | undefined {
+        var attr = 'data-' + k.replace(/[A-Z]/g, m => '-' + m.toLowerCase());
+        return self.getAttribute(attr) ?? undefined;
+      },
+      set(_t: Record<string, string>, k: string, v: string): boolean {
+        var attr = 'data-' + k.replace(/[A-Z]/g, m => '-' + m.toLowerCase());
+        self.setAttribute(attr, String(v));
+        return true;
+      },
+      has(_t: Record<string, string>, k: string): boolean {
+        return self.hasAttribute('data-' + k.replace(/[A-Z]/g, m => '-' + m.toLowerCase()));
+      },
+    });
+  }
+
+  // ── Shadow DOM stub ─────────────────────────────────────────────────────────
+
+  attachShadow(_opts: { mode: string }): VElement { return this; }
+
+  // ── next/prev element sibling ─────────────────────────────────────────────────
+
+  get nextElementSibling(): VElement | null {
+    var sib = this.nextSibling;
+    while (sib) { if (sib instanceof VElement) return sib as VElement; sib = sib.nextSibling; }
+    return null;
+  }
+  get previousElementSibling(): VElement | null {
+    var sib = this.previousSibling;
+    while (sib) { if (sib instanceof VElement) return sib as VElement; sib = sib.previousSibling; }
+    return null;
+  }
 }
 
 // ── VDocument ─────────────────────────────────────────────────────────────────
@@ -340,9 +408,28 @@ export class VDocument extends VNode {
   hasFocus(): boolean { return true; }
   execCommand(_cmd: string, _show?: boolean, _val?: string): boolean { return false; }
   getSelection(): null { return null; }
-  createRange(): any { return { selectNodeContents() {}, collapse() {}, toString() { return ''; } }; }
+  createRange(): any { return { selectNodeContents() {}, collapse() {}, toString() { return ''; }, commonAncestorContainer: null }; }
   importNode(node: VNode, deep = false): VNode { return node.cloneNode(deep); }
   adoptNode(node: VNode): VNode { if (node.parentNode) node.parentNode.removeChild(node); node.ownerDocument = this; return node; }
+
+  get readyState(): string { return 'complete'; }
+  get activeElement(): VElement { return this.body; }
+  get visibilityState(): string { return 'visible'; }
+  get hidden(): boolean { return false; }
+
+  createTreeWalker(root: VElement, _whatToShow?: number, _filter?: unknown): any {
+    var nodes: VNode[] = [];
+    var idx = 0;
+    _walk(root, el => nodes.push(el));
+    return {
+      currentNode: root as VNode,
+      nextNode(): VNode | null { if (idx < nodes.length) { this.currentNode = nodes[idx++]; return this.currentNode; } return null; },
+      previousNode(): VNode | null { if (idx > 1) { this.currentNode = nodes[--idx - 1]; return this.currentNode; } return null; },
+      firstChild(): VNode | null { return root.firstChild; },
+      parentNode(): VNode | null { return null; },
+    };
+  }
+  createNodeIterator(root: VElement, _whatToShow?: number): any { return this.createTreeWalker(root, _whatToShow); }
 }
 
 // ── DOM walker + CSS selector engine ──────────────────────────────────────────
