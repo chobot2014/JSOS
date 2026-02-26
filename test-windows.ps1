@@ -148,12 +148,22 @@ if ($Headless) {
     Write-Host "Press Alt+Ctrl+2 then type 'quit' to exit QEMU" -ForegroundColor Yellow
     Write-Host "==================" -ForegroundColor Green
 
+    New-Item -ItemType Directory -Path "test-output" -Force | Out-Null
+    Remove-Item "test-output\serial.log" -ErrorAction SilentlyContinue
+
     & $qemuExe `
         -cdrom "build/jsos.iso" `
         -drive "file=build/disk.img,format=raw,media=disk" `
         -boot order=d `
         -m 4G `
         -no-reboot `
+        -vga std `
+        -serial "file:test-output/serial.log" `
         -netdev "user,id=n0" `
         -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on"
+
+    if (Test-Path "test-output\serial.log") {
+        Write-Host "`nSerial log:" -ForegroundColor DarkGray
+        Get-Content "test-output\serial.log" | Select-Object -Last 20 | ForEach-Object { Write-Host $_ }
+    }
 }

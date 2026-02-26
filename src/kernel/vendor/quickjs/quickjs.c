@@ -235,6 +235,12 @@ typedef enum {
 
 typedef enum OPCodeEnum OPCodeEnum;
 
+#ifdef JSOS_JIT_HOOK
+/* Forward typedef so JSRuntime can store a per-runtime hook pointer */
+typedef int (*js_jit_hook_t)(struct JSRuntime *rt, struct JSContext *ctx,
+                              void *bc_ptr, void *stack_ptr, int argc);
+#endif
+
 struct JSRuntime {
     JSMallocFunctions mf;
     JSMallocState malloc_state;
@@ -308,6 +314,10 @@ struct JSRuntime {
     int shape_hash_count; /* number of hashed shapes */
     JSShape **shape_hash;
     void *user_opaque;
+#ifdef JSOS_JIT_HOOK
+    /* Step-5: per-runtime JIT hook — set via JS_SetJITHook() */
+    js_jit_hook_t jit_hook;
+#endif
 };
 
 struct JSClass {
@@ -1811,15 +1821,10 @@ JSRuntime *JS_NewRuntime(void)
 
 #define JIT_THRESHOLD 100
 
-typedef int (*js_jit_hook_t)(JSRuntime *rt, JSContext *ctx,
-                              void *bc_ptr, void *stack_ptr, int argc);
-
-static js_jit_hook_t _jit_hook_fn = NULL;
-
-/* Install a callback fired when a function's call_count reaches JIT_THRESHOLD */
+/* Install a per-runtime JIT callback fired when call_count hits JIT_THRESHOLD.
+ * Each JSRuntime stores its own hook so main and child runtimes are independent. */
 void JS_SetJITHook(JSRuntime *rt, js_jit_hook_t hook) {
-    (void)rt;
-    _jit_hook_fn = hook;
+    rt->jit_hook = hook;
 }
 
 /* Write the compiled native function pointer into the bytecode object */
@@ -17465,16 +17470,39 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
     b = p->u.func.function_bytecode;
 
 #ifdef JSOS_JIT_HOOK
-    /* Step-5: native dispatch for JIT-compiled functions */
+    /* Step-5: native dispatch for JIT-compiled functions.
+     * JIT-compiled canvas functions use cdecl int32 calling convention:
+     *   int32_t fn(int32_t a0, int32_t a1, ..., int32_t a7)
+     * Extract integer values from the JSValue argv array and dispatch
+     * via jit_call_i4 / jit_call_i8 — never pass JSContext/JSValue. */
     if (b->jit_native_ptr) {
-        typedef JSValue (*jit_native_fn_t)(JSContext *, JSValueConst,
-                                           int, JSValueConst *);
-        return ((jit_native_fn_t)b->jit_native_ptr)(
-            caller_ctx, this_obj, argc, (JSValueConst *)argv);
+        extern int32_t jit_call_i4(void *fn,
+                                   int32_t a0, int32_t a1,
+                                   int32_t a2, int32_t a3);
+        extern int32_t jit_call_i8(void *fn,
+                                   int32_t a0, int32_t a1,
+                                   int32_t a2, int32_t a3,
+                                   int32_t a4, int32_t a5,
+                                   int32_t a6, int32_t a7);
+#define _JARG(i) ((i) < argc ? \
+            (JS_VALUE_GET_TAG(argv[i]) == JS_TAG_INT \
+                ? (int32_t)JS_VALUE_GET_INT(argv[i]) \
+                : (int32_t)(uint32_t)JS_VALUE_GET_FLOAT64(argv[i])) \
+            : 0)
+        int32_t _jit_ret;
+        if (argc <= 4)
+            _jit_ret = jit_call_i4(b->jit_native_ptr,
+                                   _JARG(0), _JARG(1), _JARG(2), _JARG(3));
+        else
+            _jit_ret = jit_call_i8(b->jit_native_ptr,
+                                   _JARG(0), _JARG(1), _JARG(2), _JARG(3),
+                                   _JARG(4), _JARG(5), _JARG(6), _JARG(7));
+#undef _JARG
+        return JS_NewInt32(caller_ctx, _jit_ret);
     }
-    /* Increment hot counter; fire hook at threshold so TS JIT can compile */
-    if (++b->call_count == JIT_THRESHOLD && _jit_hook_fn)
-        _jit_hook_fn(caller_ctx->rt, caller_ctx, (void *)b, NULL, argc);
+    /* Increment hot counter; fire this runtime's hook at threshold */
+    if (++b->call_count == JIT_THRESHOLD && rt->jit_hook)
+        rt->jit_hook(rt, caller_ctx, (void *)b, NULL, argc);
 #endif /* JSOS_JIT_HOOK */
 
     if (unlikely(argc < b->arg_count || (flags & JS_CALL_FLAG_COPY_ARGV))) {

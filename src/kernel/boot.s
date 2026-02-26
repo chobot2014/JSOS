@@ -38,10 +38,21 @@ header_start:
 header_end:
 
 ; ── BSS: stack + boot-info pointer ────────────────────────────────────────
+;
+; 512 KiB kernel C stack.
+;
+; QuickJS's JS_SetMaxStackSize is configured to 256 KiB (see quickjs_binding.c).
+; The QuickJS interpreter uses the C stack for every nested JS function call
+; (each level of parsePrimary / parseAssign / etc. in jit.ts consumes ~256 KiB
+; of C stack in the worst-case deep-expression parse).  We need the actual C
+; stack to be at least as large as JS_SetMaxStackSize to avoid silent stack
+; overflows that corrupt BSS data.  512 KiB gives 256 KiB safety headroom
+; beyond the QuickJS soft limit.
+;
 section .bss
 align 16
 stack_bottom:
-    resb 32768          ; 32 KiB kernel stack
+    resb 524288         ; 512 KiB kernel stack (was 32 KiB — too small for deep QuickJS recursion)
 stack_top:
 
 global _multiboot2_ptr
