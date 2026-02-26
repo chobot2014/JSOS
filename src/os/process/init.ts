@@ -231,8 +231,58 @@ export class InitSystem {
    * Initialize system (called during boot, synchronous)
    */
   initialize(): void {
+    // Item 717: read extra service definitions from /etc/init/*.json
+    this.loadServicesFromDir('/etc/init');
     // Register and start all services up to runlevel 3 (full multi-user)
     this.changeRunlevel(3);
+  }
+
+  /**
+   * Item 717: Load service definitions from a directory of JSON files.
+   * Each file should contain a JSON object matching the Service interface.
+   * Silently skips files that cannot be parsed or have missing required fields.
+   */
+  loadServicesFromDir(dirPath: string): void {
+    try {
+      var fsObj: any = (globalThis as any).fs;
+      if (!fsObj) return;
+      if (!fsObj.isDirectory(dirPath)) return;
+      var entries: Array<{ name: string; type: string }> = fsObj.ls(dirPath) || [];
+      for (var i = 0; i < entries.length; i++) {
+        var entry = entries[i];
+        if (entry.type !== 'file') continue;
+        if (!entry.name.endsWith('.json')) continue;
+        var filePath = dirPath.replace(/\/$/, '') + '/' + entry.name;
+        var raw = fsObj.readFile(filePath);
+        if (!raw) continue;
+        try {
+          var def: any = JSON.parse(raw);
+          if (!def.name || !def.executable) continue;
+          var svc: Service = {
+            name:             def.name,
+            description:      def.description || '',
+            executable:       def.executable,
+            args:             def.args || [],
+            runlevel:         (def.runlevel !== undefined ? def.runlevel : 3) as RunLevel,
+            dependencies:     def.dependencies || [],
+            startPriority:    def.startPriority !== undefined ? def.startPriority : 50,
+            stopPriority:     def.stopPriority  !== undefined ? def.stopPriority  : 50,
+            restartPolicy:    def.restartPolicy || 'no',
+            environment:      def.environment || {},
+            workingDirectory: def.workingDirectory || '/',
+            user:             def.user  || 'root',
+            group:            def.group || 'root',
+          };
+          // Only register if not already registered (hardcoded services take priority)
+          if (!this.services.has(svc.name)) {
+            this.registerService(svc);
+            kernel.serialPut('[init] loaded service ' + svc.name + ' from ' + filePath + '\n');
+          }
+        } catch (_) {
+          kernel.serialPut('[init] warn: could not parse ' + filePath + '\n');
+        }
+      }
+    } catch (_) { /* /etc/init not accessible early in boot — ignore */ }
   }
 
   /**

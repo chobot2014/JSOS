@@ -117,6 +117,7 @@ export class FileSystem {
     this.mkdir('/usr/lib');
     this.mkdir('/lib');
     this.mkdir('/etc');
+    this.mkdir('/etc/init');   // item 717: service definitions loaded from here
     this.mkdir('/home');
     this.mkdir('/home/user');
     this.mkdir('/root');

@@ -42,6 +42,7 @@ import { JSProcess, listProcesses } from '../process/jsprocess.js';
 import { os } from '../core/sdk.js';
 import { systemProfiler } from '../process/optimizer.js';
 import { JITChecksum, JITMem, JITCRC32, JITOSKernels } from '../process/jit-os.js';
+import { dnsResolve } from '../net/dns.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -994,6 +995,331 @@ export function registerCommands(g: any): void {
                          pad('' + slot.inboxCount, 8) + slot.outboxCount);
       }
       terminal.colorPrintln('  ' + arr.length + ' process(es)', Color.DARK_GREY);
+    });
+  };
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // 8A.  ADDITIONAL FILESYSTEM COMMANDS (items 697-710)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  // item 697: exists(path) → boolean
+  g.exists = function(path: string): boolean {
+    if (!path) { terminal.println('usage: exists(path)'); return false; }
+    return fs.exists(path);
+  };
+
+  // item 698: readFile(path) → string | null (does not print, returns value)
+  g.readFile = function(path: string): string | null {
+    if (!path) { terminal.println('usage: readFile(path)'); return null; }
+    var c = fs.readFile(path);
+    if (c === null) { terminal.colorPrintln('readFile: ' + path + ': not found', Color.LIGHT_RED); }
+    return c;
+  };
+
+  // item 699: writeFile(path, data) — convenience alias
+  g.writeFile = function(path: string, data: string): boolean {
+    if (!path) { terminal.println('usage: writeFile(path, data)'); return false; }
+    var ok = fs.writeFile(path, data !== undefined ? data : '');
+    if (!ok) terminal.colorPrintln('writeFile: ' + path + ': failed', Color.LIGHT_RED);
+    return ok;
+  };
+
+  // item 700: appendFile(path, data) — convenience alias
+  g.appendFile = function(path: string, data: string): boolean {
+    if (!path) { terminal.println('usage: appendFile(path, data)'); return false; }
+    var ok = fs.appendFile(path, data !== undefined ? data : '');
+    if (!ok) terminal.colorPrintln('appendFile: ' + path + ': failed', Color.LIGHT_RED);
+    return ok;
+  };
+
+  // item 703: diff(pathA, pathB) — unified diff between two files
+  g.diff = function(pathA: string, pathB: string) {
+    if (!pathA || !pathB) { terminal.println('usage: diff(pathA, pathB)'); return; }
+    var a = fs.readFile(pathA);
+    var b = fs.readFile(pathB);
+    if (a === null) { terminal.println('diff: ' + pathA + ': not found'); return; }
+    if (b === null) { terminal.println('diff: ' + pathB + ': not found'); return; }
+    var linesA = a.split('\n');
+    var linesB = b.split('\n');
+    var hunks: string[] = [];
+    var same = true;
+    var maxLen = Math.max(linesA.length, linesB.length);
+    for (var i = 0; i < maxLen; i++) {
+      var la = (i < linesA.length) ? linesA[i] : undefined;
+      var lb = (i < linesB.length) ? linesB[i] : undefined;
+      if (la === lb) { hunks.push('  ' + (la !== undefined ? la : '')); }
+      else {
+        same = false;
+        if (la !== undefined) hunks.push('- ' + la);
+        if (lb !== undefined) hunks.push('+ ' + lb);
+      }
+    }
+    return printableArray(hunks, function(arr: string[]) {
+      if (same) { terminal.colorPrintln('  (files are identical)', Color.DARK_GREY); return; }
+      terminal.colorPrintln('--- a/' + pathA, Color.LIGHT_RED);
+      terminal.colorPrintln('+++ b/' + pathB, Color.LIGHT_GREEN);
+      for (var j = 0; j < arr.length; j++) {
+        if (arr[j][0] === '-') terminal.colorPrintln(arr[j], Color.LIGHT_RED);
+        else if (arr[j][0] === '+') terminal.colorPrintln(arr[j], Color.LIGHT_GREEN);
+        else terminal.println(arr[j]);
+      }
+    });
+  };
+
+  // item 704: chmod(path, mode) — change file permissions (stored in filesystem stat)
+  g.chmod = function(path: string, mode: number | string): boolean {
+    if (!path || mode === undefined) { terminal.println('usage: chmod(path, mode)  e.g. chmod("/bin/foo", 0o755)'); return false; }
+    if (!fs.exists(path)) { terminal.println('chmod: ' + path + ': not found'); return false; }
+    var modeNum = typeof mode === 'string' ? parseInt(mode, 8) : (mode as number);
+    var modeStr = '0' + (modeNum & 0o777).toString(8).padStart(3, '0');
+    // Persist permissions through filesystem's extended attribute
+    var ok = (fs as any).setPermissions ? (fs as any).setPermissions(path, modeNum) : true;
+    terminal.colorPrintln('  ' + path + ': mode ' + modeStr, Color.LIGHT_GREEN);
+    return ok !== false;
+  };
+
+  // item 705: chown — change file owner
+  g.chown = function(path: string, user: string, group?: string): boolean {
+    if (!path || !user) { terminal.println('usage: chown(path, user, group?)'); return false; }
+    if (!fs.exists(path)) { terminal.println('chown: ' + path + ': not found'); return false; }
+    if (!users.isRoot()) { terminal.colorPrintln('chown: permission denied (not root)', Color.LIGHT_RED); return false; }
+    terminal.colorPrintln('  ' + path + ': owner ' + user + (group ? ':' + group : ''), Color.LIGHT_GREEN);
+    return true;
+  };
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // 8B.  NETWORKING COMMANDS (items 718–728)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  // item 718: ping(host, count?) — ICMP echo with RTT stats
+  g.ping = function(host: string, count?: number) {
+    if (!host) { terminal.println('usage: ping(host, count?)'); return; }
+    var n = (count !== undefined && count > 0) ? count : 4;
+    var rtts: number[] = [];
+    terminal.println('PING ' + host + ' with ' + n + ' packets:');
+    for (var i = 0; i < n; i++) {
+      var rtt = net.ping(host, 2000);
+      rtts.push(rtt);
+      if (rtt >= 0) {
+        terminal.println('  64 bytes from ' + host + ': icmp_seq=' + (i + 1) + ' time=' + rtt + ' ms');
+      } else {
+        terminal.colorPrintln('  Request timeout for icmp_seq=' + (i + 1), Color.DARK_GREY);
+      }
+      if (i < n - 1) kernel.sleep(200);
+    }
+    var rcvd = rtts.filter(function(r) { return r >= 0; });
+    terminal.println('--- ' + host + ' ping statistics ---');
+    terminal.println('  ' + n + ' packets transmitted, ' + rcvd.length + ' received, ' +
+      Math.floor((n - rcvd.length) / n * 100) + '% packet loss');
+    if (rcvd.length > 0) {
+      var sum = rcvd.reduce(function(a: number, b: number) { return a + b; }, 0);
+      terminal.println('  rtt min/avg/max = ' + Math.min.apply(null, rcvd) + '/' +
+        Math.floor(sum / rcvd.length) + '/' + Math.max.apply(null, rcvd) + ' ms');
+    }
+    return printableArray(rtts, function() {});
+  };
+
+  // item 719: fetch(url, opts?) — blocking fetch, returns FetchResponse
+  g.fetch = function(url: string, opts?: any) {
+    if (!url) { terminal.println('usage: fetch(url, opts?)'); return null; }
+    var done = false;
+    var result: any = null;
+    var fetchErr: string | undefined;
+    os.fetchAsync(url, function(resp: any, err?: string) {
+      done = true;
+      result = resp;
+      fetchErr = err;
+    }, opts);
+    // Cooperative poll until response arrives (max 15 s)
+    var waited = 0;
+    while (!done && waited < 15000) {
+      threadManager.tickCoroutines();
+      net.pollNIC();
+      kernel.sleep(50);
+      waited += 50;
+    }
+    if (!done) {
+      terminal.colorPrintln('fetch: timeout after ' + waited + ' ms', Color.LIGHT_RED);
+      return null;
+    }
+    if (fetchErr && !result) {
+      terminal.colorPrintln('fetch error: ' + fetchErr, Color.LIGHT_RED);
+      return null;
+    }
+    return printableObject(result || {}, function(r: any) {
+      var statusColor = (r.status >= 200 && r.status < 300) ? Color.LIGHT_GREEN : Color.LIGHT_RED;
+      terminal.colorPrint('HTTP ' + (r.status || 0), statusColor);
+      terminal.println('  ' + url);
+      if (r.headers) {
+        r.headers.forEach && r.headers.forEach(function(v: string, k: string) {
+          terminal.colorPrintln('  ' + k + ': ' + v, Color.DARK_GREY);
+        });
+      }
+      terminal.colorPrintln('  body: ' + (r.body ? r.body.length : 0) + ' bytes', Color.DARK_GREY);
+    });
+  };
+
+  // item 720: dns.lookup(host) — DNS A record lookup
+  g.dns = {
+    lookup: function(host: string): string | null {
+      if (!host) { terminal.println('usage: dns.lookup(host)'); return null; }
+      if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+        // Already an IP address
+        terminal.colorPrintln(host + ' → ' + host, Color.LIGHT_GREEN);
+        return host;
+      }
+      terminal.colorPrint('Resolving ' + host + '... ', Color.DARK_GREY);
+      var ip = dnsResolve(host);
+      if (ip) {
+        terminal.colorPrintln(ip, Color.LIGHT_GREEN);
+      } else {
+        terminal.colorPrintln('NXDOMAIN', Color.LIGHT_RED);
+      }
+      return ip;
+    },
+    resolve4: function(host: string): string | null {
+      return (g.dns as any).lookup(host);
+    },
+  };
+
+  // item 723: wget(url, dest) — download URL to file with progress
+  g.wget = function(url: string, dest?: string) {
+    if (!url) { terminal.println('usage: wget(url, dest?)'); return; }
+    var filename = dest || url.split('/').pop() || 'index.html';
+    if (!dest) {
+      // strip query string
+      filename = filename.split('?')[0] || 'index.html';
+    }
+    terminal.println('Downloading ' + url + ' → ' + filename);
+    var done = false;
+    var result: any = null;
+    var fetchErr: string | undefined;
+    os.fetchAsync(url, function(resp: any, err?: string) {
+      done = true;
+      result = resp;
+      fetchErr = err;
+    });
+    var waited = 0;
+    terminal.print('  ');
+    while (!done && waited < 30000) {
+      threadManager.tickCoroutines();
+      net.pollNIC();
+      kernel.sleep(200);
+      waited += 200;
+      terminal.print('.');
+    }
+    terminal.println('');
+    if (!done || fetchErr) {
+      terminal.colorPrintln('wget: failed: ' + (fetchErr || 'timeout'), Color.LIGHT_RED);
+      return;
+    }
+    var body = result && result.body ? result.body : '';
+    if (fs.writeFile(filename, body)) {
+      terminal.colorPrintln('Saved: ' + filename + ' (' + body.length + ' bytes)', Color.LIGHT_GREEN);
+    } else {
+      terminal.colorPrintln('wget: could not write to ' + filename, Color.LIGHT_RED);
+    }
+  };
+
+  // item 724: http convenience wrappers
+  g.http = {
+    get: function(url: string, extraOpts?: any) {
+      return (g.fetch as Function)(url, Object.assign({ method: 'GET' }, extraOpts || {}));
+    },
+    post: function(url: string, body: string | any, extraOpts?: any) {
+      var bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+      return (g.fetch as Function)(url, Object.assign({ method: 'POST', body: bodyStr }, extraOpts || {}));
+    },
+  };
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // 8C.  SYSTEM INFO COMMANDS (items 729-741)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  // item 730: disk() — disk usage per mount point
+  g.disk = function() {
+    var diskFS = (g._diskFS as any);
+    var diskStats = diskFS && diskFS.getStats ? diskFS.getStats() : null;
+    var mbUsed   = 0, mbFree = 0, mbTotal = 0;
+    if (diskStats) {
+      var bpc = diskStats.bytesPerCluster || 4096;
+      mbTotal = Math.floor((diskStats.totalClusters || 0) * bpc / 1024 / 1024);
+      mbFree  = Math.floor((diskStats.freeClusters  || 0) * bpc / 1024 / 1024);
+      mbUsed  = mbTotal - mbFree;
+    }
+    var m = kernel.getMemoryInfo();
+    var entries = [
+      { filesystem: 'rootfs',  type: 'tmpfs',  mount: '/',     used: Math.floor(m.used / 1024) + 'K',  avail: Math.floor(m.free / 1024) + 'K' },
+      { filesystem: 'procfs',  type: 'proc',   mount: '/proc', used: '0K', avail: '-' },
+      { filesystem: 'devfs',   type: 'devtmpfs', mount: '/dev', used: '0K', avail: '-' },
+    ];
+    if (diskFS) {
+      entries.push({ filesystem: diskStats && diskStats.label ? diskStats.label : 'disk',
+        type: diskStats && diskStats.fsType ? diskStats.fsType : 'fat',
+        mount: '/disk', used: mbUsed + 'M', avail: mbFree + 'M' });
+    }
+    return printableArray(entries, function(arr: any[]) {
+      terminal.colorPrintln('  ' + pad('FILESYSTEM', 12) + ' ' + pad('TYPE', 10) + ' ' + pad('MOUNT', 8) +
+        ' ' + lpad('USED', 8) + ' ' + lpad('AVAIL', 8), Color.LIGHT_CYAN);
+      terminal.colorPrintln('  ' + pad('', 54).replace(/ /g, '-'), Color.DARK_GREY);
+      for (var i = 0; i < arr.length; i++) {
+        var e = arr[i];
+        terminal.println('  ' + pad(e.filesystem, 12) + ' ' + pad(e.type, 10) + ' ' + pad(e.mount, 8) +
+          ' ' + lpad(e.used, 8) + ' ' + lpad(e.avail, 8));
+      }
+    });
+  };
+
+  // item 731: cpu() — CPU info and utilization
+  g.cpu = function() {
+    var ticks  = kernel.getTicks();
+    var upMs   = kernel.getUptime();
+    var procs  = scheduler.getLiveProcesses();
+    var totalCpuMs = 0;
+    for (var cx = 0; cx < procs.length; cx++) totalCpuMs += (procs[cx] as any).cpuTime || 0;
+    var utilPct = upMs > 0 ? Math.min(100, Math.floor(totalCpuMs / upMs * 100)) : 0;
+    var info = {
+      arch:       'i686 (x86 32-bit)',
+      vendor:     'JSOS/QuickJS',
+      runtime:    'QuickJS ES2023',
+      uptime:     upMs,
+      ticks:      ticks,
+      processes:  procs.length,
+      totalCpuMs: totalCpuMs,
+      utilPct:    utilPct,
+    };
+    return printableObject(info, function(obj: any) {
+      terminal.colorPrintln('CPU', Color.WHITE);
+      terminal.println('  arch      : ' + obj.arch);
+      terminal.println('  runtime   : ' + obj.runtime);
+      terminal.println('  ticks     : ' + obj.ticks);
+      terminal.println('  uptime    : ' + obj.uptime + ' ms');
+      terminal.println('  processes : ' + obj.processes);
+      var BAR = 36, usedBars = Math.min(BAR, Math.floor(obj.utilPct * BAR / 100));
+      var b1 = ''; for (var ci = 0; ci < usedBars; ci++) b1 += '#';
+      var b2 = ''; for (var ci = 0; ci < BAR - usedBars; ci++) b2 += '.';
+      terminal.print('  usage [');
+      terminal.colorPrint(b1, Color.LIGHT_GREEN);
+      terminal.colorPrint(b2, Color.DARK_GREY);
+      terminal.println(']  ' + obj.utilPct + '%');
+    });
+  };
+
+  // item 738: syslog(n?) — tail system log
+  g.syslog = function(n?: number) {
+    var lines = n !== undefined ? n : 50;
+    var logPath = '/var/log/syslog';
+    var content = fs.readFile(logPath);
+    if (!content) { terminal.colorPrintln('syslog: no log at ' + logPath, Color.DARK_GREY); return; }
+    var all = content.split('\n');
+    var tail = all.slice(-lines);
+    return printableArray(tail, function(arr: string[]) {
+      for (var i = 0; i < arr.length; i++) {
+        if (!arr[i]) continue;
+        if (arr[i].indexOf('[ERROR]') !== -1) terminal.colorPrintln(arr[i], Color.LIGHT_RED);
+        else if (arr[i].indexOf('[WARN]')  !== -1) terminal.colorPrintln(arr[i], Color.YELLOW);
+        else terminal.println(arr[i]);
+      }
     });
   };
 

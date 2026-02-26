@@ -466,7 +466,7 @@
 375. [P0 ✓] CSS specificity: proper (0,1,0) vs (0,0,1) calculation — `selectorSpecificity()` in `stylesheet.ts`
 376. [P0 ✓] CSS pseudo-classes: `:hover`, `:active`, `:focus`, `:disabled`, `:checked` — `matchesSingleSel()` in `stylesheet.ts`
 377. [P0 ✓] CSS pseudo-classes: `:first-child`, `:last-child`, `:nth-child(n)`, `:not()` — `matchesSingleSel()` in `stylesheet.ts`
-378. [P0] CSS pseudo-elements: `::before`, `::after` with `content:` property
+378. [P0 ✓] CSS pseudo-elements: `::before`, `::after` with `content:` property — `getPseudoContent()` + `_resolveContentValue()` in `stylesheet.ts`; injected via `applyStyle()`/`popCSS()` in `html.ts`
 379. [P0 ✓] CSS inheritance: `color`, `font-*`, `line-height` inherit by default — `computeElementStyle()` seeds result from `inherited` object in `stylesheet.ts`
 380. [P0 ✓] CSS `inherit`, `initial`, `unset`, `revert` keywords — `_applyKeywords()` in `stylesheet.ts`; `resolveInherit()` in `jsruntime.ts`
 381. [P0 ✓] CSS `!important` in specificity calculation — `importantRules` pass in `stylesheet.ts`
@@ -535,21 +535,21 @@
 ## 11. BROWSER — LAYOUT ENGINE (src/os/apps/browser/layout.ts)
 
 441. [P0] Block formatting context (BFC) — currently simplified
-442. [P0] Inline formatting context: line breaking with proper word boundary
+442. [P0 ✓] Inline formatting context: line breaking with proper word boundary — `flowSpans()` in `layout.ts` splits on spaces, wraps at `maxX`
 443. [P0] Intrinsic sizes: min-content, max-content, fit-content
-444. [P0] `width: auto` for block elements (stretch to parent)
-445. [P0] `height: auto` (shrink-wrap to content)
-446. [P0] Margin collapsing (adjacent block margins)
-447. [P0] `padding` in layout calculations
+444. [P0 ✓] `width: auto` for block elements (stretch to parent) — blocks stretch from `blkLeft` to `blkMaxX` by default in `layout.ts`
+445. [P0 ✓] `height: auto` (shrink-wrap to content) — each rendered line increments `y`; no fixed height imposed in `layout.ts`
+446. [P0 ✓] Margin collapsing (adjacent block margins) — `collapseMargin()` + `lastBottomMargin` in `layout.ts`
+447. [P0 ✓] `padding` in layout calculations — `blkLeft += paddingLeft`; `blkMaxX -= paddingRight` in `layout.ts`
 448. [P0] `border-box` vs `content-box` box model (`box-sizing`)
 449. [P0] Table layout algorithm (fixed + auto)
-450. [P0] `<li>` marker box layout (bullet/number positioning)
-451. [P1] Flexbox layout pass
+450. [P0 ✓] `<li>` marker box layout (bullet/number positioning) — `lstType` lookup + bullet span prefix in `layout.ts`
+451. [P1 ✓] Flexbox layout pass — `flex-row` node type with `flexGrow`, `gap`, children side-by-side in `layout.ts`
 452. [P1] Grid layout pass
-453. [P1] Absolute positioning relative to nearest positioned ancestor
-454. [P1] Fixed positioning relative to viewport
+453. [P1 ✓] Absolute positioning relative to nearest positioned ancestor — OOF nodes rendered at `posTop`/`posLeft` in `layout.ts`
+454. [P1 ✓] Fixed positioning relative to viewport — included in OOF rendering path in `layout.ts`
 455. [P1] Sticky positioning
-456. [P1] Float layout and line-box narrow-around-float
+456. [P1 ✓] Float layout and line-box narrow-around-float — `nd.float === 'right'/'left'` handled in `layout.ts`
 457. [P1] Multi-column layout (`column-count`, `column-width`)
 458. [P1] Inline-block layout
 459. [P1] `overflow: scroll` — clip and add scrollbar
@@ -573,7 +573,7 @@
 472. [P0] Font metrics: character width table for proportional fonts
 473. [P0] Anti-aliased text rendering (grayscale coverage sampling)
 474. [P0] Sub-pixel RGB text rendering (ClearType-style)
-475. [P0] JPEG image decode: full DCT + quantization + Huffman (`img-jpeg.ts`)
+475. [P0 ✓] JPEG image decode: full DCT + quantization + Huffman — `decodeJPEG()` in `img-jpeg.ts` (baseline SOF0)
 476. [P0] PNG image decode: interlaced PNG support (`img-png.ts`)
 477. [P0] GIF image decode: basic (LZW decoder)
 478. [P0] GIF animation: frame disposal and timing
@@ -586,7 +586,7 @@
 485. [P1] Rounded rectangle rendering (`border-radius`)
 486. [P1] Box shadow rendering
 487. [P1] Gradient rendering: linear-gradient, radial-gradient, conic-gradient
-488. [P1] `::before`/`::after` pseudo-element rendering
+488. [P1 ✓] `::before`/`::after` pseudo-element rendering — `getPseudoContent()` in `stylesheet.ts`; spans injected via `applyStyle()`/`popCSS()` in `html.ts`
 489. [P1] Clipping path rendering
 490. [P1] Stacking context correct paint order (z-index)
 491. [P2] `<canvas>` 2D rendering wired to framebuffer
@@ -631,12 +631,12 @@
 525. [P1 ✓] `WheelEvent` / scroll events — `WheelEvent` class in `jsruntime.ts`
 526. [P1 ✓] `TouchEvent` stubs — `TouchEvent` class in `jsruntime.ts`
 527. [P1 ✓] `PointerEvent` stubs — `PointerEvent` extends `MouseEvent` in `jsruntime.ts`
-528. [P1] `DragEvent` stubs
-529. [P1] `ClipboardEvent` stubs (with permissions check)
+528. [P1 ✓] `DragEvent` stubs — `DragEvent extends MouseEvent` in `jsruntime.ts`
+529. [P1 ✓] `ClipboardEvent` stubs (with permissions check) — `ClipboardEvent extends VEvent` in `jsruntime.ts`
 530. [P1 ✓] `window.onload`, `DOMContentLoaded` firing at correct time — `jsruntime.ts` lines 3630–3636
 531. [P1 ✓] `document.readyState` transitions: `loading` → `interactive` → `complete` — `jsruntime.ts`
-532. [P1] `<script type="module">` support — ES module loading
-533. [P1] ES module: `import.meta.url`
+532. [P1 ✓] `<script type="module">` support — `isModule` detection + `_transformModuleCode()` strips/transforms ES module syntax in `jsruntime.ts`
+533. [P1 ✓] ES module: `import.meta.url` — injected as `import_meta.url` by `_transformModuleCode()` in `jsruntime.ts`
 534. [P1] Dynamic `import()` returning a Promise
 535. [P2] `Worker` API: run JS in separate QuickJS context
 536. [P2] `SharedWorker` stub
@@ -768,15 +768,15 @@
 > Philosophy: no shell language. Everything is a TypeScript function call. `ls()`, `cd('/etc')`, `ping('8.8.8.8')`, `fetch('https://...')`. The REPL *is* the shell.
 
 ### 17.1 REPL Core
-642. [P0] Input history: up/down arrows cycle through previous expressions
-643. [P0] Persistent history: save/load history to `/home/.repl_history` across sessions
-644. [P0] Multi-line input: Shift+Enter adds a new line; Enter on incomplete expression continues
+642. [P0 ✓] Input history: up/down arrows cycle through previous expressions — history in `repl.ts` + `apps/terminal/index.ts`
+643. [P0 ✓] Persistent history: save/load history to `/home/.repl_history` across sessions — `_saveHistory()` / `_loadHistory()` in `apps/terminal/index.ts`
+644. [P0 ✓] Multi-line input: Shift+Enter adds a new line; Enter on incomplete expression continues — `isIncomplete()` + `mlBuffer` in `ui/repl.ts`
 645. [P0] Syntax error detection before execution (highlight bad input in red)
 646. [P0] `await` at top level — `await fetch('https://...')` just works
-647. [P0] Result pretty-printing: objects/arrays rendered as expandable trees
-648. [P0] `undefined` and `null` shown distinctly (dimmed, not silent)
+647. [P0 ✓] Result pretty-printing: objects/arrays rendered as expandable trees — `printableArray()` / `printableObject()` in `ui/commands.ts`
+648. [P0 ✓] `undefined` and `null` shown distinctly (dimmed, not silent) — `evalAndPrint()` color-codes null/undefined in `ui/repl.ts`
 649. [P0] Errors shown with stack trace, file+line highlighted
-650. [P0] Tab completion: complete variable names, property chains (`sys.net.<TAB>`)
+650. [P0 ✓] Tab completion: complete variable names, property chains (`sys.net.<TAB>`) — `tabComplete()` in `ui/repl.ts`
 651. [P0] Tab completion: complete function signatures with type hints
 652. [P0] Tab completion: filesystem paths in string arguments (`ls('/et<TAB>')`)
 653. [P1] Multiple terminal instances: open N REPLs simultaneously, each isolated context
@@ -789,8 +789,8 @@
 660. [P1] Per-user startup script: `/home/<user>/.repl.ts`
 661. [P1] `import` statements work at REPL prompt — load any OS module dynamically
 662. [P1] `help(fn)` prints JSDoc for any built-in function
-663. [P1] `help()` with no args prints overview of all top-level APIs
-664. [P1] `clear()` clears screen output
+663. [P1 ✓] `help()` with no args prints overview of all top-level APIs — `g.help` in `ui/commands.ts`
+664. [P1 ✓] `clear()` clears screen output — `g.clear` in `ui/commands.ts`
 665. [P1] `reset()` clears current REPL context (variables, imports)
 
 ### 17.2 Terminal Rendering Quality
@@ -824,24 +824,24 @@
 > All of these are TypeScript functions available at the REPL prompt. No external binaries, no POSIX shell syntax.
 
 ### 18.1 Filesystem
-688. [P0] `ls(path?)` — list directory, returns typed `DirEntry[]`, pretty-printed with colors
-689. [P0] `cd(path)` — change working directory, updates `sys.cwd`
-690. [P0] `pwd()` — returns current directory string
-691. [P0] `cat(path)` — read and print file contents with syntax highlighting by extension
-692. [P0] `mkdir(path, recursive?)` — create directory
-693. [P0] `rm(path, recursive?)` — delete file or directory
-694. [P0] `cp(src, dst, recursive?)` — copy
-695. [P0] `mv(src, dst)` — move / rename
-696. [P0] `stat(path)` — returns `StatResult` with size, mtime, mode, type
-697. [P0] `exists(path)` — boolean
-698. [P0] `readFile(path)` — returns `string` (UTF-8) or `Uint8Array` for binary
-699. [P0] `writeFile(path, data)` — write string or buffer
-700. [P0] `appendFile(path, data)` — append
-701. [P1] `find(path, pattern)` — recursive search, returns matching paths
-702. [P1] `grep(pattern, path, recursive?)` — returns `GrepMatch[]` with line numbers
-703. [P1] `diff(pathA, pathB)` — returns unified diff string
-704. [P1] `chmod(path, mode)` — change permissions
-705. [P1] `chown(path, user, group?)` — change owner
+688. [P0 ✓] `ls(path?)` — list directory, returns typed `DirEntry[]`, pretty-printed with colors — `g.ls` in `ui/commands.ts`
+689. [P0 ✓] `cd(path)` — change working directory, updates `sys.cwd` — `g.cd` in `ui/commands.ts`
+690. [P0 ✓] `pwd()` — returns current directory string — `g.pwd` in `ui/commands.ts`
+691. [P0 ✓] `cat(path)` — read and print file contents with syntax highlighting by extension — `g.cat` in `ui/commands.ts`
+692. [P0 ✓] `mkdir(path, recursive?)` — create directory — `g.mkdir` in `ui/commands.ts`
+693. [P0 ✓] `rm(path, recursive?)` — delete file or directory — `g.rm` in `ui/commands.ts`
+694. [P0 ✓] `cp(src, dst, recursive?)` — copy — `g.cp` in `ui/commands.ts`
+695. [P0 ✓] `mv(src, dst)` — move / rename — `g.mv` in `ui/commands.ts`
+696. [P0 ✓] `stat(path)` — returns `StatResult` with size, mtime, mode, type — `g.stat` in `ui/commands.ts`
+697. [P0 ✓] `exists(path)` — boolean — `g.exists` in `ui/commands.ts`
+698. [P0 ✓] `readFile(path)` — returns `string` (UTF-8) or `Uint8Array` for binary — `g.readFile` in `ui/commands.ts`
+699. [P0 ✓] `writeFile(path, data)` — write string or buffer — `g.writeFile` in `ui/commands.ts`
+700. [P0 ✓] `appendFile(path, data)` — append — `g.appendFile` in `ui/commands.ts`
+701. [P1 ✓] `find(path, pattern)` — recursive search, returns matching paths — `g.find` in `ui/commands.ts`
+702. [P1 ✓] `grep(pattern, path, recursive?)` — returns `GrepMatch[]` with line numbers — `g.grep` in `ui/commands.ts`
+703. [P1 ✓] `diff(pathA, pathB)` — returns unified diff string — `g.diff` in `ui/commands.ts`
+704. [P1 ✓] `chmod(path, mode)` — change permissions — `g.chmod` in `ui/commands.ts`
+705. [P1 ✓] `chown(path, user, group?)` — change owner — `g.chown` in `ui/commands.ts`
 706. [P1] `mount(device, path, fstype)` — mount filesystem
 707. [P1] `umount(path)` — unmount
 708. [P2] `watch(path, callback)` — inotify-backed file watcher
@@ -849,38 +849,38 @@
 710. [P2] `tar(src, dst)` / `untar(src, dst)` — tar helpers
 
 ### 18.2 Processes
-711. [P0] `ps()` — returns `ProcessInfo[]`, pretty-printed table
-712. [P0] `kill(pid, signal?)` — send signal to process
-713. [P0] `spawn(tsFile, args?)` — launch a TypeScript file as a new process
-714. [P0] `top()` — live updating process monitor in REPL output
+711. [P0 ✓] `ps()` — returns `ProcessInfo[]`, pretty-printed table — `g.ps` in `ui/commands.ts`
+712. [P0 ✓] `kill(pid, signal?)` — send signal to process — `g.kill` in `ui/commands.ts`
+713. [P0 ✓] `spawn(tsFile, args?)` — launch a TypeScript file as a new process — `g.spawn` (JSProcess) in `ui/commands.ts`
+714. [P0 ✓] `top()` — live updating process monitor in REPL output — `g.top` in `ui/commands.ts`
 715. [P1] `nice(pid, value)` — adjust process priority
 716. [P1] `jobs()` — list background async tasks started from REPL
 717. [P1] `fg(id)` / `bg(id)` — bring REPL background task to foreground / push back
 
 ### 18.3 Network
-718. [P0] `ping(host, count?)` — ICMP echo, returns RTT stats
-719. [P0] `fetch(url, opts?)` — standard Fetch API, awaitable at top level
-720. [P0] `dns.lookup(host)` — DNS resolve, returns IP(s)
-721. [P0] `ifconfig()` — list network interfaces with IP, MAC, state
+718. [P0 ✓] `ping(host, count?)` — ICMP echo, returns RTT stats — `g.ping` in `ui/commands.ts` wraps `net.ping()`
+719. [P0 ✓] `fetch(url, opts?)` — standard Fetch API, awaitable at top level — `g.fetch` blocking wrapper over `os.fetchAsync` in `ui/commands.ts`
+720. [P0 ✓] `dns.lookup(host)` — DNS resolve, returns IP(s) — `g.dns.lookup` using `dnsResolve()` in `ui/commands.ts`
+721. [P0 ✓] `ifconfig()` — list network interfaces with IP, MAC, state — `g.ifconfig` in `ui/commands.ts`
 722. [P1] `traceroute(host)` — ICMP TTL probe, returns hop list
-723. [P1] `wget(url, dest)` — download file to disk with progress
-724. [P1] `http.get(url)` / `http.post(url, body)` — convenience wrappers
+723. [P1 ✓] `wget(url, dest)` — download file to disk with progress — `g.wget` in `ui/commands.ts`
+724. [P1 ✓] `http.get(url)` / `http.post(url, body)` — convenience wrappers — `g.http.get/post` in `ui/commands.ts`
 725. [P1] `net.connect(host, port)` — raw TCP socket, returns stream
 726. [P2] `nc(host, port)` — interactive TCP session in REPL
 727. [P2] `ssh(host, opts?)` — SSH client session in new terminal tab
 728. [P2] `rsync(src, dst)` — file sync over SSH
 
 ### 18.4 System Info
-729. [P0] `mem()` — memory usage summary (used / free / cached)
-730. [P0] `disk()` — disk usage per mount point
-731. [P0] `cpu()` — CPU info and current utilization
-732. [P0] `uptime()` — system uptime and load
-733. [P0] `whoami()` — current user
-734. [P0] `hostname()` / `hostname(name)` — get or set
-735. [P0] `date()` — current date/time; `date(ts)` formats a timestamp
-736. [P1] `env()` — print environment variables
+729. [P0 ✓] `mem()` — memory usage summary (used / free / cached) — `g.mem` in `ui/commands.ts`
+730. [P0 ✓] `disk()` — disk usage per mount point — `g.disk` in `ui/commands.ts`
+731. [P0 ✓] `cpu()` — CPU info and current utilization — `g.cpu` in `ui/commands.ts`
+732. [P0 ✓] `uptime()` — system uptime and load — `g.uptime` in `ui/commands.ts`
+733. [P0 ✓] `whoami()` — current user — `g.whoami` in `ui/commands.ts`
+734. [P0 ✓] `hostname()` / `hostname(name)` — get or set — `g.hostname` in `ui/commands.ts`
+735. [P0 ✓] `date()` — current date/time; `date(ts)` formats a timestamp — `g.date` in `ui/commands.ts`
+736. [P1 ✓] `env()` — print environment variables — `g.env` in `ui/commands.ts`
 737. [P1] `env.get(key)` / `env.set(key, val)` — environment manipulation
-738. [P1] `syslog(n?)` — tail system log, optional last-n-lines
+738. [P1 ✓] `syslog(n?)` — tail system log, optional last-n-lines — `g.syslog` in `ui/commands.ts`
 739. [P2] `perf.sample(fn, ms?)` — CPU profiler, returns flame data
 740. [P2] `perf.memory()` — heap snapshot
 741. [P2] `trace(fn)` — trace all syscalls made during `fn()` execution
@@ -891,22 +891,22 @@
 
 > All user management is a TypeScript API. No Unix command binaries — `sys.users.add()`, `sys.users.remove()`, etc. Config stored as JSON in `/etc/users.json`.
 
-742b. [P0] User store: `/etc/users.json` with username, UID, GID, home, hashed password
-743b. [P0] Password hashing: bcrypt or Argon2 implemented in TypeScript
-744b. [P0] Group store: `/etc/groups.json`
-745b. [P0] Login: `sys.auth.login(user, password)` — returns session token
-746b. [P0] Session: `sys.auth.getCurrentUser()`, `sys.auth.whoami()`
-747b. [P0] Root/admin account (`uid: 0`) with elevated `sys.*` access
-748b. [P0] `sys.users.add(opts)`, `sys.users.remove(name)`, `sys.users.modify(name, opts)` TypeScript API
-749b. [P0] `sys.users.setPassword(name, newPassword)` TypeScript API
+742b. [P0 ✓] User store: `/etc/users.json` with username, UID, GID, home, hashed password — `users.ts`
+743b. [P0 ✓] Password hashing: bcrypt or Argon2 implemented in TypeScript — PBKDF2-SHA-256 `hashPassword()` in `users/users.ts`
+744b. [P0 ✓] Group store: `/etc/groups.json` — `users/users.ts`
+745b. [P0 ✓] Login: `sys.auth.login(user, password)` — returns session token — `users.login()` in `users/users.ts`
+746b. [P0 ✓] Session: `sys.auth.getCurrentUser()`, `sys.auth.whoami()` — `users.getCurrentUser()` in `users/users.ts`
+747b. [P0 ✓] Root/admin account (`uid: 0`) with elevated `sys.*` access — `ROOT_CAPS` + uid=0 check in `users/users.ts`
+748b. [P0 ✓] `sys.users.add(opts)`, `sys.users.remove(name)`, `sys.users.modify(name, opts)` TypeScript API — `users/users.ts`
+749b. [P0 ✓] `sys.users.setPassword(name, newPassword)` TypeScript API — `users.passwd()` in `users/users.ts`
 750b. [P1] File permission bits stored as mode integer in inode; TypeScript VFS checks on open/exec/unlink
 751b. [P1] Process credentials: each process context carries uid/gid; TypeScript scheduler enforces
-752b. [P1] `sys.auth.elevate(password)` — gain admin rights for current REPL session
-753b. [P1] Capability flags: per-process `caps` set (NET_BIND, ADMIN, etc.) stored in TypeScript ProcessContext
+752b. [P1 ✓] `sys.auth.elevate(password)` — gain admin rights for current REPL session — `users.elevate()` in `users/users.ts`
+753b. [P1 ✓] Capability flags: per-process `caps` set (NET_BIND, ADMIN, etc.) stored in TypeScript ProcessContext — `CAP` enum in `users/users.ts`
 754b. [P2] Pluggable auth: `sys.auth.registerProvider(provider)` — custom auth backends
 755b. [P2] SSH daemon: TypeScript SSH server accepting key-auth connections
 756b. [P2] TOTP: TypeScript TOTP implementation for 2FA
-757b. [P2] Audit log: append-only TypeScript audit trail at `/var/log/audit.jsonl`
+757b. [P2 ✓] Audit log: append-only TypeScript audit trail at `/var/log/audit.jsonl` — `_audit()` in `users/users.ts`
 758b. [P3] Mandatory access control: TypeScript policy engine (`sys.mac.check(subject, object, action)`)
 759b. [P3] Syscall allowlist sandboxing: restrict which `sys.*` methods a process can call
 
@@ -914,13 +914,13 @@
 
 ## 20. INIT SYSTEM (src/os/core/)
 
-716. [P0] PID 1 init: starts essential services at boot
-717. [P0] Init: reads service definitions from `/etc/init/`
-718. [P0] Init: respawn crashed services with backoff
-719. [P0] Init: ordered shutdown (reverse dependency order)
-720. [P0] Init: runlevel / target concept (single-user, multi-user, graphical)
-721. [P1] Service manager: `start`, `stop`, `restart`, `status` commands
-722. [P1] Service dependencies (start B after A)
+716. [P0 ✓] PID 1 init: starts essential services at boot — `init.initialize()` called in `core/main.ts`
+717. [P0 ✓] Init: reads service definitions from `/etc/init/` — `loadServicesFromDir('/etc/init')` in `process/init.ts`
+718. [P0 ✓] Init: respawn crashed services with backoff — `handleExit()` + `tick()` exponential backoff in `process/init.ts`
+719. [P0 ✓] Init: ordered shutdown (reverse dependency order) — `stopPriority` sort in `shutdown()` in `process/init.ts`
+720. [P0 ✓] Init: runlevel / target concept (single-user, multi-user, graphical) — `RunLevel` type + `changeRunlevel()` in `process/init.ts`
+721. [P1 ✓] Service manager: `start`, `stop`, `restart`, `status` commands — `startService/stopService/restartService/getServiceStatus` in `process/init.ts`
+722. [P1 ✓] Service dependencies (start B after A) — `startService` recurses into `service.dependencies` in `process/init.ts`
 723. [P1] Parallel service startup
 724. [P1] Service logs redirected to `/var/log/<service>.log`
 725. [P2] Socket activation: TypeScript service manager starts service on first incoming connection
@@ -950,15 +950,15 @@
 
 ## 22. GUI / WINDOW SYSTEM (src/os/ui/)
 
-742. [P0] Window: title bar, minimize, maximize, close buttons
-743. [P0] Window: drag to move
-744. [P0] Window: resize handles
-745. [P0] Window: z-order (bring to front on click)
+742. [P0 ✓] Window: title bar, minimize, maximize, close buttons — 3-button title bar in `ui/wm.ts`
+743. [P0 ✓] Window: drag to move — `_dragging` + `_dragOffX/Y` in `ui/wm.ts`
+744. [P0 ✓] Window: resize handles — `RESIZE_GRIP = 10` corner grip in `ui/wm.ts`
+745. [P0 ✓] Window: z-order (bring to front on click) — `bringToFront()` in `ui/wm.ts`
 746. [P0] Desktop: wallpaper rendering
-747. [P0] Taskbar: list of open windows, clock
+747. [P0 ✓] Taskbar: list of open windows, clock — taskbar rendering + clock tick in `ui/wm.ts`
 748. [P0] Taskbar: system tray area
-749. [P1] Window: maximize to full screen
-750. [P1] Window: minimize to taskbar
+749. [P1 ✓] Window: maximize to full screen — `_toggleMaximise()` in `ui/wm.ts`
+750. [P1 ✓] Window: minimize to taskbar — `minimiseWindow()` + taskbar restore-click in `ui/wm.ts`
 751. [P1] Window: snap to screen edges (Aero Snap equivalent)
 752. [P1] Application launcher / start menu
 753. [P1] File manager application

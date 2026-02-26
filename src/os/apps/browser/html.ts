@@ -3,7 +3,7 @@ import type {
   WidgetBlueprint, WidgetKind, FormState, CSSProps, ScriptRecord,
 } from './types.js';
 import { parseInlineStyle } from './css.js';
-import { type CSSRule, computeElementStyle } from './stylesheet.js';
+import { type CSSRule, computeElementStyle, getPseudoContent } from './stylesheet.js';
 
 // ── HTML5 Named Entity Table (items 350–351) ──────────────────────────────────
 // ISO 8859-1, HTML 4 + common HTML5 named character references.
@@ -291,6 +291,9 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
   }
   function popCSS(): void {
     if (cssStack.length > 0) {
+      // Inject ::after content before restoring parent CSS
+      var afterTxt = curCSS._pseudoAfter;
+      if (afterTxt) pushSpan(afterTxt);
       var prev = cssStack[cssStack.length - 1]!;
       if (curCSS.hidden && !prev.hidden) skipDepth = Math.max(0, skipDepth - 1);
       curCSS = cssStack.pop()!;
@@ -427,14 +430,23 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     nodes.push({ type: 'widget', spans: [], widget: bp });
   }
 
-  // Apply combined sheet + inline style for an element; push to CSS stack
+  // Apply combined sheet + inline style for an element; push to CSS stack.
+  // Also injects ::before generated content span if applicable.
   function applyStyle(tag: string, attrs: Map<string, string>): boolean {
     var id  = attrs.get('id')    || '';
     var cls = (attrs.get('class') || '').split(/\s+/).filter(Boolean);
     var inl = attrs.get('style') || '';
-    if (!inl && sheets.length === 0) { cssStack.push({ ...curCSS }); return false; }
+    var hasPseudo = sheets.length > 0;
+    if (!inl && !hasPseudo) { cssStack.push({ ...curCSS }); return false; }
     var ep = computeElementStyle(tag, id, cls, attrs, curCSS, sheets, inl);
+    if (hasPseudo) {
+      var pseudo = getPseudoContent(tag, id, cls, attrs, sheets);
+      if (pseudo.before) ep._pseudoBefore = pseudo.before;
+      if (pseudo.after)  ep._pseudoAfter  = pseudo.after;
+    }
     pushCSS(ep);
+    // Inject ::before span immediately (before element content)
+    if (curCSS._pseudoBefore) pushSpan(curCSS._pseudoBefore);
     return true;
   }
 
