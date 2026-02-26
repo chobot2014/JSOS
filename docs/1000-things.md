@@ -1,6 +1,8 @@
 # JSOS: 1,000 Things Before Release
 
 > Generated 2026-02-25. Items are grouped by subsystem. P0 = blocks launch, P1 = required for usability, P2 = important, P3 = nice-to-have.
+>
+> **Vision constraint (agents.md):** C code = thin hardware register I/O only. All algorithms, drivers, protocols, scheduling, filesystems, and applications = TypeScript. No shell language — TypeScript REPL only. No non-JS/TS applications.
 
 ---
 
@@ -94,27 +96,27 @@
 75. [P3] KMS/DRM-style driver abstraction layer
 76. [P3] HDMI audio detection
 
-### 1.7 Storage (C layer)
-77. [P0] ATA PIO: verify LBA48 read/write for disks >128GB
-78. [P0] ATA interrupt-driven I/O (currently polling — blocks CPU)
-79. [P0] ATA DMA (UDMA) mode for performance
-80. [P1] ATAPI (CD-ROM) read support
-81. [P1] Virtio-BLK driver for QEMU virtio disks
-82. [P1] NVMe driver (admin queue + I/O queue, basic)
-83. [P2] SATA AHCI driver
-84. [P2] SD/MMC driver stub
-85. [P3] USB mass storage class (MSC) driver
-86. [P3] Floppy driver (legacy BIOS path)
+### 1.7 Storage (C layer — register I/O only)
+77. [P0] ATA: C provides `ata_read_sectors()` / `ata_write_sectors()` raw register I/O — TypeScript implements all queue/retry logic
+78. [P0] ATA interrupt-driven I/O: C fires IRQ, TypeScript driver handles the request queue
+79. [P0] ATA DMA: C sets up PRDT registers; TypeScript controls when and what to transfer
+80. [P1] ATAPI: C exposes packet command send/recv; TypeScript implements the ATAPI protocol
+81. [P1] Virtio-BLK: C maps virtqueue MMIO; TypeScript implements the virtio ring buffer protocol
+82. [P1] NVMe: C maps BAR0 registers; TypeScript implements admin/IO queue state machines
+83. [P2] SATA AHCI: C maps AHCI MMIO; TypeScript implements FIS construction and port management
+84. [P2] SD/MMC: C handles SPI/SDIO register interface; TypeScript implements the SD protocol
+85. [P3] USB mass storage: C provides USB host controller register access; TypeScript implements MSC bulk-only transport
+86. [P3] Floppy: C-only stub (legacy, minimal effort)
 
-### 1.8 Network (C layer)
-87. [P0] Virtio-net: TX ring not flushed when queue full — fix
-88. [P0] Virtio-net: handle multiple RX packets per interrupt
-89. [P0] Ethernet frame validation (min frame size, FCS strip)
-90. [P1] E1000 NIC driver (most common in QEMU default config)
-91. [P1] RTL8139 driver
-92. [P2] PCNET driver (VirtualBox default)
-93. [P2] USB CDC-ECM networking driver
-94. [P3] WiFi (Realtek RTL8188) stub driver
+### 1.8 Network (C layer — register I/O only)
+87. [P0] Virtio-net: C flushes TX ring registers; TypeScript manages the ring buffer logic
+88. [P0] Virtio-net: C signals RX available; TypeScript drains and dispatches packets
+89. [P0] Ethernet: C exposes raw frame bytes; TypeScript validates headers, strips FCS
+90. [P1] E1000: C maps BAR0, fires IRQ; TypeScript implements descriptor ring management
+91. [P1] RTL8139: C maps MMIO registers; TypeScript implements TX/RX buffer logic
+92. [P2] PCNET: C register access; TypeScript implements the full driver logic
+93. [P2] USB CDC-ECM: C USB host register access; TypeScript implements CDC protocol
+94. [P3] WiFi (Realtek RTL8188): C USB register shim; TypeScript implements 802.11 association
 
 ### 1.9 PCI
 95. [P0] PCI config space: MSI capability detection and enable
@@ -193,20 +195,20 @@
 151. [P0] `fork()` syscall wired and working
 152. [P0] `exec()` syscall: load JS bundle from filesystem and run
 153. [P1] `pid_t` namespace: PID 1 = init, wraps at 32768
-154. [P1] Process groups and sessions (`setsid`, `setpgrp`)
-155. [P1] Signals: SIGTERM, SIGKILL, SIGSTOP, SIGCONT, SIGCHLD, SIGHUP
-156. [P1] Signal delivery: interrupt blocked syscall (`SA_RESTART`)
-157. [P1] Signal masking (`sigprocmask`)
-158. [P1] Signal queuing (real-time signals, `sigqueue`)
-159. [P1] `setpriority` / `getpriority` (nice values -20..+19)
-160. [P1] Real-time scheduling class (SCHED_FIFO, SCHED_RR)
-161. [P2] CPU affinity (`sched_setaffinity`) — preparation for SMP
-162. [P2] Process resource limits (`setrlimit`: RLIMIT_CPU, RLIMIT_AS, RLIMIT_NOFILE)
-163. [P2] `/proc/<pid>/` virtual filesystem entries
+154. [P2] Process groups — for job control between cooperating async tasks, not for shell use
+155. [P1] Signals: SIGTERM, SIGKILL — sufficient; SIGSTOP/SIGCONT/SIGHUP are shell-isms, deprioritize
+156. [P1] Signal delivery: interrupt blocked syscall
+157. [P2] Signal masking
+158. [P2] Signal queuing
+159. [P1] `proc.setPriority(pid, n)` TypeScript API — numeric priority with sane range
+160. [P1] Real-time scheduling: TypeScript scheduler supports FIFO and round-robin classes via `proc.setScheduler(pid, policy)`
+161. [P2] CPU affinity: `proc.setCpuAffinity(pid, cpuMask)` TypeScript API — preparation for SMP
+162. [P2] Per-process limits: TypeScript process context carries `limits`.{ maxRSS, maxFDs, maxCPU } — enforced by TypeScript scheduler
+163. [P2] `sys.proc.list()` / `sys.proc.get(pid)` TypeScript API (see `sys.proc` in item 182)
 164. [P2] Process accounting (CPU time, wall time, I/O bytes)
-165. [P3] Namespaces (PID, mount, network, UTS, IPC, user)
-166. [P3] cgroups v2 stubs
-167. [P3] Seccomp-style syscall filter
+165. [P3] Process isolation: TypeScript-level sandboxing per JS context (not Linux namespaces)
+166. [P3] Resource quotas: TypeScript-level per-process limits (not cgroups)
+167. [P3] Syscall allowlist: TypeScript wrapper that restricts which `sys.*` APIs a process can call
 
 ---
 
@@ -217,17 +219,17 @@
 170. [P0] VFS: file descriptor table per process
 171. [P0] VFS: `open`, `close`, `read`, `write`, `seek`, `stat`
 172. [P0] VFS: `readdir`, `mkdir`, `rmdir`, `unlink`, `rename`
-173. [P0] VFS: `dup`, `dup2` for file descriptor duplication
-174. [P0] VFS: `fcntl` (O_NONBLOCK, F_GETFD, F_SETFD, F_GETFL, F_SETFL)
-175. [P0] VFS: `ioctl` dispatch framework
+173. [P1] VFS: `sys.fs.dup(fd)` — TypeScript file descriptor duplication in current process context
+174. [P1] VFS: `fcntl` flags (O_NONBLOCK, O_CLOEXEC) tracked in TypeScript FD table
+175. [P1] VFS: `sys.devices.ioctl(path, cmd, arg)` TypeScript dispatch — individual device drivers handle in TS
 176. [P0] VFS: path resolution with symlink support (max 40 levels)
 177. [P0] Implement ext2 read (no journal) — simplest real FS
 178. [P1] Implement ext4 read-only (extent tree, large file support)
 179. [P1] Implement ext4 write (journaling, metadata journal)
 180. [P1] FAT32 read/write (USB drives, shared with host)
 181. [P1] tmpfs: RAM-backed filesystem for `/tmp`
-182. [P1] procfs: `/proc` virtual filesystem
-183. [P1] sysfs: `/sys` virtual filesystem
+182. [P1] `sys.proc` TypeScript API: enumerate processes, read state — replaces `/proc` virtual FS
+183. [P1] `sys.devices` TypeScript API: enumerate hardware and driver state — replaces `/sys` virtual FS
 184. [P1] devfs: `/dev` character devices (null, zero, random, urandom, tty)
 185. [P1] `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`
 186. [P1] Block device layer: request queue, elevator I/O scheduler
@@ -236,41 +238,41 @@
 189. [P1] Writeback: dirty page flush with 30s timeout
 190. [P2] ISO 9660 read (boot media access)
 191. [P2] OverlayFS (union mount — writable layer over read-only base)
-192. [P2] File locking (`flock`, `fcntl` advisory locks)
-193. [P2] Extended attributes (`xattr`: user, security, trusted namespaces)
-194. [P2] POSIX ACLs
-195. [P2] Filesystem quota (per-user block/inode limits)
-196. [P2] `inotify` for filesystem event notifications
+192. [P2] File locking: TypeScript advisory lock API (`fs.lock(path)` / `fs.unlock(path)`)
+193. [P2] Extended attributes: TypeScript key-value metadata per inode (`fs.xattr.get/set`)
+194. [P2] Access control: TypeScript permission check layer (not POSIX ACL binary format)
+195. [P2] Filesystem quota: TypeScript per-user limit enforcement
+196. [P2] `sys.fs.watch(path, handler)` TypeScript API for filesystem event notifications
 197. [P2] Sparse file support
 198. [P2] Hard links across same device
 199. [P2] `sendfile` zero-copy syscall
-200. [P3] Btrfs read-only support
-201. [P3] ZFS stubs (licensing issues — at least stubs for future)
-202. [P3] FUSE-style userspace filesystem driver API
-203. [P3] NFS client (NFSv3 or v4)
-204. [P3] Samba/CIFS client
-205. [P3] Filesystem compression (zstd per-file attribute)
-206. [P3] Filesystem encryption (fscrypt or dm-crypt)
+200. [P3] Btrfs read-only: TypeScript Btrfs driver (extent tree parsing)
+201. [P3] ZFS: TypeScript read-only ZFS driver stubs
+202. [P3] TypeScript pluggable FS driver API: implement a filesystem in TypeScript, mount it via VFS
+203. [P3] NFS client: TypeScript NFS protocol over UDP/TCP
+204. [P3] SMB/CIFS client: TypeScript SMB2 implementation
+205. [P3] Filesystem compression: TypeScript zstd/lz4 stream per file attribute
+206. [P3] Filesystem encryption: TypeScript AES-XTS layer over block device (replaces dm-crypt)
 
 ---
 
 ## 6. IPC (src/os/ipc/)
 
-207. [P0] Anonymous pipes: `pipe()` syscall, kernel ring buffer
-208. [P0] Named pipes (FIFO): `mkfifo`, VFS entry in `/dev/fifo/`
-209. [P1] Unix domain sockets: `AF_UNIX SOCK_STREAM` and `SOCK_DGRAM`
-210. [P1] Unix domain socket: `sendmsg`/`recvmsg` with SCM_RIGHTS (fd passing)
-211. [P1] POSIX message queues: `mq_open`, `mq_send`, `mq_receive`
-212. [P1] eventfd: lightweight notification primitive
-213. [P1] signalfd: read signals as file descriptors
-214. [P1] timerfd: timer events as file descriptors
-215. [P2] POSIX shared memory: `shm_open`, `mmap(MAP_SHARED)`
-216. [P2] System V IPC: `shmget`, `msgget`, `semget` (legacy compat)
-217. [P2] `epoll`: level-triggered and edge-triggered modes
-218. [P2] `poll` and `select` multiplexing
-219. [P2] `io_uring`: submission/completion ring for async I/O
-220. [P3] D-Bus protocol as native IPC mechanism
-221. [P3] `memfd_create` anonymous shared memory
+207. [P1] Pipes: TypeScript `ipc.pipe()` returns a `[ReadableStream, WritableStream]` pair
+208. [P1] Named pipes: `ipc.namedPipe(name)` registers a named channel in `/dev/pipes/`
+209. [P1] Unix domain sockets: TypeScript `ipc.socket(path)` — TypeScript implements all framing
+210. [P1] Credential passing: `ipc.sendFd(socket, fd)` shares a FD reference between two TypeScript processes
+211. [P1] TypeScript message channels: `ipc.createChannel()` — typed async message passing between processes
+212. [P1] Event bus: `ipc.on(topic, handler)` / `ipc.emit(topic, data)` — pub/sub within and across processes
+213. [P1] Signal-as-Promise: `proc.waitForSignal(SIGTERM)` returns a Promise
+214. [P1] Timer promises: `sys.sleep(ms)`, `sys.setInterval(fn, ms)` — no fd-based abstraction needed
+215. [P2] Shared memory: `sys.shm.create(name, bytes)` returns a `SharedArrayBuffer` usable across processes
+216. [P2] ~~System V IPC~~ — **REMOVED**: legacy Unix-ism not needed in TypeScript-native OS
+217. [P2] Async I/O multiplexing: TypeScript `select([...promises])` — built on native Promise.race
+218. [P2] `poll`/`select` POSIX compat shim if needed for any C-adjacent code
+219. [P2] Async I/O: use JS async/await natively — `io_uring` concepts expressed as typed Promise APIs
+220. [P3] JSOS native IPC bus: typed pub/sub service registry (replaces D-Bus)
+221. [P3] `sys.shm.anonymous(bytes)` — unnamed shared buffer between forked processes
 
 ---
 
@@ -885,25 +887,26 @@
 
 ## 19. USERS & SECURITY (src/os/users/)
 
-697. [P0] `passwd` file: username, UID, GID, home, shell
-698. [P0] `shadow` file: hashed passwords (bcrypt or SHA-512-crypt)
-699. [P0] `group` file: group names, GIDs, members
-700. [P0] Login: PAM-like authentication against shadow file
-701. [P0] Session creation: set UID, GID, supplementary groups, env vars
-702. [P0] Root account (UID 0) with superuser privileges
-703. [P0] `useradd`, `userdel`, `usermod` commands
-704. [P0] `groupadd`, `groupdel`
-705. [P0] `passwd` command to change password
-706. [P1] DAC: file permission bits (rwxrwxrwx + sticky + setuid + setgid)
-707. [P1] Process credential checks on file open/exec/unlink
-708. [P1] `su`/`sudo` with password confirmation
-709. [P1] Capabilities (CAP_NET_BIND_SERVICE, CAP_SYS_ADMIN, etc.)
-710. [P2] Pluggable authentication framework
-711. [P2] SSH daemon for remote login
-712. [P2] Two-factor authentication stub (TOTP)
-713. [P2] Audit log: security events to `/var/log/auth.log`
-714. [P3] SELinux / AppArmor style mandatory access control
-715. [P3] Seccomp namespace filtering per process
+> All user management is a TypeScript API. No Unix command binaries — `sys.users.add()`, `sys.users.remove()`, etc. Config stored as JSON in `/etc/users.json`.
+
+742b. [P0] User store: `/etc/users.json` with username, UID, GID, home, hashed password
+743b. [P0] Password hashing: bcrypt or Argon2 implemented in TypeScript
+744b. [P0] Group store: `/etc/groups.json`
+745b. [P0] Login: `sys.auth.login(user, password)` — returns session token
+746b. [P0] Session: `sys.auth.getCurrentUser()`, `sys.auth.whoami()`
+747b. [P0] Root/admin account (`uid: 0`) with elevated `sys.*` access
+748b. [P0] `sys.users.add(opts)`, `sys.users.remove(name)`, `sys.users.modify(name, opts)` TypeScript API
+749b. [P0] `sys.users.setPassword(name, newPassword)` TypeScript API
+750b. [P1] File permission bits stored as mode integer in inode; TypeScript VFS checks on open/exec/unlink
+751b. [P1] Process credentials: each process context carries uid/gid; TypeScript scheduler enforces
+752b. [P1] `sys.auth.elevate(password)` — gain admin rights for current REPL session
+753b. [P1] Capability flags: per-process `caps` set (NET_BIND, ADMIN, etc.) stored in TypeScript ProcessContext
+754b. [P2] Pluggable auth: `sys.auth.registerProvider(provider)` — custom auth backends
+755b. [P2] SSH daemon: TypeScript SSH server accepting key-auth connections
+756b. [P2] TOTP: TypeScript TOTP implementation for 2FA
+757b. [P2] Audit log: append-only TypeScript audit trail at `/var/log/audit.jsonl`
+758b. [P3] Mandatory access control: TypeScript policy engine (`sys.mac.check(subject, object, action)`)
+759b. [P3] Syscall allowlist sandboxing: restrict which `sys.*` methods a process can call
 
 ---
 
@@ -918,9 +921,9 @@
 722. [P1] Service dependencies (start B after A)
 723. [P1] Parallel service startup
 724. [P1] Service logs redirected to `/var/log/<service>.log`
-725. [P2] Socket activation: start service when first connection arrives
-726. [P2] D-Bus daemon as optional service
-727. [P3] Systemd-compatible unit file parser (for ecosystem compat)
+725. [P2] Socket activation: TypeScript service manager starts service on first incoming connection
+726. [P2] JSOS service bus: typed event bus for inter-service communication (not D-Bus binary protocol)
+727. [P3] ~~systemd unit file parser~~ — **REMOVED**: JSOS services are defined in TypeScript, not `.service` files
 
 ---
 
@@ -938,8 +941,8 @@
 737. [P2] Virtual packages (provides/requires)
 738. [P2] Package pinning / hold
 739. [P2] Sandbox package installation (test before committing)
-740. [P3] Flatpak-style containerized apps
-741. [P3] NPM-compatible registry proxy (install npm packages natively)
+740. [P3] TypeScript sandbox: run untrusted `.ts` packages in isolated JS context with restricted `sys.*` API
+741. [P3] NPM-compatible registry: install npm packages that have no native deps natively
 
 ---
 
@@ -999,11 +1002,13 @@
 
 ## 24. DEVELOPER TOOLS
 
-786. [P0] REPL: interactive JS console accessible from shell
-787. [P0] REPL: multiline input mode
-788. [P0] REPL: syntax highlighting input
-789. [P0] REPL: pretty-print objects/arrays
-790. [P1] JSOS SDK: TypeScript type definitions for all `sys.*` APIs
+> Note: REPL core features are in section 17. This section covers tooling built on top of the REPL.
+
+786. [P0] JSOS SDK: TypeScript type definitions for all `sys.*` APIs — enables IntelliSense in REPL and editor
+787. [P0] In-REPL type checking: red underline on type errors before executing
+788. [P0] `inspect(value)` — deep pretty-print with types, circular ref handling, collapsible nodes
+789. [P0] `doc(symbol)` — print full JSDoc + type signature for any `sys.*` function
+790. [P1] JSOS SDK npm package: install on host machine for authoring apps with full type support
 791. [P1] Build system: can rebuild JSOS from within JSOS
 792. [P1] Debugger: breakpoint on JS line via serial DevTools protocol
 793. [P1] Debugger: step over, step in, step out
@@ -1035,10 +1040,10 @@
 814. [P1] Integration test: WebSocket echo server test
 815. [P1] Regression test: no kernel panic on 100 random pages
 816. [P1] Performance benchmark: pages rendered per second
-817. [P2] Fuzzing: HTTP response parser with AFL
-818. [P2] Fuzzing: HTML parser
-819. [P2] Fuzzing: CSS parser
-820. [P2] Fuzzing: TLS certificate parser
+817. [P2] Property-based fuzzing: HTTP response parser — TypeScript fast-check or similar
+818. [P2] Property-based fuzzing: HTML parser against html5lib test vectors
+819. [P2] Property-based fuzzing: CSS parser
+820. [P2] Property-based fuzzing: TLS certificate/X.509 parser
 821. [P2] Memory leak detection: run 1000 page loads, check heap growth
 822. [P2] CI pipeline: Docker build + QEMU headless test on every commit
 823. [P3] Formal verification of TCP state machine
@@ -1048,20 +1053,22 @@
 
 ## 26. AUDIO (src/os/apps/)
 
-825. [P1] AC97 audio device driver (QEMU default sound)
-826. [P1] Intel HDA (ICH6) audio driver
-827. [P1] Virtio-sound driver
-828. [P1] PCM ring buffer: mix multiple sources, write to hw
-829. [P1] `AudioContext` Web Audio API stub
-830. [P1] MP3 decode: minimp3 or similar, compiled to TS port
-831. [P1] OGG/Vorbis decode
-832. [P2] AAC decode stub
-833. [P2] FLAC decode
-834. [P2] Volume control mixer
-835. [P2] `<audio>` element playback wired to AudioContext
-836. [P2] `<video>` audio track sync
-837. [P3] ALSA-compatible API
-838. [P3] Audio recording from microphone
+> C layer: raw register writes to audio device DMA buffers only. TypeScript implements all mixing, decoding, and the audio API.
+
+825. [P1] AC97: C provides `ac97_write_pcm_buffer(ptr, len)`; TypeScript audio manager drives it
+826. [P1] Intel HDA: C maps MMIO registers and fires IRQ; TypeScript implements stream descriptor logic
+827. [P1] Virtio-sound: C maps virtqueue; TypeScript implements the virtio-snd protocol
+828. [P1] PCM mixer: TypeScript ring buffer — mix N source streams, call C write function each frame
+829. [P1] `sys.audio` TypeScript API: `createSource()`, `setVolume()`, `play()`, `pause()`, `stop()`
+830. [P1] MP3 decode: TypeScript port of minimp3 (no C dependency)
+831. [P1] OGG/Vorbis decode: TypeScript implementation
+832. [P2] AAC decode: TypeScript port
+833. [P2] FLAC decode: TypeScript implementation
+834. [P2] Software mixer: TypeScript volume, pan, EQ chain
+835. [P2] `<audio>` element wired to `sys.audio` TypeScript API
+836. [P2] `<video>` audio track sync via TypeScript event scheduler
+837. [P3] ~~ALSA-compatible API~~ — **REMOVED**: JSOS has its own `sys.audio` TypeScript API, no ALSA compat needed
+838. [P3] Microphone input: C exposes capture buffer; TypeScript audio capture API
 
 ---
 
@@ -1177,33 +1184,33 @@
 
 ## 33. MISC MISSING PIECES
 
-919. [P0] `/etc/localtime`: timezone database (IANA tz data, compact form)
-920. [P0] `/etc/hostname`: set and read system hostname
-921. [P0] `/etc/fstab`: filesystem mount table at boot
-922. [P0] Clock sync at boot: read CMOS RTC, initialize system time
-923. [P0] Proper random seed at boot (mix TSC + RTC for `/dev/random`)
-924. [P0] `sysctl`-style kernel parameter tuning
-925. [P1] Locale: `C.UTF-8` locale always available
-926. [P1] Locale: `LC_ALL` env var respected by utilities
-927. [P1] POSIX regular expression (libc `regcomp`/`regexec` binding)
-928. [P1] `libc` shim: `malloc`/`free` consistency (currently uses raw kernel allocator)
-929. [P1] `printf` / `sprintf` from libc working correctly
-930. [P1] Math library: `libm` — all trig, exp, log, pow functions
-931. [P1] Floating point edge cases: NaN, Inf, denormals in kernel math
-932. [P1] Process umask (`umask 022` default)
-933. [P1] `openpty`: pseudoterminal creation for terminal emulator
-934. [P1] `utmp`/`wtmp`: login records for `who`, `last` commands
-935. [P2] D-Bus: basic system bus for IPC between services
-936. [P2] UDisks: automatic block device management
-937. [P2] NetworkManager-like daemon: manage interfaces, WiFi profiles
-938. [P2] PulseAudio-compatible API (volume, routing)
-939. [P2] udev rules for dynamic device naming
-940. [P2] Hotplug: USB device add/remove events
-941. [P3] Containers: `chroot` + namespace isolation
-942. [P3] Virtualization: run another OS in JSOS via KVM (meta!)
-943. [P3] LLVM backend: compile C/TypeScript to native via JSJIT
-944. [P3] Wayland protocol: modern display server replacement
-945. [P3] systemd-resolved: split-horizon DNS
+919. [P0] Timezone data: IANA tz database as a TypeScript module (`sys.time.tz`)
+920. [P0] `/etc/config.json`: machine config (hostname, locale, timezone) — JSON not `/etc/hostname`
+921. [P0] `/etc/fstab.json`: filesystem mount table as JSON array
+922. [P0] Clock sync at boot: C reads CMOS RTC once; TypeScript initializes system clock
+923. [P0] Entropy: C mixes TSC + RTC into seed; TypeScript `/dev/random` PRNG (ChaCha20)
+924. [P0] `sys.config.get(key)` / `sys.config.set(key, val)` TypeScript API (replaces sysctl)
+925. [P1] Locale: TypeScript locale module — `sys.locale.format(date)`, `sys.locale.collate()`
+926. [P1] Locale: per-process locale setting via `sys.locale.set('en-US')`
+927. [P1] RegExp: use QuickJS native `RegExp` — no libc binding needed
+928. [P1] C heap: `malloc`/`free` consistency in C layer (kernel allocator) — fine, C-internal
+929. [P1] C `printf`/`sprintf`: used only in C layer for debug output — already works
+930. [P1] Math: QuickJS provides `Math.*` natively; `libm` only needed for C layer functions
+931. [P1] Floating point: verify QuickJS handles NaN/Inf edge cases correctly
+932. [P1] File creation mask: default mode bits for new files, stored in TypeScript process context
+933. [P2] Pseudoterminals: only needed if embedding a third-party TUI app — low priority without shell
+934. [P2] Session log: TypeScript append-only log at `/var/log/sessions.jsonl` (replaces utmp/wtmp)
+935. [P2] JSOS service bus: typed async pub/sub (TypeScript, replaces D-Bus)
+936. [P2] TypeScript device manager: `sys.devices` — enumerate, mount, eject block devices
+937. [P2] TypeScript network manager: `sys.net.interfaces`, `sys.net.wifi` — no external daemon
+938. [P2] `sys.audio` TypeScript API (see section 26) — no PulseAudio compat layer needed
+939. [P2] TypeScript hotplug manager: `sys.devices.on('add', handler)` event-based device arrival
+940. [P2] USB hotplug: C fires IRQ on device attach; TypeScript dispatches `sys.devices` events
+941. [P3] TypeScript sandbox isolation: `sys.sandbox.run(code, { allowedAPIs })` restricted context
+942. [P3] KVM: C exposes VMLAUNCH/VMRESUME; TypeScript implements VMM control logic
+943. [P3] ~~LLVM / C compilation~~ — **REMOVED**: JSOS does not compile C. TypeScript-to-native via JSJIT only.
+944. [P3] ~~Wayland protocol~~ — **REMOVED**: JSOS renders directly to framebuffer canvas, no Wayland needed
+945. [P3] Split-horizon DNS: TypeScript DNS resolver with per-interface search domain config
 
 ---
 
@@ -1240,7 +1247,7 @@
 969. [P1] Audio output works (plays a `.mp3`)
 970. [P1] Network connectivity survives DHCP renewal
 971. [P1] Multiple simultaneous HTTPS connections work
-972. [P1] Shell tab completion works reliably
+972. [P1] REPL tab completion works reliably for all `sys.*` APIs and filesystem paths
 973. [P1] File manager can browse and open files
 974. [P1] Text editor can edit and save files
 975. [P1] System survives OOM (out of memory) gracefully
@@ -1277,3 +1284,10 @@
 *P1 (~320 items): required for the OS to be genuinely usable.*
 *P2 (~280 items): important quality-of-life and compatibility.*
 *P3 (~220 items): future roadmap.*
+
+### Vision Alignment Rules (from agents.md)
+- C code = raw I/O register access only. Zero scheduling, protocol, or FS logic in C.
+- All driver logic, all protocols, all OS algorithms = TypeScript.
+- All applications = TypeScript. No C apps, no Python apps, no shell scripts.
+- No shell language. TypeScript REPL is the only interactive interface.
+- Items removed as misaligned: System V IPC, systemd unit parser, ALSA compat, Wayland, LLVM/C compilation, udev rules (replaced with TypeScript equivalents), utmp/wtmp (replaced with JSON log), sysctl (replaced with `sys.config` API), D-Bus (replaced with typed service bus), cgroups/namespaces (replaced with TypeScript sandboxing).
