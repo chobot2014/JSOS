@@ -33,6 +33,28 @@ export class VEvent {
 // ── VNode base ────────────────────────────────────────────────────────────────
 
 export class VNode {
+  // ── Node type constants (item 582) ─────────────────────────────────────────
+  static readonly ELEMENT_NODE                = 1;
+  static readonly ATTRIBUTE_NODE              = 2;
+  static readonly TEXT_NODE                   = 3;
+  static readonly CDATA_SECTION_NODE          = 4;
+  static readonly PROCESSING_INSTRUCTION_NODE = 7;
+  static readonly COMMENT_NODE                = 8;
+  static readonly DOCUMENT_NODE               = 9;
+  static readonly DOCUMENT_TYPE_NODE          = 10;
+  static readonly DOCUMENT_FRAGMENT_NODE      = 11;
+
+  // Instance aliases so frameworks can do `node.ELEMENT_NODE`
+  readonly ELEMENT_NODE                = 1;
+  readonly ATTRIBUTE_NODE              = 2;
+  readonly TEXT_NODE                   = 3;
+  readonly CDATA_SECTION_NODE          = 4;
+  readonly PROCESSING_INSTRUCTION_NODE = 7;
+  readonly COMMENT_NODE                = 8;
+  readonly DOCUMENT_NODE               = 9;
+  readonly DOCUMENT_TYPE_NODE          = 10;
+  readonly DOCUMENT_FRAGMENT_NODE      = 11;
+
   nodeType = 1;
   nodeName = '';
   parentNode: VNode | null = null;
@@ -81,12 +103,19 @@ export class VNode {
     if (deep) { for (var ch of this.childNodes) { var cc = ch.cloneNode(true); cc.parentNode = c; c.childNodes.push(cc); } }
     return c;
   }
-  addEventListener(type: string, fn: (e: VEvent) => void): void {
+  addEventListener(type: string, fn: ((e: VEvent) => void) | { handleEvent(e: VEvent): void } | null, options?: boolean | { capture?: boolean; once?: boolean; passive?: boolean; signal?: unknown }): void {
+    if (!fn) return;
+    var handler = typeof fn === 'function' ? fn : (e: VEvent) => (fn as any).handleEvent(e);
+    var once = typeof options === 'object' ? options.once : false;
+    var wrapped = once ? (e: VEvent) => { this.removeEventListener(type, wrapped); handler(e); } : handler;
+    (wrapped as any)._original = fn; // for removeEventListener matching
     var arr = this._handlers.get(type); if (!arr) { arr = []; this._handlers.set(type, arr); }
-    if (!arr.includes(fn)) arr.push(fn);
+    if (!arr.some(f => f === wrapped || (f as any)._original === fn)) arr.push(wrapped);
   }
-  removeEventListener(type: string, fn: (e: VEvent) => void): void {
-    var arr = this._handlers.get(type); if (arr) { var i = arr.indexOf(fn); if (i >= 0) arr.splice(i, 1); }
+  removeEventListener(type: string, fn: ((e: VEvent) => void) | { handleEvent(e: VEvent): void } | null, _options?: boolean | { capture?: boolean }): void {
+    if (!fn) return;
+    var arr = this._handlers.get(type);
+    if (arr) { var i = arr.findIndex(f => f === fn || (f as any)._original === fn); if (i >= 0) arr.splice(i, 1); }
   }
   dispatchEvent(ev: VEvent): boolean {
     ev.target = this; this._fireList(ev);
@@ -351,8 +380,24 @@ export class VElement extends VNode {
   // Convenience getters used by forms
   get form(): VElement | null { return this.closest('form'); }
   get elements(): VElement[] { return this.querySelectorAll('input,textarea,select,button'); }
-  focus(): void { /* visual focus managed by BrowserApp */ }
-  blur(): void {}
+  focus(_opts?: { preventScroll?: boolean }): void {
+    var doc = this.ownerDocument;
+    if (doc && doc._activeElement !== this) {
+      var prev = doc._activeElement;
+      doc._activeElement = this;
+      if (prev) { var blurEv = new VEvent('blur', { bubbles: false, cancelable: false }); (blurEv as any).relatedTarget = this; prev.dispatchEvent(blurEv); var focusoutEv = new VEvent('focusout', { bubbles: true, cancelable: false }); (focusoutEv as any).relatedTarget = this; prev.dispatchEvent(focusoutEv); }
+      var focusEv = new VEvent('focus', { bubbles: false, cancelable: false }); (focusEv as any).relatedTarget = prev; this.dispatchEvent(focusEv);
+      var focusinEv = new VEvent('focusin', { bubbles: true, cancelable: false }); (focusinEv as any).relatedTarget = prev; this.dispatchEvent(focusinEv);
+    }
+  }
+  blur(): void {
+    var doc = this.ownerDocument;
+    if (doc && doc._activeElement === this) {
+      doc._activeElement = null;
+      var blurEv = new VEvent('blur', { bubbles: false, cancelable: false }); this.dispatchEvent(blurEv);
+      var focusoutEv = new VEvent('focusout', { bubbles: true, cancelable: false }); this.dispatchEvent(focusoutEv);
+    }
+  }
   click(): void { this.dispatchEvent(new VEvent('click')); }
   submit(): void { this.dispatchEvent(new VEvent('submit')); }
 
@@ -380,7 +425,44 @@ export class VElement extends VNode {
   get scrollWidth():  number { return 200; }
   get scrollHeight(): number { return 20; }
 
-  // ── dataset: data-* attribute access ─────────────────────────────────────────
+  /** Returns an array of DOMRect objects for each CSS border box of the element. */
+  getClientRects(): Array<{ x: number; y: number; width: number; height: number; top: number; left: number; right: number; bottom: number }> {
+    return [this.getBoundingClientRect()];
+  }
+
+  // ── Pointer capture stubs (item 527) ──────────────────────────────────────────
+  setPointerCapture(_pointerId: number): void {}
+  releasePointerCapture(_pointerId: number): void {}
+  hasPointerCapture(_pointerId: number): boolean { return false; }
+
+  // ── Constraint Validation API (item 615) ──────────────────────────────────────
+  _validationMessage = '';
+  checkValidity(): boolean { return true; }
+  reportValidity(): boolean { return true; }
+  setCustomValidity(msg: string): void { this._validationMessage = msg; }
+  get validationMessage(): string { return this._validationMessage; }
+  get validity(): ValidityState { return { valid: true, valueMissing: false, typeMismatch: false, patternMismatch: false, tooLong: false, tooShort: false, rangeUnderflow: false, rangeOverflow: false, stepMismatch: false, badInput: false, customError: this._validationMessage.length > 0 } as ValidityState; }
+  get willValidate(): boolean { return true; }
+
+  // ── Web Animations API stub (item 585) ────────────────────────────────────────
+  animate(_keyframes: unknown[], _opts?: unknown): { finish(): void; cancel(): void; pause(): void; play(): void; reverse(): void; addEventListener(): void; removeEventListener(): void; finished: Promise<unknown> } {
+    return { finish() {}, cancel() {}, pause() {}, play() {}, reverse() {}, addEventListener() {}, removeEventListener() {}, finished: Promise.resolve(undefined) };
+  }
+  getAnimations(): unknown[] { return []; }
+
+  // ── requestPointerLock / exitPointerLock ──────────────────────────────────────
+  requestPointerLock(): void {}
+  requestFullscreen(_opts?: unknown): Promise<void> { return Promise.resolve(); }
+
+  // ── scroll helpers ────────────────────────────────────────────────────────────
+  scroll(xOrOpts?: number | { top?: number; left?: number }, y?: number): void {
+    if (typeof xOrOpts === 'object') { this.scrollTop = xOrOpts?.top ?? this.scrollTop; this.scrollLeft = xOrOpts?.left ?? this.scrollLeft; }
+    else { this.scrollLeft = xOrOpts ?? 0; this.scrollTop = y ?? 0; }
+  }
+  scrollBy(xOrOpts?: number | { top?: number; left?: number }, dy?: number): void {
+    if (typeof xOrOpts === 'object') { this.scrollTop += xOrOpts?.top ?? 0; this.scrollLeft += xOrOpts?.left ?? 0; }
+    else { this.scrollLeft += xOrOpts ?? 0; this.scrollTop += dy ?? 0; }
+  }
 
   get dataset(): Record<string, string> {
     var self = this;
@@ -425,6 +507,8 @@ export class VDocument extends VNode {
   _title = '';
   _dirty = false;
   _cookie = '';
+  _activeElement: VElement | null = null;
+  _styleSheets: unknown[] = [];
   head: VElement;
   body: VElement;
   documentElement: VElement;
@@ -451,7 +535,7 @@ export class VDocument extends VNode {
   createElement(tag: string): VElement { var el = new VElement(tag); el.ownerDocument = this; return el; }
   createElementNS(_ns: string, tag: string): VElement { return this.createElement(tag); }
   createTextNode(text: string): VText { var t = new VText(text); t.ownerDocument = this; return t; }
-  createDocumentFragment(): VElement { var f = new VElement('#fragment'); f.ownerDocument = this; return f; }
+  createDocumentFragment(): VElement { var f = new VElement('#document-fragment'); f.nodeType = 11; f.ownerDocument = this; return f; }
 
   getElementById(id: string): VElement | null { var res: VElement | null = null; _walk(this.body, el => { if (!res && el.id === id) res = el; }); if (!res) _walk(this.head, el => { if (!res && el.id === id) res = el; }); return res; }
   querySelector(sel: string): VElement | null { return this.body.querySelector(sel) ?? this.head.querySelector(sel); }
@@ -463,18 +547,36 @@ export class VDocument extends VNode {
   write(html: string): void { this.body.innerHTML += html; }
   writeln(html: string): void { this.write(html + '\n'); }
   // Stubs
-  createComment(data: string): VNode { var n = new VNode(); (n as any).nodeType = 8; (n as any).data = data; n.ownerDocument = this; return n; }
+  createComment(data: string): VNode { var n = new VNode(); (n as any).nodeType = 8; (n as any).nodeName = '#comment'; (n as any).data = data; n.ownerDocument = this; return n; }
+  createProcessingInstruction(target: string, data: string): VNode {
+    var n = new VNode(); (n as any).nodeType = 7; (n as any).nodeName = target; (n as any).target = target; (n as any).data = data; n.ownerDocument = this; return n;
+  }
   hasFocus(): boolean { return true; }
   execCommand(_cmd: string, _show?: boolean, _val?: string): boolean { return false; }
-  getSelection(): null { return null; }
-  createRange(): any { return { selectNodeContents() {}, collapse() {}, toString() { return ''; }, commonAncestorContainer: null }; }
+  getSelection(): unknown { return (this as any)._selectionRef ?? null; }
+  createRange(): any { return { selectNodeContents() {}, collapse() {}, toString() { return ''; }, commonAncestorContainer: null, startContainer: null, endContainer: null, startOffset: 0, endOffset: 0, collapsed: true, detach() {}, cloneRange() { return this; }, deleteContents() {}, selectNode() {}, surroundContents() {} }; }
   importNode(node: VNode, deep = false): VNode { return node.cloneNode(deep); }
   adoptNode(node: VNode): VNode { if (node.parentNode) node.parentNode.removeChild(node); node.ownerDocument = this; return node; }
+  elementFromPoint(_x: number, _y: number): VElement | null { return this.body; }
+  elementsFromPoint(_x: number, _y: number): VElement[] { return [this.body]; }
+  caretPositionFromPoint(_x: number, _y: number): null { return null; }
 
-  get readyState(): string { return 'complete'; }
-  get activeElement(): VElement { return this.body; }
+  /** 'loading' | 'interactive' | 'complete' — set by jsruntime during page lifecycle */
+  get readyState(): string { return (this as any)._readyState ?? 'complete'; }
+  get activeElement(): VElement { return this._activeElement ?? this.body; }
+  get styleSheets(): unknown[] { return this._styleSheets; }
+  get defaultView(): unknown { return (this as any)._defaultView ?? null; }
   get visibilityState(): string { return 'visible'; }
   get hidden(): boolean { return false; }
+  get domain(): string { try { return new URL((this as any)._url ?? '').hostname; } catch(_) { return ''; } }
+  get URL(): string { return (this as any)._url ?? ''; }
+  get documentURI(): string { return (this as any)._url ?? ''; }
+  get referrer(): string { return ''; }
+  get lastModified(): string { return new Date().toLocaleString(); }
+  get forms(): VElement[] { return this.querySelectorAll('form'); }
+  get images(): VElement[] { return this.querySelectorAll('img'); }
+  get links(): VElement[] { return this.querySelectorAll('a[href],area[href]'); }
+  get scripts(): VElement[] { return this.querySelectorAll('script'); }
 
   createTreeWalker(root: VElement, _whatToShow?: number, _filter?: unknown): any {
     var nodes: VNode[] = [];
