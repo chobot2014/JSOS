@@ -320,4 +320,16 @@ export class BrowserPerformance {
   toJSON(): Record<string, unknown> {
     return { timeOrigin: this.timeOrigin, timing: this.timing };
   }
+
+  // ── Chrome-specific memory API (non-standard, widely used) ────────────────
+  readonly memory = {
+    /** Estimated JS heap size in bytes */
+    get usedJSHeapSize(): number {
+      return (typeof (globalThis as any).__jsHeapUsed === 'number') ? (globalThis as any).__jsHeapUsed : 32 * 1024 * 1024;
+    },
+    get totalJSHeapSize(): number {
+      return (typeof (globalThis as any).__jsHeapTotal === 'number') ? (globalThis as any).__jsHeapTotal : 64 * 1024 * 1024;
+    },
+    get jsHeapSizeLimit(): number { return 512 * 1024 * 1024; },
+  };
 }

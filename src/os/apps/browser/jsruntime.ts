@@ -236,6 +236,8 @@ export function createPageJS(
     get host():     string { try { return new URL(cb.baseURL).host;     } catch(_) { return ''; } },
     get search():   string { try { return new URL(cb.baseURL).search;   } catch(_) { return ''; } },
     get hash():     string { try { return new URL(cb.baseURL).hash;     } catch(_) { return ''; } },
+    get port():     string { try { return new URL(cb.baseURL).port;     } catch(_) { return ''; } },
+    get origin():   string { try { return new URL(cb.baseURL).origin;   } catch(_) { return 'null'; } },
     toString():     string { return cb.baseURL; },
   };
 
@@ -250,6 +252,7 @@ export function createPageJS(
 
   var history = {
     _stack: [cb.baseURL], _pos: 0, _states: [null as unknown],
+    scrollRestoration: 'auto' as 'auto' | 'manual',
     get length(): number { return this._stack.length; },
     get state(): unknown { return this._states[this._pos] ?? null; },
     pushState(state: unknown, _title: string, url: string) {

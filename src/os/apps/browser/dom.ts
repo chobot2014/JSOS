@@ -180,9 +180,13 @@ export class VStyleMap {
   _map: Map<string, string> = new Map();
   _owner: VElement;
   constructor(owner: VElement) { this._owner = owner; }
-  setProperty(prop: string, val: string): void { this._map.set(prop.trim(), val.trim()); if (this._owner.ownerDocument) this._owner.ownerDocument._dirty = true; }
+  setProperty(prop: string, val: string, _priority?: string): void { this._map.set(prop.trim(), val.trim()); if (this._owner.ownerDocument) this._owner.ownerDocument._dirty = true; }
   getPropertyValue(prop: string): string { return this._map.get(prop.trim()) || ''; }
-  removeProperty(prop: string): void { this._map.delete(prop.trim()); if (this._owner.ownerDocument) this._owner.ownerDocument._dirty = true; }
+  getPropertyPriority(_prop: string): string { return ''; }  // !important not tracked
+  removeProperty(prop: string): string { var old = this._map.get(prop.trim()) || ''; this._map.delete(prop.trim()); if (this._owner.ownerDocument) this._owner.ownerDocument._dirty = true; return old; }
+  get length(): number { return this._map.size; }
+  item(index: number): string { return [...this._map.keys()][index] ?? ''; }
+  [Symbol.iterator](): Iterator<string> { return this._map.keys(); }
   get cssText(): string { var p: string[] = []; this._map.forEach((v, k) => p.push(k + ':' + v)); return p.join(';'); }
   set cssText(v: string) {
     this._map.clear();
@@ -195,8 +199,8 @@ function _jsToCss(js: string): string { return js.replace(/[A-Z]/g, m => '-' + m
 
 export function makeStyleProxy(sm: VStyleMap): any {
   return new Proxy(sm, {
-    get(t: any, k: string) { if (typeof (t as any)[k] !== 'undefined' && (k === '_map' || k === '_owner' || k === 'setProperty' || k === 'getPropertyValue' || k === 'removeProperty' || k === 'cssText')) return (t as any)[k]; return t.getPropertyValue(_jsToCss(k)); },
-    set(t: any, k: string, v: string) { if (k === 'cssText') { t.cssText = v; return true; } t.setProperty(_jsToCss(k), v); return true; },
+    get(t: any, k: string) { if (typeof (t as any)[k] !== 'undefined' && (k === '_map' || k === '_owner' || k === 'setProperty' || k === 'getPropertyValue' || k === 'getPropertyPriority' || k === 'removeProperty' || k === 'cssText' || k === 'length' || k === 'item')) return (t as any)[k]; if (typeof k === 'string' && k !== '') return t.getPropertyValue(_jsToCss(k)); return undefined; },
+    set(t: any, k: string, v: string) { if (k === 'cssText') { t.cssText = v; return true; } if (k !== '_map' && k !== '_owner') { t.setProperty(_jsToCss(k), v); } return true; },
   });
 }
 
@@ -255,6 +259,27 @@ export class VElement extends VNode {
   set hidden(v: boolean)  { if (v) this._style.setProperty('display', 'none'); else this._style.removeProperty('display'); }
   get title():     string  { return this._attrs.get('title') || ''; }  set title(v: string)     { this.setAttribute('title', v); }
   get placeholder(): string { return this._attrs.get('placeholder') || ''; }
+
+  // contentEditable / editing properties
+  get contentEditable(): string { return this._attrs.get('contenteditable') ?? 'inherit'; }
+  set contentEditable(v: string) { if (v === 'inherit') this.removeAttribute('contenteditable'); else this.setAttribute('contenteditable', v); }
+  get isContentEditable(): boolean { var ce = this.getAttribute('contenteditable'); return ce === 'true' || ce === ''; }
+  get tabIndex(): number { return parseInt(this._attrs.get('tabindex') ?? '-1', 10); }
+  set tabIndex(v: number) { this.setAttribute('tabindex', String(v)); }
+  get draggable(): boolean { return this._attrs.get('draggable') === 'true'; }
+  set draggable(v: boolean) { this.setAttribute('draggable', String(v)); }
+  get spellcheck(): boolean { return this._attrs.get('spellcheck') !== 'false'; }
+  set spellcheck(v: boolean) { this.setAttribute('spellcheck', String(v)); }
+  get autofocus(): boolean { return this._attrs.has('autofocus'); }
+  set autofocus(v: boolean) { if (v) this.setAttribute('autofocus', ''); else this.removeAttribute('autofocus'); }
+  get translate(): boolean { return this._attrs.get('translate') !== 'no'; }
+  set translate(v: boolean) { this.setAttribute('translate', v ? 'yes' : 'no'); }
+  get inert(): boolean { return this._attrs.has('inert'); }
+  set inert(v: boolean) { if (v) this.setAttribute('inert', ''); else this.removeAttribute('inert'); }
+  get enterKeyHint(): string { return this._attrs.get('enterkeyhint') ?? ''; }
+  set enterKeyHint(v: string) { this.setAttribute('enterkeyhint', v); }
+  get inputMode(): string { return this._attrs.get('inputmode') ?? ''; }
+  set inputMode(v: string) { this.setAttribute('inputmode', v); }
 
   // on* property handlers
   get onclick():  ((e: VEvent) => void) | null { return this._onHandlers['click']  ?? null; }
@@ -458,6 +483,17 @@ export class VElement extends VNode {
   }
   click(): void { this.dispatchEvent(new VEvent('click')); }
   submit(): void { this.dispatchEvent(new VEvent('submit')); }
+  reset(): void { this.dispatchEvent(new VEvent('reset')); }
+  requestSubmit(_submitter?: unknown): void { this.submit(); }
+
+  // Form-specific property shorthands (HTMLFormElement)
+  get action(): string  { return this._attrs.get('action') || ''; }  set action(v: string)  { this.setAttribute('action', v); }
+  get method(): string  { return this._attrs.get('method') || 'get'; } set method(v: string)  { this.setAttribute('method', v); }
+  get enctype(): string { return this._attrs.get('enctype') || 'application/x-www-form-urlencoded'; } set enctype(v: string) { this.setAttribute('enctype', v); }
+  get encoding(): string { return this.enctype; } set encoding(v: string) { this.enctype = v; }
+  get noValidate(): boolean { return this._attrs.has('novalidate'); } set noValidate(v: boolean) { if (v) this.setAttribute('novalidate', ''); else this.removeAttribute('novalidate'); }
+  get acceptCharset(): string { return this._attrs.get('accept-charset') || ''; }
+  // elements getter already defined above (in form-input area)
 
   // HTMLInputElement-like — scrollIntoView etc.
   scrollIntoView(): void {}
@@ -520,6 +556,25 @@ export class VElement extends VNode {
   get validationMessage(): string { return this._validationMessage; }
   get validity(): ValidityState { return { valid: true, valueMissing: false, typeMismatch: false, patternMismatch: false, tooLong: false, tooShort: false, rangeUnderflow: false, rangeOverflow: false, stepMismatch: false, badInput: false, customError: this._validationMessage.length > 0 } as ValidityState; }
   get willValidate(): boolean { return true; }
+
+  // ── Selection (text input) API ────────────────────────────────────────────────
+  _selectionStart = 0; _selectionEnd = 0; _selectionDirection = 'none';
+  get selectionStart(): number | null { return this._selectionStart; }
+  set selectionStart(v: number | null) { this._selectionStart = v ?? 0; }
+  get selectionEnd(): number | null { return this._selectionEnd; }
+  set selectionEnd(v: number | null) { this._selectionEnd = v ?? 0; }
+  get selectionDirection(): string | null { return this._selectionDirection; }
+  set selectionDirection(v: string | null) { this._selectionDirection = v ?? 'none'; }
+  setSelectionRange(start: number, end: number, direction?: string): void {
+    this._selectionStart = start; this._selectionEnd = end; this._selectionDirection = direction ?? 'none';
+  }
+  setRangeText(replacement: string, start?: number, end?: number, _selectMode?: string): void {
+    var v = this.value ?? '';
+    var s = start ?? this._selectionStart; var e = end ?? this._selectionEnd;
+    this.value = v.slice(0, s) + replacement + v.slice(e);
+    this._selectionStart = this._selectionEnd = s + replacement.length;
+  }
+  select(): void { this._selectionStart = 0; this._selectionEnd = (this.value ?? '').length; }
 
   // ── Web Animations API stub (item 585) ────────────────────────────────────────
   animate(_keyframes: unknown[], _opts?: unknown): { finish(): void; cancel(): void; pause(): void; play(): void; reverse(): void; addEventListener(): void; removeEventListener(): void; finished: Promise<unknown> } {
@@ -630,7 +685,10 @@ export class VElement extends VNode {
 
   // ── Shadow DOM stub ─────────────────────────────────────────────────────────
 
-  attachShadow(_opts: { mode: string }): VElement { return this; }
+  _shadowRoot: VElement | null = null;
+  attachShadow(_opts: { mode: string }): VElement { this._shadowRoot = this; return this; }
+  get shadowRoot(): VElement | null { return this._shadowRoot; }
+  adoptedStyleSheets: unknown[] = [];
 
   // ── next/prev element sibling ─────────────────────────────────────────────────
 
@@ -806,6 +864,7 @@ export class VDocument extends VNode {
   get readyState(): string { return (this as any)._readyState ?? 'complete'; }
   get activeElement(): VElement { return this._activeElement ?? this.body; }
   get styleSheets(): unknown[] { return this._styleSheets; }
+  adoptedStyleSheets: unknown[] = [];
   get defaultView(): unknown { return (this as any)._defaultView ?? null; }
   get visibilityState(): string { return 'visible'; }
   /** Document.timeline — Animation timeline (used by GSAP, Framer Motion, Anime.js) */
