@@ -17,7 +17,7 @@ import { os } from '../../core/sdk.js';
 import type { FetchResponse } from '../../core/sdk.js';
 import {
   VDocument, VElement, VEvent, VText,
-  buildDOM, serializeDOM, _walk,
+  buildDOM, serializeDOM, _walk, _matchSel,
 } from './dom.js';
 import { BrowserPerformance, BrowserPerformanceObserver } from './perf.js';
 import { WorkerImpl, MessageChannel, BroadcastChannelImpl, tickAllWorkers } from './workers.js';
@@ -207,8 +207,11 @@ export function createPageJS(
     if (doc._dirty) {
       doc._dirty = false;
       needsRerender = true;
-      // Flush mutation observers with a synthetic mutation record
-      _flushMutationObservers([{ type: 'childList', target: doc, addedNodes: [], removedNodes: [] }]);
+      // Flush queued mutation records (or a synthetic fallback if none)
+      var records = doc._mutationQueue.length > 0
+        ? doc._mutationQueue.splice(0)
+        : [{ type: 'childList', target: doc, addedNodes: [], removedNodes: [] }];
+      _flushMutationObservers(records);
     }
   }
 
@@ -221,6 +224,41 @@ export function createPageJS(
     // Rebuild the DOM from the new HTML so subsequent JS keeps working
     // (we keep the existing doc object but sync values back from serialized form)
   }
+
+  // ── Form action/method wiring (items 602, 604) ─────────────────────────────
+  // Intercept submit events that bubble to the document and handle action navigation.
+  doc.addEventListener('submit', (ev: VEvent) => {
+    if (ev.defaultPrevented) return;
+    var form = ev.target as VElement | null;
+    if (!form) return;
+    var action  = (form as any).action  || '';
+    if (!action) return;  // no action — leave to script handlers
+    var method  = ((form as any).method  || 'get').toLowerCase();
+    var noVal   = (form as any).noValidate;
+    // Validate unless novalidate
+    if (!noVal && !(form as any).checkFormValidity && form.querySelectorAll) {
+      // fall back: iterate fields
+    }
+    if (!noVal && typeof (form as any).checkFormValidity === 'function') {
+      if (!(form as any).checkFormValidity()) { ev.preventDefault(); return; }
+    }
+    var serialized = typeof (form as any).serializeForm === 'function' ? (form as any).serializeForm() : '';
+    var actionURL = action.startsWith('http') ? action : _resolveURL(action, _baseHref);
+    if (method === 'get') {
+      actionURL += (actionURL.includes('?') ? '&' : '?') + serialized;
+      cb.navigate(actionURL);
+    } else {
+      // POST — use fetchAsync, then navigate if redirect returned
+      os.fetchAsync(actionURL, (resp: any) => {
+        if (resp && resp.status >= 300 && resp.status < 400 && resp.headers?.location) {
+          cb.navigate(resp.headers.location);
+        } else if (resp) {
+          // Navigate to action URL with response body rendered
+          cb.navigate(actionURL);
+        }
+      }, { method: 'POST', body: serialized, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    }
+  });
 
   // ── window.location ────────────────────────────────────────────────────────
 
@@ -657,7 +695,75 @@ export function createPageJS(
     };
   }
 
-  function fetchAPI(url: string | { url?: string; href?: string; toString(): string }, opts?: { method?: string; body?: string | FormData_; headers?: Record<string, string> | Headers_; signal?: AbortSignalImpl; mode?: string; credentials?: string; cache?: string; redirect?: string; referrer?: string; keepalive?: boolean }): Promise<any> {
+  // ── Request class (item 506) ──────────────────────────────────────────────
+
+  class Request_ {
+    url: string; method: string; headers: Headers_; body: any;
+    mode: string; credentials: string; cache: string; redirect: string;
+    referrer: string; keepalive: boolean; signal: AbortSignalImpl | null;
+    bodyUsed = false;
+    constructor(input: string | Request_, init?: { method?: string; headers?: any; body?: any; mode?: string; credentials?: string; cache?: string; redirect?: string; referrer?: string; keepalive?: boolean; signal?: AbortSignalImpl }) {
+      if (input instanceof Request_) {
+        this.url = input.url; this.method = input.method; this.headers = new Headers_(input.headers);
+        this.body = input.body; this.mode = input.mode; this.credentials = input.credentials;
+        this.cache = input.cache; this.redirect = input.redirect; this.referrer = input.referrer;
+        this.keepalive = input.keepalive; this.signal = input.signal;
+      } else {
+        this.url = String(input); this.method = (init?.method || 'GET').toUpperCase();
+        this.headers  = init?.headers instanceof Headers_ ? init.headers : new Headers_(init?.headers);
+        this.body       = init?.body ?? null;
+        this.mode       = init?.mode       ?? 'cors';
+        this.credentials = init?.credentials ?? 'same-origin';
+        this.cache      = init?.cache      ?? 'default';
+        this.redirect   = init?.redirect   ?? 'follow';
+        this.referrer   = init?.referrer   ?? 'about:client';
+        this.keepalive  = init?.keepalive  ?? false;
+        this.signal     = init?.signal     ?? null;
+      }
+    }
+    clone(): Request_ { return new Request_(this); }
+    text():        Promise<string>      { return Promise.resolve(String(this.body ?? '')); }
+    json():        Promise<unknown>     { return this.text().then(t => JSON.parse(t)); }
+    arrayBuffer(): Promise<ArrayBuffer> { var s = String(this.body ?? ''); var ab = new ArrayBuffer(s.length); var v = new Uint8Array(ab); for (var i = 0; i < s.length; i++) v[i] = s.charCodeAt(i) & 0xff; return Promise.resolve(ab); }
+    blob():        Promise<Blob>        { return Promise.resolve(new Blob([String(this.body ?? '')])); }
+    formData():    Promise<FormData_>   { return Promise.resolve(new FormData_()); }
+  }
+
+  // ── Response class (item 506) ─────────────────────────────────────────────
+
+  class Response_ {
+    status: number; statusText: string; ok: boolean; headers: Headers_;
+    type: string; url: string; redirected: boolean; body: any; bodyUsed = false;
+    _text: string;
+    constructor(body?: string | null | Blob | ArrayBuffer | FormData_, init?: { status?: number; statusText?: string; headers?: any }) {
+      this.status     = init?.status ?? 200;
+      this.statusText = init?.statusText ?? (this.status === 200 ? 'OK' : String(this.status));
+      this.ok         = this.status >= 200 && this.status < 300;
+      this.headers    = init?.headers instanceof Headers_ ? init.headers : new Headers_(init?.headers);
+      this.type       = 'default'; this.url = ''; this.redirected = false;
+      this._text      = body == null ? '' : (typeof body === 'string' ? body : '');
+      this.body       = _makeBodyStream(this._text);
+    }
+    clone(): Response_ { return Object.assign(new Response_(this._text, { status: this.status, statusText: this.statusText, headers: this.headers }), { type: this.type, url: this.url, redirected: this.redirected }); }
+    text():        Promise<string>      { return Promise.resolve(this._text); }
+    json():        Promise<unknown>     { try { return Promise.resolve(JSON.parse(this._text)); } catch(e) { return Promise.reject(e); } }
+    blob():        Promise<Blob>        { return Promise.resolve(new Blob([this._text], { type: this.headers.get('content-type') || '' })); }
+    arrayBuffer(): Promise<ArrayBuffer> { var s = this._text; var ab = new ArrayBuffer(s.length); var v = new Uint8Array(ab); for (var i = 0; i < s.length; i++) v[i] = s.charCodeAt(i) & 0xff; return Promise.resolve(ab); }
+    formData():    Promise<FormData_>   { return Promise.resolve(new FormData_()); }
+    static error(): Response_ { var r = new Response_(null, { status: 0, statusText: '' }); r.type = 'error'; return r; }
+    static redirect(url: string, status = 302): Response_ { var r = new Response_(null, { status }); r.headers.set('location', url); return r; }
+    static json(data: unknown, init?: { status?: number; statusText?: string; headers?: any }): Response_ {
+      var r = new Response_(JSON.stringify(data), init); r.headers.set('content-type', 'application/json'); return r;
+    }
+  }
+
+  function fetchAPI(url: string | Request_ | { url?: string; href?: string; toString(): string }, opts?: { method?: string; body?: string | FormData_; headers?: Record<string, string> | Headers_; signal?: AbortSignalImpl; mode?: string; credentials?: string; cache?: string; redirect?: string; referrer?: string; keepalive?: boolean }): Promise<any> {
+    // Allow fetching a Request object — merge its fields with any overriding opts
+    if (url instanceof Request_) {
+      var req = url as Request_;
+      opts = Object.assign({ method: req.method, headers: req.headers, body: req.body, signal: req.signal }, opts as any);
+      url = req.url;
+    }
     var urlStr = typeof url === 'string' ? url : (url as any).href || (url as any).url || String(url);
     return new Promise((resolve, reject) => {
       var signal = opts?.signal;
@@ -1012,7 +1118,21 @@ export function createPageJS(
     get hash(): string { return this._hash; }
     set hash(v: string) { this._hash = v ? (v.startsWith('#') ? v : '#' + v) : ''; }
     get origin(): string { return this._protocol + '//' + this._host; }
-    get searchParams(): URLSearchParamsImpl { return new URLSearchParamsImpl(this._search.slice(1)); }
+    get searchParams(): URLSearchParamsImpl {
+      // Return a live URLSearchParams that writes back to this URL's _search on mutation
+      var sp = new URLSearchParamsImpl(this._search ? this._search.slice(1) : '');
+      var urlRef = this;
+      function syncBack(): void { urlRef._search = sp._pairs.length ? '?' + sp.toString() : ''; }
+      var orig_set     = sp.set.bind(sp);
+      var orig_append  = sp.append.bind(sp);
+      var orig_delete  = sp.delete.bind(sp);
+      var orig_sort    = sp.sort.bind(sp);
+      sp.set    = (k: string, v: string) => { orig_set(k, v); syncBack(); };
+      sp.append = (k: string, v: string) => { orig_append(k, v); syncBack(); };
+      sp.delete = (k: string, v?: string) => { orig_delete(k, v); syncBack(); };
+      sp.sort   = () => { orig_sort(); syncBack(); };
+      return sp;
+    }
     toString(): string { return this.href; }
     toJSON(): string { return this.href; }
 
@@ -1183,14 +1303,33 @@ export function createPageJS(
 
   var _mutationObservers: MutationObserverImpl[] = [];
 
+  interface MutationObsRecord { target: VElement; subtree?: boolean; childList?: boolean; attributes?: boolean; attributeFilter?: string[]; characterData?: boolean; attributeOldValue?: boolean; characterDataOldValue?: boolean; }
+
   class MutationObserverImpl {
     _fn:      (mutations: unknown[], obs: MutationObserverImpl) => void;
     _records: unknown[] = [];
     _active   = false;
+    _watching: MutationObsRecord[] = [];
     constructor(fn: (mutations: unknown[], obs: MutationObserverImpl) => void) { this._fn = fn; }
-    observe(_node: unknown, _opts?: unknown): void { this._active = true; _mutationObservers.push(this); }
+    observe(node: unknown, opts?: Partial<MutationObsRecord>): void {
+      this._active = true;
+      var rec: MutationObsRecord = {
+        target:            node as VElement,
+        subtree:           !!(opts as any)?.subtree,
+        childList:         !!(opts as any)?.childList,
+        attributes:        !!(opts as any)?.attributes,
+        attributeFilter:   (opts as any)?.attributeFilter,
+        characterData:     !!(opts as any)?.characterData,
+        attributeOldValue: !!(opts as any)?.attributeOldValue,
+        characterDataOldValue: !!(opts as any)?.characterDataOldValue,
+      };
+      // Remove existing record for same node, then add updated
+      this._watching = this._watching.filter(w => w.target !== node);
+      this._watching.push(rec);
+      if (!_mutationObservers.includes(this)) _mutationObservers.push(this);
+    }
     disconnect(): void {
-      this._active = false;
+      this._active = false; this._watching = [];
       var i = _mutationObservers.indexOf(this);
       if (i >= 0) _mutationObservers.splice(i, 1);
     }
@@ -1200,7 +1339,29 @@ export function createPageJS(
       var r = this._records; this._records = [];
       try { this._fn(r, this); } catch (_) {}
     }
-    _record(rec: unknown): void { this._records.push(rec); }
+    _shouldRecord(mut: any): boolean {
+      if (this._watching.length === 0) return true; // no targets = observe all (legacy compat)
+      for (var w of this._watching) {
+        var tgt = w.target as VElement | null;
+        var matches = false;
+        if (tgt === mut.target) {
+          matches = true;
+        } else if (w.subtree && tgt) {
+          // Check if mut.target is a descendant of tgt
+          var n: any = mut.target;
+          while (n) { if (n === tgt) { matches = true; break; } n = n.parentNode; }
+        }
+        if (!matches) continue;
+        // Check type filter
+        if (mut.type === 'childList' && w.childList) return true;
+        if (mut.type === 'attributes' && w.attributes) {
+          if (!w.attributeFilter || w.attributeFilter.includes(mut.attributeName)) return true;
+        }
+        if (mut.type === 'characterData' && w.characterData) return true;
+      }
+      return false;
+    }
+    _record(rec: unknown): void { if (this._shouldRecord(rec)) this._records.push(rec); }
   }
 
   function _flushMutationObservers(mutations: unknown[]): void {
@@ -1887,14 +2048,73 @@ export function createPageJS(
         constructor(errors: unknown[], message?: string) { super(message); this.errors = errors; this.name = 'AggregateError'; }
       };
 
-  // ── window.getComputedStyle stub ──────────────────────────────────────────
+  // ── window.getComputedStyle — full CSS cascade (item 577) ────────────────
 
-  function getComputedStyle(el: VElement): any {
-    return new Proxy({}, {
+  function getComputedStyle(el: VElement, _pseudoElt?: string | null): any {
+    // Build a merged style map: stylesheet rules (in order), then inline styles
+    var merged = new Map<string, string>();
+
+    function applyRuleStyle(ruleStyle: any): void {
+      if (!ruleStyle || typeof ruleStyle !== 'object') return;
+      for (var p in ruleStyle) {
+        if (p === 'cssText') continue;
+        if (ruleStyle[p]) merged.set(p, ruleStyle[p]);
+      }
+    }
+
+    function walkRules(rules: Array<any>): void {
+      for (var rule of rules) {
+        if (!rule) continue;
+        if (rule.type === 1 && rule.selectorText) {
+          // CSSStyleRule — test each comma-separated selector
+          var sels = (rule.selectorText as string).split(',');
+          for (var s = 0; s < sels.length; s++) {
+            try { if (_matchSel(sels[s].trim(), el)) { applyRuleStyle(rule.style); break; } } catch (_) {}
+          }
+        } else if (rule.type === 4 && rule.cssRules) {
+          // @media — apply unconditionally (we treat all media queries as matching)
+          walkRules(rule.cssRules);
+        }
+      }
+    }
+
+    // Walk all document stylesheets
+    for (var si = 0; si < doc._styleSheets.length; si++) {
+      var sheet = doc._styleSheets[si] as any;
+      if (sheet.disabled) continue;
+      walkRules(sheet.cssRules ?? []);
+    }
+
+    // Inline el._style overrides stylesheet rules
+    var inlineMap = (el._style as any)._map as Map<string, string> | undefined;
+    if (inlineMap) { inlineMap.forEach((v, p) => { if (v) merged.set(p, v); }); }
+
+    // CSS custom property (var()) resolver — walks ancestor chain
+    function resolveVar(name: string, fallback: string): string {
+      var n: VElement | null = el;
+      while (n) {
+        var vm = (n._style as any)._map as Map<string, string> | undefined;
+        if (vm) { var vv = vm.get(name); if (vv !== undefined) return vv; }
+        n = n.parentNode instanceof VElement ? n.parentNode as VElement : null;
+      }
+      return fallback;
+    }
+    function resolveValue(val: string): string {
+      if (!val || val.indexOf('var(') === -1) return val;
+      return val.replace(/var\(\s*(--[\w-]+)(?:\s*,\s*([^)]*))?\)/g,
+        (_m: string, name: string, fb: string) => resolveVar(name, fb || ''));
+    }
+    function resolve(prop: string): string { return resolveValue(merged.get(prop) ?? ''); }
+
+    return new Proxy({} as Record<string, string>, {
       get(_t, k: string) {
         if (typeof k !== 'string') return undefined;
-        if (k === 'getPropertyValue') return (p: string) => el._style.getPropertyValue(p);
-        return el._style.getPropertyValue(k.replace(/[A-Z]/g, m => '-' + m.toLowerCase()));
+        if (k === 'getPropertyValue')   return (p: string) => resolve(p);
+        if (k === 'getPropertyPriority') return (_p: string) => '';
+        if (k === 'setProperty' || k === 'removeProperty') return () => {};
+        if (k === 'cssText') { var parts: string[] = []; merged.forEach((v, p) => parts.push(p + ': ' + v)); return parts.join('; '); }
+        if (k === 'length') return merged.size;
+        return resolve((k as string).replace(/[A-Z]/g, m => '-' + m.toLowerCase()));
       },
     });
   }
@@ -1976,6 +2196,37 @@ export function createPageJS(
   class DOMParser {
     parseFromString(html: string, _type: string) { return buildDOM(html); }
   }
+
+  // ── XMLSerializer ─────────────────────────────────────────────────────────
+  // Serializes a DOM node back to an HTML/XML string.
+
+  class XMLSerializer {
+    serializeToString(node: VElement | any): string {
+      if (!node) return '';
+      // If it's a full document, serialize its body/html
+      if (node.nodeType === 9) { return serializeDOM(node as any); }
+      // If it's an element, use the dom serializer
+      return serializeDOM(node as any);
+    }
+  }
+
+  // ── document.implementation ───────────────────────────────────────────────
+  // Basic DOMImplementation stub (needed by many framework feature detections).
+
+  var _docImplementation = {
+    hasFeature(_feature: string, _version?: string): boolean { return false; },
+    createDocumentType(_qualifier: string, _publicId: string, _systemId: string): any {
+      return { nodeType: 10, name: _qualifier, publicId: _publicId, systemId: _systemId };
+    },
+    createDocument(_namespace: string | null, _qualifiedName: string, _doctype?: any): VDocument {
+      return buildDOM('');
+    },
+    createHTMLDocument(title?: string): VDocument {
+      var d = buildDOM('<!DOCTYPE html><html><head>' + (title ? '<title>' + title + '</title>' : '') + '</head><body></body></html>');
+      return d;
+    },
+  };
+  (doc as any).implementation = _docImplementation;
 
   // ── WeakRef + FinalizationRegistry stubs (item 548) ──────────────────────
 
@@ -2540,6 +2791,8 @@ export function createPageJS(
     get parent()    { return win; },
     get frames()    { return win; },
     get length()    { return 0; },
+    opener:         null,          // no popup parent
+    frameElement:   null,          // not embedded in a frame
 
     // Core globals
     document: doc,
@@ -2563,6 +2816,8 @@ export function createPageJS(
     // Networking
     fetch:           fetchAPI,
     XMLHttpRequest,
+    Request:         Request_,
+    Response:        Response_,
 
     // DOM constructors
     Event:              VEvent,
@@ -2600,6 +2855,7 @@ export function createPageJS(
     MessageChannel,
     BroadcastChannel:     BroadcastChannelImpl,
     DOMParser,
+    XMLSerializer,
     TextEncoder: TextEncoder_,
     TextDecoder: TextDecoder_,
     HTMLCanvasElement: HTMLCanvas,
@@ -3008,6 +3264,22 @@ export function createPageJS(
     for (var _lnEl2 of _linkTags2) {
       if ((_lnEl2.getAttribute('rel') || '').toLowerCase().includes('stylesheet')) {
         var _lnSheet2 = new CSSStyleSheet_(); _lnSheet2.href = _lnEl2.getAttribute('href') || null; _lnSheet2.ownerNode = _lnEl2; doc._styleSheets.push(_lnSheet2);
+        // Async-fetch the CSS content and parse when ready
+        (function (_sheet: CSSStyleSheet_, _lnEl: VElement) {
+          var _cssHref = _lnEl.getAttribute('href') || '';
+          if (_cssHref) {
+            var _cssURL = _cssHref.startsWith('http') ? _cssHref : _resolveURL(_cssHref, _baseHref);
+            os.fetchAsync(_cssURL, (resp: FetchResponse | null) => {
+              if (resp && resp.status === 200) {
+                _sheet._parseText(resp.bodyText);
+                doc._dirty = true;
+                try { _lnEl.dispatchEvent(new VEvent('load')); } catch(_) {}
+              } else {
+                try { _lnEl.dispatchEvent(new VEvent('error')); } catch(_) {}
+              }
+            });
+          }
+        })(_lnSheet2, _lnEl2);
       }
     }
   }

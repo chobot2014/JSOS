@@ -73,7 +73,8 @@ export class VNode {
   parentNode: VNode | null = null;
   childNodes: VNode[] = [];
   ownerDocument: VDocument | null = null;
-  _handlers: Map<string, Array<(e: VEvent) => void>> = new Map();
+  _handlers:        Map<string, Array<(e: VEvent) => void>> = new Map();
+  _captureHandlers: Map<string, Array<(e: VEvent) => void>> = new Map();
 
   get firstChild():      VNode | null { return this.childNodes[0] ?? null; }
   get lastChild():       VNode | null { return this.childNodes[this.childNodes.length - 1] ?? null; }
@@ -84,12 +85,22 @@ export class VNode {
     if (child.parentNode) child.parentNode.removeChild(child);
     child.parentNode = this; child.ownerDocument = this.ownerDocument;
     this.childNodes.push(child);
-    if (this.ownerDocument) this.ownerDocument._dirty = true;
+    if (this.ownerDocument) {
+      this.ownerDocument._dirty = true;
+      this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [child], removedNodes: [], previousSibling: this.childNodes[this.childNodes.length - 2] ?? null, nextSibling: null });
+    }
     return child;
   }
   removeChild(child: VNode): VNode {
     var i = this.childNodes.indexOf(child);
-    if (i >= 0) { this.childNodes.splice(i, 1); child.parentNode = null; if (this.ownerDocument) this.ownerDocument._dirty = true; }
+    if (i >= 0) {
+      var prev = this.childNodes[i - 1] ?? null; var next = this.childNodes[i + 1] ?? null;
+      this.childNodes.splice(i, 1); child.parentNode = null;
+      if (this.ownerDocument) {
+        this.ownerDocument._dirty = true;
+        this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [], removedNodes: [child], previousSibling: prev, nextSibling: next });
+      }
+    }
     return child;
   }
   insertBefore(newNode: VNode, ref: VNode | null): VNode {
@@ -99,7 +110,10 @@ export class VNode {
     if (i < 0) return this.appendChild(newNode);
     newNode.parentNode = this; newNode.ownerDocument = this.ownerDocument;
     this.childNodes.splice(i, 0, newNode);
-    if (this.ownerDocument) this.ownerDocument._dirty = true;
+    if (this.ownerDocument) {
+      this.ownerDocument._dirty = true;
+      this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [newNode], removedNodes: [], previousSibling: this.childNodes[i - 1] ?? null, nextSibling: ref });
+    }
     return newNode;
   }
   replaceChild(newNode: VNode, oldNode: VNode): VNode {
@@ -108,7 +122,10 @@ export class VNode {
     if (newNode.parentNode) newNode.parentNode.removeChild(newNode);
     oldNode.parentNode = null; newNode.parentNode = this; newNode.ownerDocument = this.ownerDocument;
     this.childNodes[i] = newNode;
-    if (this.ownerDocument) this.ownerDocument._dirty = true;
+    if (this.ownerDocument) {
+      this.ownerDocument._dirty = true;
+      this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [newNode], removedNodes: [oldNode], previousSibling: this.childNodes[i - 1] ?? null, nextSibling: this.childNodes[i + 1] ?? null });
+    }
     return oldNode;
   }
   cloneNode(deep = false): VNode {
@@ -119,23 +136,55 @@ export class VNode {
   addEventListener(type: string, fn: ((e: VEvent) => void) | { handleEvent(e: VEvent): void } | null, options?: boolean | { capture?: boolean; once?: boolean; passive?: boolean; signal?: unknown }): void {
     if (!fn) return;
     var handler = typeof fn === 'function' ? fn : (e: VEvent) => (fn as any).handleEvent(e);
-    var once = typeof options === 'object' ? options.once : false;
+    var once    = typeof options === 'object' ? options.once : false;
+    var capture = typeof options === 'boolean' ? options : (typeof options === 'object' ? (options.capture ?? false) : false);
     var wrapped = once ? (e: VEvent) => { this.removeEventListener(type, wrapped); handler(e); } : handler;
     (wrapped as any)._original = fn; // for removeEventListener matching
-    var arr = this._handlers.get(type); if (!arr) { arr = []; this._handlers.set(type, arr); }
+    var map = capture ? this._captureHandlers : this._handlers;
+    var arr = map.get(type); if (!arr) { arr = []; map.set(type, arr); }
     if (!arr.some(f => f === wrapped || (f as any)._original === fn)) arr.push(wrapped);
   }
-  removeEventListener(type: string, fn: ((e: VEvent) => void) | { handleEvent(e: VEvent): void } | null, _options?: boolean | { capture?: boolean }): void {
+  removeEventListener(type: string, fn: ((e: VEvent) => void) | { handleEvent(e: VEvent): void } | null, options?: boolean | { capture?: boolean }): void {
     if (!fn) return;
-    var arr = this._handlers.get(type);
+    var capture = typeof options === 'boolean' ? options : (typeof options === 'object' ? (options?.capture ?? false) : false);
+    var map = capture ? this._captureHandlers : this._handlers;
+    var arr = map.get(type);
     if (arr) { var i = arr.findIndex(f => f === fn || (f as any)._original === fn); if (i >= 0) arr.splice(i, 1); }
   }
   dispatchEvent(ev: VEvent): boolean {
-    ev.target = this; this._fireList(ev);
-    if (ev.bubbles && !ev._stopProp && this.parentNode) {
-      var cur: VNode | null = this.parentNode;
-      while (cur && !ev._stopProp) { ev.currentTarget = cur; cur._fireList(ev); cur = cur.parentNode; }
+    ev.target = this;
+    // Build path: [root, ..., grandparent, parent]
+    var path: VNode[] = [];
+    var p: VNode | null = this.parentNode;
+    while (p) { path.unshift(p); p = p.parentNode; }
+    // ── Capture phase: root → parent ─────────────────────────────────────
+    ev.eventPhase = 1;
+    for (var ci = 0; ci < path.length; ci++) {
+      if (ev._stopProp) break;
+      var capNode = path[ci];
+      ev.currentTarget = capNode;
+      var capArr = capNode._captureHandlers.get(ev.type);
+      if (capArr) { for (var cfn of [...capArr]) { try { cfn(ev); } catch (_) {} if (ev._stopImmediate) break; } }
     }
+    // ── At-target phase ──────────────────────────────────────────────────
+    if (!ev._stopProp) {
+      ev.eventPhase = 2;
+      // Fire capture handlers registered on the target itself first
+      var capAt = this._captureHandlers.get(ev.type);
+      if (capAt) { for (var cf of [...capAt]) { try { cf(ev); } catch (_) {} if (ev._stopImmediate) break; } }
+      if (!ev._stopImmediate) this._fireList(ev);
+    }
+    // ── Bubble phase: parent → root ──────────────────────────────────────
+    if (ev.bubbles && !ev._stopProp) {
+      ev.eventPhase = 3;
+      for (var bi = path.length - 1; bi >= 0; bi--) {
+        if (ev._stopProp) break;
+        ev.currentTarget = path[bi];
+        path[bi]._fireList(ev);
+      }
+    }
+    ev.eventPhase = 0;
+    ev.currentTarget = null;
     return !ev.defaultPrevented;
   }
   _fireList(ev: VEvent): void {
@@ -148,9 +197,13 @@ export class VNode {
     return this.childNodes.map(c => c.textContent).join('');
   }
   set textContent(v: string) {
+    var removedNodes = this.childNodes.slice();
     this.childNodes = [];
     if (v) { var t = new VText(v); t.parentNode = this; t.ownerDocument = this.ownerDocument; this.childNodes.push(t); }
-    if (this.ownerDocument) this.ownerDocument._dirty = true;
+    if (this.ownerDocument) {
+      this.ownerDocument._dirty = true;
+      this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: this.childNodes.slice(), removedNodes, previousSibling: null, nextSibling: null });
+    }
   }
   /** Removes this node from its parent. */
   remove(): void { if (this.parentNode) this.parentNode.removeChild(this); }
@@ -180,10 +233,24 @@ export class VStyleMap {
   _map: Map<string, string> = new Map();
   _owner: VElement;
   constructor(owner: VElement) { this._owner = owner; }
-  setProperty(prop: string, val: string, _priority?: string): void { this._map.set(prop.trim(), val.trim()); if (this._owner.ownerDocument) this._owner.ownerDocument._dirty = true; }
+  setProperty(prop: string, val: string, _priority?: string): void {
+    this._map.set(prop.trim(), val.trim());
+    if (this._owner.ownerDocument) {
+      this._owner.ownerDocument._dirty = true;
+      this._owner.ownerDocument._queueMutation({ type: 'attributes', target: this._owner, attributeName: 'style', attributeNamespace: null, oldValue: null });
+    }
+  }
   getPropertyValue(prop: string): string { return this._map.get(prop.trim()) || ''; }
   getPropertyPriority(_prop: string): string { return ''; }  // !important not tracked
-  removeProperty(prop: string): string { var old = this._map.get(prop.trim()) || ''; this._map.delete(prop.trim()); if (this._owner.ownerDocument) this._owner.ownerDocument._dirty = true; return old; }
+  removeProperty(prop: string): string {
+    var old = this._map.get(prop.trim()) || '';
+    this._map.delete(prop.trim());
+    if (this._owner.ownerDocument) {
+      this._owner.ownerDocument._dirty = true;
+      this._owner.ownerDocument._queueMutation({ type: 'attributes', target: this._owner, attributeName: 'style', attributeNamespace: null, oldValue: null });
+    }
+    return old;
+  }
   get length(): number { return this._map.size; }
   item(index: number): string { return [...this._map.keys()][index] ?? ''; }
   [Symbol.iterator](): Iterator<string> { return this._map.keys(); }
@@ -191,7 +258,10 @@ export class VStyleMap {
   set cssText(v: string) {
     this._map.clear();
     v.split(';').forEach(p => { var ci = p.indexOf(':'); if (ci >= 0) this._map.set(p.slice(0, ci).trim(), p.slice(ci + 1).trim()); });
-    if (this._owner.ownerDocument) this._owner.ownerDocument._dirty = true;
+    if (this._owner.ownerDocument) {
+      this._owner.ownerDocument._dirty = true;
+      this._owner.ownerDocument._queueMutation({ type: 'attributes', target: this._owner, attributeName: 'style', attributeNamespace: null, oldValue: null });
+    }
   }
 }
 
@@ -215,7 +285,7 @@ export class VClassList {
   add(...cs: string[]):    void { var a = this._clss(); for (var c of cs) if (!a.includes(c)) a.push(c); this._set(a); }
   remove(...cs: string[]): void { this._set(this._clss().filter(x => !cs.includes(x))); }
   toggle(c: string, force?: boolean): boolean { var a = this._clss(); var i = a.indexOf(c); if (force === true || (force === undefined && i < 0)) { if (i < 0) a.push(c); this._set(a); return true; } if (i >= 0) { a.splice(i, 1); this._set(a); } return false; }
-  replace(old: string, n: string): void { var a = this._clss(); var i = a.indexOf(old); if (i >= 0) { a[i] = n; this._set(a); } }
+  replace(old: string, n: string): boolean { var a = this._clss(); var i = a.indexOf(old); if (i >= 0) { a[i] = n; this._set(a); return true; } return false; }
   get value(): string { return this._owner.getAttribute('class') || ''; }
   [Symbol.iterator]() { return this._clss()[Symbol.iterator](); }
   get length(): number { return this._clss().length; }
@@ -306,8 +376,24 @@ export class VElement extends VNode {
   }
 
   getAttribute(name: string): string | null { var v = this._attrs.get(name.toLowerCase()); return v !== undefined ? v : null; }
-  setAttribute(name: string, value: string): void { this._attrs.set(name.toLowerCase(), String(value)); if (this.ownerDocument) this.ownerDocument._dirty = true; }
-  removeAttribute(name: string): void { this._attrs.delete(name.toLowerCase()); if (this.ownerDocument) this.ownerDocument._dirty = true; }
+  setAttribute(name: string, value: string): void {
+    var lname = name.toLowerCase();
+    var oldValue = this._attrs.get(lname) ?? null;
+    this._attrs.set(lname, String(value));
+    if (this.ownerDocument) {
+      this.ownerDocument._dirty = true;
+      this.ownerDocument._queueMutation({ type: 'attributes', target: this, attributeName: lname, attributeNamespace: null, oldValue });
+    }
+  }
+  removeAttribute(name: string): void {
+    var lname = name.toLowerCase();
+    var oldValue = this._attrs.get(lname) ?? null;
+    this._attrs.delete(lname);
+    if (this.ownerDocument) {
+      this.ownerDocument._dirty = true;
+      this.ownerDocument._queueMutation({ type: 'attributes', target: this, attributeName: lname, attributeNamespace: null, oldValue });
+    }
+  }
   hasAttribute(name: string): boolean { return this._attrs.has(name.toLowerCase()); }
   getAttributeNames(): string[] { return [...this._attrs.keys()]; }
   // Namespaced attribute variants — ignore namespace, treat as plain attributes
@@ -362,13 +448,17 @@ export class VElement extends VNode {
 
   get innerHTML(): string { return _serialize(this.childNodes); }
   set innerHTML(html: string) {
+    var removedNodes = this.childNodes.slice();
     this.childNodes = [];
     if (html) {
       var frag = _parseFragment(html, this.ownerDocument);
       for (var c of frag) { c.parentNode = this; c.ownerDocument = this.ownerDocument; }
       this.childNodes = frag;
     }
-    if (this.ownerDocument) this.ownerDocument._dirty = true;
+    if (this.ownerDocument) {
+      this.ownerDocument._dirty = true;
+      this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: this.childNodes.slice(), removedNodes, previousSibling: null, nextSibling: null });
+    }
   }
   get outerHTML(): string { return _serializeEl(this); }
   set outerHTML(html: string) {
@@ -483,8 +573,72 @@ export class VElement extends VNode {
   }
   click(): void { this.dispatchEvent(new VEvent('click')); }
   submit(): void { this.dispatchEvent(new VEvent('submit')); }
-  reset(): void { this.dispatchEvent(new VEvent('reset')); }
+  reset(): void {
+    // Reset all fields to their default values
+    _walk(this, n => {
+      if (n instanceof VElement) {
+        var tag = n.tagName.toLowerCase();
+        if (tag === 'input') {
+          var type = (n.getAttribute('type') || 'text').toLowerCase();
+          if (type === 'checkbox' || type === 'radio') {
+            if (n.hasAttribute('checked')) (n as any).checked = true; else (n as any).checked = false;
+          } else {
+            (n as any).value = n.getAttribute('value') || '';
+          }
+        } else if (tag === 'textarea') {
+          (n as any).value = n.textContent || '';
+        } else if (tag === 'select') {
+          (n as any).selectedIndex = 0;
+        }
+      }
+    });
+    this.dispatchEvent(new VEvent('reset'));
+  }
   requestSubmit(_submitter?: unknown): void { this.submit(); }
+
+  // Form serialization (item 604) — returns URLSearchParams string
+  serializeForm(): string {
+    var pairs: string[] = [];
+    _walk(this, n => {
+      if (!(n instanceof VElement)) return;
+      var tag = n.tagName.toLowerCase();
+      if (tag === 'input') {
+        var type = (n.getAttribute('type') || 'text').toLowerCase();
+        var name = n.getAttribute('name');
+        if (!name || n.hasAttribute('disabled')) return;
+        if (type === 'submit' || type === 'button' || type === 'image' || type === 'reset') return;
+        if (type === 'checkbox' || type === 'radio') {
+          if ((n as any).checked) pairs.push(encodeURIComponent(name) + '=' + encodeURIComponent((n as any).value || 'on'));
+        } else {
+          pairs.push(encodeURIComponent(name) + '=' + encodeURIComponent((n as any).value || ''));
+        }
+      } else if (tag === 'textarea') {
+        var name = n.getAttribute('name');
+        if (name && !n.hasAttribute('disabled')) pairs.push(encodeURIComponent(name) + '=' + encodeURIComponent((n as any).value || n.textContent || ''));
+      } else if (tag === 'select') {
+        var name = n.getAttribute('name');
+        if (!name || n.hasAttribute('disabled')) return;
+        var si = (n as any).selectedIndex ?? 0;
+        var opts = n.querySelectorAll('option');
+        if (opts[si]) pairs.push(encodeURIComponent(name) + '=' + encodeURIComponent((opts[si] as any).value ?? opts[si].textContent ?? ''));
+      }
+    });
+    return pairs.join('&');
+  }
+
+  // checkValidity for form — iterate all fields
+  checkFormValidity(): boolean {
+    var valid = true;
+    _walk(this, n => {
+      if (n instanceof VElement) {
+        var tag = n.tagName.toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+          if (!n.checkValidity()) { valid = false; }
+        }
+      }
+    });
+    return valid;
+  }
 
   // Form-specific property shorthands (HTMLFormElement)
   get action(): string  { return this._attrs.get('action') || ''; }  set action(v: string)  { this.setAttribute('action', v); }
@@ -550,12 +704,82 @@ export class VElement extends VNode {
 
   // ── Constraint Validation API (item 615) ──────────────────────────────────────
   _validationMessage = '';
-  checkValidity(): boolean { return true; }
-  reportValidity(): boolean { return true; }
+  checkValidity(): boolean {
+    var tag = this.tagName.toLowerCase();
+    var isField = tag === 'input' || tag === 'textarea' || tag === 'select';
+    if (!isField) return true;
+    if (this.hasAttribute('disabled')) return true;
+    var val: string = (this as any).value ?? '';
+    var type = (this.getAttribute('type') || 'text').toLowerCase();
+    // required
+    if (this.hasAttribute('required') && !val.trim()) return false;
+    // minlength
+    var minLen = this.getAttribute('minlength');
+    if (minLen !== null && val.length > 0 && val.length < parseInt(minLen, 10)) return false;
+    // maxlength
+    var maxLen = this.getAttribute('maxlength');
+    if (maxLen !== null && val.length > parseInt(maxLen, 10)) return false;
+    // pattern
+    var pat = this.getAttribute('pattern');
+    if (pat && val) { try { if (!new RegExp('^(?:' + pat + ')$').test(val)) return false; } catch(_) {} }
+    // type-specific
+    if (val && type === 'email') { if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)) return false; }
+    if (val && type === 'url') { try { new URL(val); } catch(_) { return false; } }
+    if (val && (type === 'number' || type === 'range')) {
+      var num = parseFloat(val);
+      if (isNaN(num)) return false;
+      var min = this.getAttribute('min'); if (min !== null && num < parseFloat(min)) return false;
+      var max = this.getAttribute('max'); if (max !== null && num > parseFloat(max)) return false;
+    }
+    if (this._validationMessage) return false;
+    return true;
+  }
+  reportValidity(): boolean { return this.checkValidity(); }
   setCustomValidity(msg: string): void { this._validationMessage = msg; }
-  get validationMessage(): string { return this._validationMessage; }
-  get validity(): ValidityState { return { valid: true, valueMissing: false, typeMismatch: false, patternMismatch: false, tooLong: false, tooShort: false, rangeUnderflow: false, rangeOverflow: false, stepMismatch: false, badInput: false, customError: this._validationMessage.length > 0 } as ValidityState; }
-  get willValidate(): boolean { return true; }
+  get validationMessage(): string {
+    if (this._validationMessage) return this._validationMessage;
+    if (!this.checkValidity()) {
+      var type = (this.getAttribute('type') || 'text').toLowerCase();
+      var val: string = (this as any).value ?? '';
+      if (this.hasAttribute('required') && !val.trim()) return 'Please fill in this field.';
+      var minLen = this.getAttribute('minlength');
+      if (minLen && val.length < parseInt(minLen, 10)) return 'Please lengthen this text.';
+      if (this.getAttribute('pattern')) return 'Please match the requested format.';
+      if (type === 'email') return 'Please enter an email address.';
+      if (type === 'url') return 'Please enter a URL.';
+      if (type === 'number') return 'Please enter a valid number.';
+      return 'Invalid value.';
+    }
+    return '';
+  }
+  get validity(): ValidityState {
+    var tag = this.tagName.toLowerCase();
+    var isField = tag === 'input' || tag === 'textarea' || tag === 'select';
+    if (!isField) return { valid: true, valueMissing: false, typeMismatch: false, patternMismatch: false, tooLong: false, tooShort: false, rangeUnderflow: false, rangeOverflow: false, stepMismatch: false, badInput: false, customError: false } as ValidityState;
+    var val: string = (this as any).value ?? '';
+    var type = (this.getAttribute('type') || 'text').toLowerCase();
+    var valueMissing  = this.hasAttribute('required') && !val.trim();
+    var minLen = this.getAttribute('minlength');
+    var maxLen = this.getAttribute('maxlength');
+    var tooShort = !!(minLen && val.length > 0 && val.length < parseInt(minLen, 10));
+    var tooLong  = !!(maxLen && val.length > parseInt(maxLen, 10));
+    var pat = this.getAttribute('pattern');
+    var patternMismatch = !!(pat && val && (() => { try { return !new RegExp('^(?:' + pat + ')$').test(val); } catch(_) { return false; } })());
+    var typeMismatch = !!(val && (
+      (type === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)) ||
+      (type === 'url'   && (() => { try { new URL(val); return false; } catch(_) { return true; } })())
+    ));
+    var num = parseFloat(val); var isNum = type === 'number' || type === 'range';
+    var rangeUnderflow = !!(isNum && val && !isNaN(num) && (() => { var min = this.getAttribute('min'); return min !== null && num < parseFloat(min); })());
+    var rangeOverflow  = !!(isNum && val && !isNaN(num) && (() => { var max = this.getAttribute('max'); return max !== null && num > parseFloat(max); })());
+    var customError = this._validationMessage.length > 0;
+    var valid = !valueMissing && !typeMismatch && !patternMismatch && !tooLong && !tooShort && !rangeUnderflow && !rangeOverflow && !customError;
+    return { valid, valueMissing, typeMismatch, patternMismatch, tooLong, tooShort, rangeUnderflow, rangeOverflow, stepMismatch: false, badInput: false, customError } as ValidityState;
+  }
+  get willValidate(): boolean {
+    var tag = this.tagName.toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select';
+  }
 
   // ── Selection (text input) API ────────────────────────────────────────────────
   _selectionStart = 0; _selectionEnd = 0; _selectionDirection = 'none';
@@ -702,6 +926,27 @@ export class VElement extends VNode {
     while (sib) { if (sib instanceof VElement) return sib as VElement; sib = sib.previousSibling; }
     return null;
   }
+
+  // ── Namespace / SVG properties ────────────────────────────────────────────────
+
+  get namespaceURI(): string | null {
+    var tag = this.tagName;
+    if (tag === 'SVG' || this._attrs.get('xmlns') === 'http://www.w3.org/2000/svg') return 'http://www.w3.org/2000/svg';
+    if (tag === 'MATH') return 'http://www.w3.org/1998/Math/MathML';
+    return 'http://www.w3.org/1999/xhtml';
+  }
+  get localName(): string { return this.tagName.toLowerCase(); }
+  get prefix(): string | null { return null; }
+  get ownerSVGElement(): VElement | null {
+    var p: VNode | null = this.parentNode;
+    while (p) { if (p instanceof VElement && p.tagName === 'SVG') return p; p = p.parentNode; }
+    return null;
+  }
+  get viewportElement(): VElement | null { return this.ownerSVGElement; }
+
+  // ── outerText / innerText ─────────────────────────────────────────────────────
+  get outerText(): string { return this.textContent || ''; }
+  set outerText(v: string) { if (this.parentNode) { var t = new VText(v); t.parentNode = this.parentNode; t.ownerDocument = this.ownerDocument; var idx = this.parentNode.childNodes.indexOf(this as any); if (idx >= 0) this.parentNode.childNodes.splice(idx, 1, t as any); } }
 }
 
 // ── VDocument ─────────────────────────────────────────────────────────────────
@@ -714,11 +959,15 @@ export class VDocument extends VNode {
   _activeElement: VElement | null = null;
   _styleSheets: unknown[] = [];
   _currentScript: VElement | null = null;  // set by jsruntime while executing <script>
+  _mutationQueue: unknown[] = [];           // queued mutation records for MutationObserver
   head: VElement;
   body: VElement;
   documentElement: VElement;
 
   get currentScript(): VElement | null { return this._currentScript; }
+
+  /** Enqueue a mutation record (called by VNode/VElement mutation methods). */
+  _queueMutation(rec: unknown): void { this._mutationQueue.push(rec); }
 
   constructor() {
     super(); this.ownerDocument = this;
@@ -743,6 +992,12 @@ export class VDocument extends VNode {
   createElementNS(_ns: string, tag: string): VElement { return this.createElement(tag); }
   createTextNode(text: string): VText { var t = new VText(text); t.ownerDocument = this; return t; }
   createDocumentFragment(): VElement { var f = new VElement('#document-fragment'); f.nodeType = 11; f.ownerDocument = this; return f; }
+  createAttribute(name: string): { name: string; value: string; specified: boolean; ownerElement: null } {
+    return { name: name.toLowerCase(), value: '', specified: true, ownerElement: null };
+  }
+  createAttributeNS(_ns: string | null, qualifiedName: string): { name: string; value: string; specified: boolean; ownerElement: null } {
+    return this.createAttribute(qualifiedName);
+  }
 
   getElementById(id: string): VElement | null { var res: VElement | null = null; _walk(this.body, el => { if (!res && el.id === id) res = el; }); if (!res) _walk(this.head, el => { if (!res && el.id === id) res = el; }); return res; }
   querySelector(sel: string): VElement | null { return this.body.querySelector(sel) ?? this.head.querySelector(sel); }
@@ -753,6 +1008,10 @@ export class VDocument extends VNode {
 
   write(html: string): void { this.body.innerHTML += html; }
   writeln(html: string): void { this.write(html + '\n'); }
+  /** Legacy document.open() — clears body content for subsequent write() calls */
+  open(): VDocument { this.body.innerHTML = ''; this.head.innerHTML = ''; return this; }
+  /** Legacy document.close() — no-op in JSOS */
+  close(): void {}
   // Stubs
   createComment(data: string): VNode { var n = new VNode(); (n as any).nodeType = 8; (n as any).nodeName = '#comment'; (n as any).data = data; n.ownerDocument = this; return n; }
   createProcessingInstruction(target: string, data: string): VNode {
@@ -877,10 +1136,33 @@ export class VDocument extends VNode {
   get documentURI(): string { return (this as any)._url ?? ''; }
   get referrer(): string { return ''; }
   get lastModified(): string { return new Date().toLocaleString(); }
+  get baseURI(): string { return (this as any)._url ?? ''; }
+  get contentType(): string { return 'text/html'; }
+  get characterSet(): string { return 'UTF-8'; }
+  get charset(): string { return 'UTF-8'; }
+  get inputEncoding(): string { return 'UTF-8'; }
+  get compatMode(): string { return 'CSS1Compat'; }  // always standards mode
   get forms(): VElement[] { return this.querySelectorAll('form'); }
   get images(): VElement[] { return this.querySelectorAll('img'); }
   get links(): VElement[] { return this.querySelectorAll('a[href],area[href]'); }
   get scripts(): VElement[] { return this.querySelectorAll('script'); }
+
+  /** document.all — legacy HTMLAllCollection (item 592) */
+  get all(): any {
+    var self = this;
+    return new Proxy([], {
+      get(_t: any, k: string) {
+        var els = self.querySelectorAll('*');
+        if (k === 'length') return els.length;
+        if (k === 'item') return (i: number) => els[i] ?? null;
+        if (k === 'namedItem') return (name: string) => self.getElementById(name) ?? self.querySelector('[name="' + name + '"]') ?? null;
+        if (k === Symbol.iterator as any) return () => els[Symbol.iterator]();
+        var n = parseInt(k, 10);
+        if (!isNaN(n)) return els[n] ?? null;
+        return undefined;
+      },
+    });
+  }
 
   /** FontFaceSet — document.fonts (used by frameworks to detect font loading readiness) */
   get fonts(): any {
