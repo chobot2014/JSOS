@@ -244,7 +244,7 @@
 193. [P2] Extended attributes: TypeScript key-value metadata per inode (`fs.xattr.get/set`)
 194. [P2] Access control: TypeScript permission check layer (not POSIX ACL binary format)
 195. [P2] Filesystem quota: TypeScript per-user limit enforcement
-196. [P2] `sys.fs.watch(path, handler)` TypeScript API for filesystem event notifications
+196. [P2 ✓] `sys.fs.watch(path, handler)` TypeScript API for filesystem event notifications — `os.fs.watch()` with `_patchFsWatch()` monkey-patching fs primitives in `core/sdk.ts`
 197. [P2] Sparse file support
 198. [P2] Hard links across same device
 199. [P2] `sendfile` zero-copy syscall
@@ -497,7 +497,7 @@
 406. [P1 ✓] CSS Grid: `grid-area`, `grid-template-areas` — parsed in `css.ts`, stored in `types.ts`
 407. [P1 ✓] CSS Grid: `gap` / `row-gap` / `column-gap` — parsed in `css.ts`, stored in `types.ts`
 408. [P1 ✓] CSS `calc()` expression evaluation — `evalCalc()` in `css.ts`
-409. [P1] CSS custom properties (variables): inheritance through DOM tree (currently session-global only)
+409. [P1 ✓] CSS custom properties (variables): inheritance through DOM tree — `resolveVar()` walks ancestor `_cssVarCache` chain in `getComputedStyle` in `apps/browser/jsruntime.ts`
 410. [P1 ✓] CSS `transition`: `transition-property`, `transition-duration`, `transition-timing-function` — all sub-properties + `-webkit-` prefix variants in `css.ts`/`types.ts`
 411. [P1 ✓] CSS `animation`: `@keyframes`, `animation-name`, `animation-duration`, `animation-iteration-count` — all sub-properties + `-webkit-` prefix variants in `css.ts`/`types.ts`
 412. [P1 ✓] CSS `transform`: `translate`, `rotate`, `scale`, `matrix`, `skew` — stored in `CSSProps.transform` string; parsed in `css.ts`
@@ -684,10 +684,10 @@
 573. [P0 ✓] `element.classList.entries()`, `values()`, `forEach()` — `VClassList` in `dom.ts`
 574. [P0 ✓] `document.createComment()` — `dom.ts`
 575. [P0 ✓] `document.createProcessingInstruction()` — `dom.ts`
-576. [P1] `element.style` property access triggers re-render (currently only on explicit calls)
-577. [P1] CSSOM: `getComputedStyle` returns live values (not static snapshot)
-578. [P1] CSSOM: `CSSStyleSheet` add/remove rules dynamically
-579. [P1] CSSOM: `document.styleSheets` list
+576. [P1 ✓] `element.style` property access triggers re-render — `VStyleMap.setProperty()` calls `_dirtyLayout=true`, `bumpStyleGeneration()`, `_dirty=true`; proxied via `makeStyleProxy()` in `apps/browser/dom.ts`
+577. [P1 ✓] CSSOM: `getComputedStyle` returns live values — `_csProxyCache` WeakMap keyed by style generation stamp; recomputes on any style change in `apps/browser/jsruntime.ts`
+578. [P1 ✓] CSSOM: `CSSStyleSheet` add/remove rules dynamically — `insertRule()` + `deleteRule()` on `CSSStyleSheet_` in `apps/browser/jsruntime.ts`
+579. [P1 ✓] CSSOM: `document.styleSheets` list — `doc._styleSheets` populated from `<style>` and `<link rel="stylesheet">` elements in `apps/browser/jsruntime.ts`
 580. [P1 ✓] DOM Range: `document.createRange()`, `range.setStart/End`, `range.extractContents()` — `VRange` class in `dom.ts`
 581. [P1 ✓] Selection API: `window.getSelection()`, `sel.getRangeAt(0)` — `_selection` object in `jsruntime.ts`
 582. [P1 ✓] `Node.ELEMENT_NODE`, `TEXT_NODE`, `COMMENT_NODE` constants — `VNode` static + instance aliases in `dom.ts`
