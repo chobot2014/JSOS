@@ -1086,22 +1086,156 @@
 ---
 
 ## 28. PERFORMANCE
+> Goal: JS execution within 2× of V8; layout/render at consistent 60fps; network latency indistinguishable from Chrome on same hardware.
 
-847. [P0] JIT: compile hot JS functions to x86 via JSJIT (`jit.c` hook)
-848. [P0] JIT: inline caches for property access
-849. [P0] JIT: type specialization for arithmetic loops
-850. [P0] Renderer: tile-based rendering (only repaint dirty tiles)
-851. [P0] Network: avoid copying packet data more than once (zero-copy recv path)
-852. [P1] CSS: cache computed styles per element, invalidate on class/attr change
-853. [P1] Profiling: TSC-based microsecond timer in every subsystem
-854. [P1] HTTP: connection pool per hostname (currently global pool)
-855. [P1] DNS: negative cache (NXDOMAIN answers cached too)
-856. [P2] Prefetch `<link rel="prefetch">` and `<link rel="preconnect">`
-857. [P2] Resource hints: `<link rel="preload">` with `as=` attribute
-858. [P2] CSS: avoid reflow on `transform` and `opacity` changes
-859. [P2] JS: `requestIdleCallback` for low-priority work
-860. [P3] GPU: Virtio-GPU accelerated blitting for large images
-861. [P3] WASM: precompile to native via JSJIT for heavy workloads
+### 28a. JIT — JavaScript Execution Speed
+> The biggest lever. QuickJS baseline is ~10–30× slower than V8. JIT closes most of that gap.
+
+847. [P0] JIT: compile hot functions to x86-32 machine code via `jit.c` hook (call-count threshold = 1000 invocations)
+848. [P0] JIT: inline caches (ICs) for property reads — monomorphic fast path, polymorphic fallback
+849. [P0] JIT: inline caches for property writes — shape guard → direct offset store
+850. [P0] JIT: type specialization for integer arithmetic — avoid boxing on hot `+`/`-`/`*`/`|` loops
+851. [P0] JIT: type specialization for float arithmetic — SSE2 xmm register path for `Number`
+852. [P0] JIT: eliminate redundant `typeof` guards after type narrowing
+853. [P0] JIT: dead code elimination for unreachable branches after type specialization
+854. [P0] JIT: devirtualize `this.method()` calls when receiver shape is constant
+855. [P0] JIT: register allocator — keep hot variables in EAX/ECX/EDX/EBX across a function body
+856. [P0] JIT: on-stack replacement (OSR) — enter native code mid-loop without exiting the interpreter
+857. [P0] JIT: tiered compilation — tier-0 interpreter → tier-1 unoptimized native → tier-2 optimized native
+858. [P1] JIT: array element IC — fast path for small-index `arr[i]` without boxing index
+859. [P1] JIT: typed array fast path — `Int32Array`/`Float64Array`/`Uint8Array` direct memory ops
+860. [P1] JIT: `for...of` loop over Array: compile to direct index loop, skip iterator protocol
+861. [P1] JIT: string concatenation fast path — single-alloc for `a + b + c` chains
+862. [P1] JIT: `Array.prototype.map`/`filter`/`forEach` intrinsics — compile to inline loops
+863. [P1] JIT: deoptimization — bail out to interpreter cleanly on IC miss or shape change
+864. [P1] JIT: deopt trampoline — record deopt reason, re-profile, recompile with new type info
+865. [P1] JIT: profile-guided inlining — inline small callees (< 50 bytecodes) at call sites
+866. [P1] JIT: escape analysis — stack-allocate objects that don't escape the function
+867. [P1] JIT: code cache — serialise compiled native blobs per function, skip recompile after reload
+868. [P2] JIT: loop invariant code motion (LICM) — hoist property reads out of loops
+869. [P2] JIT: range analysis — prove array index in bounds, eliminate bounds check
+870. [P2] JIT: constant folding — evaluate `2 * Math.PI` at compile time
+871. [P2] JIT: `arguments` object elimination — replace with individual stack slots
+872. [P2] JIT: closure variable promotion — if closure never captures mutated var, treat as constant
+873. [P2] JIT: `Promise` fast path — microtask queue flush without full task‐queue overhead
+874. [P2] JIT: async/await desugaring optimisation — avoid extra closure allocation per `await`
+875. [P3] JIT: WebAssembly tier-2 — compile WASM hot functions to x86 via same JSJIT backend
+876. [P3] JIT: speculative inlining across module boundaries for bundled apps
+
+### 28b. GC & Memory
+877. [P0] GC: incremental mark-and-sweep — max 1ms pause per GC slice at 60fps
+878. [P0] GC: generational collection — young/old heap; minor GC < 0.5ms
+879. [P0] GC: write barrier — track old→young pointers for generational correctness
+880. [P1] GC: explicit nursery size tuning — default 4MB young, 128MB old; configurable at boot
+881. [P1] GC: weak references (`WeakRef`, `WeakMap`, `WeakSet`) handled without extending object lifetime
+882. [P1] GC: `FinalizationRegistry` callbacks deferred to idle time
+883. [P1] Object pool: reuse `VNode`/`VElement` objects across re-renders (avoid GC pressure)
+884. [P1] `ArrayBuffer` pool: recycle fixed-size 4KB/64KB/1MB buffers for network I/O
+885. [P1] String interning: deduplicate CSS class names, tag names, attribute names
+886. [P2] Slab allocator in TypeScript heap manager: fixed-size slabs for common object sizes
+887. [P2] Copy-on-write strings: large string operations share backing buffer until modification
+888. [P2] `sys.mem.gc()` TypeScript API — trigger manual GC from REPL, returns freed bytes
+889. [P2] Heap profiler: `sys.mem.snapshot()` returns live object graph as JSON
+890. [P3] Compressed pointers (heap base + 32-bit offset) to halve per-object pointer size on x86-64 port
+
+### 28c. Layout Engine Performance
+891. [P0] Incremental layout: dirty-mark only changed subtrees; skip clean nodes entirely
+892. [P0] Style recalc: dirty-mark only elements whose computed style changes; batch before layout
+893. [P0] Layout containment: `contain: layout` boundary stops dirty propagation across component boundaries
+894. [P0] Avoid forced synchronous layout (FSL): batch all DOM reads before any DOM writes per frame
+895. [P1] Flex/grid cache: cache row/column tracks, invalidate only on container size or child count change
+896. [P1] Text measurement cache: `measureText(str, font)` result cached by (str, size, family) key
+897. [P1] Font metrics cache: ascent/descent/line-gap per (family, size, weight) triple
+898. [P1] Containing-block cache: cache absolute/fixed-position ancestors; invalidate on layout
+899. [P1] Layer tree: promote `position:fixed`, `transform`, `opacity < 1`, `will-change` to compositor layers
+900. [P1] `will-change: transform` hint triggers layer promotion and skips layout on animation
+901. [P2] Layout budget: hard 4ms layout deadline per frame; defer rest to next IdleCallback
+902. [P2] Partial style invalidation: attribute selectors and `:nth-child` don't trigger full tree recalc
+903. [P2] CSS Grid auto-placement fast path: skip backtracking when all cells are single-span
+904. [P3] Parallel layout: farm independent flex/grid containers to separate JS microtasks
+
+### 28d. Rendering Pipeline
+905. [P0] Double buffering: render to back-buffer, flip on vsync (PIT timer at 60Hz)
+906. [P0] Dirty rect tracking: only re-draw rectangles that changed since last frame
+907. [P0] Tile-based renderer: 64×64px tiles; mark dirty tiles, skip clean tiles in paint
+908. [P0] Compositor: separate `transform`/`opacity` animation from layout+paint (CSS compositor thread)
+909. [P1] Painter's algorithm: sort render list by z-index once; re-sort only on z-index mutation
+910. [P1] Text atlas: pre-rasterize ASCII + common Unicode glyphs to a single bitmap; blit from atlas
+911. [P1] Image decode: JPEG/PNG/WebP decode runs once, cached as decoded RGBA bitmap
+912. [P1] Image resize: cached scaled copy per (src, destW, destH) to avoid repeated scaling
+913. [P1] CSS `background-color` fast path: solid fill rect — skip compositing when no children overlap
+914. [P1] Border/shadow cache: pre-rasterize borders and `box-shadow` into per-element texture
+915. [P1] Canvas 2D: `drawImage()` blits from decoded bitmap cache, no re-decode
+916. [P2] Subpixel text: LCD subpixel antialiasing using RGB stripe masks on VGA framebuffer
+917. [P2] Glyph atlas grow-on-demand: allocate larger atlas when full, copy existing glyphs
+918. [P2] CSS `clip-path` acceleration: pre-clip layer bitmap, composite without per-pixel test
+919. [P2] Opacity layer: flatten composited layer to single bitmap before blending
+920. [P3] Virtio-GPU: hardware-accelerated blit using virtio 2D resource commands
+921. [P3] WebGL stub: map `gl.drawArrays()` calls to framebuffer software rasteriser using typed arrays
+
+### 28e. Network Performance
+922. [P0] Zero-copy recv: NIC DMA direct to JS `ArrayBuffer`; no extra memcpy in kernel path
+923. [P0] HTTP keep-alive pool: persist connections per origin; default max 6 per hostname
+924. [P0] HTTP/1.1 pipelining: queue multiple GET requests on same connection
+925. [P0] Resource prioritisation: HTML > CSS > JS > fonts > images; scheduler respects priority
+926. [P0] DNS cache: positive answers cached for TTL, negative answers cached for 60s
+927. [P1] HTTP/2 multiplexing (HPACK header compression + stream multiplexing over single TLS conn)
+928. [P1] HPACK: static + dynamic table; avoid redundant header retransmission
+929. [P1] HTTP/2 server push: accept pushed resources, store in cache before request
+930. [P1] TLS session resumption: session ticket (TLS 1.3 0-RTT) to skip full handshake on revisit
+931. [P1] TCP fast open: send SYN+data on reconnect to known hosts
+932. [P1] Preconnect: resolve DNS + complete TCP+TLS for `<link rel="preconnect">` origins during idle
+933. [P1] Prefetch: fetch and cache `<link rel="prefetch">` resources at idle priority
+934. [P1] Preload: `<link rel="preload" as="script|style|font|image">` fetched at high priority
+935. [P1] Resource cache: disk-backed cache at `/var/cache/browser/` keyed by URL+ETag
+936. [P1] Cache-Control: honour `max-age`, `no-cache`, `no-store`, `stale-while-revalidate`
+937. [P2] Service Worker API: TypeScript-based SW intercepts `fetch()`, serves from cache
+938. [P2] HTTP/3 (QUIC): TypeScript QUIC implementation over UDP for latency-sensitive resources
+939. [P2] TCP congestion: CUBIC algorithm in TypeScript TCP stack for better throughput
+940. [P2] Receive window scaling: advertise large window to maximise download throughput
+941. [P2] Parallel image decode: decode multiple images concurrently using microtask scheduler
+942. [P3] SPDY compat: recognise and handle SPDY/3.1 as HTTP/2 alias
+
+### 28f. CSS Execution Performance
+943. [P0] Style computation: `O(1)` rule matching via class/id/tag hash buckets — no linear scan
+944. [P0] Computed style cache: per-element cache with generation stamp; cheaply validate on re-render
+945. [P0] CSS variable resolve: resolve once at cascade, store in computed style; re-resolve only on change
+946. [P1] Selector specificity index: pre-sorted rule list; skip rules below current specificity floor
+947. [P1] `transition` / `animation`: run on compositor at 60fps without triggering layout or JS
+948. [P1] `transform: translate/scale/rotate` → matrix multiply only, no layout recalc
+949. [P1] `opacity` animation: alpha-multiply composited layer, no paint
+950. [P2] `@media` listener: recompute only if viewport crosses a breakpoint boundary
+951. [P2] CSS `contain: strict` → isolate paint and size; skip full viewport damage on mutation
+952. [P2] Heuristics: skip box-shadow/filter for off-screen elements
+
+### 28g. JS API & Event Performance
+953. [P0] `requestAnimationFrame`: fired exactly once per vsync interrupt (no setTimeout drift)
+954. [P0] `requestIdleCallback`: coalesced and fired in remaining frame budget after rAF work
+955. [P0] Event delegation: single root listener for bubbling events; O(1) target lookup by node id
+956. [P0] Microtask queue: drain after every macrotask and after every `await` resume — spec-correct order
+957. [P1] `MutationObserver`: batch all mutations in a frame, deliver one callback after layout
+958. [P1] `ResizeObserver`: deliver after layout, before paint; skip if size unchanged
+959. [P1] `IntersectionObserver`: compute once per rAF tick; skip off-screen roots
+960. [P1] `addEventListener` passive: default-passive for `touchstart`/`wheel` — never block scroll
+961. [P1] Debounce DOM write after `input` events: batch concurrent `value` changes
+962. [P2] `queueMicrotask()`: TC39 spec-correct; drains before next macrotask
+963. [P2] `scheduler.postTask()`: priority-aware task scheduling (background/user-visible/user-blocking)
+964. [P2] Web Workers: run JS in isolated QuickJS context; `postMessage` over IPC channel
+965. [P3] Worklets (CSS paint, audio): isolated micro-contexts; share data via `SharedArrayBuffer`
+
+### 28h. Benchmarking & Profiling Infrastructure
+966. [P0] TSC-based `performance.now()`: nanosecond resolution from x86 RDTSC; monotonic
+967. [P0] `performance.mark()` / `performance.measure()` — browser Performance Timeline API
+968. [P0] Frame timing: record paint start/end per frame; expose via `PerformanceObserver('frame')`
+969. [P1] JIT profiler: count call-site hits, IC misses, deopt events; `sys.jit.stats()` TypeScript API
+970. [P1] GC profiler: record each GC pause duration and bytes freed; `sys.mem.gcStats()` API
+971. [P1] Network waterfall: record DNS/connect/TLS/TTFB/transfer timing per request
+972. [P1] Layout profiler: record per-subtree layout time; highlight > 2ms nodes
+973. [P1] Paint profiler: record per-tile repaint reason (new DOM node / style change / scroll / etc.)
+974. [P2] Flame graph renderer: ASCII flame chart in REPL via `sys.perf.flame()`, PNG export to file
+975. [P2] Synthetic benchmarks: built-in suite — DOM ops/sec, CSS recalc/sec, JS ops/sec, frames/sec
+976. [P2] `sys.browser.bench(url)` — load URL and return Core Web Vitals equivalents (LCP, FID, CLS)
+977. [P3] Continuous benchmark CI: run benchmark suite on every build, fail on > 5% regression
 
 ---
 
@@ -1255,7 +1389,7 @@
 977. [P2] Browser correctly renders top 100 Alexa sites (≥ 60% readable)
 978. [P2] SSH login from host machine works
 979. [P2] File sharing with host via QEMU 9p virtio
-980. [P2] Performance: browser renders 60fps scroll on simple pages
+980. [P0] Browser: consistent 60fps scroll and animation on real-world sites (see section 28 for full perf roadmap)
 981. [P3] Browser passes WPT (Web Platform Tests) ≥ 40% pass rate
 982. [P3] Self-hosting: build JSOS from within JSOS
 983. [P3] Support for 10 simultaneous logged-in users (SMP)
@@ -1279,7 +1413,7 @@
 
 ---
 
-*Total: 1000 items across 35 categories.*
+*Total items: 1130+ across 35 categories (section 28 expanded with full desktop-performance roadmap).*
 *P0 (~180 items): must fix before any public demo.*
 *P1 (~320 items): required for the OS to be genuinely usable.*
 *P2 (~280 items): important quality-of-life and compatibility.*
