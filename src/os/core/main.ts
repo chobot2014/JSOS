@@ -32,6 +32,7 @@ import { httpsGet } from '../net/http.js';
 import { registerCommands } from '../ui/commands.js';
 import { QJSJITHook } from '../process/qjs-jit.js';
 import { JITOSKernels } from '../process/jit-os.js';
+import { _registerJITStats } from './sdk.js';
 
 declare var kernel: import('./kernel.js').KernelAPI; // kernel.js is in core/
 
@@ -289,6 +290,9 @@ function main(): void {
       // Tier-2 JIT: compile OS integer kernels (checksum, memcpy, CRC-32, etc.)
       // at module-load time so they run native from the very first call.
       JITOSKernels.init();
+
+      // Register JIT stats providers so os.system.jitStats() returns live data.
+      _registerJITStats(qjsJit, () => JITOSKernels.stats());
 
       // ── Phase 9: JSOS Native Browser ──────────────────────────────────────
       // Launch the JSOS native TypeScript browser.  Written 100% in TypeScript

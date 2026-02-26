@@ -347,10 +347,17 @@ export interface KernelAPI {
     a0?: number, a1?: number, a2?: number, a3?: number,
     a4?: number, a5?: number, a6?: number, a7?: number): number;
   /**
-   * Returns the number of bytes currently consumed in the 256 KB JIT pool.
-   * Useful for budget checks and debugging.
+   * Returns the number of bytes currently consumed in the 8 MB main JIT pool.
+   * Useful for budget checks and debugging.  Pool capacity = 8,388,608 bytes.
    */
   jitUsedBytes(): number;
+  /**
+   * Reset the main JIT pool bump pointer to zero, reclaiming all 8 MB.
+   * The TypeScript QJSJITHook is responsible for clearing all live
+   * jit_native_ptr fields before calling this (to prevent stale call targets).
+   * Returns the number of bytes reclaimed.
+   */
+  jitMainReset(): number;
   /**
    * Return the physical (linear) address of a JS ArrayBuffer's backing store.
    * QuickJS uses reference-counting (not a moving GC), so the pointer is stable

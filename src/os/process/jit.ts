@@ -664,6 +664,27 @@ export class _Emit {
     else { this._w(0x81); this._w(0xEC); this._u32(n); }
   }
   peekTOS(): void { this._w(0x8B); this._w(0x04); this._w(0x24); }  // MOV EAX, [ESP]
+  /** Peek Nth item from top of the eval stack (0 = TOS) into EAX. */
+  peekN(n: number): void {
+    const disp = n * 4;
+    if (disp === 0) {
+      this._w(0x8B); this._w(0x04); this._w(0x24);            // MOV EAX, [ESP]
+    } else if (disp <= 127) {
+      this._w(0x8B); this._w(0x44); this._w(0x24); this._w(disp); // MOV EAX, [ESP+disp8]
+    } else {
+      this._w(0x8B); this._w(0x84); this._w(0x24); this._u32(disp); // MOV EAX, [ESP+disp32]
+    }
+  }
+  /** MOV ECX, [ESP + disp_bytes] — load eval-stack item N below TOS into ECX. */
+  movEspDispEcx(disp: number): void {
+    if (disp === 0) {
+      this._w(0x8B); this._w(0x0C); this._w(0x24);            // MOV ECX, [ESP]
+    } else if (disp <= 127) {
+      this._w(0x8B); this._w(0x4C); this._w(0x24); this._w(disp); // MOV ECX, [ESP+disp8]
+    } else {
+      this._w(0x8B); this._w(0x8C); this._w(0x24); this._u32(disp); // MOV ECX, [ESP+disp32]
+    }
+  }
   movEaxEcxDisp(disp: number): void {                                // MOV EAX, [ECX + disp]
     if (disp === 0) { this._w(0x8B); this._w(0x01); }
     else if (disp >= -128 && disp <= 127) { this._w(0x8B); this._w(0x41); this._w(disp & 0xFF); }

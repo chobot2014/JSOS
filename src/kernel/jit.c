@@ -82,3 +82,13 @@ int32_t jit_call_i8(void *fn,
 uint32_t jit_used_bytes(void) {
     return _jit_main_used;
 }
+
+/*
+ * Reset the main JIT pool bump pointer to zero, reclaiming all 8 MB.
+ * The caller is responsible for clearing all jit_native_ptr fields in
+ * JSFunctionBytecode structs before calling this — otherwise stale native
+ * pointers will be called on re-entry.  (TypeScript QJSJITHook does this.)
+ */
+void jit_main_reset(void) {
+    _jit_main_used = 0;
+}

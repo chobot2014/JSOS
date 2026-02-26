@@ -39,7 +39,7 @@ import {
   OP_lt,  OP_lte, OP_gt, OP_gte,
   OP_inc_loc, OP_dec_loc, OP_inc_loc8, OP_dec_loc8,
   OP_add_loc, OP_add_loc8,
-  OP_drop, OP_dup,
+  OP_drop, OP_dup, OP_dup2, OP_nip, OP_swap,
   OP_if_true8, OP_if_false8, OP_if_true, OP_if_false,
   OP_goto, OP_goto8, OP_goto16,
   OP_return_val, OP_return_undef, OP_nop,
@@ -190,8 +190,9 @@ export class TypeSpeculator {
     const v = new DataView(raw);
     for (let i = 0; i < n; i++) {
       const tag = v.getInt32(i * JSVALUE_SIZE + 4, true);
-      const obs: ArgType = tag === JS_TAG_INT  ? ArgType.Int32
-                          : tag === JS_TAG_BOOL ? ArgType.Bool
+      const obs: ArgType = tag === JS_TAG_INT     ? ArgType.Int32
+                          : tag === JS_TAG_BOOL    ? ArgType.Bool
+                          : tag === JS_TAG_FLOAT64 ? ArgType.Float64
                           : ArgType.Any;
       const prev = this._argTypes[i];
       if (prev === ArgType.Unknown) {
@@ -211,6 +212,27 @@ export class TypeSpeculator {
       if (this._argTypes[i] !== ArgType.Int32 && this._argTypes[i] !== ArgType.Unknown)
         return false;
     return true;
+  }
+
+  /**
+   * Returns true if all observed args are integer-like (Int32, Bool, or Unknown).
+   * Bool is treated as int32 (0/1) — safe for V1 integer JIT.  Float64 or Any
+   * require a different compilation tier and are rejected here.
+   */
+  allIntegerLike(): boolean {
+    for (let i = 0; i < this._maxArgs; i++) {
+      const t = this._argTypes[i];
+      if (t !== ArgType.Int32 && t !== ArgType.Bool && t !== ArgType.Unknown)
+        return false;
+    }
+    return true;
+  }
+
+  /** Returns true if any observed argument was Float64. */
+  hasFloat64(): boolean {
+    for (let i = 0; i < this._maxArgs; i++)
+      if (this._argTypes[i] === ArgType.Float64) return true;
+    return false;
   }
 }
 
@@ -237,6 +259,13 @@ export class QJSJITCompiler {
   private _bcToNative: Map<number, number> = new Map();
   /** Pending branch fixups: { bcTarget, fixupOffset } */
   private _fixups: Array<{ bcTarget: number; fixupOff: number; is8: boolean }> = [];
+  /**
+   * Simulated evaluation-stack depth used as a safety guard.
+   * The compiled frame reserves 8 extra int32 slots for the eval stack
+   * (see localBytes calculation).  If depth exceeds this, bail out.
+   */
+  private _stackDepth: number = 0;
+  private static readonly _MAX_EVAL_STACK = 8;
 
   constructor(bc: QJSBytecodeReader) {
     this._e    = new _Emit();
@@ -310,6 +339,31 @@ export class QJSJITCompiler {
         // ── Stack ops ────────────────────────────────────────────────────
         case OP_drop: { e.addEsp(4); pc++; break; }
         case OP_dup:  { e.peekTOS(); e.pushEax(); pc++; break; }
+        case OP_dup2: {
+          // [... a b] → [... a b a b]   (duplicate top two values)
+          e.popEcx();  // ECX = b (TOS)
+          e.popEax();  // EAX = a (TOS-1)
+          e.pushEax(); // push a
+          e.pushEcx(); // push b
+          e.pushEax(); // push a (copy)
+          e.pushEcx(); // push b (copy) ← new TOS
+          pc++; break;
+        }
+        case OP_nip: {
+          // [... a b] → [... b]   (remove element below TOS; keep TOS)
+          e.popEax();  // EAX = b (TOS)
+          e.addEsp(4); // discard a (TOS-1)
+          e.pushEax(); // restore b as new TOS
+          pc++; break;
+        }
+        case OP_swap: {
+          // [... a b] → [... b a]   (exchange TOS and TOS-1)
+          e.popEax();  // EAX = b (TOS)
+          e.popEcx();  // ECX = a (TOS-1)
+          e.pushEax(); // push b (now TOS-1 position → will become TOS-1 after next push)
+          e.pushEcx(); // push a ← new TOS
+          pc++; break;
+        }
 
         // ── Increment / decrement in-place ───────────────────────────────
         case OP_inc_loc:  { const i = bc.u16(pc + 1); e.load(this._locDisp(i)); e.addEaxImm32(1); e.store(this._locDisp(i)); pc += 3; break; }
@@ -486,11 +540,13 @@ export class QJSJITCompiler {
 
 /** State per compiled (or blacklisted) function. */
 interface FuncEntry {
-  bcAddr:    number;
+  bcAddr:     number;
   nativeAddr: number;     // 0 = not yet compiled
   deoptCount: number;
   blacklisted: boolean;
   speculator:  TypeSpeculator;
+  /** kernel.getTicks() at last hook invocation — used for LRU pool GC. */
+  lastAccess:  number;
 }
 
 export class QJSJITHook {
@@ -498,6 +554,9 @@ export class QJSJITHook {
   private _funcs:    Map<number, FuncEntry> = new Map();
   private _compiled: number = 0;
   private _bailed:   number = 0;
+  private _jitDeopts: number = 0;
+  /** Number of full pool GC resets performed. */
+  private _resets:   number = 0;
 
   constructor() {
     this._offsets = initOffsets();
@@ -516,10 +575,15 @@ export class QJSJITHook {
       entry = {
         bcAddr, nativeAddr: 0, deoptCount: 0, blacklisted: false,
         speculator: new TypeSpeculator(argc),
+        lastAccess: 0,
       };
       this._funcs.set(bcAddr, entry);
     }
     if (entry.blacklisted) return 0;
+
+    // Update access timestamp for LRU pool GC
+    entry.lastAccess = typeof kernel !== 'undefined' ? kernel.getTicks() : 0;
+
     if (entry.nativeAddr && entry.nativeAddr !== DEOPT_SENTINEL) return 1; // already compiled
 
     // Accumulate type observations
@@ -528,9 +592,15 @@ export class QJSJITHook {
     // Only attempt compilation if we have enough calls to speculate types
     if (entry.speculator.callCount < JIT_THRESHOLD) return 0;
 
-    // Only compile integer-specialised functions (V1 scope)
-    if (!entry.speculator.allInt32() && argc > 0) {
-      entry.blacklisted = true;
+    // V1 scope: only compile integer-specialised functions.
+    // Bool (0/1) is treated as int32 — same representation in cdecl.
+    // Float64 and Any arg types require a future float-specialised tier.
+    if (!entry.speculator.allIntegerLike() && argc > 0) {
+      // Float64-only functions may stabilise later; give them 4× threshold
+      // before permanently giving up.
+      if (entry.speculator.callCount >= JIT_THRESHOLD * 4) {
+        entry.blacklisted = true;
+      }
       return 0;
     }
 
@@ -556,8 +626,19 @@ export class QJSJITHook {
     }
 
     const ab = new Uint8Array(native).buffer;
-    const nativeAddr = kernel.jitAlloc(native.length);
-    if (!nativeAddr) { entry.blacklisted = true; return 0; }
+    let nativeAddr = kernel.jitAlloc(native.length);
+    if (!nativeAddr) {
+      // Pool exhausted — perform a full GC reset and retry once.
+      const reclaimed = this._poolGC();
+      if (reclaimed > 0) {
+        nativeAddr = kernel.jitAlloc(native.length);
+      }
+      if (!nativeAddr) {
+        // Still can't allocate; give up on this function.
+        entry.blacklisted = true;
+        return 0;
+      }
+    }
     kernel.jitWrite(nativeAddr, ab);
     kernel.setJITNative(entry.bcAddr, nativeAddr);
     entry.nativeAddr = nativeAddr;
@@ -565,12 +646,44 @@ export class QJSJITHook {
     return 1;
   }
 
+  /**
+   * Full pool GC: clears all compiled native pointers and resets the 8 MB
+   * bump allocator.  Compiled functions are re-eligible for compilation on
+   * their next invocation.  O(n) in number of tracked functions.
+   * Returns the number of bytes reclaimed.
+   */
+  private _poolGC(): number {
+    if (typeof kernel === 'undefined') return 0;
+    if (typeof (kernel as any).jitMainReset !== 'function') return 0;
+
+    // Phase 1: clear all live native pointers so QuickJS won't jump to
+    // stale addresses after the pool memory is reused.
+    for (const e of this._funcs.values()) {
+      if (e.nativeAddr && e.nativeAddr !== DEOPT_SENTINEL) {
+        kernel.setJITNative(e.bcAddr, 0);
+        e.nativeAddr  = 0;
+        e.blacklisted = false;  // allow recompilation
+      }
+    }
+
+    // Phase 2: reset the bump allocator — reclaims all 8 MB.
+    const reclaimed = (kernel as any).jitMainReset() as number;
+    this._resets++;
+    if (typeof (kernel as any).serialPut === 'function') {
+      (kernel as any).serialPut(
+        `[JIT] pool GC #${this._resets}: ${(reclaimed / 1024).toFixed(0)} KB reclaimed, ` +
+        `${this._funcs.size} entries cleared\n`
+      );
+    }
+    return reclaimed;
+  }
+
   /** Called by the deopt handler when a compiled function deoptimises. */
   deopt(bcAddr: number): void {
     const entry = this._funcs.get(bcAddr);
     if (!entry) return;
     entry.deoptCount++;
-    this._incDeopt();
+    this._jitDeopts++;
     entry.nativeAddr = 0; // clear so it can be recompiled
     if (entry.deoptCount >= MAX_DEOPTS) {
       entry.blacklisted = true;
@@ -581,11 +694,7 @@ export class QJSJITHook {
   get compiledCount(): number { return this._compiled; }
   get bailedCount():   number { return this._bailed;   }
   get deoptCount():    number { return this._jitDeopts; }
-
-  private _jitDeopts: number = 0;
-
-  /** Increment deopt counter (called from deopt()). */
-  private _incDeopt(): void { this._jitDeopts++; }
+  get resetCount():    number { return this._resets;   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

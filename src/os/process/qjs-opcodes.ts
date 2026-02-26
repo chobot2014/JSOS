@@ -634,7 +634,8 @@ export const JIT_SUPPORTED_OPCODES = new Set<number>([
   OP_or, OP_and, OP_xor, OP_shl, OP_sar, OP_shr,
   OP_inc_loc, OP_dec_loc, OP_inc_loc8, OP_dec_loc8,
   OP_add_loc, OP_add_loc8,
-  OP_drop, OP_dup,
+  // Stack manipulation: dup/dup2/nip/swap extend the set of compilable functions
+  OP_drop, OP_dup, OP_dup2, OP_nip, OP_swap,
   OP_if_true8, OP_if_false8, OP_if_true, OP_if_false,
   OP_goto, OP_goto8, OP_goto16,
   OP_return_val, OP_return_undef,

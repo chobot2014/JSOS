@@ -873,6 +873,33 @@ function _debugSerial(level: string, args: unknown[]): void {
   }
 }
 
+// ── JIT stats registry (wired from main.ts via _registerJITStats) ──────────
+
+interface _JITStatsProvider {
+  compiledCount: number;
+  bailedCount:   number;
+  deoptCount:    number;
+  resetCount:    number;
+}
+interface _JITOSStatsProvider {
+  (): { checksumNative: boolean; stringNative: boolean; compiled: number; poolUsedKB: number };
+}
+
+var _jitStatsProvider: _JITStatsProvider | null = null;
+var _jitOSStatsProvider: _JITOSStatsProvider | null = null;
+
+/**
+ * Register the runtime JIT hook and OS-kernel stats provider.
+ * Called once by main.ts after creating QJSJITHook and JITOSKernels.
+ */
+export function _registerJITStats(
+  hook: _JITStatsProvider,
+  osStats: _JITOSStatsProvider
+): void {
+  _jitStatsProvider    = hook;
+  _jitOSStatsProvider  = osStats;
+}
+
 const sdk = {
 
   // ── Filesystem ─────────────────────────────────────────────────────────────
@@ -1225,6 +1252,37 @@ const sdk = {
     screenWidth():  number { return wm ? wm.screenWidth  : 0; },
     /** Screen height in pixels (0 in text mode). Use os.wm.screenHeight for WM-specific code. */
     screenHeight(): number { return wm ? wm.screenHeight : 0; },
+    /**
+     * JIT compiler statistics — compiled function counts, pool usage, GC resets.
+     *
+     * Example:
+     *   var s = os.system.jitStats();
+     *   print('JIT: ' + s.compiled + ' compiled, ' + s.bailed + ' bailed, ' +
+     *         s.poolUsedKB + '/' + s.poolCapKB + ' KB, ' + s.resets + ' GC resets');
+     */
+    jitStats(): {
+      compiled:     number;   // functions successfully JIT-compiled
+      bailed:       number;   // functions that failed or bailed out
+      deopts:       number;   // deoptimisation events
+      resets:       number;   // full pool GC reset count
+      poolUsedKB:   number;   // bytes used in 8 MB main JIT pool
+      poolCapKB:    number;   // total capacity (8192 KB)
+      osNative:     boolean;  // JIT OS kernels (checksum, mem ops) compiled
+      stringNative: boolean;  // JIT string ops (strcmp, memchr, hash) compiled
+    } {
+      var jh = _jitStatsProvider;
+      var os = _jitOSStatsProvider ? _jitOSStatsProvider() : null;
+      return {
+        compiled:     jh?.compiledCount  ?? 0,
+        bailed:       jh?.bailedCount    ?? 0,
+        deopts:       jh?.deoptCount     ?? 0,
+        resets:       jh?.resetCount     ?? 0,
+        poolUsedKB:   ((typeof kernel !== 'undefined' ? kernel.jitUsedBytes() : 0) / 1024) | 0,
+        poolCapKB:    8192,
+        osNative:     os?.checksumNative  ?? false,
+        stringNative: os?.stringNative    ?? false,
+      };
+    },
   },
 
   // ── Multi-process ────────────────────────────────────────────────────────────

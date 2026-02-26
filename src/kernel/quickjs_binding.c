@@ -1797,6 +1797,20 @@ static JSValue js_jit_used_bytes(JSContext *c, JSValueConst this_val,
 }
 
 /*
+ * kernel.jitMainReset() — reset the main JIT pool bump pointer to 0.
+ * TypeScript must call kernel.setJITNative(addr, 0) for every compiled
+ * function before calling this, so that stale native pointers are cleared.
+ * Returns the number of bytes that were reclaimed.
+ */
+static JSValue js_jit_main_reset(JSContext *c, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    uint32_t reclaimed = jit_used_bytes();
+    jit_main_reset();
+    return JS_NewUint32(c, reclaimed);
+}
+
+/*
  * kernel.jitCallI8(addr, a0..a7) → int32
  * Call a JIT-compiled cdecl function with eight 32-bit integer arguments.
  */
@@ -2435,7 +2449,8 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("jitWrite",     2, js_jit_write),
     JS_CFUNC_DEF("jitCallI",     5, js_jit_call_i),
     JS_CFUNC_DEF("jitCallI8",    9, js_jit_call_i8),
-    JS_CFUNC_DEF("jitUsedBytes", 0, js_jit_used_bytes),
+    JS_CFUNC_DEF("jitUsedBytes",   0, js_jit_used_bytes),
+    JS_CFUNC_DEF("jitMainReset",   0, js_jit_main_reset),
     JS_CFUNC_DEF("physAddrOf",   1, js_physaddr_of),
     /* Step 5: QJS JIT hook + per-process JIT management */
     JS_CFUNC_DEF("setJITHook",    1, js_set_jit_hook),

@@ -163,6 +163,59 @@ function crc32(physAddr, len, tableAddr, crc) {
 }
 `;
 
+/**
+ * Byte-by-byte compare of two null-terminated strings in physical memory.
+ * strcmp8(aAddr, bAddr, maxLen) → <0 / 0 / >0 (like C strcmp).
+ * Stops at the first differing byte or either null terminator.
+ */
+const _SRC_STRCMP = `
+function strcmp8(aAddr, bAddr, maxLen) {
+  var i = 0;
+  while (i < maxLen) {
+    var ca = mem8[aAddr + i] & 0xff;
+    var cb = mem8[bAddr + i] & 0xff;
+    if (ca !== cb) { return ca - cb; }
+    if (ca === 0) { return 0; }
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * Search for byte `val` in physical memory starting at `physAddr`.
+ * memchr8(physAddr, val, len) → address of first match or 0.
+ */
+const _SRC_MEMCHR = `
+function memchr8(physAddr, val, len) {
+  var b = val & 0xff;
+  var i = 0;
+  while (i < len) {
+    if ((mem8[physAddr + i] & 0xff) === b) { return physAddr + i; }
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * FNV-1a 32-bit hash of `len` bytes at `physAddr`.
+ * fnv1a32(physAddr, len) → uint32 hash.
+ * Used for fast hash-table keying in VFS path lookups.
+ */
+const _SRC_FNV1A32 = `
+function fnv1a32(physAddr, len) {
+  var hash = -2128831035;
+  var i = 0;
+  while (i < len) {
+    hash = (hash ^ (mem8[physAddr + i] & 0xff)) | 0;
+    hash = ((hash * 16777619) | 0);
+    i = i + 1;
+  }
+  return hash;
+}
+`;
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  CRC-32 table (256 × uint32)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -227,6 +280,9 @@ var _nativCopy8:     ((...a: number[]) => number) | null = null;
 var _nativCopy32:    ((...a: number[]) => number) | null = null;
 var _nativCompare:   ((...a: number[]) => number) | null = null;
 var _nativCRC32:     ((...a: number[]) => number) | null = null;
+var _nativStrcmp:    ((...a: number[]) => number) | null = null;
+var _nativMemchr:    ((...a: number[]) => number) | null = null;
+var _nativFNV1A32:   ((...a: number[]) => number) | null = null;
 
 /** Physical address of the CRC-32 table once copied to a shared kernel buffer. */
 var _crc32TablePhys: number = 0;
@@ -378,6 +434,82 @@ export const JITCRC32 = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  JITString — string/byte-search primitives over physical memory
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * String / byte-search operations JIT-compiled to native x86-32.
+ * All functions degrade gracefully to TypeScript when JIT is unavailable.
+ *
+ * Physical addresses are used throughout because kernel strings live in
+ * raw memory not managed by the JS GC.  Use kernel.physAddrOf(ab) to obtain
+ * the physical address of an ArrayBuffer if needed.
+ */
+export const JITString = {
+  /**
+   * Compare two null-terminated byte strings in physical memory.
+   * strcmp8(aPhys, bPhys, maxLen) → negative / 0 / positive  (C strcmp semantics).
+   */
+  strcmp8(aPhys: number, bPhys: number, maxLen: number): number {
+    if (_nativStrcmp) return _nativStrcmp(aPhys, bPhys, maxLen);
+    // TypeScript fallback
+    for (let i = 0; i < maxLen; i++) {
+      const raw = typeof kernel !== 'undefined'
+        ? kernel.readPhysMem(aPhys + i, 2) : null;
+      if (!raw) break;
+      const v = new DataView(raw);
+      const ca = v.getUint8(0), cb = v.getUint8(1); // can't read b independently here
+      // For TS fallback, use readPhysMem with 1 byte each
+      const ra = typeof kernel !== 'undefined' ? kernel.readPhysMem(aPhys + i, 1) : null;
+      const rb = typeof kernel !== 'undefined' ? kernel.readPhysMem(bPhys + i, 1) : null;
+      if (!ra || !rb) break;
+      const cA = new DataView(ra).getUint8(0);
+      const cB = new DataView(rb).getUint8(0);
+      if (cA !== cB) return cA - cB;
+      if (cA === 0) return 0;
+    }
+    return 0;
+  },
+
+  /**
+   * Search for byte `val` in physical memory.
+   * memchr8(physAddr, val, len) → physical address of first match or 0 if not found.
+   */
+  memchr8(physAddr: number, val: number, len: number): number {
+    if (_nativMemchr) return _nativMemchr(physAddr, val & 0xFF, len);
+    // TypeScript fallback
+    const b = val & 0xFF;
+    const raw = typeof kernel !== 'undefined' ? kernel.readPhysMem(physAddr, len) : null;
+    if (!raw) return 0;
+    const v = new Uint8Array(raw);
+    for (let i = 0; i < len; i++) if (v[i] === b) return physAddr + i;
+    return 0;
+  },
+
+  /**
+   * FNV-1a 32-bit hash of `len` bytes at `physAddr`.
+   * fnv1a32(physAddr, len) → uint32 hash value.
+   * Useful for fast string key hashing in VFS path caches.
+   */
+  fnv1a32(physAddr: number, len: number): number {
+    if (_nativFNV1A32) return _nativFNV1A32(physAddr, len) >>> 0;
+    // TypeScript fallback
+    let hash = 0x811c9dc5;
+    const raw = typeof kernel !== 'undefined' ? kernel.readPhysMem(physAddr, len) : null;
+    if (!raw) return hash >>> 0;
+    const v = new Uint8Array(raw);
+    for (let i = 0; i < len; i++) {
+      hash ^= v[i];
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash;
+  },
+
+  /** True when string ops are JIT-compiled to native code. */
+  isNative(): boolean { return _nativStrcmp !== null; },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  Boot initialisation
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -417,6 +549,9 @@ export const JITOSKernels = {
     _nativCopy32   = tryCompile(_SRC_COPY32,   'copy32');
     _nativCompare  = tryCompile(_SRC_COMPARE,  'compare');
     _nativCRC32    = tryCompile(_SRC_CRC32,    'crc32');
+    _nativStrcmp   = tryCompile(_SRC_STRCMP,   'strcmp8');
+    _nativMemchr   = tryCompile(_SRC_MEMCHR,   'memchr8');
+    _nativFNV1A32  = tryCompile(_SRC_FNV1A32,  'fnv1a32');
 
     // Write the CRC table into a shared ArrayBuffer so JIT native can access it
     if (_nativCRC32) {
@@ -435,13 +570,14 @@ export const JITOSKernels = {
   },
 
   stats(): { compiled: number; poolUsedKB: number; checksumNative: boolean;
-             memFillNative: boolean; crc32Native: boolean } {
+             memFillNative: boolean; crc32Native: boolean; stringNative: boolean } {
     return {
       compiled:         _initStats.compiled,
       poolUsedKB:       (JIT.stats().poolUsed / 1024) | 0,
       checksumNative:   _nativChecksum !== null,
       memFillNative:    _nativFill8    !== null,
       crc32Native:      _nativCRC32    !== null,
+      stringNative:     _nativStrcmp   !== null,
     };
   },
 };

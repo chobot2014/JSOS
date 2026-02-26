@@ -59,6 +59,13 @@ int32_t jit_call_i8(void *fn,
  */
 uint32_t jit_used_bytes(void);
 
+/*
+ * Reset the main JIT pool bump pointer to zero, reclaiming all 8 MB.
+ * Must only be called AFTER the TypeScript JIT manager has cleared all
+ * live jit_native_ptr fields via kernel.setJITNative(addr, 0).
+ */
+void jit_main_reset(void);
+
 /* Per-child-process JIT allocation and reclaim */
 void    *jit_proc_alloc(int proc_id, size_t size);  /* allocate from child partition */
 void     jit_proc_reset(int proc_id);               /* O(1) reclaim on procDestroy   */
