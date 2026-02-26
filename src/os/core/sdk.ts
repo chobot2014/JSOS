@@ -58,6 +58,17 @@ export { Mutex, Condvar, Semaphore } from '../process/sync.js';
 export type { User, Group } from '../users/users.js';
 export { Pipe } from '../ipc/ipc.js';
 export type { ProcessContext } from '../process/scheduler.js';
+// ── Widget library ────────────────────────────────────────────────────────────
+export {
+  BaseApp,
+  TabBar,    type TabBarOptions,
+  Sidebar,   type SidebarOptions,
+  ListView,  type ListViewOptions,
+  ProgressBar,
+  Button,    type ButtonOptions,
+  TextInput, type TextInputOptions,
+  drawSection, drawRow,
+} from './widgets.js';
 
 // ── SDK-defined public types ──────────────────────────────────────────────────
 
