@@ -186,7 +186,64 @@ function isIncomplete(code: string): boolean {
 // Try to evaluate code as an expression first so we can JSON-stringify objects.
 // If that's a SyntaxError (e.g. it's a statement like `var x = 5`), fall back
 // to direct eval. Shell functions return undefined — we suppress that silently.
+
+/** Print a REPL result string to the terminal with appropriate syntax colouring. */
+function _printReplResult(result: string): void {
+  if (result === '__JSOS_PRINTED__') return;
+  if (result === '__JSOS_UNDEF__' || result === 'undefined') return;
+  if (result === 'null') {
+    terminal.colorPrintln('null', Color.DARK_GREY);
+  } else if (result === 'true' || result === 'false') {
+    terminal.colorPrintln(result, Color.YELLOW);
+  } else if (result !== 'Infinity' && result !== '-Infinity' && result !== 'NaN' && !isNaN(Number(result))) {
+    terminal.colorPrintln(result, Color.LIGHT_CYAN);
+  } else if (result.indexOf('Error:') !== -1) {
+    terminal.colorPrintln(result, Color.LIGHT_RED);
+  } else if (result.length > 0 && result[0] === '"') {
+    terminal.colorPrintln(result, Color.LIGHT_GREEN);
+  } else {
+    terminal.colorPrintln(result, Color.WHITE);
+  }
+}
+
+// ── Top-level await support (item 646) ────────────────────────────────────────
+// Install result/error callbacks in globalThis so async eval can call them.
+// The callback prints the result one tick later (when the Promise resolves).
+(function _setupAwaitCallbacks() {
+  var g = globalThis as any;
+  g.__replResult = function(v: unknown): void {
+    var s: string;
+    if (v === undefined) return;
+    if (v === null) { s = 'null'; }
+    else if (v instanceof Error) { s = String(v); }
+    else if (v && typeof (v as any).__jsos_print__ === 'function') { (v as any).__jsos_print__(); return; }
+    else if (typeof v === 'object') { try { s = JSON.stringify(v, null, 2); } catch (_) { s = String(v); } }
+    else { s = String(v); }
+    _printReplResult(s);
+  };
+  g.__replError = function(e: unknown): void {
+    terminal.colorPrintln('Uncaught (in promise): ' + String(e), Color.LIGHT_RED);
+  };
+})();
+
 function evalAndPrint(code: string): void {
+  // ── Top-level await (item 646): wrap code in async IIFE ───────────────────
+  var hasAwait = /\bawait\b/.test(code);
+  if (hasAwait) {
+    var asyncWrapped =
+      '(async function(){' +
+      'var __r=(' + code + ');' +
+      'if(__r===undefined)return"__JSOS_UNDEF__";' +
+      'if(__r===null)return"null";' +
+      'if(__r instanceof Error)return String(__r);' +
+      'if(__r&&typeof __r.__jsos_print__==="function"){__r.__jsos_print__();return"__JSOS_PRINTED__";}' +
+      'if(typeof __r==="object")return JSON.stringify(__r,null,2);' +
+      'return String(__r);' +
+      '})()\n.then(function(r){__replResult(r)},function(e){__replError(e)})';
+    kernel.eval(asyncWrapped);
+    return; // result delivered asynchronously via __replResult / __replError
+  }
+
   var exprWrapped =
     '(function(){' +
     'var __r=(' + code + ');' +
@@ -208,23 +265,7 @@ function evalAndPrint(code: string): void {
     if (result === 'undefined') return;
   }
 
-  // Printable already wrote its output; nothing more to do.
-  if (result === '__JSOS_PRINTED__') return;
-  if (result === '__JSOS_UNDEF__' || result === 'undefined') return;
-
-  if (result === 'null') {
-    terminal.colorPrintln('null', Color.DARK_GREY);
-  } else if (result === 'true' || result === 'false') {
-    terminal.colorPrintln(result, Color.YELLOW);
-  } else if (result !== 'Infinity' && result !== '-Infinity' && result !== 'NaN' && !isNaN(Number(result))) {
-    terminal.colorPrintln(result, Color.LIGHT_CYAN);
-  } else if (result.indexOf('Error:') !== -1) {
-    terminal.colorPrintln(result, Color.LIGHT_RED);
-  } else if (result.length > 0 && result[0] === '"') {
-    terminal.colorPrintln(result, Color.LIGHT_GREEN);
-  } else {
-    terminal.colorPrintln(result, Color.WHITE);
-  }
+  _printReplResult(result);
 }
 
 //  Shell prompt ─────────────────────────────────────────────────────────────

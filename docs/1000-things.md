@@ -233,7 +233,7 @@
 182. [P1] `sys.proc` TypeScript API: enumerate processes, read state — replaces `/proc` virtual FS
 183. [P1] `sys.devices` TypeScript API: enumerate hardware and driver state — replaces `/sys` virtual FS
 184. [P1] devfs: `/dev` character devices (null, zero, random, urandom, tty)
-185. [P1] `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`
+185. [P1 ✓] `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`
 186. [P1] Block device layer: request queue, elevator I/O scheduler
 187. [P1] Buffer cache: block-level read cache (LRU eviction)
 188. [P1] Page cache: file-level read cache
@@ -1141,7 +1141,7 @@
 890. [P3] Compressed pointers (heap base + 32-bit offset) to halve per-object pointer size on x86-64 port
 
 ### 28c. Layout Engine Performance
-891. [P0] Incremental layout: dirty-mark only changed subtrees; skip clean nodes entirely
+891. [P0 ✓] Incremental layout: dirty-mark only changed subtrees; skip clean nodes entirely
 892. [P0] Style recalc: dirty-mark only elements whose computed style changes; batch before layout
 893. [P0] Layout containment: `contain: layout` boundary stops dirty propagation across component boundaries
 894. [P0] Avoid forced synchronous layout (FSL): batch all DOM reads before any DOM writes per frame
@@ -1200,7 +1200,7 @@
 
 ### 28f. CSS Execution Performance
 943. [P0 ✓] Style computation: `O(1)` rule matching via class/id/tag hash buckets — no linear scan
-944. [P0] Computed style cache: per-element cache with generation stamp; cheaply validate on re-render
+944. [P0 ✓] Computed style cache: per-element cache with generation stamp; cheaply validate on re-render
 945. [P0] CSS variable resolve: resolve once at cascade, store in computed style; re-resolve only on change
 946. [P1] Selector specificity index: pre-sorted rule list; skip rules below current specificity floor
 947. [P1] `transition` / `animation`: run on compositor at 60fps without triggering layout or JS
@@ -1226,12 +1226,12 @@
 965. [P3] Worklets (CSS paint, audio): isolated micro-contexts; share data via `SharedArrayBuffer`
 
 ### 28h. Benchmarking & Profiling Infrastructure
-966. [P0] TSC-based `performance.now()`: nanosecond resolution from x86 RDTSC; monotonic
-967. [P0] `performance.mark()` / `performance.measure()` — browser Performance Timeline API
-968. [P0] Frame timing: record paint start/end per frame; expose via `PerformanceObserver('frame')`
+966. [P0 ✓] TSC-based `performance.now()`: nanosecond resolution from x86 RDTSC; monotonic
+967. [P0 ✓] `performance.mark()` / `performance.measure()` — browser Performance Timeline API
+968. [P0 ✓] Frame timing: record paint start/end per frame; expose via `PerformanceObserver('frame')`
 969. [P1] JIT profiler: count call-site hits, IC misses, deopt events; `sys.jit.stats()` TypeScript API
 970. [P1] GC profiler: record each GC pause duration and bytes freed; `sys.mem.gcStats()` API
-971. [P1] Network waterfall: record DNS/connect/TLS/TTFB/transfer timing per request
+971. [P1 ✓] Network waterfall: record DNS/connect/TLS/TTFB/transfer timing per request
 972. [P1] Layout profiler: record per-subtree layout time; highlight > 2ms nodes
 973. [P1] Paint profiler: record per-tile repaint reason (new DOM node / style change / scroll / etc.)
 974. [P2] Flame graph renderer: ASCII flame chart in REPL via `sys.perf.flame()`, PNG export to file
@@ -1321,18 +1321,18 @@
 ## 33. MISC MISSING PIECES
 
 919. [P0] Timezone data: IANA tz database as a TypeScript module (`sys.time.tz`)
-920. [P0] `/etc/config.json`: machine config (hostname, locale, timezone) — JSON not `/etc/hostname`
-921. [P0] `/etc/fstab.json`: filesystem mount table as JSON array
-922. [P0] Clock sync at boot: C reads CMOS RTC once; TypeScript initializes system clock
-923. [P0] Entropy: C mixes TSC + RTC into seed; TypeScript `/dev/random` PRNG (ChaCha20)
-924. [P0] `sys.config.get(key)` / `sys.config.set(key, val)` TypeScript API (replaces sysctl)
+920. [P0 ✓] `/etc/config.json`: machine config (hostname, locale, timezone) — JSON not `/etc/hostname`
+921. [P0 ✓] `/etc/fstab.json`: filesystem mount table as JSON array
+922. [P0 ✓] Clock sync at boot: C reads CMOS RTC once; TypeScript initializes system clock
+923. [P0 ✓] Entropy: C mixes TSC + RTC into seed; TypeScript `/dev/random` PRNG (ChaCha20)
+924. [P0 ✓] `sys.config.get(key)` / `sys.config.set(key, val)` TypeScript API (replaces sysctl)
 925. [P1] Locale: TypeScript locale module — `sys.locale.format(date)`, `sys.locale.collate()`
 926. [P1] Locale: per-process locale setting via `sys.locale.set('en-US')`
-927. [P1] RegExp: use QuickJS native `RegExp` — no libc binding needed
+927. [P1 ✓] RegExp: use QuickJS native `RegExp` — no libc binding needed
 928. [P1] C heap: `malloc`/`free` consistency in C layer (kernel allocator) — fine, C-internal
 929. [P1] C `printf`/`sprintf`: used only in C layer for debug output — already works
-930. [P1] Math: QuickJS provides `Math.*` natively; `libm` only needed for C layer functions
-931. [P1] Floating point: verify QuickJS handles NaN/Inf edge cases correctly
+930. [P1 ✓] Math: QuickJS provides `Math.*` natively; `libm` only needed for C layer functions
+931. [P1 ✓] Floating point: verify QuickJS handles NaN/Inf edge cases correctly
 932. [P1] File creation mask: default mode bits for new files, stored in TypeScript process context
 933. [P2] Pseudoterminals: only needed if embedding a third-party TUI app — low priority without shell
 934. [P2] Session log: TypeScript append-only log at `/var/log/sessions.jsonl` (replaces utmp/wtmp)
