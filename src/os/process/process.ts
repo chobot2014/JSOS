@@ -178,6 +178,18 @@ export class ProcessManager {
     this._procs.forEach(function(_p, pid) { pids.push(pid); });
     return pids;
   }
+
+  /**
+   * Adjust the scheduling priority of a process (item 715: nice).
+   * Priority 0 = highest (real-time); 39 = lowest (idle).
+   * Returns true if the process was found and updated.
+   */
+  setPriority(pid: number, value: number): boolean {
+    var ctx = scheduler.getProcess(pid);
+    if (!ctx) return false;
+    ctx.priority = Math.max(0, Math.min(39, value));
+    return true;
+  }
 }
 
 export const processManager = new ProcessManager();

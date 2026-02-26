@@ -1222,6 +1222,37 @@ export class NetworkStack {
     return -1; // timeout (real driver needed for actual reply detection)
   }
 
+  /**
+   * Send an ICMP echo with a specific TTL — used by traceroute (item 722).
+   * Returns RTT in ms if an ICMP Time-Exceeded or Echo-Reply arrives within
+   * timeoutMs, or -1 on timeout.  In simulation mode this always times out
+   * (identical to ping), but the TTL-limited packet is correctly sent.
+   */
+  pingWithTTL(targetIP: IPv4Address, ttl: number, timeoutMs: number = 1000): number {
+    var id   = (this.idCounter++) & 0xffff;
+    var seq  = ttl & 0xffff;
+    var data = fill(8);
+    wu16be(data, 0, id);
+    wu16be(data, 2, seq);
+    wu32be(data, 4, kernel.getTicks());
+
+    this._sendIPv4({
+      ihl: 5, dscp: 0, ecn: 0, id: this.idCounter++,
+      flags: 0, fragOff: 0, ttl: Math.max(1, ttl), protocol: PROTO_ICMP,
+      src: this.ip, dst: targetIP,
+      payload: buildICMP(8, 0, data),
+    });
+    this.stats.icmpTx++;
+
+    var start    = kernel.getTicks();
+    var deadline = start + timeoutMs;
+    while (kernel.getTicks() < deadline) {
+      this.processRxQueue();
+      kernel.sleep(10);
+    }
+    return -1; // timeout; real NIC reply needed for actual RTT
+  }
+
   // ── ARP ───────────────────────────────────────────────────────────────────
 
   resolve(ip: IPv4Address): MACAddress | null {

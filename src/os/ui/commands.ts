@@ -326,6 +326,30 @@ export function registerCommands(g: any): void {
     else terminal.println('mv: ' + src + ': failed');
   };
 
+  // item 706: mount — attach a VFS provider to a mount point
+  g.mount = function(mountpoint: string, vfs?: any) {
+    if (!mountpoint) {
+      // No args → list current mounts
+      var mpts = os.fs.mounts();
+      if (mpts.length === 0) { terminal.colorPrintln('(no VFS mounts)', Color.DARK_GREY); return; }
+      for (var i = 0; i < mpts.length; i++)
+        terminal.colorPrintln(mpts[i], Color.LIGHT_CYAN);
+      return;
+    }
+    if (!vfs) { terminal.println('usage: mount(mountpoint, vfsObject) or mount() to list'); return; }
+    os.fs.mount(mountpoint, vfs);
+    terminal.colorPrintln('mounted: ' + mountpoint, Color.LIGHT_GREEN);
+  };
+
+  // item 707: umount — detach a VFS mount point
+  g.umount = function(mountpoint: string) {
+    if (!mountpoint) { terminal.println('usage: umount(mountpoint)'); return; }
+    if (os.fs.umount(mountpoint))
+      terminal.colorPrintln('unmounted: ' + mountpoint, Color.LIGHT_GREEN);
+    else
+      terminal.println('umount: ' + mountpoint + ': not mounted');
+  };
+
   g.write = function(path: string, content: string) {
     if (!path) { terminal.println('usage: write(path, content)'); return; }
     if (fs.writeFile(path, content || ''))
@@ -453,6 +477,57 @@ export function registerCommands(g: any): void {
     if (processManager.kill(pid, sig !== undefined ? sig : 15))
       terminal.colorPrintln('sent SIGTERM to PID ' + pid, Color.LIGHT_GREEN);
     else terminal.println('kill: PID ' + pid + ': not found or protected');
+  };
+
+  // item 715: nice — adjust process priority
+  g.nice = function(pid: number, value: number) {
+    if (pid === undefined || value === undefined) { terminal.println('usage: nice(pid, value)'); return; }
+    if (processManager.setPriority && processManager.setPriority(pid, value))
+      terminal.colorPrintln('nice: PID ' + pid + ' priority → ' + value, Color.LIGHT_GREEN);
+    else terminal.colorPrintln('nice: PID ' + pid + ' not found or priority not adjustable', Color.YELLOW);
+  };
+
+  // item 716: jobs — list background async coroutines started from the REPL
+  g.jobs = function() {
+    var coros = threadManager.getCoroutines();
+    if (coros.length === 0) { terminal.colorPrintln('No active background jobs.', Color.DARK_GREY); return; }
+    return printableArray(coros, function(arr: Array<{ id: number; name: string }>) {
+      terminal.colorPrintln('  ' + pad('ID', 6) + ' NAME', Color.LIGHT_CYAN);
+      for (var i = 0; i < arr.length; i++) {
+        terminal.colorPrint('  ' + lpad('' + arr[i].id, 6) + ' ', Color.DARK_GREY);
+        terminal.colorPrintln(arr[i].name || '(unnamed)', Color.WHITE);
+      }
+    });
+  };
+
+  // item 717: fg / bg — foreground / background job control
+  // In JSOS single-threaded REPL there is no True background, so fg() is a no-op
+  // (coroutines run at each REPL tick) and bg() cancels blocking via cancel().
+  g.fg = function(id: number) {
+    var coros = threadManager.getCoroutines();
+    var found = coros.find(function(c) { return c.id === id; });
+    if (!found) { terminal.println('fg: job ' + id + ' not found'); return; }
+    terminal.colorPrintln('[' + id + '] ' + (found.name || '(unnamed)') + ' (already running in tick loop)', Color.LIGHT_CYAN);
+  };
+
+  g.bg = function(id: number) {
+    var coros = threadManager.getCoroutines();
+    var found = coros.find(function(c) { return c.id === id; });
+    if (!found) { terminal.println('bg: job ' + id + ' not found'); return; }
+    terminal.colorPrintln('[' + id + '] ' + (found.name || '(unnamed)') + ' running in background', Color.LIGHT_CYAN);
+  };
+
+  // item 756: global alert / confirm / prompt backed by os.wm.dialog.*
+  g.alert = function(message: string, opts?: { title?: string }) {
+    os.wm.dialog.alert(message, opts);
+  };
+
+  g.confirm = function(message: string, callback?: (ok: boolean) => void, opts?: { title?: string; okLabel?: string; cancelLabel?: string }) {
+    os.wm.dialog.confirm(message, callback || function() {}, opts);
+  };
+
+  g.prompt = function(question: string, callback?: (value: string | null) => void, opts?: { title?: string; defaultValue?: string }) {
+    os.wm.dialog.prompt(question, callback || function() {}, opts);
   };
 
   g.services = function(name?: string) {
@@ -628,11 +703,19 @@ export function registerCommands(g: any): void {
       RUNLEVEL:     '' + init.getCurrentRunlevel(),
       JSOS_VERSION: fs.readFile('/etc/version') || '1.0.0',
     };
-    return printableObject(pseudo, function(obj: any) {
-      var keys = Object.keys(obj);
+    // Merge in os.env entries (item 737)
+    var allEnv = os.env.all();
+    var merged: Record<string, string> = Object.assign({}, pseudo, allEnv);
+    return printableObject(merged, function(obj: any) {
+      var keys = Object.keys(obj).sort();
       for (var i = 0; i < keys.length; i++) terminal.println('  ' + pad(keys[i], 14) + '= ' + obj[keys[i]]);
     });
   };
+  // item 737: env.get(key) / env.set(key, val) on the shell-level env command
+  (g.env as any).get    = function(key: string): string | undefined { return os.env.get(key); };
+  (g.env as any).set    = function(key: string, val: string): void   { os.env.set(key, val); };
+  (g.env as any).delete = function(key: string): void                { os.env.delete(key); };
+  (g.env as any).expand = function(s: string): string               { return os.env.expand(s); };
 
   // ──────────────────────────────────────────────────────────────────────────
   // 4.  TERMINAL / DISPLAY COMMANDS
@@ -655,6 +738,27 @@ export function registerCommands(g: any): void {
   g.sleep  = function(ms: number) { kernel.sleep(ms); };
   g.halt   = function() { kernel.halt(); };
   g.reboot = function() { kernel.reboot(); };
+
+  // item 665: reset — remove all user-defined globals from this REPL session
+  // Snapshot the built-in keys right after registerCommands finishes.
+  var _builtinKeys: Set<string> | null = null;
+  g.reset = function() {
+    if (!_builtinKeys) { terminal.colorPrintln('reset: built-in snapshot not ready', Color.YELLOW); return; }
+    var removed = 0;
+    var keys = Object.keys(g);
+    for (var i = 0; i < keys.length; i++) {
+      if (!_builtinKeys.has(keys[i])) {
+        try { delete g[keys[i]]; removed++; } catch(_) { /* some globals cannot be deleted */ }
+      }
+    }
+    terminal.colorPrintln('reset: removed ' + removed + ' user-defined global(s).', Color.LIGHT_GREEN);
+  };
+  // Schedule snapshot of built-in keys after current sync task (after registerCommands returns)
+  if (typeof Promise !== 'undefined') {
+    Promise.resolve().then(function() {
+      _builtinKeys = new Set<string>(Object.keys(g));
+    });
+  }
 
   /** shutdown — friendly alias for halt() */
   g.shutdown = function() {
@@ -1118,6 +1222,45 @@ export function registerCommands(g: any): void {
         Math.floor(sum / rcvd.length) + '/' + Math.max.apply(null, rcvd) + ' ms');
     }
     return printableArray(rtts, function() {});
+  };
+
+  // item 722: traceroute(host, maxHops?) — ICMP TTL probe, returns hop list
+  g.traceroute = function(host: string, maxHops?: number) {
+    if (!host) { terminal.println('usage: traceroute(host, maxHops?)'); return; }
+    var hops  = (maxHops !== undefined && maxHops > 0) ? Math.min(maxHops, 30) : 30;
+    // Resolve hostname
+    var targetIP = host;
+    if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+      var resolved = dnsResolve(host);
+      if (!resolved || resolved.length === 0) {
+        terminal.colorPrintln('traceroute: ' + host + ': name not found', Color.LIGHT_RED);
+        return;
+      }
+      targetIP = resolved[0];
+    }
+    terminal.colorPrintln('traceroute to ' + host + ' (' + targetIP + '), ' + hops + ' hops max', Color.LIGHT_CYAN);
+    var hopResults: Array<{ ttl: number; ip: string; rtt: number }> = [];
+    for (var ttl = 1; ttl <= hops; ttl++) {
+      var rtt = net.pingWithTTL(targetIP, ttl, 1000);
+      var hopIP  = rtt >= 0 ? targetIP : '*';
+      hopResults.push({ ttl, ip: hopIP, rtt });
+
+      var ttlStr  = lpad('' + ttl, 2);
+      var rttStr  = rtt >= 0 ? rtt + ' ms' : '* * *';
+      var hopInfo = rtt >= 0 ? hopIP : '';
+
+      terminal.colorPrint(' ' + ttlStr + '  ', Color.DARK_GREY);
+      if (rtt >= 0) {
+        terminal.colorPrint(hopInfo + '  ', Color.WHITE);
+        terminal.colorPrintln(rttStr, Color.LIGHT_GREEN);
+      } else {
+        terminal.colorPrintln('* * *', Color.DARK_GREY);
+      }
+
+      // Stop when we reach the target
+      if (rtt >= 0 && hopIP === targetIP) break;
+    }
+    return printableArray(hopResults, function() {});
   };
 
   // item 719: fetch(url, opts?) — blocking fetch, returns FetchResponse
@@ -1609,11 +1752,92 @@ export function registerCommands(g: any): void {
     }
   };
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // 9.  HELP
-  // ──────────────────────────────────────────────────────────────────────────
+  // ── help(fn) registry (item 662) ─────────────────────────────────────────
+  // Short descriptions for all REPL shell commands.
+  // help(fn) will first check this registry, then fall back to fn.toString().
+  var _helpDocs: Record<string, string> = {
+    ls:        'ls(path?)\n  List files in the current or given directory.',
+    cd:        'cd(path?)\n  Change working directory.  ~ = /home/user.',
+    pwd:       'pwd()\n  Print the current working directory path.',
+    cat:       'cat(path)\n  Print the contents of a file.',
+    mkdir:     'mkdir(path)\n  Create a directory (and parents).',
+    touch:     'touch(path)\n  Create an empty file.',
+    rm:        'rm(path)\n  Remove a file or empty directory.',
+    cp:        'cp(src, dst)\n  Copy a file.',
+    mv:        'mv(src, dst)\n  Move or rename a file.',
+    write:     'write(path, text)\n  Write text to a file (overwrite).',
+    append:    'append(path, text)\n  Append text to a file.',
+    find:      'find(path?, pattern)\n  Find files matching a * wildcard pattern.',
+    stat:      'stat(path)\n  Show file metadata (size, type, permissions, timestamps).',
+    run:       'run(path)\n  Execute a JavaScript file.',
+    grep:      'grep(pattern, path)\n  Search a file for lines matching a regex.',
+    wc:        'wc(path)\n  Count lines, words and characters in a file.',
+    which:     'which(cmd)\n  Find the location of a command.',
+    ps:        'ps()\n  List all running processes.',
+    top:       'top()\n  Interactive process monitor (q to quit).',
+    kill:      'kill(pid)\n  Terminate a process by PID.',
+    services:  'services(name?)\n  List services, or show detail for one service.',
+    mem:       'mem()\n  Memory usage summary.',
+    uptime:    'uptime()\n  System uptime and tick counter.',
+    sysinfo:   'sysinfo()\n  Full system information summary.',
+    uname:     'uname(opts?)\n  OS info.  opts: -s -r -m -n -a.',
+    date:      'date()\n  Current date/time (uptime-based).',
+    hostname:  'hostname(name?)\n  Show or set the hostname.',
+    env:       'env()\n  Print environment variables.  env.get(key) / env.set(key, val).',
+    ping:      'ping(host, count?)\n  ICMP echo to host.',
+    traceroute: 'traceroute(host, maxHops?)\n  ICMP TTL probe — prints hop-by-hop path. maxHops default 30.',
+    dns:       'dns(host)\n  DNS lookup for a hostname.',
+    http:      'http(url)\n  Fetch a URL and print the response body.',
+    curl:      'curl(url)\n  Alias for http().',
+    edit:      'edit(path?)\n  Open the built-in text editor.',
+    history:   'history()\n  Print REPL history.',
+    clear:     'clear()\n  Clear the terminal.',
+    help:      'help(fn?)\n  With no argument: show all commands.\n  With fn: show its documentation.',
+    reset:     'reset()\n  Remove all user-defined globals from this REPL session.',
+    jobs:      'jobs()\n  List background async coroutine jobs.',
+    fg:        'fg(id)\n  Bring a background job to the foreground.',
+    bg:        'bg(id)\n  Resume a suspended job in the background.',
+    nice:      'nice(pid, value)\n  Adjust the scheduling priority of a process.',
+  };
 
-  g.help = function() {
+  g.help = function(fn?: unknown) {
+    // ── help(fn) mode: show docs for a single function (item 662) ──────────
+    if (fn !== undefined) {
+      var fname = typeof fn === 'function'
+        ? (fn as any).name as string || '(anonymous)'
+        : String(fn);
+      // Check registry first
+      if (_helpDocs[fname]) {
+        var lines = _helpDocs[fname].split('\n');
+        terminal.colorPrintln(lines[0], Color.WHITE);
+        for (var li = 1; li < lines.length; li++) terminal.colorPrintln(lines[li], Color.LIGHT_GREY);
+        return;
+      }
+      // Fall back to fn.toString() — show first block comment and signature
+      if (typeof fn === 'function') {
+        var src: string = (fn as any).toString() as string;
+        // Extract leading JSDoc comment if present
+        var docMatch = src.match(/^(?:\/\*\*([\s\S]*?)\*\/\s*)?(\S[^\n]{0,80})/);
+        if (docMatch) {
+          terminal.colorPrintln(docMatch[2], Color.WHITE);
+          if (docMatch[1]) {
+            var docLines = docMatch[1].trim().split('\n');
+            for (var dli = 0; dli < docLines.length; dli++) {
+              terminal.colorPrintln('  ' + docLines[dli].trim().replace(/^\*\s?/, ''), Color.LIGHT_GREY);
+            }
+          }
+        } else {
+          // Just show first 15 lines of source
+          var srcLines = src.split('\n').slice(0, 15);
+          for (var sli = 0; sli < srcLines.length; sli++) terminal.println(srcLines[sli]);
+        }
+        return;
+      }
+      terminal.colorPrintln('No documentation found for: ' + fname, Color.DARK_GREY);
+      return;
+    }
+
+    // ── Default: show full command reference ────────────────────────────────
     terminal.println('');
     terminal.colorPrintln('JSOS  —  everything is JavaScript', Color.WHITE);
     terminal.colorPrintln('QuickJS ES2023 on bare-metal i686', Color.DARK_GREY);

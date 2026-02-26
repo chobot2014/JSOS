@@ -21,6 +21,7 @@
  */
 
 import fs            from '../fs/filesystem.js';
+import { umask as fsUmask } from '../fs/filesystem.js';
 import { net }       from '../net/net.js';
 import { TLSSocket } from '../net/tls.js';
 import { threadManager, type CoroutineStep } from '../process/threads.js';
@@ -35,6 +36,8 @@ import {
 } from '../net/dns.js';
 import { parseHttpResponse, cookieJar } from '../net/http.js';
 import { config, getHostname, getDnsServers, getTimezone } from './config.js';
+import { locale } from './locale.js';
+import { tz as _tz } from './timezone.js';
 import { JSProcess, listProcesses } from '../process/jsprocess.js';
 import { ProcessSupervisor, supervisor as _defaultSupervisor } from '../process/supervisor.js';
 import { ipc, Pipe } from '../ipc/ipc.js';
@@ -1120,6 +1123,50 @@ const sdk = {
     readdir(path: string): string[] { return sdk.fs.list(path); },
     /** @deprecated Use os.fs.isDir() instead. */
     isDirectory(path: string): boolean { return sdk.fs.isDir(path); },
+
+    // item 706/707: VFS mount / umount
+    /**
+     * Mount a VirtualFileSystem provider at a path prefix.
+     * The `vfs` object must implement the VFSMount interface used by the kernel.
+     *
+     * Example:
+     *   os.fs.mount('/proc', procVFS);
+     */
+    mount(mountpoint: string, vfs: any): void {
+      fs.mountVFS(mountpoint, vfs);
+    },
+    /**
+     * Unmount a previously mounted VFS.  Returns true if the mountpoint existed.
+     *
+     * Example:
+     *   os.fs.umount('/proc');
+     */
+    umount(mountpoint: string): boolean {
+      return fs.unmountVFS(mountpoint);
+    },
+    /**
+     * List all active VFS mount points.
+     *
+     * Example:
+     *   os.fs.mounts();  // → ['/proc', '/sys']
+     */
+    mounts(): string[] {
+      return fs.listMounts();
+    },
+  },
+
+  /**
+   * File creation mask (item 932).
+   * With no argument, returns the current umask.
+   * With `mask`, sets the new umask and returns the previous value.
+   *
+   * Default mask is 0o022 → files get 0o644, dirs get 0o755.
+   *
+   * @example os.umask()          // → 18  (0o022)
+   * @example os.umask(0o027)     // → 18; now files get 0o640, dirs 0o750
+   */
+  umask(mask?: number): number {
+    return fsUmask(mask);
   },
 
   // ── Network ─────────────────────────────────────────────────────────────────
@@ -1393,6 +1440,37 @@ const sdk = {
     dnsServers(): string[] { return getDnsServers(); },
     /** Shorthand: timezone string (IANA). */
     timezone(): string { return getTimezone(); },
+  },
+
+  // ── Locale (items 925, 926) ───────────────────────────────────────────────────
+  locale: {
+    /** Get the current process locale string (e.g. 'en-US'). */
+    get(): string { return locale.get(); },
+    /** Set the locale for this process. */
+    set(loc: string): void { locale.set(loc); },
+    /**
+     * Format a Date according to the current locale.
+     * @param date  Date to format (defaults to now)
+     * @param style 'date' | 'time' | 'datetime' (default)
+     */
+    format(date?: Date, style?: 'date' | 'time' | 'datetime'): string {
+      return locale.format(date, style);
+    },
+    /**
+     * Format a number with group separators and decimal point for the current locale.
+     * @example os.locale.formatNumber(1234567.89)
+     * @example os.locale.formatNumber(42, { style: 'currency' })
+     */
+    formatNumber(n: number, opts?: { style?: 'decimal' | 'currency' | 'percent'; minimumFractionDigits?: number; maximumFractionDigits?: number; currency?: string }): string {
+      return locale.formatNumber(n, opts);
+    },
+    /**
+     * Locale-aware string comparison. Returns -1, 0, or 1.
+     * @example ['ä','z','a'].sort(os.locale.collate) // ['a','ä','z']
+     */
+    collate(a: string, b: string): -1 | 0 | 1 { return locale.collate(a, b); },
+    /** Produce a stable sort key for locale-aware sorting. */
+    sortKey(s: string): string { return locale.sortKey(s); },
   },
 
   // ── Multi-process ────────────────────────────────────────────────────────────
@@ -2656,6 +2734,19 @@ const sdk = {
       var d = Math.floor(h / 24); h %= 24;
       return d + 'd ' + (h ? h + 'h' : '');
     },
+
+    /**
+     * IANA timezone database (item 919).
+     * Covers ~130 major timezones with DST support.
+     *
+     * Example:
+     *   os.time.tz.list();               // → ['Africa/Cairo', 'America/Chicago', …]
+     *   os.time.tz.offset('Asia/Tokyo'); // → 540 (minutes east of UTC)
+     *   os.time.tz.abbr('Europe/Paris'); // → 'CEST' or 'CET'
+     *   os.time.tz.utcToLocal(Date.now(), 'America/New_York');
+     *   os.time.tz.formatOffset(-300);   // → '-05:00'
+     */
+    tz: _tz,
   },
 
   // ── Audio (PC speaker) ────────────────────────────────────────────────────────

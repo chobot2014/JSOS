@@ -14,6 +14,37 @@ function uptime(): number {
   return typeof kernel !== 'undefined' ? kernel.getUptime() : 0;
 }
 
+// ── File creation mask (item 932) ─────────────────────────────────────────────
+/**
+ * Default file creation mask (umask). Bits set here are *removed* from the
+ * default permissions when a new file or directory is created.
+ *   0o022 → files: 0o644 (rw-r--r--), dirs: 0o755 (rwxr-xr-x)
+ *   0o027 → files: 0o640 (rw-r-----), dirs: 0o750 (rwxr-x---)
+ */
+var _processUmask: number = 0o022;
+
+/** Read or change the process file-creation mask. Returns the previous mask. */
+export function umask(mask?: number): number {
+  var old = _processUmask;
+  if (mask !== undefined) _processUmask = mask & 0o777;
+  return old;
+}
+
+/** Apply current umask to a base octal permission value, return rwxrwxrwx string. */
+function _applyUmask(base: number): string {
+  var bits = base & ~_processUmask & 0o777;
+  var r = (s: number): string =>
+    ((bits >> s) & 4 ? 'r' : '-') +
+    ((bits >> s) & 2 ? 'w' : '-') +
+    ((bits >> s) & 1 ? 'x' : '-');
+  return r(6) + r(3) + r(0);
+}
+
+/** Default permissions string for a new regular file (umask applied). */
+function _filePerms(): string { return _applyUmask(0o666); }
+/** Default permissions string for a new directory (umask applied). */
+function _dirPerms():  string { return _applyUmask(0o777); }
+
 export type FileType = 'file' | 'directory' | 'symlink';
 
 /** Interface that any virtual filesystem must implement to be mounted. */
@@ -85,6 +116,16 @@ export class FileSystem {
   /** Mount a virtual filesystem at a path prefix (e.g. '/proc'). */
   mountVFS(mountpoint: string, vfs: VFSMount): void {
     this.mounts.set(mountpoint, vfs);
+  }
+
+  /** Unmount (remove) a VFS mount point.  Returns true if it existed. */
+  unmountVFS(mountpoint: string): boolean {
+    return this.mounts.delete(mountpoint);
+  }
+
+  /** List all active VFS mount points. */
+  listMounts(): string[] {
+    return Array.from(this.mounts.keys());
   }
 
   /** Find the VFS handler for a resolved path, if any. */
@@ -526,7 +567,7 @@ export class FileSystem {
           children: new Map(),
           created: now,
           modified: now,
-          permissions: 'rwxr-xr-x',
+          permissions: _dirPerms(),  // umask applied (item 932)
         };
         current.children.set(parts[i], newDir);
         current = newDir;
@@ -562,7 +603,7 @@ export class FileSystem {
       size: content.length,
       created: existing ? (existing as FileEntry).created || now : now,
       modified: now,
-      permissions: 'rw-r--r--',
+      permissions: existing ? (existing as FileEntry).permissions : _filePerms(), // umask (item 932)
     };
 
     parent.children.set(fileName, file);

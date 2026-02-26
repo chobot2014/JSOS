@@ -222,6 +222,31 @@ function audit(event: string, uid: number, name: string, detail = ''): void {
   } catch(_) { /* never let audit failure break auth */ }
 }
 
+// ── Session log (item 934) — replaces utmp/wtmp ──────────────────────────────
+
+export const SESSION_LOG_PATH = '/var/log/sessions.jsonl';
+
+export interface SessionLogEntry {
+  ts:     number;    // Unix ms
+  action: 'login' | 'logout';
+  uid:    number;
+  name:   string;
+  pid:    number;    // process id (kernel PID 1 for boot, child for su)
+}
+
+/** Append one entry to /var/log/sessions.jsonl. */
+export function sessionLog(action: 'login' | 'logout', uid: number, name: string): void {
+  var entry: SessionLogEntry = {
+    ts: Date.now(), action, uid, name,
+    pid: typeof kernel !== 'undefined' ? (kernel as any).getPid?.() || 1 : 1,
+  };
+  try {
+    var prev = '';
+    try { prev = fs.readFile(SESSION_LOG_PATH) || ''; } catch(_) {}
+    fs.writeFile(SESSION_LOG_PATH, prev + JSON.stringify(entry) + '\n');
+  } catch(_) { /* never let session-log failure break auth */ }
+}
+
 // ── UserManager ──────────────────────────────────────────────────────────────
 
 export class UserManager {
@@ -473,6 +498,7 @@ export class UserManager {
     });
     this.currentUid = u.uid;
     audit('LOGIN', u.uid, name);
+    sessionLog('login', u.uid, name);
     return token;
   }
 
@@ -528,6 +554,7 @@ export class UserManager {
 
   logout(): void {
     audit('LOGOUT', this.currentUid, this.whoami());
+    sessionLog('logout', this.currentUid, this.whoami());
     this.currentUid = 1000;
   }
 

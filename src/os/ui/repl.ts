@@ -31,8 +31,48 @@ function addHistory(line: string): void {
 
 //  Tab completion 
 
+/**
+ * Return a list of completion candidates for the current buffer.
+ *
+ * Handles three cases (item 652 for path completion):
+ *   1. Inside a string literal whose content looks like a path → filesystem completions
+ *   2. An identifier with a dot (obj.prop) → property name completions
+ *   3. A bare identifier → global name completions
+ */
 function tabComplete(buf: string): string[] {
-  // Extract the last token from the buffer
+  // ── Case 1: filesystem path inside a string literal (item 652) ────────────
+  // Detect an unmatched quote followed by something that looks like a path.
+  var pathM = buf.match(/(['"])(\/?[^'"]*?)([^/]*)$/);
+  if (pathM) {
+    var quote    = pathM[1];  // ' or "
+    var pathDir  = pathM[2];  // directory prefix including trailing / or ''
+    var pathFile = pathM[3];  // file prefix being completed
+    // Ensure there really is an unmatched quote before this match
+    var rawBefore = buf.slice(0, buf.lastIndexOf(quote));
+    var singles = (rawBefore.match(/'/g) || []).length;
+    var doubles = (rawBefore.match(/"/g) || []).length;
+    if ((quote === "'" && singles % 2 === 0) ||
+        (quote === '"' && doubles % 2 === 0)) {
+      // We're inside an open string — offer filesystem completions
+      var dirToList = pathDir || '/';
+      if (!dirToList.startsWith('/')) {
+        dirToList = fs.cwd().replace(/\/?$/, '/') + dirToList;
+      }
+      var entries: Array<{ name: string; type: string }>;
+      try { entries = (fs.ls(dirToList) as Array<{ name: string; type: string }>) || []; } catch(_) { entries = []; }
+      var results: string[] = [];
+      for (var ei = 0; ei < entries.length; ei++) {
+        var ent = entries[ei];
+        if (ent.name.indexOf(pathFile) === 0) {
+          var completion = quote + pathDir + ent.name + (ent.type === 'directory' ? '/' : '');
+          results.push(completion);
+        }
+      }
+      return results.sort();
+    }
+  }
+
+  // ── Cases 2 & 3: identifier / property completion ─────────────────────────
   var m = buf.match(/[\w$][\w$.]*$/);
   var prefix = m ? m[0] : '';
   if (!prefix) return [];
@@ -187,18 +227,58 @@ function isIncomplete(code: string): boolean {
 // If that's a SyntaxError (e.g. it's a statement like `var x = 5`), fall back
 // to direct eval. Shell functions return undefined — we suppress that silently.
 
-/** Print a REPL result string to the terminal with appropriate syntax colouring. */
+/** True when the string looks like an JS error (includes SyntaxError). */
+function _isErrorString(s: string): boolean {
+  return s.indexOf('Error:') !== -1;   // covers TypeError:, SyntaxError:, etc.
+}
+
+/**
+ * Print a REPL result to the terminal with syntax-appropriate colouring.
+ * Handles:
+ *  - item 645: SyntaxError / all other errors shown in LIGHT_RED
+ *  - item 649: Multi-line stack traces — first line in LIGHT_RED, each
+ *              "at …" frame in DARK_GREY with file+line in LIGHT_YELLOW
+ */
 function _printReplResult(result: string): void {
   if (result === '__JSOS_PRINTED__') return;
   if (result === '__JSOS_UNDEF__' || result === 'undefined') return;
+
+  // ── Error with optional stack trace (items 645 + 649) ────────────────────
+  if (_isErrorString(result)) {
+    var lines = result.split('\n');
+    // First line: error message
+    terminal.colorPrintln(lines[0], Color.LIGHT_RED);
+    // Remaining lines: stack frames  (e.g. "    at foo (eval:1:5)")
+    for (var li = 1; li < lines.length; li++) {
+      var frame = lines[li];
+      if (frame.trim().length === 0) continue;
+      // Highlight "at <funcName> (<location>)" — dimm the "at", colour location
+      var atIdx = frame.indexOf(' at ');
+      if (atIdx !== -1) {
+        var parenOpen = frame.lastIndexOf('(');
+        var parenClose = frame.lastIndexOf(')');
+        if (parenOpen !== -1 && parenClose > parenOpen) {
+          // function name part
+          terminal.colorPrint(frame.slice(0, parenOpen), Color.DARK_GREY);
+          // file:line:col in brighter colour
+          terminal.colorPrint(frame.slice(parenOpen, parenClose + 1), Color.YELLOW);
+          terminal.colorPrintln('', Color.DARK_GREY);
+        } else {
+          terminal.colorPrintln(frame, Color.DARK_GREY);
+        }
+      } else {
+        terminal.colorPrintln(frame, Color.DARK_GREY);
+      }
+    }
+    return;
+  }
+
   if (result === 'null') {
     terminal.colorPrintln('null', Color.DARK_GREY);
   } else if (result === 'true' || result === 'false') {
     terminal.colorPrintln(result, Color.YELLOW);
   } else if (result !== 'Infinity' && result !== '-Infinity' && result !== 'NaN' && !isNaN(Number(result))) {
     terminal.colorPrintln(result, Color.LIGHT_CYAN);
-  } else if (result.indexOf('Error:') !== -1) {
-    terminal.colorPrintln(result, Color.LIGHT_RED);
   } else if (result.length > 0 && result[0] === '"') {
     terminal.colorPrintln(result, Color.LIGHT_GREEN);
   } else {
@@ -222,7 +302,11 @@ function _printReplResult(result: string): void {
     _printReplResult(s);
   };
   g.__replError = function(e: unknown): void {
-    terminal.colorPrintln('Uncaught (in promise): ' + String(e), Color.LIGHT_RED);
+    // item 649: format error with multi-line stack trace
+    var errStr = e instanceof Error
+      ? String(e) + (e.stack ? '\n' + e.stack : '')
+      : 'Uncaught (in promise): ' + String(e) + ' Error:';
+    _printReplResult(errStr);
   };
 })();
 
@@ -295,6 +379,28 @@ export function startRepl(): void {
       terminal.println(_history[i]);
     }
   };
+
+  // ── Startup scripts (items 659, 660) ──────────────────────────────────────
+  // Execute /etc/repl.ts (global startup) then /home/<user>/.repl.ts (per-user).
+  var _startupPaths = ['/etc/repl.ts', '/etc/replrc'];
+  var _userHome = ((globalThis as any).os && (globalThis as any).os.env &&
+                   (globalThis as any).os.env.get('HOME')) || '/home/user';
+  _startupPaths.push(_userHome + '/.repl.ts');
+  _startupPaths.push(_userHome + '/.replrc');
+  for (var _si = 0; _si < _startupPaths.length; _si++) {
+    var _sp = _startupPaths[_si];
+    var _spContent = fs.readFile(_sp);
+    if (_spContent !== null && _spContent.trim().length > 0) {
+      try {
+        var _spResult = kernel.eval(_spContent);
+        if (_spResult && _spResult.indexOf('Error:') !== -1) {
+          terminal.colorPrintln('repl: error in ' + _sp + ': ' + _spResult, Color.LIGHT_RED);
+        }
+      } catch (_spErr) {
+        terminal.colorPrintln('repl: error loading ' + _sp + ': ' + String(_spErr), Color.LIGHT_RED);
+      }
+    }
+  }
 
   var mlBuffer = '';
 

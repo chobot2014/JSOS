@@ -1757,7 +1757,8 @@ export function createPageJS(
     /** O(1) rule index: key → CSSStyleRule_[] (item 943) */
     _ruleIdx: Map<string, CSSStyleRule_[]> = new Map();
 
-    /** Add or remove a CSSStyleRule_ from the bucket index. */
+    /** Add or remove a CSSStyleRule_ from the bucket index.
+     * Buckets are kept sorted ascending by _spec (item 946: pre-sorted rule list). */
     _idxRule(r: CSSStyleRule_, remove = false): void {
       var sels = r.selectorText.split(',');
       var seen = new Set<string>();
@@ -1770,7 +1771,10 @@ export function createPageJS(
         } else {
           var lst2 = this._ruleIdx.get(key);
           if (!lst2) { lst2 = []; this._ruleIdx.set(key, lst2); }
-          lst2.push(r);
+          // Insert in ascending _spec order (item 946: pre-sorted for cascade)
+          var ins = lst2.length;
+          while (ins > 0 && lst2[ins - 1]!._spec > r._spec) ins--;
+          lst2.splice(ins, 0, r);
         }
       }
     }
@@ -1943,10 +1947,18 @@ export function createPageJS(
     selectorText = '';
     important: Set<string> | undefined;
     style: CSSStyleDeclarationStub & { cssText: string } = { cssText: '' } as any;
+    /** Pre-computed max specificity across all comma-separated selectors (item 946). */
+    _spec: number = 0;
     constructor(selector: string, body: string) {
       super();
       this.selectorText = selector;
       this.cssText = selector + ' { ' + body + ' }';
+      // Compute max specificity for this rule once at construction (item 946)
+      var selsForSpec = selector.split(',');
+      for (var _si = 0; _si < selsForSpec.length; _si++) {
+        var _s = selsForSpec[_si].trim();
+        if (_s) { var _sp = _calcSpecificity(_s); if (_sp > this._spec) this._spec = _sp; }
+      }
       // Populate style with property: value pairs; track !important
       body.split(';').forEach(pair => {
         var idx = pair.indexOf(':');
@@ -2550,6 +2562,12 @@ export function createPageJS(
       return val.replace(/var\(\s*(--[\w-]+)(?:\s*,\s*([^)]*))?\)/g,
         (_m: string, name: string, fb: string) => resolveVar(name, fb || ''));
     }
+
+    // item 945: resolve all var() references once at cascade time so the proxy
+    // getter can return already-resolved values without repeated substitution.
+    merged.forEach((v, p) => {
+      if (v && v.indexOf('var(') !== -1) merged.set(p, resolveValue(v));
+    });
 
     // Resolve `inherit` keyword by walking parent chain
     function resolveInherit(prop: string): string {

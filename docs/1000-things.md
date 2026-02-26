@@ -771,27 +771,27 @@
 642. [P0 ✓] Input history: up/down arrows cycle through previous expressions — history in `repl.ts` + `apps/terminal/index.ts`
 643. [P0 ✓] Persistent history: save/load history to `/home/.repl_history` across sessions — `_saveHistory()` / `_loadHistory()` in `apps/terminal/index.ts`
 644. [P0 ✓] Multi-line input: Shift+Enter adds a new line; Enter on incomplete expression continues — `isIncomplete()` + `mlBuffer` in `ui/repl.ts`
-645. [P0] Syntax error detection before execution (highlight bad input in red)
-646. [P0] `await` at top level — `await fetch('https://...')` just works
+645. [P0 ✓] Syntax error detection before execution (highlight bad input in red) — `_isErrorString()` + `_printReplResult()` handle SyntaxError in LIGHT_RED in `ui/repl.ts`
+646. [P0 ✓] `await` at top level — `await fetch('https://...')` just works — async IIFE wrapper + `__replResult`/`__replError` globalThis callbacks in `ui/repl.ts`
 647. [P0 ✓] Result pretty-printing: objects/arrays rendered as expandable trees — `printableArray()` / `printableObject()` in `ui/commands.ts`
 648. [P0 ✓] `undefined` and `null` shown distinctly (dimmed, not silent) — `evalAndPrint()` color-codes null/undefined in `ui/repl.ts`
-649. [P0] Errors shown with stack trace, file+line highlighted
+649. [P0 ✓] Errors shown with stack trace, file+line highlighted — `_printReplResult()` splits on `\n`, prints first line LIGHT_RED, frames DARK_GREY, location in YELLOW in `ui/repl.ts`
 650. [P0 ✓] Tab completion: complete variable names, property chains (`sys.net.<TAB>`) — `tabComplete()` in `ui/repl.ts`
 651. [P0] Tab completion: complete function signatures with type hints
-652. [P0] Tab completion: filesystem paths in string arguments (`ls('/et<TAB>')`)
+652. [P0 ✓] Tab completion: filesystem paths in string arguments (`ls('/et<TAB>')`) — path detection via unmatched quote in `tabComplete()` in `ui/repl.ts`
 653. [P1] Multiple terminal instances: open N REPLs simultaneously, each isolated context
 654. [P1] Terminal tabs: switch between instances with Ctrl+Tab or GUI tab bar
 655. [P1] Each REPL tab has its own variable scope and history
 656. [P1] Named REPL sessions: `repl.open('debug')` opens labelled tab
 657. [P1] `repl.close()` closes current terminal instance
 658. [P1] Copy REPL context to new tab (clone variables and imports)
-659. [P1] REPL startup script: `/etc/repl.ts` executes on every new instance
-660. [P1] Per-user startup script: `/home/<user>/.repl.ts`
+659. [P1 ✓] REPL startup script: `/etc/repl.ts` executes on every new instance — startup loop in `startRepl()` in `ui/repl.ts`
+660. [P1 ✓] Per-user startup script: `/home/<user>/.repl.ts` — loaded after `/etc/repl.ts` in `startRepl()`
 661. [P1] `import` statements work at REPL prompt — load any OS module dynamically
-662. [P1] `help(fn)` prints JSDoc for any built-in function
+662. [P1 ✓] `help(fn)` prints JSDoc for any built-in function — `_helpDocs` registry + `fn.toString()` extraction in `ui/commands.ts`
 663. [P1 ✓] `help()` with no args prints overview of all top-level APIs — `g.help` in `ui/commands.ts`
 664. [P1 ✓] `clear()` clears screen output — `g.clear` in `ui/commands.ts`
-665. [P1] `reset()` clears current REPL context (variables, imports)
+665. [P1 ✓] `reset()` clears current REPL context (variables, imports) — snapshot of built-in keys + delete user-defined globals in `ui/commands.ts`
 
 ### 17.2 Terminal Rendering Quality
 666. [P1 ✓] ANSI SGR: 16-color, 256-color, 24-bit true color foreground + background — full ESC/CSI state machine + `_processAnsiSGR()` + `_256toVga()` + `_rgbToVga()` in `ui/terminal.ts`
@@ -853,9 +853,9 @@
 712. [P0 ✓] `kill(pid, signal?)` — send signal to process — `g.kill` in `ui/commands.ts`
 713. [P0 ✓] `spawn(tsFile, args?)` — launch a TypeScript file as a new process — `g.spawn` (JSProcess) in `ui/commands.ts`
 714. [P0 ✓] `top()` — live updating process monitor in REPL output — `g.top` in `ui/commands.ts`
-715. [P1] `nice(pid, value)` — adjust process priority
-716. [P1] `jobs()` — list background async tasks started from REPL
-717. [P1] `fg(id)` / `bg(id)` — bring REPL background task to foreground / push back
+715. [P1 ✓] `nice(pid, value)` — adjust process priority — `processManager.setPriority()` via `scheduler.getProcess()` in `process/process.ts`
+716. [P1 ✓] `jobs()` — list background async tasks started from REPL — calls `threadManager.getCoroutines()` in `ui/commands.ts`
+717. [P1 ✓] `fg(id)` / `bg(id)` — bring REPL background task to foreground / push back — implemented in `ui/commands.ts`
 
 ### 18.3 Network
 718. [P0 ✓] `ping(host, count?)` — ICMP echo, returns RTT stats — `g.ping` in `ui/commands.ts` wraps `net.ping()`
@@ -879,7 +879,7 @@
 734. [P0 ✓] `hostname()` / `hostname(name)` — get or set — `g.hostname` in `ui/commands.ts`
 735. [P0 ✓] `date()` — current date/time; `date(ts)` formats a timestamp — `g.date` in `ui/commands.ts`
 736. [P1 ✓] `env()` — print environment variables — `g.env` in `ui/commands.ts`
-737. [P1] `env.get(key)` / `env.set(key, val)` — environment manipulation
+737. [P1 ✓] `env.get(key)` / `env.set(key, val)` — environment manipulation — delegating to `os.env.*` in `ui/commands.ts`
 738. [P1 ✓] `syslog(n?)` — tail system log, optional last-n-lines — `g.syslog` in `ui/commands.ts`
 739. [P2] `perf.sample(fn, ms?)` — CPU profiler, returns flame data
 740. [P2] `perf.memory()` — heap snapshot
@@ -1326,16 +1326,16 @@
 922. [P0 ✓] Clock sync at boot: C reads CMOS RTC once; TypeScript initializes system clock
 923. [P0 ✓] Entropy: C mixes TSC + RTC into seed; TypeScript `/dev/random` PRNG (ChaCha20)
 924. [P0 ✓] `sys.config.get(key)` / `sys.config.set(key, val)` TypeScript API (replaces sysctl)
-925. [P1] Locale: TypeScript locale module — `sys.locale.format(date)`, `sys.locale.collate()`
-926. [P1] Locale: per-process locale setting via `sys.locale.set('en-US')`
+925. [P1 ✓] Locale: TypeScript locale module — `sys.locale.format(date)`, `sys.locale.collate()` — `core/locale.ts` with 7 supported locales, date/number/collation APIs
+926. [P1 ✓] Locale: per-process locale setting via `sys.locale.set('en-US')` — module-level `_currentLocale` in `core/locale.ts`, falls back to `/etc/config.json`
 927. [P1 ✓] RegExp: use QuickJS native `RegExp` — no libc binding needed
 928. [P1] C heap: `malloc`/`free` consistency in C layer (kernel allocator) — fine, C-internal
 929. [P1] C `printf`/`sprintf`: used only in C layer for debug output — already works
 930. [P1 ✓] Math: QuickJS provides `Math.*` natively; `libm` only needed for C layer functions
 931. [P1 ✓] Floating point: verify QuickJS handles NaN/Inf edge cases correctly
-932. [P1] File creation mask: default mode bits for new files, stored in TypeScript process context
+932. [P1 ✓] File creation mask: default mode bits for new files, stored in TypeScript process context — `_processUmask`, `_filePerms()`, `_dirPerms()` + `os.umask()` API in `fs/filesystem.ts`
 933. [P2] Pseudoterminals: only needed if embedding a third-party TUI app — low priority without shell
-934. [P2] Session log: TypeScript append-only log at `/var/log/sessions.jsonl` (replaces utmp/wtmp)
+934. [P2 ✓] Session log: TypeScript append-only log at `/var/log/sessions.jsonl` (replaces utmp/wtmp) — `sessionLog()` in `users/users.ts`, called on login/logout
 935. [P2] JSOS service bus: typed async pub/sub (TypeScript, replaces D-Bus)
 936. [P2] TypeScript device manager: `sys.devices` — enumerate, mount, eject block devices
 937. [P2] TypeScript network manager: `sys.net.interfaces`, `sys.net.wifi` — no external daemon
