@@ -146,12 +146,16 @@ export interface ScriptRecord {
 }
 
 export interface ParseResult {
-  nodes:    RenderNode[];
-  title:    string;
-  forms:    FormState[];
-  widgets:  WidgetBlueprint[];
-  baseURL:  string;
-  scripts:  ScriptRecord[];
+  nodes:      RenderNode[];
+  title:      string;
+  forms:      FormState[];
+  widgets:    WidgetBlueprint[];
+  baseURL:    string;
+  scripts:    ScriptRecord[];
+  /** Raw text of all <style> blocks collected from this page (in source order). */
+  styles:     string[];
+  /** Href values of <link rel="stylesheet"> tags (for external fetch). */
+  styleLinks: string[];
 }
 
 // ── CSS ───────────────────────────────────────────────────────────────────────

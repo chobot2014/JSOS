@@ -37,6 +37,7 @@ import type {
 
 import { parseURL, urlEncode, encodeFormData, decodeBMP, readPNGDimensions, decodeBase64 } from './utils.js';
 import { parseHTML }    from './html.js';
+import { parseStylesheet, type CSSRule } from './stylesheet.js';
 import { layoutNodes }  from './layout.js';
 import { aboutJsosHTML, errorHTML, jsonViewerHTML } from './pages.js';
 import { createPageJS, type PageJS } from './jsruntime.js';
@@ -1139,41 +1140,81 @@ export class BrowserApp implements App {
   // ── Page display ──────────────────────────────────────────────────────────
 
   private _showHTML(html: string, fallbackTitle: string, url: string): void {
+    // ── Pass 1: collect <style> blocks + <link rel="stylesheet"> hrefs ────────
     var r = parseHTML(html);
     this._forms       = r.forms;
     this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
+
+    // Build inline-sheet rules immediately (synchronous)
+    var sheets: CSSRule[] = r.styles.length > 0
+      ? parseStylesheet(r.styles.join('\n'))
+      : [];
+
+    // ── Pass 2: re-parse with inline CSS rules applied ────────────────────────
+    if (sheets.length > 0) {
+      r = parseHTML(html, sheets);
+      this._forms       = r.forms;
+      this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
+    }
+
     // Dispose any previous page JS before setting up the new page
     if (this._pageJS) { this._pageJS.dispose(); this._pageJS = null; }
     this._layoutPage(r.nodes as any, r.widgets as any, r.title || fallbackTitle || url, url);
+
+    // ── External stylesheets: fetch async, re-render when ready ───────────────
+    if (r.styleLinks.length > 0) {
+      var self = this;
+      var linkSheetsCSS = '';
+      var pending = r.styleLinks.length;
+      for (var li = 0; li < r.styleLinks.length; li++) {
+        var lHref = this._resolveHref(r.styleLinks[li]!);
+        (function(cssURL: string) {
+          os.fetchAsync(cssURL, function(resp: FetchResponse | null) {
+            if (resp && resp.status === 200) linkSheetsCSS += '\n' + resp.bodyText;
+            pending--;
+            if (pending === 0 && linkSheetsCSS.trim()) {
+              // Re-parse and re-layout with all sheets (inline + external)
+              var extRules = parseStylesheet(linkSheetsCSS);
+              var allSheets = sheets.concat(extRules);
+              var r3 = parseHTML(html, allSheets);
+              self._forms       = r3.forms;
+              self._pageBaseURL = r3.baseURL ? self._resolveHref(r3.baseURL) : '';
+              self._layoutPage(r3.nodes as any, r3.widgets as any, r3.title || fallbackTitle || url, url);
+            }
+          });
+        })(lHref);
+      }
+    }
+
     // Start JS engine for the new page (after layout so widgets have positions)
     if (r.scripts.length > 0) {
-      var self = this;
+      var self2 = this;
       this._jsStartMs = Date.now();
       this._pageJS = createPageJS(html, r.scripts, {
         baseURL: url,
-        navigate: (u: string) => self._navigate(u),
-        setTitle: (t: string) => { self._pageTitle = t; self._dirty = true; },
-        alert:   (msg: string) => { self._status = 'Alert: ' + msg; self._dirty = true; os.debug.log('[browser alert]', msg); },
+        navigate: (u: string) => self2._navigate(u),
+        setTitle: (t: string) => { self2._pageTitle = t; self2._dirty = true; },
+        alert:   (msg: string) => { self2._status = 'Alert: ' + msg; self2._dirty = true; os.debug.log('[browser alert]', msg); },
         confirm: (_msg: string): boolean => true,   // no blocking UI — default accept
         prompt:  (_msg: string, def: string): string => def,
         rerender: (bodyHTML: string) => {
           // Re-parse the mutated body and re-layout without re-running scripts
           var newHTML  = '<body>' + bodyHTML + '</body>';
-          var r2 = parseHTML(newHTML);
-          self._forms = r2.forms;
-          self._layoutPage(r2.nodes as any, r2.widgets as any, self._pageTitle, self._pageURL);
+          var r2 = parseHTML(newHTML, sheets);
+          self2._forms = r2.forms;
+          self2._layoutPage(r2.nodes as any, r2.widgets as any, self2._pageTitle, self2._pageURL);
         },
         log: (msg: string) => os.debug.log(msg),
         getWidgetValue: (id: string) => {
-          var w = self._widgets.find(wg => wg.name === id || String((wg as any).id) === id);
+          var w = self2._widgets.find(wg => wg.name === id || String((wg as any).id) === id);
           return w ? w.curValue : undefined;
         },
         setWidgetValue: (id: string, value: string) => {
-          var w = self._widgets.find(wg => wg.name === id || String((wg as any).id) === id);
-          if (w) { w.curValue = value; self._dirty = true; }
+          var w = self2._widgets.find(wg => wg.name === id || String((wg as any).id) === id);
+          if (w) { w.curValue = value; self2._dirty = true; }
         },
-        getScrollY: () => self._scrollY,
-        scrollTo: (_x: number, y: number) => { self._scrollBy(y - self._scrollY); },
+        getScrollY: () => self2._scrollY,
+        scrollTo: (_x: number, y: number) => { self2._scrollBy(y - self2._scrollY); },
       });
     }
   }

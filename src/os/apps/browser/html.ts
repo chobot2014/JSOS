@@ -3,6 +3,7 @@ import type {
   WidgetBlueprint, WidgetKind, FormState, CSSProps, ScriptRecord,
 } from './types.js';
 import { parseInlineStyle } from './css.js';
+import { type CSSRule, computeElementStyle } from './stylesheet.js';
 
 // ── Tokeniser ─────────────────────────────────────────────────────────────────
 
@@ -100,13 +101,15 @@ export function tokenise(html: string): HtmlToken[] {
 
 // ── HTML parser ───────────────────────────────────────────────────────────────
 
-export function parseHTML(html: string): ParseResult {
+export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
   var tokens   = tokenise(html);
   var nodes:   RenderNode[]      = [];
   var title    = '';
   var forms:   FormState[]       = [];
   var widgets: WidgetBlueprint[] = [];
   var scripts: ScriptRecord[]    = [];
+  var styles:  string[]          = [];
+  var styleLinks: string[]       = [];
   var baseURL  = '';
 
   var inTitle      = false;
@@ -117,6 +120,7 @@ export function parseHTML(html: string): ParseResult {
   var inScriptSrc  = '';
   var inScriptBuf  = '';
   var inStyle      = false;
+  var inStyleBuf   = '';
   var skipUntilClose = '';  // skip all content until this close tag (iframe, video, etc.)
   var bold      = 0;
   var italic    = 0;
@@ -221,11 +225,14 @@ export function parseHTML(html: string): ParseResult {
     nodes.push({ type: 'widget', spans: [], widget: bp });
   }
 
-  // Apply style attr and push to CSS stack; returns whether style was present
-  function applyStyle(attrs: Map<string, string>): boolean {
-    var s = attrs.get('style');
-    if (!s) { cssStack.push({ ...curCSS }); return false; }  // still push for balance
-    pushCSS(parseInlineStyle(s));
+  // Apply combined sheet + inline style for an element; push to CSS stack
+  function applyStyle(tag: string, attrs: Map<string, string>): boolean {
+    var id  = attrs.get('id')    || '';
+    var cls = (attrs.get('class') || '').split(/\s+/).filter(Boolean);
+    var inl = attrs.get('style') || '';
+    if (!inl && sheets.length === 0) { cssStack.push({ ...curCSS }); return false; }
+    var ep = computeElementStyle(tag, id, cls, attrs, curCSS, sheets, inl);
+    pushCSS(ep);
     return true;
   }
 
@@ -243,7 +250,15 @@ export function parseHTML(html: string): ParseResult {
       }
       continue;
     }
-    if (inStyle)  { if (tok.kind === 'close' && tok.tag === 'style')  inStyle  = false; continue; }
+    if (inStyle) {
+      if (tok.kind === 'close' && tok.tag === 'style') {
+        if (inStyleBuf.trim()) styles.push(inStyleBuf);
+        inStyleBuf = ''; inStyle = false;
+      } else if (tok.kind === 'text') {
+        inStyleBuf += tok.text;
+      }
+      continue;
+    }
     if (skipUntilClose) { if (tok.kind === 'close' && tok.tag === skipUntilClose) skipUntilClose = ''; continue; }
 
     // ── text inside <select> options or <textarea> ────────────────────────
@@ -280,8 +295,7 @@ export function parseHTML(html: string): ParseResult {
     if (tok.kind === 'open' || tok.kind === 'self') {
       if (skipDepth > 0) {
         // Still need to pushCSS for any styled hidden element so pops balance
-        var hs = tok.attrs.get('style');
-        if (hs) pushCSS(parseInlineStyle(hs)); else cssStack.push({ ...curCSS });
+        applyStyle(tok.tag, tok.attrs);
         continue;
       }
 
@@ -301,7 +315,7 @@ export function parseHTML(html: string): ParseResult {
           inScript = true;
           break;
         }
-        case 'style':  inStyle  = true;  break;
+        case 'style':  inStyle = true; inStyleBuf = ''; break;
 
         case 'base': {
           var bHref = tok.attrs.get('href');
@@ -309,7 +323,14 @@ export function parseHTML(html: string): ParseResult {
           break;
         }
         case 'meta': break;  // ignored
-        case 'link': break;  // ignored
+        case 'link': {
+          var lRel = (tok.attrs.get('rel') || '').toLowerCase();
+          if (lRel === 'stylesheet') {
+            var lHref = tok.attrs.get('href') || '';
+            if (lHref) styleLinks.push(lHref);
+          }
+          break;
+        }
 
         // ── Embedded media / replaced elements ─────────────────────────────────────────
         case 'iframe': {
@@ -349,34 +370,33 @@ export function parseHTML(html: string): ParseResult {
 
         // ── Inline formatting ───────────────────────────────────────────────
         case 'strong': case 'b':
-          applyStyle(tok.attrs); bold++;    break;
+          applyStyle(tok.tag, tok.attrs); bold++;    break;
         case 'em': case 'i':
-          applyStyle(tok.attrs); italic++;  break;
+          applyStyle(tok.tag, tok.attrs); italic++;  break;
         case 'code': case 'tt': case 'kbd': case 'samp':
-          applyStyle(tok.attrs); codeInl++; break;
+          applyStyle(tok.tag, tok.attrs); codeInl++; break;
         case 'del': case 's':
-          applyStyle(tok.attrs); del++;     break;
+          applyStyle(tok.tag, tok.attrs); del++;     break;
         case 'mark':
-          applyStyle(tok.attrs); mark++;    break;
+          applyStyle(tok.tag, tok.attrs); mark++;    break;
         case 'u':
-          applyStyle(tok.attrs); underline++; break;
+          applyStyle(tok.tag, tok.attrs); underline++; break;
 
-        case 'sup':  applyStyle(tok.attrs); pushSpan('^');  break;
-        case 'sub':  applyStyle(tok.attrs); break;
-        case 'abbr': applyStyle(tok.attrs); break;
-        case 'bdi':  applyStyle(tok.attrs); break;
-        case 'bdo':  applyStyle(tok.attrs); break;
-        case 'cite': applyStyle(tok.attrs); italic++; break;
-        case 'var':  applyStyle(tok.attrs); italic++; break;
-        case 'q':    applyStyle(tok.attrs); pushSpan('\u201C'); break;
+        case 'sup':  applyStyle(tok.tag, tok.attrs); pushSpan('^');  break;
+        case 'sub':  applyStyle(tok.tag, tok.attrs); break;
+        case 'abbr': applyStyle(tok.tag, tok.attrs); break;
+        case 'bdi':  applyStyle(tok.tag, tok.attrs); break;
+        case 'bdo':  applyStyle(tok.tag, tok.attrs); break;
+        case 'cite': applyStyle(tok.tag, tok.attrs); italic++; break;
+        case 'var':  applyStyle(tok.tag, tok.attrs); italic++; break;
+        case 'q':    applyStyle(tok.tag, tok.attrs); pushSpan('\u201C'); break;
 
-        case 'span': applyStyle(tok.attrs); break;
-        case 'font': applyStyle(tok.attrs); break;
+        case 'span': applyStyle(tok.tag, tok.attrs); break;
+        case 'font': applyStyle(tok.tag, tok.attrs); break;
 
         // ── Links ───────────────────────────────────────────────────────────
         case 'a': {
-          var aStyle = tok.attrs.get('style');
-          if (aStyle) pushCSS(parseInlineStyle(aStyle)); else cssStack.push({ ...curCSS });
+          applyStyle(tok.tag, tok.attrs);
           var href = tok.attrs.get('href') || '';
           if (href && !href.startsWith('javascript:')) {
             linkHref = href;
@@ -390,14 +410,14 @@ export function parseHTML(html: string): ParseResult {
         case 'h4': case 'h5': case 'h6': {
           flushInline();
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
-          var hAlign = tok.attrs.get('style') ? parseInlineStyle(tok.attrs.get('style')!).align : undefined;
+          applyStyle(tok.tag, tok.attrs);
+          var hAlign = curCSS.align;
           openBlock = { type: tok.tag as BlockType, spans: [], textAlign: hAlign };
-          applyStyle(tok.attrs);
           break;
         }
 
         // ── Preformatted ────────────────────────────────────────────────────
-        case 'pre':  applyStyle(tok.attrs); flushInline(); inPre = true; break;
+        case 'pre':  applyStyle(tok.tag, tok.attrs); flushInline(); inPre = true; break;
 
         // ── Line break / rule ────────────────────────────────────────────────
         case 'br':
@@ -431,29 +451,29 @@ export function parseHTML(html: string): ParseResult {
           pushSpan('[' + '\u2593'.repeat(mtFilled) + '\u2591'.repeat(16 - mtFilled) + '] ' + mtVal);
           break;
         }
-        case 'output': applyStyle(tok.attrs); break;
+        case 'output': applyStyle(tok.tag, tok.attrs); break;
 
         // ── Fieldset / Legend ──────────────────────────────────────────────────────
         case 'fieldset':
-          applyStyle(tok.attrs); flushInline();
+          applyStyle(tok.tag, tok.attrs); flushInline();
           nodes.push({ type: 'p-break', spans: [] });
           nodes.push({ type: 'hr', spans: [] }); break;
         case 'legend': {
           flushInline();
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
-          applyStyle(tok.attrs);
+          applyStyle(tok.tag, tok.attrs);
           openBlock = { type: 'h4', spans: [] };
           break;
         }
 
         // ── Lists ────────────────────────────────────────────────────────────
         case 'ul': case 'ol':
-          applyStyle(tok.attrs); flushInline(); listDepth++; break;
+          applyStyle(tok.tag, tok.attrs); flushInline(); listDepth++; break;
         case 'li': {
           flushInline();
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
-          var liAlign = tok.attrs.get('style') ? parseInlineStyle(tok.attrs.get('style')!).align : undefined;
-          applyStyle(tok.attrs);
+          applyStyle(tok.tag, tok.attrs);
+          var liAlign = curCSS.align;
           openBlock = { type: 'li', spans: [], indent: Math.max(0, listDepth - 1), textAlign: liAlign };
           break;
         }
@@ -462,7 +482,7 @@ export function parseHTML(html: string): ParseResult {
         case 'blockquote': {
           flushInline();
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
-          applyStyle(tok.attrs);
+          applyStyle(tok.tag, tok.attrs);
           openBlock = { type: 'blockquote', spans: [], indent: 1 };
           break;
         }
@@ -470,12 +490,12 @@ export function parseHTML(html: string): ParseResult {
         // ── <details> / <summary> ────────────────────────────────────────────
         // Details are always "open" (no JS toggle). Summary becomes a heading.
         case 'details':
-          applyStyle(tok.attrs); flushInline();
+          applyStyle(tok.tag, tok.attrs); flushInline();
           nodes.push({ type: 'p-break', spans: [] }); break;
         case 'summary': {
           flushInline();
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
-          applyStyle(tok.attrs);
+          applyStyle(tok.tag, tok.attrs);
           openBlock = { type: 'summary', spans: [] };
           break;
         }
@@ -595,7 +615,7 @@ export function parseHTML(html: string): ParseResult {
 
         // ── Table ─────────────────────────────────────────────────────────────
         case 'table':
-          applyStyle(tok.attrs); flushInline();
+          applyStyle(tok.tag, tok.attrs); flushInline();
           inTable = true; tableRows = []; tableCurRow = []; tableCellBuf = ''; inTableCell = false;
           nodes.push({ type: 'p-break', spans: [] }); break;
         case 'thead': case 'tbody': case 'tfoot': break;
@@ -607,11 +627,11 @@ export function parseHTML(html: string): ParseResult {
           flushInline();
           nodes.push({ type: 'p-break', spans: [] }); break;
         case 'th':
-          applyStyle(tok.attrs); bold++;
+          applyStyle(tok.tag, tok.attrs); bold++;
           if (inTable) { inTableCell = true; tableCellHead = true; tableCellBuf = ''; } else pushSpan('| ');
           break;
         case 'td':
-          applyStyle(tok.attrs);
+          applyStyle(tok.tag, tok.attrs);
           if (inTable) { inTableCell = true; tableCellHead = false; tableCellBuf = ''; } else pushSpan('| ');
           break;
         case 'colgroup': case 'col': break;
@@ -619,8 +639,7 @@ export function parseHTML(html: string): ParseResult {
         // ── Default block ─────────────────────────────────────────────────────
         default: {
           if (BLOCK_TAGS.has(tok.tag)) {
-            var bStyle = tok.attrs.get('style');
-            if (bStyle) pushCSS(parseInlineStyle(bStyle)); else cssStack.push({ ...curCSS });
+            applyStyle(tok.tag, tok.attrs);
             flushInline();
             if (openBlock) { nodes.push(openBlock); openBlock = null; }
             nodes.push({ type: 'p-break', spans: [] });
@@ -814,5 +833,5 @@ export function parseHTML(html: string): ParseResult {
   }
 
   flushInline();
-  return { nodes, title, forms, widgets, baseURL, scripts };
+  return { nodes, title, forms, widgets, baseURL, scripts, styles, styleLinks };
 }
