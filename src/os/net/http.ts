@@ -212,6 +212,36 @@ export class CookieJar {
     var now = Date.now();
     this._cookies = this._cookies.filter(c => c.expires === Infinity || c.expires > now);
   }
+
+  /**
+   * Return visible (non-httpOnly) cookies as "name=value; ..." for document.cookie getter.
+   * Mirrors getCookieHeader but excludes httpOnly cookies (JS must not see those).
+   */
+  getDocumentCookies(host: string, path: string): string {
+    var now = Date.now();
+    var out = '';
+    for (var i = 0; i < this._cookies.length; i++) {
+      var c = this._cookies[i];
+      if (c.httpOnly) continue;
+      if (c.expires !== Infinity && c.expires < now) continue;
+      if (host !== c.domain && !host.endsWith('.' + c.domain)) continue;
+      if (!path.startsWith(c.path)) continue;
+      if (out) out += '; ';
+      out += c.name + '=' + c.value;
+    }
+    return out;
+  }
+
+  /**
+   * Handle document.cookie = "name=value[; attr=val; ...]" (page-JS write).
+   * Pages can never set httpOnly cookies; any httpOnly attribute is ignored.
+   */
+  setFromPage(header: string, host: string, path: string): void {
+    this.setCookie(header, { host, path, secure: false });
+    // strip httpOnly flag if the parser set it — pages cannot set httpOnly
+    var last = this._cookies[this._cookies.length - 1];
+    if (last && last.domain === host) last.httpOnly = false;
+  }
 }
 
 /** Global singleton cookie jar shared by all HTTP/HTTPS requests. */
