@@ -8,6 +8,8 @@
  *   CSS selector engine: #id .class tag [attr] compound descendant child comma
  */
 
+import { bumpStyleGeneration } from './cache.js';
+
 // ── Events ────────────────────────────────────────────────────────────────────
 
 export class VEvent {
@@ -43,9 +45,44 @@ export class VEvent {
   }
 }
 
+// ── EventTarget base class (item 871) ─────────────────────────────────────────
+// VNode extends this so that `el instanceof EventTarget` passes.
+// Used by jsruntime.ts: `EventTarget: VEventTarget` in the window object.
+
+export class VEventTarget {
+  _handlers:        Map<string, Array<(e: VEvent) => void>> = new Map();
+  _captureHandlers: Map<string, Array<(e: VEvent) => void>> = new Map();
+  addEventListener(type: string, fn: ((e: VEvent) => void) | { handleEvent(e: VEvent): void } | null, options?: boolean | { capture?: boolean; once?: boolean; passive?: boolean; signal?: unknown }): void {
+    if (!fn) return;
+    var handler = typeof fn === 'function' ? fn : (e: VEvent) => (fn as any).handleEvent(e);
+    var once    = typeof options === 'object' && options !== null ? options.once : false;
+    var capture = typeof options === 'boolean' ? options : (typeof options === 'object' && options !== null ? (options.capture ?? false) : false);
+    var wrapped = once ? (e: VEvent) => { this.removeEventListener(type, wrapped); handler(e); } : handler;
+    (wrapped as any)._original = fn;
+    var map = capture ? this._captureHandlers : this._handlers;
+    var arr = map.get(type); if (!arr) { arr = []; map.set(type, arr); }
+    if (!arr.some((f: any) => f === wrapped || (f as any)._original === fn)) arr.push(wrapped);
+  }
+  removeEventListener(type: string, fn: ((e: VEvent) => void) | { handleEvent(e: VEvent): void } | null, options?: boolean | { capture?: boolean }): void {
+    if (!fn) return;
+    var capture = typeof options === 'boolean' ? options : (typeof options === 'object' && options !== null ? (options?.capture ?? false) : false);
+    var map = capture ? this._captureHandlers : this._handlers;
+    var arr = map.get(type);
+    if (arr) { var i = arr.findIndex((f: any) => f === fn || (f as any)._original === fn); if (i >= 0) arr.splice(i, 1); }
+  }
+  dispatchEvent(ev: VEvent): boolean {
+    this._fireList(ev);
+    return !ev.defaultPrevented;
+  }
+  _fireList(ev: VEvent): void {
+    var arr = this._handlers.get(ev.type);
+    if (arr) { for (var fn of [...arr]) { try { fn(ev); } catch (_) {} if (ev._stopImmediate) break; } }
+  }
+}
+
 // ── VNode base ────────────────────────────────────────────────────────────────
 
-export class VNode {
+export class VNode extends VEventTarget {
   // ── Node type constants (item 582) ─────────────────────────────────────────
   static readonly ELEMENT_NODE                = 1;
   static readonly ATTRIBUTE_NODE              = 2;
@@ -299,7 +336,8 @@ export class VStyleMap {
   setProperty(prop: string, val: string, _priority?: string): void {
     var p = prop.trim(), v = val.trim();
     this._map.set(p, v);
-    // Vendor prefix bi-directional aliasing (item 866):
+    this._owner._dirtyLayout = true; // item 891
+    bumpStyleGeneration();           // item 944 — invalidate computed style cache
     //  • Setting -webkit-X / -moz-X / -ms-X also sets canonical X
     //  • Setting canonical X also sets -webkit-X so old WebKit checks don't break
     var _vendors = ['-webkit-', '-moz-', '-ms-', '-o-'];
@@ -337,6 +375,8 @@ export class VStyleMap {
   removeProperty(prop: string): string {
     var old = this._map.get(prop.trim()) || '';
     this._map.delete(prop.trim());
+    this._owner._dirtyLayout = true; // item 891
+    bumpStyleGeneration();           // item 944
     if (this._owner.ownerDocument) {
       this._owner.ownerDocument._dirty = true;
       this._owner.ownerDocument._queueMutation({ type: 'attributes', target: this._owner, attributeName: 'style', attributeNamespace: null, oldValue: null });
@@ -350,6 +390,8 @@ export class VStyleMap {
   set cssText(v: string) {
     this._map.clear();
     v.split(';').forEach(p => { var ci = p.indexOf(':'); if (ci >= 0) this._map.set(p.slice(0, ci).trim(), p.slice(ci + 1).trim()); });
+    this._owner._dirtyLayout = true; // item 891
+    bumpStyleGeneration();           // item 944
     if (this._owner.ownerDocument) {
       this._owner.ownerDocument._dirty = true;
       this._owner.ownerDocument._queueMutation({ type: 'attributes', target: this._owner, attributeName: 'style', attributeNamespace: null, oldValue: null });
@@ -392,6 +434,9 @@ export class VClassList {
 
 // ── VElement ──────────────────────────────────────────────────────────────────
 
+/** Monotonically increasing element UID — used as computed style cache key (item 944). */
+var _elemUidCounter = 0;
+
 export class VElement extends VNode {
   tagName:   string;
   _attrs:    Map<string, string> = new Map();
@@ -399,6 +444,10 @@ export class VElement extends VNode {
   _style:    VStyleMap;
   classList: VClassList;
   _onHandlers: Record<string, ((e: VEvent) => void) | null> = {};
+  /** Unique numeric ID — stable across the element's lifetime (item 944 cache key). */
+  _cuid: number = ++_elemUidCounter;
+  /** True when attributes/style changed since last layout pass (item 891). */
+  _dirtyLayout: boolean = true;
 
   constructor(tag: string) {
     super(); this.tagName = tag.toUpperCase(); this.nodeName = this.tagName;
@@ -490,6 +539,7 @@ export class VElement extends VNode {
     var lname = name.toLowerCase();
     var oldValue = this._attrs.get(lname) ?? null;
     this._attrs.set(lname, String(value));
+    this._dirtyLayout = true; // item 891
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
       this.ownerDocument._queueMutation({ type: 'attributes', target: this, attributeName: lname, attributeNamespace: null, oldValue });
@@ -499,6 +549,7 @@ export class VElement extends VNode {
     var lname = name.toLowerCase();
     var oldValue = this._attrs.get(lname) ?? null;
     this._attrs.delete(lname);
+    this._dirtyLayout = true; // item 891
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
       this.ownerDocument._queueMutation({ type: 'attributes', target: this, attributeName: lname, attributeNamespace: null, oldValue });

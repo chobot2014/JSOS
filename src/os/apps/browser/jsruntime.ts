@@ -16,12 +16,13 @@
 import { os } from '../../core/sdk.js';
 import type { FetchResponse } from '../../core/sdk.js';
 import {
-  VDocument, VElement, VEvent, VNode, VText, VRange,
+  VDocument, VElement, VEvent, VNode, VText, VRange, VEventTarget,
   buildDOM, serializeDOM, _serializeEl, _walk, _matchSel,
 } from './dom.js';
 import { BrowserPerformance, BrowserPerformanceObserver } from './perf.js';
 import { WorkerImpl, MessageChannel, BroadcastChannelImpl, tickAllWorkers } from './workers.js';
 import { cookieJar } from '../../net/http.js';
+import { getCachedStyle, setCachedStyle, bumpStyleGeneration, currentStyleGeneration } from './cache.js';
 
 // ── Script record (collected by html.ts during parsing) ───────────────────────
 
@@ -1720,6 +1721,29 @@ export function createPageJS(
     supportedValuesOf(_key: string): string[] { return []; },
   };
 
+  // ── CSSStyleSheet O(1) rule index helper (item 943) ───────────────────────
+  // Extracts the "key selector" from a complex selector — the rightmost simple
+  // selector part that is most selective (#id > .class > tag > *).
+  // Used to bucket CSSStyleRule_ entries so getComputedStyle can look up only
+  // rules that COULD match the element instead of scanning the full rule list.
+  function _getRuleIndexKey(sel: string): string {
+    // 1. Strip pseudo-elements and pseudo-classes (keep :not content for specificity)
+    var s = sel.replace(/::?[a-z][a-z-]*(?:\([^)]*\))?/gi, '')
+               .replace(/\[[^\]]*\]/g, '')  // remove attribute selectors
+               .trim();
+    // 2. Split on combinators (space, >, +, ~) and take the last component
+    var parts = s.split(/\s+|\s*[>+~]\s*/);
+    var last = (parts[parts.length - 1] || s).trim();
+    // 3. Priority: #id > .class > tag > *
+    var idM = last.match(/#([\w-]+)/);
+    if (idM) return '#' + idM[1];
+    var clsM = last.match(/\.([\w-]+)/);
+    if (clsM) return '.' + clsM[1];
+    var tagM = last.match(/^([a-z][\w-]*)/i);
+    if (tagM && tagM[1].toLowerCase() !== '*') return tagM[1].toLowerCase();
+    return '*'; // universal
+  }
+
   // ── CSSStyleSheet (items 578-579) ─────────────────────────────────────────
 
   class CSSStyleSheet_ {
@@ -1730,6 +1754,26 @@ export function createPageJS(
     media: { mediaText: string; length: number } = { mediaText: '', length: 0 };
     type = 'text/css';
     _pendingImports: string[] = [];
+    /** O(1) rule index: key → CSSStyleRule_[] (item 943) */
+    _ruleIdx: Map<string, CSSStyleRule_[]> = new Map();
+
+    /** Add or remove a CSSStyleRule_ from the bucket index. */
+    _idxRule(r: CSSStyleRule_, remove = false): void {
+      var sels = r.selectorText.split(',');
+      var seen = new Set<string>();
+      for (var i = 0; i < sels.length; i++) {
+        var key = _getRuleIndexKey(sels[i].trim());
+        if (seen.has(key)) continue; seen.add(key);
+        if (remove) {
+          var lst = this._ruleIdx.get(key);
+          if (lst) { var ii = lst.indexOf(r); if (ii >= 0) lst.splice(ii, 1); }
+        } else {
+          var lst2 = this._ruleIdx.get(key);
+          if (!lst2) { lst2 = []; this._ruleIdx.set(key, lst2); }
+          lst2.push(r);
+        }
+      }
+    }
 
     insertRule(rule: string, index = 0): number {
       var clampedIdx = Math.max(0, Math.min(index, this.cssRules.length));
@@ -1741,10 +1785,17 @@ export function createPageJS(
       else { var bIdx = rule.indexOf('{'); rulObj = bIdx >= 0 ? new CSSStyleRule_(rule.slice(0, bIdx).trim(), rule.slice(bIdx + 1).replace(/}$/, '').trim()) : new CSSStyleRule_(rule, ''); }
       rulObj.parentStyleSheet = this;
       this.cssRules.splice(clampedIdx, 0, rulObj);
+      if (rulObj instanceof CSSStyleRule_) this._idxRule(rulObj as CSSStyleRule_);
+      bumpStyleGeneration(); // item 944
       return clampedIdx;
     }
     deleteRule(index: number): void {
-      if (index >= 0 && index < this.cssRules.length) this.cssRules.splice(index, 1);
+      if (index >= 0 && index < this.cssRules.length) {
+        var removed = this.cssRules[index];
+        this.cssRules.splice(index, 1);
+        if (removed instanceof CSSStyleRule_) this._idxRule(removed as CSSStyleRule_, true);
+        bumpStyleGeneration(); // item 944
+      }
     }
     // Legacy IE methods
     addRule(selector: string, cssText: string, index?: number): number {
@@ -1847,14 +1898,34 @@ export function createPageJS(
             _documentFonts.add(ff3);
           }
         } else if (!lhdr.startsWith('@')) {
-          var sr2 = new CSSStyleRule_(hdr, body2.trim()); sr2.parentStyleSheet = this; this.cssRules.push(sr2);
+          var sr2 = new CSSStyleRule_(hdr, body2.trim()); sr2.parentStyleSheet = this; this.cssRules.push(sr2); this._idxRule(sr2);
         }
       }
+      bumpStyleGeneration(); // item 944 — new rules indexed, invalidate computed style cache
     }
   }
 
   // Pseudo-type for canvas context so TS doesn't complain
   type CSSStyleDeclarationStub = Record<string, string>;
+
+  // ── CSS vendor prefix normalisation (item 866) ────────────────────────────
+  // Maps common -webkit-/-moz- prefixed properties to their standard name.
+  // If a rule sets a vendor-prefixed property we also set the standard name
+  // (if not already set) so layout/render code only needs to check standard names.
+  var _VENDOR_PREFIX_RE = /^-(?:webkit|moz|ms|o)-(.+)$/;
+  function _normalizeCSSProp(prop: string): string {
+    var m = _VENDOR_PREFIX_RE.exec(prop);
+    return m ? m[1] : prop;
+  }
+
+  /** Set a CSS property and its vendor-normalised alias on a style object. */
+  function _setCSSProp(styleObj: any, prop: string, val: string): void {
+    styleObj[prop] = val;                       // keep original (required by getPropertyValue)
+    var std = _normalizeCSSProp(prop);
+    if (std !== prop && !styleObj[std]) {        // only fill standard if not yet set
+      styleObj[std] = val;
+    }
+  }
 
   // ── CSS Rule subclasses (items 580-582) ───────────────────────────────────
 
@@ -1885,7 +1956,7 @@ export function createPageJS(
         if (!prop) return;
         var isImp = /!\s*important\s*$/i.test(raw);
         var val = isImp ? raw.replace(/!\s*important\s*$/i, '').trim() : raw;
-        (this.style as any)[prop] = val;
+        _setCSSProp(this.style as any, prop, val);
         if (isImp) { if (!this.important) this.important = new Set(); this.important.add(prop); }
       });
       this.style.cssText = body;
@@ -1934,7 +2005,7 @@ export function createPageJS(
           var ci = pair.indexOf(':'); if (ci < 0) return;
           var p2 = pair.slice(0, ci).trim();
           var v  = pair.slice(ci + 1).replace(/!\s*important\s*$/i, '').trim();
-          if (p2 && v) (this.style as any)[p2] = v;
+          if (p2 && v) _setCSSProp(this.style as any, p2, v);
         });
         this.style.cssText = body;
       }
@@ -2335,7 +2406,15 @@ export function createPageJS(
     return a * 10000 + b * 100 + c;
   }
 
+  /** Computed style proxy cache — keyed per-element, invalidated by style generation (item 944). */
+  var _csProxyCache = new WeakMap<VElement, { gen: number; proxy: any }>();
+
   function getComputedStyle(el: VElement, _pseudoElt?: string | null): any {
+    // ── Computed style cache check (item 944) ───────────────────────────────────
+    var _csGen = currentStyleGeneration();
+    var _csHit = _csProxyCache.get(el);
+    if (_csHit && _csHit.gen === _csGen) return _csHit.proxy;
+    // ── Full computation below ──────────────────────────────────────────────────
     // Collect all matching rules with specificity for proper cascade ordering
     // Each entry: { specificity, sourceOrder, style, important: Set<string> }
     var matched: Array<{ spec: number; order: number; style: any; important: Set<string> | undefined }> = [];
@@ -2370,11 +2449,53 @@ export function createPageJS(
       }
     }
 
-    // Walk all document stylesheets
+    // Walk all document stylesheets — use O(1) index for flat rules (item 943)
     for (var si = 0; si < doc._styleSheets.length; si++) {
-      var sheet = doc._styleSheets[si] as any;
+      var sheet = doc._styleSheets[si] as any as CSSStyleSheet_;
       if (sheet.disabled) continue;
-      walkRules(sheet.cssRules ?? []);
+      var idx = sheet._ruleIdx;
+      if (idx && idx.size > 0) {
+        // Build candidate bucket keys from this element: #id, .class..., tag, *
+        var buckets: string[] = ['*'];
+        if (el.tagName) buckets.push(el.tagName.toLowerCase());
+        if (el.id) buckets.push('#' + el.id);
+        var elCls = el.className ? (el.className as string).split(/\s+/).filter(Boolean) : [];
+        for (var ci = 0; ci < elCls.length; ci++) if (elCls[ci]) buckets.push('.' + elCls[ci]);
+        // Collect candidate rules from relevant buckets (de-duplicated)
+        var seen943 = new Set<CSSStyleRule_>();
+        for (var bi = 0; bi < buckets.length; bi++) {
+          var bkt = idx.get(buckets[bi]);
+          if (!bkt) continue;
+          for (var bri = 0; bri < bkt.length; bri++) {
+            var br = bkt[bri];
+            if (seen943.has(br)) continue; seen943.add(br);
+            // Verify full selector match (handles compound selectors, combinators, etc.)
+            var bSels = (br.selectorText as string).split(',');
+            var bMaxSpec = -1;
+            for (var bs = 0; bs < bSels.length; bs++) {
+              var bSelTrim = bSels[bs].trim();
+              try { if (_matchSel(bSelTrim, el)) { var bSp = _calcSpecificity(bSelTrim); if (bSp > bMaxSpec) bMaxSpec = bSp; } } catch (_) {}
+            }
+            if (bMaxSpec >= 0) collectRule(br, bMaxSpec);
+          }
+        }
+        // Still walk @media and @supports blocks (their nested rules are not in the flat index)
+        for (var msi = 0; msi < sheet.cssRules.length; msi++) {
+          var mRule = sheet.cssRules[msi] as any;
+          if (!mRule) continue;
+          if (mRule.type === 4 && mRule.cssRules) {
+            var mCond2: string = mRule.conditionText || (mRule.media && mRule.media.mediaText) || '';
+            if (!mCond2 || _evalMediaQuery(mCond2)) walkRules(mRule.cssRules);
+          } else if (mRule.type === 12 && mRule.cssRules) {
+            var sCond2: string = mRule.conditionText || '';
+            var sm2 = !sCond2 || (typeof CSS_ !== 'undefined' ? CSS_.supports(sCond2) : true);
+            if (sm2) walkRules(mRule.cssRules);
+          }
+        }
+      } else {
+        // Fallback: linear walk (sheet had no indexed rules, e.g. all @media)
+        walkRules(sheet.cssRules ?? []);
+      }
     }
 
     // Sort: normal rules by specificity then source order LOW→HIGH (later/higher wins)
@@ -2451,7 +2572,7 @@ export function createPageJS(
       return resolveValue(raw);
     }
 
-    return new Proxy({} as Record<string, string>, {
+    var _csProxy944 = new Proxy({} as Record<string, string>, {
       get(_t, k: string) {
         if (typeof k !== 'string') return undefined;
         if (k === 'getPropertyValue')   return (p: string) => resolve(p);
@@ -2462,6 +2583,8 @@ export function createPageJS(
         return resolve((k as string).replace(/[A-Z]/g, m => '-' + m.toLowerCase()));
       },
     });
+    _csProxyCache.set(el, { gen: _csGen, proxy: _csProxy944 }); // item 944: cache proxy
+    return _csProxy944;
   }
 
   // ── window.requestAnimationFrame / cancelAnimationFrame ───────────────────
@@ -3225,7 +3348,7 @@ export function createPageJS(
     ClipboardEvent,
     GamepadEvent,
     SecurityPolicyViolationEvent,
-    EventTarget: EventTarget_,
+    EventTarget: VEventTarget,  // VNode extends VEventTarget → instanceof EventTarget works (item 871)
     DOMException,
     MutationObserver:    MutationObserverImpl,
     IntersectionObserver: IntersectionObserverImpl,

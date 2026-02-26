@@ -43,6 +43,7 @@ import { os } from '../core/sdk.js';
 import { systemProfiler } from '../process/optimizer.js';
 import { JITChecksum, JITMem, JITCRC32, JITOSKernels } from '../process/jit-os.js';
 import { dnsResolve } from '../net/dns.js';
+import { pkgmgr } from '../core/pkgmgr.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -1324,6 +1325,101 @@ export function registerCommands(g: any): void {
   };
 
   // ──────────────────────────────────────────────────────────────────────────
+  // 8D.  PACKAGE MANAGER COMMANDS (items 728–740)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * g.pkg — package manager API
+   *   g.pkg.install('name')    — download, verify, extract to /usr/
+   *   g.pkg.remove('name')     — unlink installed files
+   *   g.pkg.list()             — list installed packages
+   *   g.pkg.search('name')     — search remote index
+   *   g.pkg.update()           — refresh package index from repos
+   *   g.pkg.upgrade('name')    — update a package to latest version
+   *   g.pkg.upgradeAll()       — upgrade all non-pinned packages
+   *   g.pkg.addRepo(url)       — add a repository
+   *   g.pkg.pin('name')        — pin / hold a package
+   *   g.pkg.unpin('name')      — unpin a package
+   *   g.pkg.sandbox('name')    — run package in isolated JS context
+   */
+  g.pkg = {
+    install: function(name: string) {
+      var errors = pkgmgr.install(name);
+      if (errors.length) {
+        errors.forEach(function(e) { terminal.colorPrintln('pkg: ' + e, Color.LIGHT_RED); });
+      } else {
+        terminal.colorPrintln('Installed: ' + name, Color.LIGHT_GREEN);
+      }
+    },
+    remove: function(name: string) {
+      var ok = pkgmgr.remove(name);
+      if (ok) terminal.colorPrintln('Removed: ' + name, Color.LIGHT_GREEN);
+      else    terminal.colorPrintln('pkg: ' + name + ' not installed', Color.YELLOW);
+    },
+    list: function() {
+      var pkgs = pkgmgr.list();
+      if (pkgs.length === 0) { terminal.colorPrintln('No packages installed.', Color.DARK_GREY); return; }
+      return printableArray(pkgs, function(arr: any[]) {
+        arr.forEach(function(p) {
+          terminal.colorPrint(p.name, Color.CYAN);
+          terminal.print('  ' + p.version);
+          if (p.pinned) terminal.colorPrint('  [pinned]', Color.YELLOW);
+          terminal.println('');
+        });
+      });
+    },
+    search: function(name: string) {
+      var entry = pkgmgr.search(name);
+      if (!entry) { terminal.colorPrintln('pkg: ' + name + ' not found in any repo', Color.YELLOW); return; }
+      terminal.colorPrint(entry.name, Color.CYAN); terminal.println('  ' + entry.version);
+    },
+    update: function() {
+      var errors = pkgmgr.update();
+      if (errors.length) errors.forEach(function(e) { terminal.colorPrintln('pkg: ' + e, Color.LIGHT_RED); });
+      else terminal.colorPrintln('Package index updated.', Color.LIGHT_GREEN);
+    },
+    upgrade: function(name: string) {
+      try {
+        var updated = pkgmgr.upgrade(name);
+        if (updated) terminal.colorPrintln('Upgraded: ' + name, Color.LIGHT_GREEN);
+        else         terminal.colorPrintln(name + ' is already up to date.', Color.DARK_GREY);
+      } catch(e) { terminal.colorPrintln('pkg: ' + String(e), Color.LIGHT_RED); }
+    },
+    upgradeAll: function() {
+      var upgraded = pkgmgr.upgradeAll();
+      if (upgraded.length) terminal.colorPrintln('Upgraded: ' + upgraded.join(', '), Color.LIGHT_GREEN);
+      else                 terminal.colorPrintln('All packages up to date.', Color.DARK_GREY);
+    },
+    addRepo: function(url: string) {
+      pkgmgr.addRepo(url);
+      terminal.colorPrintln('Repository added: ' + url, Color.LIGHT_GREEN);
+    },
+    pin: function(name: string) {
+      pkgmgr.pin(name);
+      terminal.colorPrintln('Pinned: ' + name, Color.YELLOW);
+    },
+    unpin: function(name: string) {
+      pkgmgr.unpin(name);
+      terminal.colorPrintln('Unpinned: ' + name, Color.LIGHT_GREEN);
+    },
+    sandbox: function(name: string) {
+      var result = pkgmgr.sandbox(name);
+      terminal.colorPrintln('Sandbox result for ' + name + ':', Color.CYAN);
+      terminal.println(JSON.stringify(result, null, 2));
+    },
+    dryRun: function(name: string) {
+      try {
+        var wouldInstall = pkgmgr.dryRunInstall(name);
+        if (wouldInstall.length === 0) {
+          terminal.colorPrintln(name + ' is already installed.', Color.DARK_GREY);
+        } else {
+          terminal.colorPrintln('Would install: ' + wouldInstall.join(', '), Color.CYAN);
+        }
+      } catch(e) { terminal.colorPrintln('pkg dry-run: ' + String(e), Color.LIGHT_RED); }
+    },
+  };
+
+  // ──────────────────────────────────────────────────────────────────────────
   // 8.  REPL UTILITIES
   // ──────────────────────────────────────────────────────────────────────────
 
@@ -1337,6 +1433,110 @@ export function registerCommands(g: any): void {
   g.printable = function(data: any, printer: (d: any) => void): any {
     if (Array.isArray(data)) return printableArray(data, printer);
     return printableObject(data, printer);
+  };
+
+  /**
+   * g.inspect(value) — deep pretty-print with types and circular-ref detection (item 788)
+   * Displays the full object tree with type annotations.
+   */
+  g.inspect = function(value: any, maxDepth?: number): void {
+    var depth = maxDepth !== undefined ? maxDepth : 4;
+    var seen = new Set<any>();
+
+    function typeOf(v: any): string {
+      if (v === null) return 'null';
+      if (Array.isArray(v)) return 'Array[' + v.length + ']';
+      return typeof v;
+    }
+
+    function colorForType(t: string): Color {
+      if (t === 'number' || t.startsWith('Array')) return Color.LIGHT_CYAN;
+      if (t === 'string')  return Color.LIGHT_GREEN;
+      if (t === 'boolean') return Color.YELLOW;
+      if (t === 'function') return Color.MAGENTA;
+      if (t === 'null' || t === 'undefined') return Color.DARK_GREY;
+      return Color.WHITE;
+    }
+
+    function printValue(v: any, indent: string, currentDepth: number): void {
+      var t = typeOf(v);
+      if (t === 'null')      { terminal.colorPrintln(indent + 'null', Color.DARK_GREY); return; }
+      if (t === 'undefined') { terminal.colorPrintln(indent + 'undefined', Color.DARK_GREY); return; }
+      if (t === 'number')    { terminal.colorPrintln(indent + String(v) + ' <number>', colorForType(t)); return; }
+      if (t === 'boolean')   { terminal.colorPrintln(indent + String(v) + ' <boolean>', colorForType(t)); return; }
+      if (t === 'string') {
+        var display = v.length > 80 ? JSON.stringify(v.slice(0, 80)) + '…' : JSON.stringify(v);
+        terminal.colorPrintln(indent + display + ' <string, ' + v.length + ' chars>', colorForType(t));
+        return;
+      }
+      if (t === 'function') {
+        var fname = v.name ? v.name : '(anonymous)';
+        terminal.colorPrintln(indent + '[Function: ' + fname + ']', colorForType(t));
+        return;
+      }
+      if (typeof v === 'object') {
+        if (seen.has(v)) { terminal.colorPrintln(indent + '[Circular]', Color.LIGHT_RED); return; }
+        if (currentDepth >= depth) { terminal.colorPrintln(indent + '[Object …]', Color.DARK_GREY); return; }
+        seen.add(v);
+        var keys = Object.keys(v);
+        if (Array.isArray(v)) {
+          terminal.colorPrintln(indent + 'Array(' + v.length + ') [', Color.LIGHT_CYAN);
+          for (var i = 0; i < Math.min(v.length, 20); i++) {
+            printValue(v[i], indent + '  ', currentDepth + 1);
+          }
+          if (v.length > 20) terminal.colorPrintln(indent + '  … ' + (v.length - 20) + ' more', Color.DARK_GREY);
+          terminal.colorPrintln(indent + ']', Color.LIGHT_CYAN);
+        } else {
+          terminal.colorPrintln(indent + '{', Color.WHITE);
+          for (var ki = 0; ki < Math.min(keys.length, 30); ki++) {
+            terminal.colorPrint(indent + '  ' + keys[ki] + ': ', Color.CYAN);
+            printValue(v[keys[ki]], '', currentDepth + 1);
+          }
+          if (keys.length > 30) terminal.colorPrintln(indent + '  … ' + (keys.length - 30) + ' more keys', Color.DARK_GREY);
+          terminal.colorPrintln(indent + '}', Color.WHITE);
+        }
+        seen.delete(v);
+      }
+    }
+
+    printValue(value, '', 0);
+  };
+
+  /**
+   * g.doc(symbol) — print JSDoc + type signature for any function or object (item 789)
+   * Usage: doc(fs.readFile)  or  doc('fs.readFile')
+   */
+  g.doc = function(symbol: any): void {
+    if (typeof symbol === 'string') {
+      // Try to resolve a dotted path like 'fs.readFile'
+      var parts = symbol.split('.');
+      var obj: any = g;
+      for (var i = 0; i < parts.length; i++) {
+        if (obj == null) break;
+        obj = obj[parts[i]];
+      }
+      if (obj == null) {
+        terminal.colorPrintln('doc: symbol not found: ' + symbol, Color.LIGHT_RED);
+        return;
+      }
+      symbol = obj;
+    }
+    if (typeof symbol === 'function') {
+      terminal.colorPrintln('[Function: ' + (symbol.name || '(anonymous)') + ']', Color.LIGHT_CYAN);
+      var src = symbol.toString();
+      // Print the signature (first line)
+      var firstLine = src.split('\n')[0];
+      terminal.colorPrintln('  ' + firstLine, Color.CYAN);
+      // Try to extract JSDoc comment — not available at runtime, show param names
+      var match = src.match(/\(([^)]*)\)/);
+      if (match) terminal.colorPrintln('  Params: (' + match[1] + ')', Color.DARK_GREY);
+    } else if (typeof symbol === 'object' && symbol !== null) {
+      var t = Array.isArray(symbol) ? 'Array' : 'Object';
+      var keys2 = Object.keys(symbol);
+      terminal.colorPrintln('[' + t + '] with keys: ' + keys2.join(', '), Color.LIGHT_CYAN);
+    } else {
+      terminal.colorPrintln(typeof symbol + ': ' + String(symbol), Color.DARK_GREY);
+    }
   };
 
   // ── App registry ─────────────────────────────────────────────────────────

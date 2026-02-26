@@ -288,15 +288,82 @@ export class PackageManager {
     return errors;
   }
 
-  /** Search all repos for a package. */
+  /** Search all repos for a package by name or virtual provide (item 737). */
   search(name: string): RepoPackageEntry | null {
     var repos = readRepos();
+    // First pass: exact name match
     for (var i = 0; i < repos.length; i++) {
       for (var j = 0; j < repos[i].packages.length; j++) {
         if (repos[i].packages[j].name === name) return repos[i].packages[j];
       }
     }
+    // Second pass: virtual package — match against manifest's `provides` field (item 737)
+    for (var i = 0; i < repos.length; i++) {
+      for (var j = 0; j < repos[i].packages.length; j++) {
+        var entry = repos[i].packages[j];
+        // Download manifest to check provides (only if manifest URL is derivable)
+        try {
+          var manifestUrl = entry.url.replace(/\.jspkg$/, '.manifest.json');
+          var body = (kernel as any).httpGet ? (kernel as any).httpGet(manifestUrl) : null;
+          if (body) {
+            var m: Partial<PackageManifest> = JSON.parse(body);
+            if (m.provides && m.provides.indexOf(name) !== -1) return entry;
+          }
+        } catch(_) {}
+      }
+    }
     return null;
+  }
+
+  /**
+   * Dry-run install: verify all deps can be resolved and hash-check passes
+   * without actually writing any files to disk (item 739).
+   * Returns a list of packages that would be installed, or throws on error.
+   */
+  dryRunInstall(name: string): string[] {
+    var wouldInstall: string[] = [];
+    var visited = new Set<string>();
+
+    var self = this;
+    function gather(pkgName: string): void {
+      if (visited.has(pkgName) || self.db.has(pkgName)) return;
+      visited.add(pkgName);
+
+      var entry = self.search(pkgName);
+      if (!entry) throw new Error('Package not found: ' + pkgName);
+
+      // Download manifest for dep list
+      var manifestUrl = entry.url.replace(/\.jspkg$/, '.manifest.json');
+      var manifest: Partial<PackageManifest> = {};
+      try {
+        var body = (kernel as any).httpGet ? (kernel as any).httpGet(manifestUrl) : null;
+        if (body) manifest = JSON.parse(body);
+      } catch(_) {}
+
+      // Recurse into dependencies
+      var deps = manifest.dependencies || [];
+      for (var i = 0; i < deps.length; i++) gather(deps[i]);
+
+      // Verify archive hash without extracting
+      try {
+        var raw = (kernel as any).httpGet ? (kernel as any).httpGet(entry.url) : null;
+        if (raw && entry.hash) {
+          var bytes = Array.from(raw as string).map(function(c) { return c.charCodeAt(0) & 0xff; });
+          var actualHash = sha256(bytes);
+          if (actualHash !== entry.hash) {
+            throw new Error('Hash mismatch for ' + pkgName + ': got ' + actualHash + ' expected ' + entry.hash);
+          }
+        }
+      } catch(e) {
+        if (String(e).indexOf('Hash mismatch') !== -1) throw e;
+        // Network errors during dry-run are warnings only
+      }
+
+      wouldInstall.push(pkgName);
+    }
+
+    gather(name);
+    return wouldInstall;
   }
 
   // ── Install (items 730, 733) ────────────────────────────────────────────────

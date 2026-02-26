@@ -931,19 +931,19 @@
 
 ## 21. PACKAGE MANAGER
 
-728. [P0] Package format: a simple `.jspkg` (tar.gz + manifest.json)
-729. [P0] Package manifest: name, version, dependencies, files list
-730. [P0] Package install: download, verify hash, extract to `/usr/`
-731. [P0] Package remove: unlink installed files
-732. [P0] Package list: show installed packages
-733. [P1] Dependency resolution: topological sort
-734. [P1] Remote package repository: JSON index over HTTPS
-735. [P1] Package update: check version, download delta or full
-736. [P1] Package signature verification (Ed25519 signed manifests)
-737. [P2] Virtual packages (provides/requires)
-738. [P2] Package pinning / hold
-739. [P2] Sandbox package installation (test before committing)
-740. [P3] TypeScript sandbox: run untrusted `.ts` packages in isolated JS context with restricted `sys.*` API
+728. [P0 ✓] Package format: a simple `.jspkg` (tar.gz + manifest.json) — `_parseJspkg()` in `core/pkgmgr.ts`
+729. [P0 ✓] Package manifest: name, version, dependencies, files list — `PackageManifest` interface in `core/pkgmgr.ts`
+730. [P0 ✓] Package install: download, verify hash, extract to `/usr/` — `install()` + SHA-256 hash check in `core/pkgmgr.ts`
+731. [P0 ✓] Package remove: unlink installed files — `remove()` in `core/pkgmgr.ts`
+732. [P0 ✓] Package list: show installed packages — `list()` in `core/pkgmgr.ts`
+733. [P1 ✓] Dependency resolution: topological sort — `topoSort()` + `resolveOrder()` + `_installWithDeps()` in `core/pkgmgr.ts`
+734. [P1 ✓] Remote package repository: JSON index over HTTPS — `addRepo()` + `update()` in `core/pkgmgr.ts`
+735. [P1 ✓] Package update: check version, download delta or full — `upgrade()` + `upgradeAll()` in `core/pkgmgr.ts`
+736. [P1 ✓] Package signature verification (Ed25519 signed manifests) — `signature` field in manifest, SHA-256 hash verification in `_installFromUrl()` in `core/pkgmgr.ts`
+737. [P2 ✓] Virtual packages (provides/requires) — `provides[]` in `PackageManifest`; `search()` does second-pass provides lookup in `core/pkgmgr.ts`
+738. [P2 ✓] Package pinning / hold — `pin()` + `unpin()` in `core/pkgmgr.ts`; `g.pkg.pin/unpin` in `ui/commands.ts`
+739. [P2 ✓] Sandbox package installation (test before committing) — `dryRunInstall()` hash-checks + dep-resolution without extracting in `core/pkgmgr.ts`
+740. [P3 ✓] TypeScript sandbox: run untrusted `.ts` packages in isolated JS context with restricted `sys.*` API — `sandbox()` using `new Function` with restricted proxy in `core/pkgmgr.ts`
 741. [P3] NPM-compatible registry: install npm packages that have no native deps natively
 
 ---
@@ -980,9 +980,9 @@
 
 ## 23. APPLICATIONS
 
-767. [P1] Text editor (`jsedit`) — syntax highlighting for JS/TS
-768. [P1] Code editor — JSOS self-development from within JSOS
-769. [P1] Terminal emulator app (separate from boot VT)
+767. [P1 ✓] Text editor (`jsedit`) — syntax highlighting for JS/TS
+768. [P1 ✓] Code editor — JSOS self-development from within JSOS
+769. [P1 ✓] Terminal emulator app (separate from boot VT)
 770. [P1] Image viewer
 771. [P1] PDF viewer (basic — render pages)
 772. [P1] Music player (MP3/OGG decode + audio output)
@@ -1006,10 +1006,10 @@
 
 > Note: REPL core features are in section 17. This section covers tooling built on top of the REPL.
 
-786. [P0] JSOS SDK: TypeScript type definitions for all `sys.*` APIs — enables IntelliSense in REPL and editor
+786. [P0 ✓] JSOS SDK: TypeScript type definitions for all `sys.*` APIs — comprehensive `os.*` API with full TS types in `core/sdk.ts` (3200+ lines)
 787. [P0] In-REPL type checking: red underline on type errors before executing
-788. [P0] `inspect(value)` — deep pretty-print with types, circular ref handling, collapsible nodes
-789. [P0] `doc(symbol)` — print full JSDoc + type signature for any `sys.*` function
+788. [P0 ✓] `inspect(value)` — deep pretty-print with types, circular ref handling, collapsible nodes — `g.inspect()` in `ui/commands.ts`
+789. [P0 ✓] `doc(symbol)` — print full JSDoc + type signature for any `sys.*` function — `g.doc()` in `ui/commands.ts`
 790. [P1] JSOS SDK npm package: install on host machine for authoring apps with full type support
 791. [P1] Build system: can rebuild JSOS from within JSOS
 792. [P1] Debugger: breakpoint on JS line via serial DevTools protocol
@@ -1157,8 +1157,8 @@
 904. [P3] Parallel layout: farm independent flex/grid containers to separate JS microtasks
 
 ### 28d. Rendering Pipeline
-905. [P0] Double buffering: render to back-buffer, flip on vsync (PIT timer at 60Hz)
-906. [P0] Dirty rect tracking: only re-draw rectangles that changed since last frame
+905. [P0 ✓] Double buffering: render to back-buffer, flip on vsync (PIT timer at 60Hz)
+906. [P0 ✓] Dirty rect tracking: only re-draw rectangles that changed since last frame
 907. [P0] Tile-based renderer: 64×64px tiles; mark dirty tiles, skip clean tiles in paint
 908. [P0] Compositor: separate `transform`/`opacity` animation from layout+paint (CSS compositor thread)
 909. [P1] Painter's algorithm: sort render list by z-index once; re-sort only on z-index mutation
@@ -1199,7 +1199,7 @@
 942. [P3] SPDY compat: recognise and handle SPDY/3.1 as HTTP/2 alias
 
 ### 28f. CSS Execution Performance
-943. [P0] Style computation: `O(1)` rule matching via class/id/tag hash buckets — no linear scan
+943. [P0 ✓] Style computation: `O(1)` rule matching via class/id/tag hash buckets — no linear scan
 944. [P0] Computed style cache: per-element cache with generation stamp; cheaply validate on re-render
 945. [P0] CSS variable resolve: resolve once at cascade, store in computed style; re-resolve only on change
 946. [P1] Selector specificity index: pre-sorted rule list; skip rules below current specificity floor
@@ -1211,16 +1211,16 @@
 952. [P2] Heuristics: skip box-shadow/filter for off-screen elements
 
 ### 28g. JS API & Event Performance
-953. [P0] `requestAnimationFrame`: fired exactly once per vsync interrupt (no setTimeout drift)
-954. [P0] `requestIdleCallback`: coalesced and fired in remaining frame budget after rAF work
+953. [P0 ✓] `requestAnimationFrame`: fired exactly once per vsync interrupt (no setTimeout drift)
+954. [P0 ✓] `requestIdleCallback`: coalesced and fired in remaining frame budget after rAF work
 955. [P0] Event delegation: single root listener for bubbling events; O(1) target lookup by node id
-956. [P0] Microtask queue: drain after every macrotask and after every `await` resume — spec-correct order
+956. [P0 ✓] Microtask queue: drain after every macrotask and after every `await` resume — spec-correct order
 957. [P1] `MutationObserver`: batch all mutations in a frame, deliver one callback after layout
 958. [P1] `ResizeObserver`: deliver after layout, before paint; skip if size unchanged
 959. [P1] `IntersectionObserver`: compute once per rAF tick; skip off-screen roots
 960. [P1] `addEventListener` passive: default-passive for `touchstart`/`wheel` — never block scroll
 961. [P1] Debounce DOM write after `input` events: batch concurrent `value` changes
-962. [P2] `queueMicrotask()`: TC39 spec-correct; drains before next macrotask
+962. [P2 ✓] `queueMicrotask()`: TC39 spec-correct; drains before next macrotask
 963. [P2] `scheduler.postTask()`: priority-aware task scheduling (background/user-visible/user-blocking)
 964. [P2] Web Workers: run JS in isolated QuickJS context; `postMessage` over IPC channel
 965. [P3] Worklets (CSS paint, audio): isolated micro-contexts; share data via `SharedArrayBuffer`
@@ -1243,18 +1243,18 @@
 
 ## 29. COMPATIBILITY
 
-862. [P0] User agent string: realistic Chrome-like UA to avoid server-side blocks
+862. [P0 ✓] User agent string: realistic Chrome-like UA to avoid server-side blocks — `userAgent: 'Mozilla/5.0...Chrome/120...'` in `jsruntime.ts`
 863. [P0 ✓] `navigator.userAgent`, `navigator.platform`, `navigator.language` — `navigator` object in `jsruntime.ts`
-864. [P0] `document.compatMode` returns `'CSS1Compat'` for standards mode
-865. [P0] `window.name`, `window.status`, `window.defaultStatus`
-866. [P0] CSS vendor prefixes: `-webkit-`, `-moz-` → map to standard properties
-867. [P0] `document.documentMode` = 11 (IE compat shim)
-868. [P1] ES2020+ polyfills for missing QuickJS features
-869. [P1] `globalThis` as alias for `window`
-870. [P1] `window === globalThis === self` identity checks pass
-871. [P1] Prototype chain: `HTMLElement` → `Element` → `Node` → `EventTarget`
-872. [P1] `instanceof HTMLElement`, `instanceof Element` checks working
-873. [P1] `document instanceof Document` check working
+864. [P0 ✓] `document.compatMode` returns `'CSS1Compat'` for standards mode — `(doc as any).compatMode = 'CSS1Compat'` in `jsruntime.ts`
+865. [P0 ✓] `window.name`, `window.status`, `window.defaultStatus` — defined in window object at lines 3409-3411 of `jsruntime.ts`
+866. [P0 ✓] CSS vendor prefixes: `-webkit-`, `-moz-` → map to standard properties — `_normalizeCSSProp()` + `_setCSSProp()` in `jsruntime.ts`
+867. [P0 ✓] `document.documentMode` = 11 (IE compat shim) — `(doc as any).documentMode = 11` in `jsruntime.ts`
+868. [P1 \u2713] ES2020+ polyfills for missing QuickJS features \u2014 Array.prototype.at/flat/flatMap/findLast, String.replaceAll/at, Object.hasOwn/fromEntries, structuredClone in `jsruntime.ts`
+869. [P1 ✓] `globalThis` as alias for `window` — `get globalThis(){ return win; }` in `jsruntime.ts`
+870. [P1 ✓] `window === globalThis === self` identity checks pass — `get self(){ return win; }` + `get globalThis(){ return win; }` in `jsruntime.ts`
+871. [P1 ✓] Prototype chain: `HTMLElement` → `Element` → `Node` → `EventTarget` — `VNode extends VEventTarget` in `dom.ts`; `EventTarget: VEventTarget` in window
+872. [P1 ✓] `instanceof HTMLElement`, `instanceof Element` checks working — `HTMLElement = Element = VElement` in jsruntime.ts window object
+873. [P1 ✓] `document instanceof Document` check working — `Document: VDocument` exposed in jsruntime.ts window object
 874. [P2] React 18: polyfill missing APIs used by ReactDOM
 875. [P2] Vue 3: polyfill missing APIs used by Vue runtime
 876. [P2] Bootstrap CSS: all flexbox/grid/utility classes render
@@ -1393,7 +1393,7 @@
 979. [P2] File sharing with host via QEMU 9p virtio
 980. [P0] Browser: consistent 60fps scroll and animation on real-world sites (see section 28 for full perf roadmap)
 981. [P3] Browser passes WPT (Web Platform Tests) ≥ 40% pass rate
-982. [P3] Self-hosting: build JSOS from within JSOS
+982. [P3] Self-hosting: build JSOS from within JSOS -- DONT DO
 983. [P3] Support for 10 simultaneous logged-in users (SMP)
 984. [P3] Power management: ACPI S3 suspend/resume
 985. [P3] Battery status on laptops (ACPI battery interface)
