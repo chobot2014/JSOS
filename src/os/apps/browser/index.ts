@@ -37,12 +37,13 @@ import type {
 
 import { parseURL, urlEncode, encodeFormData, decodeBMP, readPNGDimensions, decodeBase64 } from './utils.js';
 import { parseHTML }    from './html.js';
-import { parseStylesheet, type CSSRule, resetCSSVars } from './stylesheet.js';
+import { parseStylesheet, buildSheetIndex, type CSSRule, type RuleIndex, resetCSSVars } from './stylesheet.js';
 import { decodePNG }    from './img-png.js';
 import { decodeJPEG }   from './img-jpeg.js';
 import { layoutNodes }  from './layout.js';
 import { aboutJsosHTML, errorHTML, jsonViewerHTML } from './pages.js';
 import { createPageJS, type PageJS } from './jsruntime.js';
+import { flushAllCaches } from './cache.js';
 
 // ── TabState — per-tab browseable snapshot ────────────────────────────────────
 
@@ -1110,6 +1111,9 @@ export class BrowserApp implements App {
   // ── Navigation ────────────────────────────────────────────────────────────
 
   private _navigate(url: string): void {
+    // Flush all per-page caches (layout, styles, images) before loading new page
+    flushAllCaches();
+    resetCSSVars();
     this._histIdx++;
     this._history.splice(this._histIdx);
     this._history.push({ url, title: url });

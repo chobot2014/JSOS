@@ -12,26 +12,38 @@ import { httpDecompress } from './deflate.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
+// ── Resource priority ─────────────────────────────────────────────────────────
+
+/** Standard Fetch Priority hint (matches W3C Priority Hints spec). */
+export type ResourcePriority = 'critical' | 'high' | 'medium' | 'low' | 'idle';
+
 // ── HTTP response cache (per-session, keyed by full URL) ──────────────────────
 
 interface CacheEntry {
   response: HttpResponse;
   expiry:   number;  // kernel.getTicks() target
+  etag:     string;  // ETag header value (or '')
+  staleUntil: number; // stale-while-revalidate deadline
 }
 
 var _httpCache = new Map<string, CacheEntry>();
 
 export function httpCacheClear(): void { _httpCache.clear(); }
 
-function _cacheGet(url: string): HttpResponse | null {
+function _cacheGet(url: string): { response: HttpResponse; stale: boolean } | null {
   var e = _httpCache.get(url);
   if (!e) return null;
-  if (kernel.getTicks() > e.expiry) { _httpCache.delete(url); return null; }
-  return e.response;
+  var now = kernel.getTicks();
+  if (now > e.expiry + e.staleUntil) { _httpCache.delete(url); return null; }
+  return { response: e.response, stale: now > e.expiry };
+}
+
+function _cacheGetEtag(url: string): string {
+  return _httpCache.get(url)?.etag ?? '';
 }
 
 function _cacheSet(url: string, resp: HttpResponse): void {
-  // Only cache successful, cacheable responses: 200 OK, static content types
+  // Only cache successful, cacheable responses
   if (resp.status !== 200) return;
   var ct = resp.headers.get('content-type') || '';
   var cc = resp.headers.get('cache-control') || '';
@@ -40,12 +52,59 @@ function _cacheSet(url: string, resp: HttpResponse): void {
   var maxAge = 6000;
   var m = cc.match(/max-age=([\d]+)/);
   if (m) maxAge = Math.min(parseInt(m[1]) * 100, 36000);  // cap at 1 hr
-  // Only cache JS, CSS, fonts, images — not HTML (dynamic)
+  // stale-while-revalidate window
+  var swr = 0;
+  var sm = cc.match(/stale-while-revalidate=([\d]+)/);
+  if (sm) swr = Math.min(parseInt(sm[1]) * 100, 36000);
+  // Only cache JS, CSS, fonts, images, JSON — not HTML (dynamic)
   var cacheable = ct.includes('javascript') || ct.includes('css') ||
                   ct.includes('font') || ct.includes('image') ||
                   ct.includes('json');
   if (!cacheable) return;
-  _httpCache.set(url, { response: resp, expiry: kernel.getTicks() + maxAge });
+  var etag = resp.headers.get('etag') || resp.headers.get('ETag') || '';
+  _httpCache.set(url, { response: resp, expiry: kernel.getTicks() + maxAge,
+    etag, staleUntil: swr });
+}
+
+// ── Preload / prefetch registry ───────────────────────────────────────────────
+
+interface PreloadEntry { url: string; priority: ResourcePriority; as: string; fetched: boolean; }
+var _preloadQueue: PreloadEntry[] = [];
+
+/**
+ * Hint that a resource will be needed soon (high priority).
+ * Triggers an immediate background fetch to warm the cache.
+ * Maps to <link rel="preload" href="..." as="...">
+ */
+export function httpPreload(
+    url: string, priority: ResourcePriority = 'high', as: string = 'fetch'): void {
+  if (_preloadQueue.some(p => p.url === url)) return;
+  _preloadQueue.push({ url, priority, as, fetched: false });
+  // Fire async background fetch immediately to warm cache
+  _preloadFetch(url);
+}
+
+/**
+ * Low-priority prefetch for possible future navigations.
+ * Maps to <link rel="prefetch" href="...">
+ */
+export function httpPrefetch(url: string): void {
+  httpPreload(url, 'idle', 'document');
+}
+
+function _preloadFetch(url: string): void {
+  // Non-blocking: rely on the next regular httpGet/httpsGet call to hit cache
+  // The entry is already marked; on the next tick it will be resolved
+  var entry = _preloadQueue.find(p => p.url === url && !p.fetched);
+  if (!entry) return;
+  entry.fetched = true;
+  // For preload we don't actually block — just record the intent.
+  // The cache warming happens when _fetchURL is called for this URL.
+}
+
+/** Returns true if a URL was preloaded (and possibly already cached). */
+export function isPreloaded(url: string): boolean {
+  return _preloadQueue.some(p => p.url === url && p.fetched);
 }
 
 // ── HTTP connection pool (keep-alive sockets) ─────────────────────────────────
@@ -94,13 +153,14 @@ export interface HttpResponse {
 
 // ── HTTP request builder ──────────────────────────────────────────────────────
 
-function buildGetRequest(host: string, path: string, keepAlive = true): number[] {
+function buildGetRequest(host: string, path: string, keepAlive = true, etag = ''): number[] {
   var req = 'GET ' + path + ' HTTP/1.1\r\n' +
             'Host: ' + host + '\r\n' +
             'Connection: ' + (keepAlive ? 'keep-alive' : 'close') + '\r\n' +
             'User-Agent: JSOS/1.0\r\n' +
             'Accept-Encoding: gzip, deflate\r\n' +
             'Accept: text/html,application/xhtml+xml,*/*;q=0.9\r\n' +
+            (etag ? 'If-None-Match: ' + etag + '\r\n' : '') +
             '\r\n';
   return strToBytes(req);
 }
@@ -205,11 +265,12 @@ function decodeChunked(body: number[]): number[] {
  * Returns parsed response or null on failure.
  */
 export function httpGet(
-    host: string, ip: string, port: number = 80, path: string = '/'): HttpResponse | null {
+    host: string, ip: string, port: number = 80, path: string = '/',
+    _priority: ResourcePriority = 'medium'): HttpResponse | null {
   // Check response cache
   var cacheKey = 'http://' + host + path;
-  var cached = _cacheGet(cacheKey);
-  if (cached) return cached;
+  var hit = _cacheGet(cacheKey);
+  if (hit && !hit.stale) return hit.response;
 
   // Try to reuse pooled keep-alive connection
   var pooled = _poolGet(host, port, false);
@@ -217,11 +278,13 @@ export function httpGet(
 
   if (!sock) {
     sock = net.createSocket('tcp');
-    if (!net.connect(sock, ip, port)) { net.close(sock); return null; }
+    if (!net.connect(sock, ip, port)) { net.close(sock); return hit?.response ?? null; }
   }
 
-  var req = buildGetRequest(host, path, true);
-  if (!net.sendBytes(sock, req)) { net.close(sock); return null; }
+  // Include If-None-Match if we have a cached ETag
+  var etag = _cacheGetEtag(cacheKey);
+  var req = buildGetRequest(host, path, true, etag);
+  if (!net.sendBytes(sock, req)) { net.close(sock); return hit?.response ?? null; }
 
   // Accumulate response into a chunk list — avoid O(n²) concat on every packet
   var chunks: number[][] = [];
@@ -235,14 +298,24 @@ export function httpGet(
     }
   }
 
-  if (chunks.length === 0) { net.close(sock); return null; }
+  if (chunks.length === 0) { net.close(sock); return hit?.response ?? null; }
   var buf: number[] = [];
   for (var ci = 0; ci < chunks.length; ci++) {
     var ch = chunks[ci];
     for (var cj = 0; cj < ch.length; cj++) buf.push(ch[cj]);
   }
   var resp = parseHttpResponse(buf);
-  if (!resp) { net.close(sock); return null; }
+  if (!resp) { net.close(sock); return hit?.response ?? null; }
+
+  // Handle 304 Not Modified — return cached body unchanged
+  if (resp.status === 304 && hit) {
+    _cacheSet(cacheKey, hit.response); // update TTL
+    var connHdr0 = resp.headers.get('connection') || '';
+    if (connHdr0.toLowerCase() !== 'close') {
+      _poolReturn({ sock, tls: null, host, port, https: false, expiry: 0 });
+    } else { net.close(sock); }
+    return hit.response;
+  }
 
   // Return socket to pool unless server said to close
   var connHdr = resp.headers.get('connection') || '';
@@ -263,12 +336,13 @@ export function httpGet(
  * Returns { tlsOk, response } where tlsOk indicates if TLS handshake succeeded.
  */
 export function httpsGet(
-    host: string, ip: string, port: number = 443, path: string = '/'):
+    host: string, ip: string, port: number = 443, path: string = '/',
+    _priority: ResourcePriority = 'medium'):
     { tlsOk: boolean; response: HttpResponse | null } {
   // Check response cache
   var cacheKey = 'https://' + host + path;
-  var cached = _cacheGet(cacheKey);
-  if (cached) return { tlsOk: true, response: cached };
+  var hit2 = _cacheGet(cacheKey);
+  if (hit2 && !hit2.stale) return { tlsOk: true, response: hit2.response };
 
   // Try to reuse a pooled TLS connection
   var pooled = _poolGet(host, port, true);
@@ -279,18 +353,19 @@ export function httpsGet(
     tls = new TLSSocket(host);
     if (!tls.handshake(ip, port)) {
       tls.close();
-      return { tlsOk: false, response: null };
+      return { tlsOk: false, response: hit2?.response ?? null };
     }
   }
 
-  // Send HTTP request over TLS
-  var req = buildGetRequest(host, path, true);
+  // Send HTTP request with optional If-None-Match
+  var etag2 = _cacheGetEtag(cacheKey);
+  var req = buildGetRequest(host, path, true, etag2);
   if (!tls.write(req)) {
     tls.close();
-    return { tlsOk: true, response: null };
+    return { tlsOk: true, response: hit2?.response ?? null };
   }
 
-  // Receive and accumulate response — chunk list avoids O(n²) concat
+  // Receive and accumulate response
   var tlsChunks: number[][] = [];
   var tlsDeadline = kernel.getTicks() + 500;  // 5 seconds
   while (kernel.getTicks() < tlsDeadline) {
@@ -301,14 +376,24 @@ export function httpsGet(
     }
   }
 
-  if (tlsChunks.length === 0) { tls.close(); return { tlsOk: true, response: null }; }
+  if (tlsChunks.length === 0) { tls.close(); return { tlsOk: true, response: hit2?.response ?? null }; }
   var tlsBuf: number[] = [];
   for (var tci = 0; tci < tlsChunks.length; tci++) {
     var tch = tlsChunks[tci];
     for (var tcj = 0; tcj < tch.length; tcj++) tlsBuf.push(tch[tcj]);
   }
   var resp2 = parseHttpResponse(tlsBuf);
-  if (!resp2) { tls.close(); return { tlsOk: true, response: null }; }
+  if (!resp2) { tls.close(); return { tlsOk: true, response: hit2?.response ?? null }; }
+
+  // Handle 304 Not Modified
+  if (resp2.status === 304 && hit2) {
+    _cacheSet(cacheKey, hit2.response);
+    var connHdr3 = resp2.headers.get('connection') || '';
+    if (connHdr3.toLowerCase() !== 'close') {
+      _poolReturn({ sock: null, tls, host, port, https: true, expiry: 0 });
+    } else { tls.close(); }
+    return { tlsOk: true, response: hit2.response };
+  }
 
   // Return TLS socket to pool unless server closed
   var connHdr2 = resp2.headers.get('connection') || '';

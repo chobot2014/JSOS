@@ -19,6 +19,8 @@ import {
   VDocument, VElement, VEvent, VText,
   buildDOM, serializeDOM, _walk,
 } from './dom.js';
+import { BrowserPerformance, BrowserPerformanceObserver } from './perf.js';
+import { WorkerImpl, MessageChannel, BroadcastChannelImpl, tickAllWorkers } from './workers.js';
 
 // ── Script record (collected by html.ts during parsing) ───────────────────────
 
@@ -127,7 +129,14 @@ export function createPageJS(
 
   // Mutation flag — reset after re-render check
   var needsRerender = false;
-  function checkDirty(): void { if (doc._dirty) { doc._dirty = false; needsRerender = true; } }
+  function checkDirty(): void {
+    if (doc._dirty) {
+      doc._dirty = false;
+      needsRerender = true;
+      // Flush mutation observers with a synthetic mutation record
+      _flushMutationObservers([{ type: 'childList', target: doc, addedNodes: [], removedNodes: [] }]);
+    }
+  }
 
   // Re-render helper
   function doRerender(): void {
@@ -285,33 +294,100 @@ export function createPageJS(
     parse(url: string, base?: string): URL | null { try { return new URL(url, base); } catch(_) { return null; } },
   };
 
-  // ── MutationObserver (stub) ───────────────────────────────────────────────
+  // ── MutationObserver ─────────────────────────────────────────────────────
 
-  class MutationObserver {
-    _fn: (mutations: unknown[]) => void;
-    constructor(fn: (mutations: unknown[]) => void) { this._fn = fn; }
-    observe(_node: unknown, _opts?: unknown): void {}
-    disconnect(): void {}
-    takeRecords(): unknown[] { return []; }
+  var _mutationObservers: MutationObserverImpl[] = [];
+
+  class MutationObserverImpl {
+    _fn:      (mutations: unknown[], obs: MutationObserverImpl) => void;
+    _records: unknown[] = [];
+    _active   = false;
+    constructor(fn: (mutations: unknown[], obs: MutationObserverImpl) => void) { this._fn = fn; }
+    observe(_node: unknown, _opts?: unknown): void { this._active = true; _mutationObservers.push(this); }
+    disconnect(): void {
+      this._active = false;
+      var i = _mutationObservers.indexOf(this);
+      if (i >= 0) _mutationObservers.splice(i, 1);
+    }
+    takeRecords(): unknown[] { var r = this._records; this._records = []; return r; }
+    _flush(): void {
+      if (!this._active || this._records.length === 0) return;
+      var r = this._records; this._records = [];
+      try { this._fn(r, this); } catch (_) {}
+    }
+    _record(rec: unknown): void { this._records.push(rec); }
   }
 
-  // ── IntersectionObserver (stub) ───────────────────────────────────────────
-
-  class IntersectionObserver {
-    constructor(_fn: unknown, _opts?: unknown) {}
-    observe(_el: unknown): void {}
-    unobserve(_el: unknown): void {}
-    disconnect(): void {}
+  function _flushMutationObservers(mutations: unknown[]): void {
+    if (_mutationObservers.length === 0 || mutations.length === 0) return;
+    for (var o of _mutationObservers) {
+      for (var m of mutations) o._record(m);
+      o._flush();
+    }
   }
 
-  // ── ResizeObserver (stub) ─────────────────────────────────────────────────
+  // ── IntersectionObserver ─────────────────────────────────────────────────
 
-  class ResizeObserver {
-    constructor(_fn: unknown) {}
-    observe(_el: unknown): void {}
-    unobserve(_el: unknown): void {}
-    disconnect(): void {}
+  class IntersectionObserverImpl {
+    _fn:       (entries: unknown[], obs: IntersectionObserverImpl) => void;
+    _elements: VElement[] = [];
+    _threshold: number;
+    constructor(fn: (entries: unknown[], obs: IntersectionObserverImpl) => void, opts?: { threshold?: number }) {
+      this._fn = fn; this._threshold = opts?.threshold ?? 0;
+    }
+    observe(el: unknown): void   { if (el instanceof VElement) this._elements.push(el); }
+    unobserve(el: unknown): void { this._elements = this._elements.filter(e => e !== el); }
+    disconnect(): void           { this._elements = []; }
+    /** Called by tick to fire entries for elements that have entered the viewport. */
+    _tick(viewportH: number): void {
+      if (this._elements.length === 0) return;
+      var entries: unknown[] = [];
+      for (var el of this._elements) {
+        var rect = el.getBoundingClientRect?.() ?? { top: 0, bottom: 0, height: 0, width: 0, left: 0, right: 0 };
+        var intersecting = rect.bottom > 0 && rect.top < viewportH;
+        entries.push({
+          isIntersecting: intersecting,
+          intersectionRatio: intersecting ? 1 : 0,
+          boundingClientRect: rect,
+          intersectionRect:   rect,
+          rootBounds:         { top: 0, left: 0, bottom: viewportH, right: 1024, width: 1024, height: viewportH },
+          target: el,
+          time: _perf.now(),
+        });
+      }
+      if (entries.length > 0) try { this._fn(entries, this); } catch (_) {}
+    }
   }
+
+  var _ioObservers: IntersectionObserverImpl[] = [];
+
+  // ── ResizeObserver ────────────────────────────────────────────────────────
+
+  class ResizeObserverImpl {
+    _fn:       (entries: unknown[]) => void;
+    _elements: VElement[] = [];
+    _lastSizes = new WeakMap<VElement, { w: number; h: number }>();
+    constructor(fn: (entries: unknown[]) => void) { this._fn = fn; }
+    observe(el: unknown): void   { if (el instanceof VElement) this._elements.push(el); }
+    unobserve(el: unknown): void { this._elements = this._elements.filter(e => e !== el); }
+    disconnect(): void           { this._elements = []; }
+    _tick(): void {
+      var entries: unknown[] = [];
+      for (var el of this._elements) {
+        var r = el.getBoundingClientRect?.() ?? { width: 0, height: 0, top: 0, left: 0 };
+        var prev = this._lastSizes.get(el);
+        if (!prev || prev.w !== r.width || prev.h !== r.height) {
+          this._lastSizes.set(el, { w: r.width, h: r.height });
+          entries.push({ target: el, contentRect: r,
+            borderBoxSize: [{ inlineSize: r.width, blockSize: r.height }],
+            contentBoxSize:[{ inlineSize: r.width, blockSize: r.height }] });
+        }
+      }
+      if (entries.length > 0) try { this._fn(entries); } catch (_) {}
+    }
+  }
+
+  var _roObservers: ResizeObserverImpl[] = [];
 
   // ── window.getComputedStyle stub ──────────────────────────────────────────
 
@@ -332,10 +408,41 @@ export function createPageJS(
   function requestAnimationFrame(fn: (ts: number) => void): number { var id = rafSeq++; rafCallbacks.push({ id, fn }); return id; }
   function cancelAnimationFrame(id: number): void { rafCallbacks = rafCallbacks.filter(r => r.id !== id); }
 
-  // ── Performance ───────────────────────────────────────────────────────────
+  // ── Performance (real W3C Performance Timeline) ──────────────────────────
 
-  var _t0 = Date.now();
-  var performance = { now(): number { return Date.now() - _t0; }, mark() {}, measure() {}, getEntriesByName() { return []; }, getEntriesByType() { return []; } };
+  var _perf = new BrowserPerformance();
+  var performance: BrowserPerformance = _perf;
+
+  // ── Microtask queue ───────────────────────────────────────────────────────
+  // True microtask ordering: drain before each macrotask fires.
+
+  var _microtaskQueue: Array<() => void> = [];
+
+  function queueMicrotask_(fn: () => void): void { _microtaskQueue.push(fn); }
+
+  function _drainMicrotasks(): void {
+    var limit = 1000;
+    while (_microtaskQueue.length > 0 && limit-- > 0) {
+      var fn = _microtaskQueue.shift()!;
+      try { fn(); } catch (_) {}
+    }
+  }
+
+  // ── Scheduler (postTask) ──────────────────────────────────────────────────
+
+  var scheduler = {
+    postTask(fn: () => void, opts?: { priority?: string; delay?: number }): Promise<void> {
+      var delay = opts?.delay ?? 0;
+      return new Promise<void>((resolve, reject) => {
+        setTimeout_(() => {
+          try { fn(); resolve(); } catch (e) { reject(e); }
+        }, delay);
+      });
+    },
+    yield(): Promise<void> {
+      return new Promise<void>(resolve => setTimeout_(resolve, 0));
+    },
+  };
 
   // ── window.crypto (basic) ─────────────────────────────────────────────────
 
@@ -475,9 +582,13 @@ export function createPageJS(
     // DOM constructors
     Event:              VEvent,
     CustomEvent,
-    MutationObserver,
-    IntersectionObserver,
-    ResizeObserver,
+    MutationObserver:    MutationObserverImpl,
+    IntersectionObserver: IntersectionObserverImpl,
+    ResizeObserver:       ResizeObserverImpl,
+    PerformanceObserver:  BrowserPerformanceObserver,
+    Worker:               WorkerImpl,
+    MessageChannel,
+    BroadcastChannel:     BroadcastChannelImpl,
     DOMParser,
     TextEncoder: TextEncoder_,
     TextDecoder: TextDecoder_,
@@ -549,7 +660,8 @@ export function createPageJS(
       if (bits > 0) out += chars[(buf << (6 - bits)) & 63];
       while (out.length % 4) out += '='; return out;
     },
-    queueMicrotask: (fn: () => void) => setTimeout_( fn, 0),
+    queueMicrotask: queueMicrotask_,
+    scheduler,
     structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
   };
 
@@ -721,25 +833,38 @@ export function createPageJS(
     },
     tick(nowMs: number): void {
       if (disposed) return;
+      var frameStart = _perf.now();
       // Fire RAF callbacks
       if (rafCallbacks.length) {
         var cbs = rafCallbacks.splice(0);
-        for (var r of cbs) { try { r.fn(nowMs); } catch(_) {} }
+        for (var r of cbs) {
+          try { r.fn(nowMs); } catch(_) {}
+          _drainMicrotasks();
+        }
         checkDirty();
       }
-      // Fire elapsed timers
+      // Fire elapsed timers (drain microtasks after each)
       var elapsed = nowMs;
       var fired = false;
       for (var i = timers.length - 1; i >= 0; i--) {
         var t = timers[i];
         if (elapsed >= t.fireAt) {
           try { t.fn(); } catch(_) {}
+          _drainMicrotasks();
           if (t.interval) { t.fireAt = elapsed + t.delay; }
           else { timers.splice(i, 1); }
           fired = true;
         }
       }
       if (fired) { checkDirty(); if (needsRerender) doRerender(); }
+      // Pump Intersection and Resize Observers
+      var viewH = 768;
+      for (var io of _ioObservers) io._tick(viewH);
+      for (var ro of _roObservers) ro._tick();
+      // Pump all Web Workers
+      tickAllWorkers();
+      // Record frame timing
+      _perf.recordFrame(frameStart, _perf.now() - frameStart);
     },
   };
 }

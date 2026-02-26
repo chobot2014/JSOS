@@ -20,8 +20,10 @@
 
 import type { CSSProps } from './types.js';
 import { parseCSSColor, parseInlineStyle, registerCSSVarBlock, resolveCSSVars, resetCSSVars } from './css.js';
+import { buildRuleIndex, candidateRules, type RuleIndex } from './cache.js';
 
 export { resetCSSVars };
+export type { RuleIndex };
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -300,6 +302,7 @@ function splitSelectors(sel: string): string[] {
  *  - inherited     — inherited CSSProps from parent (color, font-weight etc.)
  *  - sheets        — sorted stylesheet rules (in source order)
  *  - inlineStyle   — inline style="" attribute string (highest priority)
+ *  - index         — optional pre-built rule index for O(1) pre-filtering
  *
  * Returns merged CSSProps from: UA defaults → sheet rules (spec-sorted) → inline
  */
@@ -311,6 +314,7 @@ export function computeElementStyle(
   inherited:   CSSProps,
   sheets:      CSSRule[],
   inlineStyle: string,
+  index?:      RuleIndex,
 ): CSSProps {
   // Start with inherited properties
   var result: CSSProps = {
@@ -320,13 +324,20 @@ export function computeElementStyle(
     align:  inherited.align,
   };
 
+  // Choose candidate set: indexed fast-path or full linear scan
+  var candidates: CSSRule[] = index
+    ? candidateRules(index, tag, id, cls)
+    : sheets;
+
   // Collect matching rules
   var matches: { props: CSSProps; spec: number; order: number }[] = [];
-  for (var ri = 0; ri < sheets.length; ri++) {
-    var rule = sheets[ri]!;
+  for (var ri = 0; ri < candidates.length; ri++) {
+    var rule = candidates[ri]!;
     for (var si = 0; si < rule.sels.length; si++) {
       if (matchesSingleSel(tag, id, cls, attrs, rule.sels[si]!)) {
-        matches.push({ props: rule.props, spec: rule.spec, order: ri });
+        // Preserve source order index (must use original sheets array when indexed)
+        var srcOrder = index ? sheets.indexOf(rule) : ri;
+        matches.push({ props: rule.props, spec: rule.spec, order: srcOrder });
         break;
       }
     }
@@ -346,6 +357,17 @@ export function computeElementStyle(
   }
 
   return result;
+}
+
+// ── Index helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Build a rule index for the given sheet rules.
+ * The index allows O(1) pre-filtering of candidate rules per element,
+ * reducing CSS matching from O(rules) to O(candidates).
+ */
+export function buildSheetIndex(rules: CSSRule[]): RuleIndex {
+  return buildRuleIndex(rules);
 }
 
 function mergeProps(target: CSSProps, src: CSSProps): void {

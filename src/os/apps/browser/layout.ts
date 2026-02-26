@@ -7,6 +7,7 @@ import {
   CLR_DEL, CLR_MARK_TXT, CLR_PRE_TXT, CLR_H1, CLR_H2, CLR_H3,
   CLR_QUOTE_TXT,
 } from './constants.js';
+import { getLayoutCache, setLayoutCache, layoutFingerprint } from './cache.js';
 
 // ── Inline word-flow layout ───────────────────────────────────────────────────
 
@@ -98,6 +99,20 @@ export function flowSpans(
 var _widgetCounter = 0;
 
 export function layoutNodes(
+  nodes:    RenderNode[],
+  bps:      WidgetBlueprint[],
+  contentW: number
+): LayoutResult {
+  // ─ Cache check ─
+  var fp  = layoutFingerprint(nodes, contentW);
+  var hit = getLayoutCache(fp);
+  if (hit) return hit;
+  var result = _layoutNodesImpl(nodes, bps, contentW);
+  setLayoutCache(fp, result);
+  return result;
+}
+
+function _layoutNodesImpl(
   nodes:    RenderNode[],
   bps:      WidgetBlueprint[],
   contentW: number
