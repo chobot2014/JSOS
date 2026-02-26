@@ -276,13 +276,42 @@ export class VStyleMap {
   _owner: VElement;
   constructor(owner: VElement) { this._owner = owner; }
   setProperty(prop: string, val: string, _priority?: string): void {
-    this._map.set(prop.trim(), val.trim());
+    var p = prop.trim(), v = val.trim();
+    this._map.set(p, v);
+    // Vendor prefix bi-directional aliasing (item 866):
+    //  • Setting -webkit-X / -moz-X / -ms-X also sets canonical X
+    //  • Setting canonical X also sets -webkit-X so old WebKit checks don't break
+    var _vendors = ['-webkit-', '-moz-', '-ms-', '-o-'];
+    var _toStd: string | null = null;
+    for (var _vp of _vendors) {
+      if (p.startsWith(_vp)) { _toStd = p.slice(_vp.length); break; }
+    }
+    if (_toStd !== null) {
+      if (!this._map.has(_toStd)) this._map.set(_toStd, v);
+    } else if (!p.startsWith('-')) {
+      var _wk = '-webkit-' + p;
+      if (!this._map.has(_wk)) this._map.set(_wk, v);
+    }
     if (this._owner.ownerDocument) {
       this._owner.ownerDocument._dirty = true;
       this._owner.ownerDocument._queueMutation({ type: 'attributes', target: this._owner, attributeName: 'style', attributeNamespace: null, oldValue: null });
     }
   }
-  getPropertyValue(prop: string): string { return this._map.get(prop.trim()) || ''; }
+  getPropertyValue(prop: string): string {
+    var p = prop.trim();
+    var r = this._map.get(p);
+    if (r !== undefined) return r;
+    // Fallback: try vendor-prefix variants
+    var _vendors2 = ['-webkit-', '-moz-', '-ms-', '-o-'];
+    for (var _vp2 of _vendors2) {
+      if (p.startsWith(_vp2)) {
+        r = this._map.get(p.slice(_vp2.length)); if (r !== undefined) return r;
+      } else {
+        r = this._map.get(_vp2 + p); if (r !== undefined) return r;
+      }
+    }
+    return '';
+  }
   getPropertyPriority(_prop: string): string { return ''; }  // !important not tracked
   removeProperty(prop: string): string {
     var old = this._map.get(prop.trim()) || '';
@@ -1184,6 +1213,7 @@ export class VDocument extends VNode {
   get charset(): string { return 'UTF-8'; }
   get inputEncoding(): string { return 'UTF-8'; }
   get compatMode(): string { return 'CSS1Compat'; }  // always standards mode
+  get documentMode(): number { return 11; }           // IE compat shim (item 867)
   get forms(): VElement[] { return this.querySelectorAll('form'); }
   get images(): VElement[] { return this.querySelectorAll('img'); }
   get links(): VElement[] { return this.querySelectorAll('a[href],area[href]'); }

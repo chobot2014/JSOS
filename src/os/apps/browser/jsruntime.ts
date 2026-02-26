@@ -16,7 +16,7 @@
 import { os } from '../../core/sdk.js';
 import type { FetchResponse } from '../../core/sdk.js';
 import {
-  VDocument, VElement, VEvent, VText,
+  VDocument, VElement, VEvent, VNode, VText,
   buildDOM, serializeDOM, _serializeEl, _walk, _matchSel,
 } from './dom.js';
 import { BrowserPerformance, BrowserPerformanceObserver } from './perf.js';
@@ -85,6 +85,8 @@ interface TimerEntry {
 class VStorage {
   _data: Map<string, string> = new Map();
   _path: string = '';   // set to VFS path to enable persistence
+  /** Called with (key, oldValue, newValue) when items change; null for clear(). */
+  _listener: ((key: string | null, old: string | null, nxt: string | null) => void) | null = null;
 
   /** Load from VFS. Silently no-ops if path not set or file missing. */
   _load(): void {
@@ -116,10 +118,23 @@ class VStorage {
   }
 
   get length(): number { return this._data.size; }
-  setItem(k: string, v: string): void { this._data.set(String(k), String(v)); this._save(); }
+  setItem(k: string, v: string): void {
+    var sk = String(k), sv = String(v);
+    var old = this._data.get(sk) ?? null;
+    this._data.set(sk, sv); this._save();
+    if (old !== sv) try { this._listener?.(sk, old, sv); } catch (_) {}
+  }
   getItem(k: string): string | null { return this._data.get(String(k)) ?? null; }
-  removeItem(k: string): void { this._data.delete(String(k)); this._save(); }
-  clear(): void { this._data.clear(); this._save(); }
+  removeItem(k: string): void {
+    var sk = String(k);
+    var old = this._data.get(sk) ?? null;
+    this._data.delete(sk); this._save();
+    if (old !== null) try { this._listener?.(sk, old, null); } catch (_) {}
+  }
+  clear(): void {
+    this._data.clear(); this._save();
+    try { this._listener?.(null, null, null); } catch (_) {}
+  }
   key(n: number): string | null { return [...this._data.keys()][n] ?? null; }
 }
 
@@ -262,6 +277,10 @@ export function createPageJS(
 
   // ── window.location ────────────────────────────────────────────────────────
 
+  // ── window.location ───────────────────────────────────────────────────────
+
+  var _locationHashOverride: string | null = null;   // set when page JS changes hash directly
+
   var location = {
     get href(): string { return cb.baseURL; },
     set href(v: string) { cb.navigate(v); },
@@ -273,7 +292,25 @@ export function createPageJS(
     get protocol(): string { try { return new URL(cb.baseURL).protocol; } catch(_) { return 'http:'; } },
     get host():     string { try { return new URL(cb.baseURL).host;     } catch(_) { return ''; } },
     get search():   string { try { return new URL(cb.baseURL).search;   } catch(_) { return ''; } },
-    get hash():     string { try { return new URL(cb.baseURL).hash;     } catch(_) { return ''; } },
+    get hash():     string {
+      if (_locationHashOverride !== null) return _locationHashOverride;
+      try { return new URL(cb.baseURL).hash; } catch(_) { return ''; }
+    },
+    set hash(v: string) {
+      var oldHash = location.hash;
+      var newHash = v ? (v.startsWith('#') ? v : '#' + v) : '';
+      _locationHashOverride = newHash;
+      if (oldHash !== newHash) {
+        var base = cb.baseURL.replace(/#.*$/, '');
+        var oldURL = base + oldHash;
+        var newURL = base + newHash;
+        // HashChangeEvent defined later in createPageJS; captured by closure, valid at call time
+        try {
+          var hcev = new HashChangeEvent('hashchange', { bubbles: false, cancelable: false, oldURL, newURL });
+          (win['dispatchEvent'] as (e: VEvent) => void)(hcev);
+        } catch (_) {}
+      }
+    },
     get port():     string { try { return new URL(cb.baseURL).port;     } catch(_) { return ''; } },
     get origin():   string { try { return new URL(cb.baseURL).origin;   } catch(_) { return 'null'; } },
     toString():     string { return cb.baseURL; },
@@ -343,7 +380,16 @@ export function createPageJS(
       getRegistrations(): Promise<unknown[]> { return Promise.resolve([]); },
       addEventListener() {}, removeEventListener() {},
     },
-    sendBeacon() { return false; },
+    sendBeacon(url: string, data?: unknown): boolean {
+      try {
+        // Fire-and-forget POST; fetchAPI is defined later in closure but valid at call time
+        var beaconURL = url ? _resolveURL(url, _baseHref) : '';
+        if (!beaconURL) return false;
+        var body = (data == null) ? undefined : (typeof data === 'string' ? data : JSON.stringify(data));
+        os.fetchAsync(beaconURL, () => {}, { method: 'POST', body: body ?? '', headers: { 'Content-Type': 'text/plain' } });
+        return true;
+      } catch (_) { return false; }
+    },
     vibrate()   { return false; },
     share(_d?: unknown): Promise<void> { return Promise.reject(new Error('Not supported')); },
     canShare(_d?: unknown): boolean { return false; },
@@ -2939,8 +2985,9 @@ export function createPageJS(
     HTMLVideoElement:    VElement,
     HTMLAudioElement:    VElement,
     HTMLCanvasElement2:  VElement,
-    Node:                VElement,
+    Node:                VNode,        // base class for Element, Document, Text, etc.
     Element:             VElement,
+    Document:            VDocument,    // document instanceof Document checks (item 873)
     HTMLCollection:      Array,
     NodeList:            Array,
     DocumentFragment:    DocumentFragment_,
@@ -3143,6 +3190,20 @@ export function createPageJS(
     cancelIdleCallback,
     structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
   };
+
+  // ── Wire localStorage/sessionStorage → `storage` events (item 500) ────────
+  function _makeStorageListener(area: VStorage): (key: string | null, old: string | null, nxt: string | null) => void {
+    return (key: string | null, old: string | null, nxt: string | null) => {
+      var ev = new StorageEvent('storage', {
+        bubbles: false, cancelable: false,
+        key, oldValue: old, newValue: nxt,
+        url: cb.baseURL, storageArea: area,
+      });
+      try { (win['dispatchEvent'] as (e: VEvent) => void)(ev); } catch (_) {}
+    };
+  }
+  _localStorage._listener   = _makeStorageListener(_localStorage);
+  _sessionStorage._listener = _makeStorageListener(_sessionStorage);
 
   // ── Patch doc.createElement to return HTMLCanvas for <canvas> ─────────────
 
