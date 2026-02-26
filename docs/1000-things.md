@@ -842,8 +842,8 @@
 703. [P1 ✓] `diff(pathA, pathB)` — returns unified diff string — `g.diff` in `ui/commands.ts`
 704. [P1 ✓] `chmod(path, mode)` — change permissions — `g.chmod` in `ui/commands.ts`
 705. [P1 ✓] `chown(path, user, group?)` — change owner — `g.chown` in `ui/commands.ts`
-706. [P1] `mount(device, path, fstype)` — mount filesystem
-707. [P1] `umount(path)` — unmount
+706. [P1 ✓] `mount(device, path, fstype)` — mount filesystem — `g.mount` in `ui/commands.ts`; `os.fs.mount()` in sdk.ts; `mountVFS` in `fs/filesystem.ts`
+707. [P1 ✓] `umount(path)` — unmount — `g.umount` in `ui/commands.ts`; `os.fs.umount()` in sdk.ts; `unmountVFS` added to `fs/filesystem.ts`
 708. [P2] `watch(path, callback)` — inotify-backed file watcher
 709. [P2] `zip(src, dst)` / `unzip(src, dst)` — archive helpers
 710. [P2] `tar(src, dst)` / `untar(src, dst)` — tar helpers
@@ -862,7 +862,7 @@
 719. [P0 ✓] `fetch(url, opts?)` — standard Fetch API, awaitable at top level — `g.fetch` blocking wrapper over `os.fetchAsync` in `ui/commands.ts`
 720. [P0 ✓] `dns.lookup(host)` — DNS resolve, returns IP(s) — `g.dns.lookup` using `dnsResolve()` in `ui/commands.ts`
 721. [P0 ✓] `ifconfig()` — list network interfaces with IP, MAC, state — `g.ifconfig` in `ui/commands.ts`
-722. [P1] `traceroute(host)` — ICMP TTL probe, returns hop list
+722. [P1 ✓] `traceroute(host)` — ICMP TTL probe, returns hop list — `g.traceroute` in `ui/commands.ts`; `pingWithTTL` in `net/net.ts`
 723. [P1 ✓] `wget(url, dest)` — download file to disk with progress — `g.wget` in `ui/commands.ts`
 724. [P1 ✓] `http.get(url)` / `http.post(url, body)` — convenience wrappers — `g.http.get/post` in `ui/commands.ts`
 725. [P1] `net.connect(host, port)` — raw TCP socket, returns stream
@@ -964,7 +964,7 @@
 753. [P1] File manager application
 754. [P1] Settings application (network, display, users)
 755. [P1] Notification system: toast popups in corner
-756. [P1] Dialog boxes: `alert`, `confirm`, `prompt` rendered as real windows
+756. [P1 ✓] Dialog boxes: `alert`, `confirm`, `prompt` rendered as real windows — `g.alert/confirm/prompt` in `ui/commands.ts` delegate to `os.wm.dialog.*`
 757. [P2] Theme system: color scheme, fonts, icon theme
 758. [P2] Dark mode support
 759. [P2] High-DPI scaling (2× pixel ratio)
@@ -1201,8 +1201,8 @@
 ### 28f. CSS Execution Performance
 943. [P0 ✓] Style computation: `O(1)` rule matching via class/id/tag hash buckets — no linear scan
 944. [P0 ✓] Computed style cache: per-element cache with generation stamp; cheaply validate on re-render
-945. [P0] CSS variable resolve: resolve once at cascade, store in computed style; re-resolve only on change
-946. [P1] Selector specificity index: pre-sorted rule list; skip rules below current specificity floor
+945. [P0 ✓] CSS variable resolve: resolve once at cascade, store in computed style; re-resolve only on change — pre-resolve pass in `getComputedStyle` in `apps/browser/jsruntime.ts`
+946. [P1 ✓] Selector specificity index: pre-sorted rule list; skip rules below current specificity floor — `_spec` on `CSSStyleRule_`, sorted insertion in `_idxRule` in `apps/browser/jsruntime.ts`
 947. [P1] `transition` / `animation`: run on compositor at 60fps without triggering layout or JS
 948. [P1] `transform: translate/scale/rotate` → matrix multiply only, no layout recalc
 949. [P1] `opacity` animation: alpha-multiply composited layer, no paint
@@ -1320,7 +1320,7 @@
 
 ## 33. MISC MISSING PIECES
 
-919. [P0] Timezone data: IANA tz database as a TypeScript module (`sys.time.tz`)
+919. [P0 ✓] Timezone data: IANA tz database as a TypeScript module (`sys.time.tz`) — `core/timezone.ts` with 130+ zones, DST rules; exposed as `os.time.tz` in sdk.ts
 920. [P0 ✓] `/etc/config.json`: machine config (hostname, locale, timezone) — JSON not `/etc/hostname`
 921. [P0 ✓] `/etc/fstab.json`: filesystem mount table as JSON array
 922. [P0 ✓] Clock sync at boot: C reads CMOS RTC once; TypeScript initializes system clock
