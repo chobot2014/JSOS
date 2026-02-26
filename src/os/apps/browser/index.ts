@@ -38,6 +38,7 @@ import type {
 import { parseURL, urlEncode, encodeFormData, decodeBMP, readPNGDimensions, decodeBase64 } from './utils.js';
 import { parseHTML }    from './html.js';
 import { parseStylesheet, type CSSRule } from './stylesheet.js';
+import { decodePNG }    from './img-png.js';
 import { layoutNodes }  from './layout.js';
 import { aboutJsosHTML, errorHTML, jsonViewerHTML } from './pages.js';
 import { createPageJS, type PageJS } from './jsruntime.js';
@@ -856,16 +857,21 @@ export class BrowserApp implements App {
         var dataStr   = comma >= 0 ? src.slice(comma + 1) : '';
         var isBase64  = meta.indexOf(';base64') >= 0;
         var rawBytes  = isBase64 ? decodeBase64(dataStr) : Array.from(dataStr).map(c => c.charCodeAt(0));
-        var decoded   = decodeBMP(rawBytes);
+        var decoded: DecodedImage | null = decodeBMP(rawBytes);
         if (!decoded) {
-          var pngDim0 = readPNGDimensions(rawBytes);
-          if (pngDim0) {
-            wp.imgNatW = pngDim0.w; wp.pw = Math.min(pngDim0.w, 600);
-            wp.imgNatH = pngDim0.h; wp.ph = Math.round(pngDim0.h * wp.pw / pngDim0.w);
+          // Try PNG
+          if (rawBytes.length > 8 && rawBytes[0] === 0x89 && rawBytes[1] === 0x50) {
+            try { decoded = decodePNG(new Uint8Array(rawBytes)); } catch (_e) {}
           }
-        } else {
-          wp.imgData = decoded.data; wp.pw = decoded.w; wp.ph = decoded.h;
+          if (!decoded) {
+            var pngDim0 = readPNGDimensions(rawBytes);
+            if (pngDim0) {
+              wp.imgNatW = pngDim0.w; wp.pw = Math.min(pngDim0.w, 600);
+              wp.imgNatH = pngDim0.h; wp.ph = Math.round(pngDim0.h * wp.pw / pngDim0.w);
+            }
+          }
         }
+        if (decoded) { wp.imgData = decoded.data; wp.pw = decoded.w; wp.ph = decoded.h; }
         wp.imgLoaded = true;
         this._imgCache.set(src, decoded);
         this._dirty = true;
@@ -886,11 +892,16 @@ export class BrowserApp implements App {
         os.fetchAsync(srcURL, function(resp: FetchResponse | null, _err?: string) {
           if (resp && resp.status === 200 && resp.body.length >= 2) {
             var imgDecoded: DecodedImage | null = null;
-            if (resp.body[0] === 0x42 && resp.body[1] === 0x4D) {
+            var b0 = resp.body[0] ?? 0;
+            var b1 = resp.body[1] ?? 0;
+            if (b0 === 0x42 && b1 === 0x4D) {
               // BMP — full pixel decode
               imgDecoded = decodeBMP(resp.body);
+            } else if (b0 === 0x89 && b1 === 0x50) {
+              // PNG — full decode using inline TypeScript PNG decoder
+              try { imgDecoded = decodePNG(new Uint8Array(resp.body)); } catch (_e) {}
             } else {
-              // PNG/JPEG/other — read dimensions only, show sized placeholder
+              // JPEG/other — read dimensions only, show sized placeholder
               var pDim = readPNGDimensions(resp.body);
               if (pDim) {
                 ww.imgNatW = pDim.w; ww.pw = Math.min(pDim.w, 600);
