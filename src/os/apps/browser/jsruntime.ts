@@ -170,6 +170,20 @@ export function createPageJS(
   (doc as any).charset = 'UTF-8';
   // doc._styleSheets populated later after CSSStyleSheet_ class is defined
 
+  // ── <base href> support (item 364) ───────────────────────────────────────
+  // Extract effective base URL from <base href="..."> if present in the document.
+  var _baseHref: string = cb.baseURL;
+  {
+    var _baseEl = doc.querySelector('base[href]') as any;
+    if (_baseEl) {
+      var _bh = _baseEl.getAttribute('href');
+      if (_bh) {
+        // Resolve against page URL in case it is relative
+        try { _baseHref = new URL(_bh, cb.baseURL).href; } catch(_) { _baseHref = _bh; }
+      }
+    }
+  }
+
   var timers: TimerEntry[] = [];
   var timerSeq = 1;
   var startTime = Date.now();
@@ -293,11 +307,65 @@ export function createPageJS(
     share(_d?: unknown): Promise<void> { return Promise.reject(new Error('Not supported')); },
     canShare(_d?: unknown): boolean { return false; },
     connection: { effectiveType: '4g', downlink: 10, rtt: 50, saveData: false, addEventListener() {}, removeEventListener() {} },
+    storage: {
+      estimate(): Promise<{quota: number; usage: number}> { return Promise.resolve({ quota: 1024 * 1024 * 50, usage: 0 }); },
+      persist(): Promise<boolean> { return Promise.resolve(false); },
+      persisted(): Promise<boolean> { return Promise.resolve(false); },
+    },
+    locks: {
+      request(_name: string, fnOrOpts: unknown, fn?: unknown): Promise<unknown> {
+        var cb_ = typeof fnOrOpts === 'function' ? fnOrOpts : fn;
+        return typeof cb_ === 'function' ? Promise.resolve().then(() => (cb_ as Function)({ name: _name, mode: 'exclusive' })) : Promise.resolve(null);
+      },
+      query(): Promise<{held: unknown[]; pending: unknown[]}> { return Promise.resolve({ held: [], pending: [] }); },
+    },
+    // User-Agent Client Hints API (navigator.userAgentData) — used by React DevTools, Angular, Vite
+    userAgentData: {
+      brands: [
+        { brand: 'Chromium', version: '120' },
+        { brand: 'Google Chrome', version: '120' },
+        { brand: 'JSOS', version: '1' },
+      ],
+      mobile: false,
+      platform: 'Linux',
+      getHighEntropyValues(hints: string[]): Promise<Record<string, unknown>> {
+        var vals: Record<string, unknown> = {
+          architecture: 'x86', bitness: '64', model: '', platform: 'Linux',
+          platformVersion: '1.0', uaFullVersion: '120.0.0.0',
+          fullVersionList: [
+            { brand: 'Chromium', version: '120.0.0.0' },
+            { brand: 'Google Chrome', version: '120.0.0.0' },
+            { brand: 'JSOS', version: '1.0.0' },
+          ],
+          wow64: false,
+        };
+        var result: Record<string, unknown> = {};
+        for (var h of hints) { if (h in vals) result[h] = vals[h]; }
+        return Promise.resolve(result);
+      },
+      toJSON(): object {
+        return { brands: this.brands, mobile: this.mobile, platform: this.platform };
+      },
+    },
+    webdriver: false,        // navigator.webdriver — set false so sites don't detect automation
+    pdfViewerEnabled: true,  // navigator.pdfViewerEnabled
   };
 
   // ── window.screen ─────────────────────────────────────────────────────────
 
-  var screen = { width: 1024, height: 768, availWidth: 1024, availHeight: 768, colorDepth: 32, pixelDepth: 32 };
+  var screen = {
+    width: 1024, height: 768, availWidth: 1024, availHeight: 768,
+    colorDepth: 32, pixelDepth: 32,
+    // Screen Orientation API
+    orientation: {
+      type: 'landscape-primary' as string,
+      angle: 0 as number,
+      onchange: null as ((e: unknown) => void) | null,
+      lock(_orientation: string): Promise<void> { return Promise.resolve(); },
+      unlock(): void {},
+      addEventListener() {}, removeEventListener() {},
+    },
+  };
 
   // ── CustomEvent ───────────────────────────────────────────────────────────
 
@@ -523,7 +591,18 @@ export function createPageJS(
                 .replace(/^\d/, m => '\\3' + m + ' ');
     },
     px(n: number): string { return n + 'px'; },
+    em(n: number): string { return n + 'em'; },
+    rem(n: number): string { return n + 'rem'; },
+    percent(n: number): string { return n + '%'; },
     number(n: number): string { return String(n); },
+    /** CSS.registerProperty() — CSS Houdini Properties & Values API Level 1 */
+    registerProperty(_descriptor: { name: string; syntax?: string; inherits: boolean; initialValue?: string }): void {},
+    /** CSS.paintWorklet — Houdini Paint API stub */
+    paintWorklet: { addModule(_url: string): Promise<void> { return Promise.resolve(); } },
+    /** CSS.layoutWorklet — Houdini Layout API stub */
+    layoutWorklet: { addModule(_url: string): Promise<void> { return Promise.resolve(); } },
+    /** CSS.animationWorklet — Houdini Animation Worklet stub */
+    animationWorklet: { addModule(_url: string): Promise<void> { return Promise.resolve(); } },
   };
 
   // ── visualViewport stub (item 462) ────────────────────────────────────────
@@ -543,6 +622,36 @@ export function createPageJS(
       const codes: Record<string,number> = { IndexSizeError:1, HierarchyRequestError:3, WrongDocumentError:4, InvalidCharacterError:5, NotFoundError:8, NotSupportedError:9, InvalidStateError:11, SyntaxError:12, InvalidModificationError:13, NamespaceError:14, InvalidAccessError:15, TypeMismatchError:17, SecurityError:18, NetworkError:19, AbortError:20, URLMismatchError:21, QuotaExceededError:22, TimeoutError:23, InvalidNodeTypeError:24, DataCloneError:25, NotAllowedError:0 };
       this.code = codes[name] ?? 0;
     }
+  }
+
+  /** Create a minimal ReadableStream-like body from a string (used by fetch response .body). */
+  function _makeBodyStream(bodyText: string): any {
+    var consumed = false;
+    return {
+      get locked() { return consumed; },
+      getReader(): any {
+        var done = false;
+        consumed = true;
+        return {
+          read(): Promise<any> {
+            if (done) return Promise.resolve({ done: true, value: undefined });
+            done = true;
+            var enc = new TextEncoder();
+            return Promise.resolve({ done: false, value: enc.encode(bodyText) });
+          },
+          releaseLock(): void {},
+          cancel(): Promise<void> { done = true; return Promise.resolve(); },
+          get closed(): Promise<void> { return Promise.resolve(); },
+        };
+      },
+      cancel(): Promise<void> { consumed = true; return Promise.resolve(); },
+      pipeTo(dest: any): Promise<void> {
+        var enc = new TextEncoder();
+        try { var w = dest.getWriter(); w.write(enc.encode(bodyText)); w.close(); } catch(_) {}
+        return Promise.resolve();
+      },
+      tee(): [any, any] { return [_makeBodyStream(bodyText), _makeBodyStream(bodyText)]; },
+    };
   }
 
   function fetchAPI(url: string | { url?: string; href?: string; toString(): string }, opts?: { method?: string; body?: string | FormData_; headers?: Record<string, string> | Headers_; signal?: AbortSignalImpl; mode?: string; credentials?: string; cache?: string; redirect?: string; referrer?: string; keepalive?: boolean }): Promise<any> {
@@ -569,7 +678,8 @@ export function createPageJS(
           blob():        Promise<Blob>        { return Promise.resolve(new Blob([text2], { type: mimeType })); },
           arrayBuffer(): Promise<ArrayBuffer> { var ab2 = new ArrayBuffer(text2.length); var v2 = new Uint8Array(ab2); for (var ii = 0; ii < text2.length; ii++) v2[ii] = text2.charCodeAt(ii) & 0xff; return Promise.resolve(ab2); },
           formData():    Promise<FormData_>   { return Promise.resolve(new FormData_()); },
-          clone() { return Object.assign({}, this); }, body: null, bodyUsed: false,
+          clone() { return Object.assign({}, this); }, bodyUsed: false,
+          get body() { return _makeBodyStream(text2); },
         });
         return;
       }
@@ -620,8 +730,8 @@ export function createPageJS(
           },
           formData():    Promise<FormData_>   { return Promise.resolve(new FormData_()); },
           clone()        { return Object.assign({}, this); },
-          body: null,
           bodyUsed: false,
+          get body()     { return _makeBodyStream(text); },
         };
         resolve(response);
       }, { method, headers: extraHeaders, body: bodyStr });
@@ -929,6 +1039,84 @@ export function createPageJS(
     constructor(parts: (string | Uint8Array | ArrayBuffer)[], name: string, opts?: { type?: string; lastModified?: number }) {
       super(parts, opts); this.name = name; this.lastModified = opts?.lastModified ?? Date.now();
     }
+  }
+
+  // ── FileList stub (item 531 adjacent) ─────────────────────────────────────
+
+  class FileList_ {
+    _files: File[];
+    constructor(files: File[] = []) { this._files = files; }
+    get length(): number { return this._files.length; }
+    item(index: number): File | null { return this._files[index] ?? null; }
+    [Symbol.iterator](): Iterator<File> { return this._files[Symbol.iterator](); }
+  }
+
+  // ── FileReader (item 531) ─────────────────────────────────────────────────
+
+  class FileReader_ {
+    static EMPTY  = 0; static LOADING = 1; static DONE = 2;
+    EMPTY  = 0; LOADING = 1; DONE = 2;
+    readyState = 0;
+    result: string | ArrayBuffer | null = null;
+    error: DOMException | null = null;
+    onload:       ((ev: any) => void) | null = null;
+    onerror:      ((ev: any) => void) | null = null;
+    onabort:      ((ev: any) => void) | null = null;
+    onloadstart:  ((ev: any) => void) | null = null;
+    onloadend:    ((ev: any) => void) | null = null;
+    onprogress:   ((ev: any) => void) | null = null;
+    _aborted = false;
+    _listeners: Map<string, Array<(ev: any) => void>> = new Map();
+
+    addEventListener(type: string, fn: (ev: any) => void): void {
+      if (!this._listeners.has(type)) this._listeners.set(type, []);
+      this._listeners.get(type)!.push(fn);
+    }
+    removeEventListener(type: string, fn: (ev: any) => void): void {
+      var lst = this._listeners.get(type); if (!lst) return;
+      this._listeners.set(type, lst.filter(f => f !== fn));
+    }
+    _fire(type: string, extra?: Record<string, unknown>): void {
+      var ev = { type, target: this, loaded: 0, total: 0, lengthComputable: false, ...extra };
+      var on = (this as any)['on' + type]; if (typeof on === 'function') on.call(this, ev);
+      var lst = this._listeners.get(type); if (lst) for (var fn of lst) fn.call(this, ev);
+    }
+
+    _read(blob: Blob, asArrayBuffer: boolean, encoding?: string): void {
+      this.readyState = 1; this._aborted = false; this._fire('loadstart');
+      blob.text().then(text => {
+        if (this._aborted) { this.result = null; this.readyState = 2; this._fire('abort'); this._fire('loadend'); return; }
+        if (asArrayBuffer) {
+          var ab = new ArrayBuffer(text.length);
+          var v = new Uint8Array(ab);
+          for (var i = 0; i < text.length; i++) v[i] = text.charCodeAt(i) & 0xff;
+          this.result = ab;
+        } else {
+          this.result = text;
+        }
+        this.readyState = 2; this._fire('load'); this._fire('loadend');
+      }).catch(err => {
+        this.error = err instanceof DOMException ? err : new DOMException(String(err));
+        this.readyState = 2; this._fire('error'); this._fire('loadend');
+      });
+    }
+
+    readAsText(blob: Blob, _encoding = 'utf-8'): void { this._read(blob, false, _encoding); }
+    readAsArrayBuffer(blob: Blob): void { this._read(blob, true); }
+    readAsBinaryString(blob: Blob): void { this._read(blob, false); }
+    readAsDataURL(blob: Blob): void {
+      blob.arrayBuffer().then(ab => {
+        if (this._aborted) { this.result = null; this.readyState = 2; this._fire('abort'); this._fire('loadend'); return; }
+        var bytes = new Uint8Array(ab);
+        var b64 = btoa(String.fromCharCode(...bytes));
+        this.result = 'data:' + (blob.type || 'application/octet-stream') + ';base64,' + b64;
+        this.readyState = 2; this._fire('load'); this._fire('loadend');
+      }).catch(err => {
+        this.error = err instanceof DOMException ? err : new DOMException(String(err));
+        this.readyState = 2; this._fire('error'); this._fire('loadend');
+      });
+    }
+    abort(): void { this._aborted = true; }
   }
 
   var URL_ = URLImpl;
@@ -1253,7 +1441,7 @@ export function createPageJS(
   // ── CSSStyleSheet (items 578-579) ─────────────────────────────────────────
 
   class CSSStyleSheet_ {
-    cssRules: Array<{ cssText: string; type: number; selectorText?: string; style?: CSSStyleDeclarationStub }> = [];
+    cssRules: Array<CSSRule_ | CSSStyleRule_ | CSSMediaRule_ | CSSKeyframesRule_> = [];
     href: string | null = null;
     ownerNode:  unknown = null;
     disabled = false;
@@ -1262,7 +1450,14 @@ export function createPageJS(
 
     insertRule(rule: string, index = 0): number {
       var clampedIdx = Math.max(0, Math.min(index, this.cssRules.length));
-      this.cssRules.splice(clampedIdx, 0, { cssText: rule, type: 1 });
+      var mMedia = rule.trim().match(/^@media\s+([^{]+)\{([\s\S]*)\}\s*$/);
+      var mKf    = rule.trim().match(/^@keyframes\s+(\S+)/);
+      var rulObj: CSSRule_;
+      if (mMedia) { rulObj = new CSSMediaRule_(mMedia[1].trim()); }
+      else if (mKf) { rulObj = new CSSKeyframesRule_(mKf[1]); }
+      else { var bIdx = rule.indexOf('{'); rulObj = bIdx >= 0 ? new CSSStyleRule_(rule.slice(0, bIdx).trim(), rule.slice(bIdx + 1).replace(/}$/, '').trim()) : new CSSStyleRule_(rule, ''); }
+      rulObj.parentStyleSheet = this;
+      this.cssRules.splice(clampedIdx, 0, rulObj);
       return clampedIdx;
     }
     deleteRule(index: number): void {
@@ -1282,7 +1477,13 @@ export function createPageJS(
       var re = /([^{]+)\{([^}]*)\}/g; var m: RegExpExecArray | null;
       while ((m = re.exec(text)) !== null) {
         var sel = m[1].trim(); var body = m[2].trim();
-        this.cssRules.push({ cssText: sel + ' { ' + body + ' }', type: 1, selectorText: sel });
+        if (sel.startsWith('@media')) {
+          var mr = new CSSMediaRule_(sel.slice(6).trim()); mr.parentStyleSheet = this; this.cssRules.push(mr);
+        } else if (sel.startsWith('@keyframes') || sel.startsWith('@-webkit-keyframes')) {
+          var kr = new CSSKeyframesRule_(sel.replace(/@-?(?:webkit-)?keyframes\s*/, '').trim()); kr.parentStyleSheet = this; this.cssRules.push(kr);
+        } else {
+          var sr = new CSSStyleRule_(sel, body); sr.parentStyleSheet = this; this.cssRules.push(sr);
+        }
       }
     }
   }
@@ -1290,11 +1491,307 @@ export function createPageJS(
   // Pseudo-type for canvas context so TS doesn't complain
   type CSSStyleDeclarationStub = Record<string, string>;
 
-  // ── DocumentFragment (item 583) ───────────────────────────────────────────
+  // ── CSS Rule subclasses (items 580-582) ───────────────────────────────────
+
+  /** CSSRule — base class for all CSS rules */
+  class CSSRule_ {
+    static STYLE_RULE      = 1; static MEDIA_RULE   = 4; static FONT_FACE_RULE  = 5;
+    static PAGE_RULE       = 6; static IMPORT_RULE   = 3; static CHARSET_RULE    = 2;
+    static KEYFRAMES_RULE  = 7; static KEYFRAME_RULE = 8; static SUPPORTS_RULE   = 12;
+    type = 0; cssText = ''; parentStyleSheet: CSSStyleSheet_ | null = null; parentRule: CSSRule_ | null = null;
+  }
+
+  /** CSSStyleRule — element-matched style rule (type=1) */
+  class CSSStyleRule_ extends CSSRule_ {
+    type = 1;
+    selectorText = '';
+    style: CSSStyleDeclarationStub & { cssText: string } = { cssText: '' } as any;
+    constructor(selector: string, body: string) {
+      super();
+      this.selectorText = selector;
+      this.cssText = selector + ' { ' + body + ' }';
+      // Populate style with property: value pairs
+      body.split(';').forEach(pair => {
+        var idx = pair.indexOf(':');
+        if (idx < 0) return;
+        var prop = pair.slice(0, idx).trim();
+        var val  = pair.slice(idx + 1).trim();
+        if (prop) (this.style as any)[prop] = val;
+      });
+      this.style.cssText = body;
+    }
+  }
+
+  /** CSSMediaRule — @media rule (type=4) */
+  class CSSMediaRule_ extends CSSRule_ {
+    type = 4;
+    media: { mediaText: string; length: number; appendMedium(m: string): void; deleteMedium(m: string): void } = {
+      mediaText: '', length: 0, appendMedium() {}, deleteMedium() {},
+    };
+    cssRules: CSSRule_[] = [];
+    conditionText = '';
+    constructor(conditionText: string) {
+      super();
+      this.conditionText = conditionText;
+      this.media.mediaText = conditionText;
+      this.cssText = '@media ' + conditionText + ' { }';
+    }
+    insertRule(rule: string, index = 0): number { this.cssRules.splice(index, 0, new CSSStyleRule_(rule, '')); return index; }
+    deleteRule(index: number): void { this.cssRules.splice(index, 1); }
+  }
+
+  /** CSSKeyframesRule — @keyframes rule (type=7) */
+  class CSSKeyframesRule_ extends CSSRule_ {
+    type = 7;
+    name = '';
+    cssRules: CSSRule_[] = [];
+    constructor(name: string) { super(); this.name = name; this.cssText = '@keyframes ' + name + ' { }'; }
+    appendRule(rule: string): void { this.cssRules.push(new CSSStyleRule_(rule, '')); }
+    deleteRule(select: string): void { this.cssRules = this.cssRules.filter(r => (r as any).keyText !== select); }
+    findRule(select: string): CSSRule_ | null { return this.cssRules.find(r => (r as any).keyText === select) ?? null; }
+  }
+
+  /** CSSSupportRule — @supports rule (type=12) */
+  class CSSSupportsRule_ extends CSSRule_ {
+    type = 12;
+    conditionText = '';
+    cssRules: CSSRule_[] = [];
+    constructor(conditionText: string) { super(); this.conditionText = conditionText; this.cssText = '@supports ' + conditionText + ' { }'; }
+    insertRule(rule: string, index = 0): number { this.cssRules.splice(index, 0, new CSSStyleRule_(rule, '')); return index; }
+    deleteRule(index: number): void { this.cssRules.splice(index, 1); }
+  }
+
+  /** CSSFontFaceRule — @font-face rule (type=5) */
+  class CSSFontFaceRule_ extends CSSRule_ {
+    type = 5;
+    style: CSSStyleDeclarationStub & { cssText: string } = { cssText: '' } as any;
+  }
+
+  /** CSSImportRule — @import rule (type=3) */
+  class CSSImportRule_ extends CSSRule_ {
+    type = 3;
+    href = '';
+    media: { mediaText: string } = { mediaText: '' };
+    styleSheet: CSSStyleSheet_ | null = null;
+    constructor(href: string) { super(); this.href = href; this.cssText = '@import url(' + href + ')'; }
+  }
 
   class DocumentFragment_ extends VElement {
     constructor() { super('#document-fragment'); this.nodeType = 11; }
   }
+
+  // ── AudioContext / Web Audio API stub ─────────────────────────────────────
+  // Many sites check `window.AudioContext || window.webkitAudioContext`.
+  // We provide a stub that accepts method calls without throwing.
+
+  class AudioNode_ {
+    context: any; numberOfInputs = 1; numberOfOutputs = 1; channelCount = 2;
+    channelCountMode = 'max'; channelInterpretation = 'speakers';
+    connect(_dest: unknown): unknown { return _dest; }
+    disconnect(): void {}
+    addEventListener() {} removeEventListener() {}
+  }
+
+  class AudioParam_ {
+    value = 0; defaultValue = 0; minValue = -3.4e38; maxValue = 3.4e38;
+    automationRate = 'a-rate';
+    setValueAtTime(v: number): this { this.value = v; return this; }
+    linearRampToValueAtTime(v: number): this { this.value = v; return this; }
+    exponentialRampToValueAtTime(v: number): this { this.value = v; return this; }
+    setTargetAtTime(v: number): this { this.value = v; return this; }
+    setValueCurveAtTime(): this { return this; }
+    cancelScheduledValues(): this { return this; }
+    cancelAndHoldAtCurrentValue(): this { return this; }
+  }
+
+  class AudioContext_ extends AudioNode_ {
+    state: 'suspended' | 'running' | 'closed' = 'suspended';
+    sampleRate = 44100;
+    currentTime = 0;
+    baseLatency = 0;
+    outputLatency = 0;
+    get destination(): AudioNode_ { return new AudioNode_(); }
+    get listener(): any { return { positionX: new AudioParam_(), positionY: new AudioParam_(), positionZ: new AudioParam_(), forwardX: new AudioParam_(), forwardY: new AudioParam_(), forwardZ: new AudioParam_(), upX: new AudioParam_(), upY: new AudioParam_(), upZ: new AudioParam_() }; }
+    createGain(): any { var n: any = new AudioNode_(); n.gain = new AudioParam_(); n.gain.value = 1; return n; }
+    createOscillator(): any { var n: any = new AudioNode_(); n.type = 'sine'; n.frequency = new AudioParam_(); n.frequency.value = 440; n.detune = new AudioParam_(); n.start = function() {}; n.stop = function() {}; return n; }
+    createBufferSource(): any { var n: any = new AudioNode_(); n.buffer = null; n.loop = false; n.loopStart = 0; n.loopEnd = 0; n.playbackRate = new AudioParam_(); n.playbackRate.value = 1; n.detune = new AudioParam_(); n.onended = null; n.start = function() {}; n.stop = function() {}; return n; }
+    createDynamicsCompressor(): any { var n: any = new AudioNode_(); ['threshold','knee','ratio','attack','release'].forEach(p => n[p] = new AudioParam_()); n.reduction = 0; return n; }
+    createBiquadFilter(): any { var n: any = new AudioNode_(); n.type = 'lowpass'; n.frequency = new AudioParam_(); n.frequency.value = 350; n.detune = new AudioParam_(); n.Q = new AudioParam_(); n.Q.value = 1; n.gain = new AudioParam_(); n.getFrequencyResponse = function() {}; return n; }
+    createStereoPanner(): any { var n: any = new AudioNode_(); n.pan = new AudioParam_(); return n; }
+    createPanner(): any { var n: any = new AudioNode_(); ['positionX','positionY','positionZ','orientationX','orientationY','orientationZ'].forEach(p => n[p] = new AudioParam_()); n.panningModel = 'equalpower'; n.distanceModel = 'inverse'; n.refDistance = 1; n.maxDistance = 10000; n.rolloffFactor = 1; n.coneInnerAngle = 360; n.coneOuterAngle = 0; n.coneOuterGain = 0; return n; }
+    createAnalyser(): any { var n: any = new AudioNode_(); n.fftSize = 2048; n.frequencyBinCount = 1024; n.minDecibels = -100; n.maxDecibels = -30; n.smoothingTimeConstant = 0.8; n.getByteFrequencyData = function() {}; n.getByteTimeDomainData = function() {}; n.getFloatFrequencyData = function() {}; n.getFloatTimeDomainData = function() {}; return n; }
+    createDelay(_maxDelay?: number): any { var n: any = new AudioNode_(); n.delayTime = new AudioParam_(); return n; }
+    createWaveShaper(): any { var n: any = new AudioNode_(); n.curve = null; n.oversample = 'none'; return n; }
+    createConvolver(): any { var n: any = new AudioNode_(); n.buffer = null; n.normalize = true; return n; }
+    createChannelSplitter(_channels?: number): AudioNode_ { return new AudioNode_(); }
+    createChannelMerger(_channels?: number): AudioNode_ { return new AudioNode_(); }
+    createScriptProcessor(_bufferSize?: number, _inChannels?: number, _outChannels?: number): any { var n: any = new AudioNode_(); n.onaudioprocess = null; return n; }
+    createMediaElementSource(_el: unknown): AudioNode_ { return new AudioNode_(); }
+    createMediaStreamSource(_stream: unknown): AudioNode_ { return new AudioNode_(); }
+    createMediaStreamDestination(): any { return { stream: null, ...new AudioNode_() }; }
+    createBuffer(_channels: number, _length: number, _sampleRate: number): any { return { numberOfChannels: _channels, length: _length, sampleRate: _sampleRate, duration: _length / (_sampleRate || 44100), getChannelData(_ch: number) { return new Float32Array(_length || 0); }, copyFromChannel() {}, copyToChannel() {} }; }
+    decodeAudioData(_buf: unknown, success?: (buf: unknown) => void, _err?: (e: unknown) => void): Promise<unknown> {
+      var dummy = this.createBuffer(2, 44100, 44100);
+      if (success) { try { success(dummy); } catch(_) {} }
+      return Promise.resolve(dummy);
+    }
+    resume(): Promise<void> { this.state = 'running'; return Promise.resolve(); }
+    suspend(): Promise<void> { this.state = 'suspended'; return Promise.resolve(); }
+    close(): Promise<void> { this.state = 'closed'; return Promise.resolve(); }
+    getOutputTimestamp(): { contextTime: number; performanceTime: number } { return { contextTime: 0, performanceTime: 0 }; }
+  }
+
+  // ── speech synthesis stub ─────────────────────────────────────────────────
+
+  var _speechSynthesis = {
+    pending: false, speaking: false, paused: false,
+    onvoiceschanged: null as ((e: unknown) => void) | null,
+    getVoices(): unknown[] { return []; },
+    speak(_utt: unknown): void {},
+    cancel(): void {},
+    pause(): void  { this.paused = true; },
+    resume(): void { this.paused = false; },
+    addEventListener() {}, removeEventListener() {},
+  };
+
+  // ── Cache API stub (window.caches) ────────────────────────────────────────
+
+  var _caches = {
+    open(_name: string): Promise<unknown> { return Promise.resolve({ put() { return Promise.resolve(); }, match() { return Promise.resolve(undefined); }, delete() { return Promise.resolve(false); }, keys() { return Promise.resolve([]); }, add() { return Promise.resolve(); }, addAll() { return Promise.resolve(); } }); },
+    match(_req: unknown): Promise<unknown> { return Promise.resolve(undefined); },
+    has(_name: string): Promise<boolean> { return Promise.resolve(false); },
+    delete(_name: string): Promise<boolean> { return Promise.resolve(false); },
+    keys(): Promise<string[]> { return Promise.resolve([]); },
+  };
+
+  // ── SpeechSynthesisUtterance ──────────────────────────────────────────────
+
+  class SpeechSynthesisUtterance_ {
+    text = ''; lang = 'en-US'; voice = null; volume = 1; rate = 1; pitch = 1;
+    onstart = null; onend = null; onerror = null; onpause = null; onresume = null; onmark = null; onboundary = null;
+    constructor(text?: string) { if (text !== undefined) this.text = text; }
+    addEventListener() {} removeEventListener() {}
+  }
+
+  // ── ClipboardItem ─────────────────────────────────────────────────────────
+
+  class ClipboardItem_ {
+    _items: Map<string, Blob>;
+    constructor(items: Record<string, Blob | Promise<Blob>>) {
+      this._items = new Map();
+      for (var [type, data] of Object.entries(items)) {
+        if (data instanceof Blob) this._items.set(type, data);
+      }
+    }
+    get types(): string[] { return [...this._items.keys()]; }
+    getType(type: string): Promise<Blob> {
+      var b = this._items.get(type);
+      return b ? Promise.resolve(b) : Promise.reject(new Error('Type not found'));
+    }
+  }
+
+  // ── FontFace ──────────────────────────────────────────────────────────────
+
+  class FontFace_ {
+    family: string; style = 'normal'; weight = 'normal'; stretch = 'normal';
+    unicodeRange = 'U+0-10FFFF'; variant = 'normal'; featureSettings = 'normal';
+    display = 'auto'; status: 'unloaded' | 'loading' | 'loaded' | 'error' = 'unloaded';
+    loaded: Promise<FontFace_>;
+    _resolve!: (f: FontFace_) => void;
+    constructor(family: string, _source?: string | ArrayBuffer | ArrayBufferView, _descriptors?: object) {
+      this.family = family;
+      this.loaded = new Promise(res => { this._resolve = res; });
+    }
+    load(): Promise<FontFace_> {
+      this.status = 'loaded';
+      if (this._resolve) this._resolve(this);
+      return Promise.resolve(this);
+    }
+  }
+
+  // ── EventSource (Server-Sent Events) ─────────────────────────────────────
+
+  class EventSource_ {
+    static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
+    CONNECTING = 0; OPEN = 1; CLOSED = 2;
+    readyState = 2; // closed by default (no keep-alive networking)
+    url: string; withCredentials: boolean;
+    onopen: ((e: unknown) => void) | null = null;
+    onmessage: ((e: unknown) => void) | null = null;
+    onerror: ((e: unknown) => void) | null = null;
+    constructor(url: string, init?: { withCredentials?: boolean }) {
+      this.url = url; this.withCredentials = init?.withCredentials ?? false;
+    }
+    close(): void { this.readyState = 2; }
+    addEventListener() {} removeEventListener() {} dispatchEvent() { return true; }
+  }
+
+  // ── OffscreenCanvas ───────────────────────────────────────────────────────
+
+  class OffscreenCanvas_ {
+    width: number; height: number;
+    constructor(w: number, h: number) { this.width = w; this.height = h; }
+    getContext(type: string): unknown {
+      if (type === '2d') return new (HTMLCanvas.prototype as any).getContext.bind({ width: this.width, height: this.height, _canvas: this })('2d');
+      return null;
+    }
+    transferToImageBitmap(): unknown { return { width: this.width, height: this.height, close() {} }; }
+    convertToBlob(_opts?: unknown): Promise<Blob> { return Promise.resolve(new Blob([], { type: 'image/png' })); }
+    addEventListener() {} removeEventListener() {}
+  }
+
+  // ── DOMRect / DOMRectReadOnly / DOMPoint / DOMMatrix ─────────────────────
+
+  class DOMRect_ {
+    x: number; y: number; width: number; height: number;
+    constructor(x = 0, y = 0, w = 0, h = 0) { this.x = x; this.y = y; this.width = w; this.height = h; }
+    get top()    { return this.y; }
+    get left()   { return this.x; }
+    get right()  { return this.x + this.width; }
+    get bottom() { return this.y + this.height; }
+    toJSON(): object { return { x: this.x, y: this.y, width: this.width, height: this.height, top: this.top, left: this.left, right: this.right, bottom: this.bottom }; }
+    static fromRect(rect?: { x?: number; y?: number; width?: number; height?: number }): DOMRect_ {
+      return new DOMRect_(rect?.x ?? 0, rect?.y ?? 0, rect?.width ?? 0, rect?.height ?? 0);
+    }
+  }
+  // DOMRectReadOnly is identical in behavior
+  var DOMRectReadOnly_ = DOMRect_;
+
+  class DOMPoint_ {
+    x: number; y: number; z: number; w: number;
+    constructor(x = 0, y = 0, z = 0, w = 1) { this.x = x; this.y = y; this.z = z; this.w = w; }
+    toJSON(): object { return { x: this.x, y: this.y, z: this.z, w: this.w }; }
+    matrixTransform(_m?: unknown): DOMPoint_ { return new DOMPoint_(this.x, this.y, this.z, this.w); }
+    static fromPoint(p?: { x?: number; y?: number; z?: number; w?: number }): DOMPoint_ {
+      return new DOMPoint_(p?.x ?? 0, p?.y ?? 0, p?.z ?? 0, p?.w ?? 1);
+    }
+  }
+
+  class DOMMatrix_ {
+    // Identity matrix (column-major as per spec, but we store flat)
+    a = 1; b = 0; c = 0; d = 1; e = 0; f = 0;
+    m11 = 1; m12 = 0; m13 = 0; m14 = 0;
+    m21 = 0; m22 = 1; m23 = 0; m24 = 0;
+    m31 = 0; m32 = 0; m33 = 1; m34 = 0;
+    m41 = 0; m42 = 0; m43 = 0; m44 = 1;
+    is2D = true; isIdentity = true;
+    constructor(_init?: string | number[]) {}
+    translate(tx = 0, ty = 0, _tz = 0): DOMMatrix_ { var m = new DOMMatrix_(); m.e = tx; m.f = ty; m.m41 = tx; m.m42 = ty; return m; }
+    scale(sx = 1, sy?: number, _sz = 1, _ox = 0, _oy = 0, _oz = 0): DOMMatrix_ { var m = new DOMMatrix_(); m.a = sx; m.d = sy ?? sx; m.m11 = sx; m.m22 = sy ?? sx; return m; }
+    rotate(_angle = 0, _ry = 0, _rz = 0): DOMMatrix_ { return new DOMMatrix_(); }
+    multiply(_m: DOMMatrix_): DOMMatrix_ { return new DOMMatrix_(); }
+    inverse(): DOMMatrix_ { return new DOMMatrix_(); }
+    flipX(): DOMMatrix_ { var m = new DOMMatrix_(); m.a = -1; m.m11 = -1; return m; }
+    flipY(): DOMMatrix_ { var m = new DOMMatrix_(); m.d = -1; m.m22 = -1; return m; }
+    transformPoint(p: DOMPoint_): DOMPoint_ { return new DOMPoint_(this.a * p.x + this.c * p.y + this.e, this.b * p.x + this.d * p.y + this.f, p.z, p.w); }
+    toFloat32Array(): Float32Array { return new Float32Array([this.m11, this.m12, this.m13, this.m14, this.m21, this.m22, this.m23, this.m24, this.m31, this.m32, this.m33, this.m34, this.m41, this.m42, this.m43, this.m44]); }
+    toFloat64Array(): Float64Array { return new Float64Array([this.m11, this.m12, this.m13, this.m14, this.m21, this.m22, this.m23, this.m24, this.m31, this.m32, this.m33, this.m34, this.m41, this.m42, this.m43, this.m44]); }
+    toJSON(): object { return { a: this.a, b: this.b, c: this.c, d: this.d, e: this.e, f: this.f, is2D: this.is2D }; }
+    toString(): string { return `matrix(${this.a}, ${this.b}, ${this.c}, ${this.d}, ${this.e}, ${this.f})`; }
+    static fromMatrix(m?: Partial<DOMMatrix_>): DOMMatrix_ { var dm = new DOMMatrix_(); if (m) Object.assign(dm, m); return dm; }
+    static fromFloat32Array(arr: Float32Array): DOMMatrix_ { var m = new DOMMatrix_(); m.m11 = arr[0] ?? 1; m.m12 = arr[1] ?? 0; m.m22 = arr[5] ?? 1; return m; }
+  }
+  var DOMMatrixReadOnly_ = DOMMatrix_;
 
   // ── WebSocket stub (item 542) ─────────────────────────────────────────────
 
@@ -1505,6 +2002,172 @@ export function createPageJS(
       return null;
     },
   };
+
+  // ── Streams API (ReadableStream, WritableStream, TransformStream) ─────────
+  // Minimal stubs — complete enough for feature-detection by frameworks.
+
+  class ReadableStreamDefaultReader_ {
+    _stream: any;
+    _done = false;
+    constructor(stream: any) { this._stream = stream; }
+    read(): Promise<{ done: boolean; value: unknown }> {
+      var chunk = this._stream._chunks ? this._stream._chunks.shift() : undefined;
+      if (chunk !== undefined) return Promise.resolve({ done: false, value: chunk });
+      return Promise.resolve({ done: true, value: undefined });
+    }
+    releaseLock(): void { this._stream._reader = null; }
+    cancel(_reason?: unknown): Promise<void> { this._done = true; return Promise.resolve(); }
+    get closed(): Promise<void> { return Promise.resolve(); }
+  }
+
+  class ReadableStream_ {
+    locked = false;
+    _chunks: unknown[] = [];
+    _reader: ReadableStreamDefaultReader_ | null = null;
+    constructor(underlyingSource?: { start?: (controller: any) => void; pull?: (controller: any) => void; cancel?: (reason?: unknown) => void } | null, _queuingStrategy?: unknown) {
+      if (underlyingSource?.start) {
+        var controller = {
+          enqueue: (chunk: unknown) => this._chunks.push(chunk),
+          close: () => {},
+          error: (_e: unknown) => {},
+          desiredSize: 1,
+        };
+        try { underlyingSource.start(controller); } catch(_) {}
+      }
+    }
+    getReader(): ReadableStreamDefaultReader_ {
+      this.locked = true;
+      this._reader = new ReadableStreamDefaultReader_(this);
+      return this._reader;
+    }
+    cancel(_reason?: unknown): Promise<void> { return Promise.resolve(); }
+    pipeTo(_dest: unknown, _opts?: unknown): Promise<void> { return Promise.resolve(); }
+    pipeThrough(_transform: unknown): ReadableStream_ { return new ReadableStream_(); }
+    tee(): [ReadableStream_, ReadableStream_] { return [new ReadableStream_(), new ReadableStream_()]; }
+    [Symbol.asyncIterator](): AsyncIterator<unknown> {
+      var reader = this.getReader();
+      return {
+        next(): Promise<IteratorResult<unknown>> { return reader.read() as Promise<IteratorResult<unknown>>; },
+        return(): Promise<IteratorResult<unknown>> { reader.releaseLock(); return Promise.resolve({ done: true, value: undefined }); },
+      };
+    }
+    static from(_asyncIterable: unknown): ReadableStream_ { return new ReadableStream_(); }
+  }
+
+  class WritableStreamDefaultWriter_ {
+    _stream: any;
+    constructor(stream: any) { this._stream = stream; }
+    write(_chunk: unknown): Promise<void> { return Promise.resolve(); }
+    close(): Promise<void> { return Promise.resolve(); }
+    abort(_reason?: unknown): Promise<void> { return Promise.resolve(); }
+    releaseLock(): void {}
+    get closed(): Promise<void> { return Promise.resolve(); }
+    get ready(): Promise<void> { return Promise.resolve(); }
+    get desiredSize(): number | null { return 1; }
+  }
+
+  class WritableStream_ {
+    locked = false;
+    constructor(_underlyingSink?: unknown, _queuingStrategy?: unknown) {}
+    getWriter(): WritableStreamDefaultWriter_ { this.locked = true; return new WritableStreamDefaultWriter_(this); }
+    abort(_reason?: unknown): Promise<void> { return Promise.resolve(); }
+    close(): Promise<void> { return Promise.resolve(); }
+    get closed(): Promise<void> { return Promise.resolve(); }
+  }
+
+  class TransformStream_ {
+    readable: ReadableStream_;
+    writable: WritableStream_;
+    constructor(_transformer?: unknown, _readableStrategy?: unknown, _writableStrategy?: unknown) {
+      this.readable = new ReadableStream_();
+      this.writable = new WritableStream_();
+    }
+  }
+
+  class CountQueuingStrategy_ {
+    highWaterMark: number;
+    constructor(init: { highWaterMark: number }) { this.highWaterMark = init.highWaterMark; }
+    size(_chunk: unknown): number { return 1; }
+  }
+
+  class ByteLengthQueuingStrategy_ {
+    highWaterMark: number;
+    constructor(init: { highWaterMark: number }) { this.highWaterMark = init.highWaterMark; }
+    size(chunk: ArrayBufferView): number { return chunk.byteLength; }
+  }
+
+  // ── TextEncoderStream / TextDecoderStream (item 545 adjacent) ────────────
+
+  class TextEncoderStream_ {
+    readonly encoding = 'utf-8';
+    readable: ReadableStream_;
+    writable: WritableStream_;
+    constructor() {
+      var chunks: Uint8Array[] = [];
+      this.readable = new ReadableStream_();
+      this.writable = new WritableStream_({
+        write(chunk: string) {
+          // inline utf-8 encode
+          var out: number[] = [];
+          for (var i = 0; i < chunk.length; ) {
+            var cp = chunk.codePointAt(i)!;
+            if (cp < 0x80) { out.push(cp); i++; }
+            else if (cp < 0x800) { out.push(0xC0 | (cp >> 6), 0x80 | (cp & 63)); i++; }
+            else if (cp < 0x10000) { out.push(0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63)); i++; }
+            else { out.push(0xF0 | (cp >> 18), 0x80 | ((cp >> 12) & 63), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63)); i += 2; }
+          }
+          chunks.push(new Uint8Array(out));
+        },
+      });
+    }
+  }
+
+  class TextDecoderStream_ {
+    readonly encoding: string;
+    readable: ReadableStream_;
+    writable: WritableStream_;
+    constructor(label = 'utf-8') {
+      this.encoding = label;
+      var _chunks: string[] = [];
+      this.readable = new ReadableStream_();
+      this.writable = new WritableStream_({
+        write(chunk: Uint8Array | string) {
+          if (typeof chunk === 'string') { _chunks.push(chunk); return; }
+          // Simple Latin-1 passthrough (full UTF-8 decode not needed for stub)
+          var s = '';
+          for (var ci = 0; ci < chunk.length; ci++) s += String.fromCharCode(chunk[ci]);
+          _chunks.push(s);
+        },
+      });
+    }
+  }
+
+  // ── CompressionStream / DecompressionStream (item 545 adjacent) ──────────
+  // Stubs — pass data through unchanged; real compression not yet implemented.
+
+  class CompressionStream_ {
+    readonly format: string;
+    readable: ReadableStream_;
+    writable: WritableStream_;
+    constructor(format: string) {
+      this.format = format;
+      var _buf: Uint8Array[] = [];
+      this.readable = new ReadableStream_({ start() {} });
+      this.writable = new WritableStream_({ write(chunk: Uint8Array) { _buf.push(chunk); } });
+    }
+  }
+
+  class DecompressionStream_ {
+    readonly format: string;
+    readable: ReadableStream_;
+    writable: WritableStream_;
+    constructor(format: string) {
+      this.format = format;
+      var _buf: Uint8Array[] = [];
+      this.readable = new ReadableStream_({ start() {} });
+      this.writable = new WritableStream_({ write(chunk: Uint8Array) { _buf.push(chunk); } });
+    }
+  }
 
   // ── TextEncoder / TextDecoder ─────────────────────────────────────────────
 
@@ -1764,6 +2427,105 @@ export function createPageJS(
     getBoundingClientRect() { return { x:0, y:0, width:this.width, height:this.height, top:0, left:0, right:this.width, bottom:this.height }; }
   }
 
+  // ── Image() / Audio() constructors ─────────────────────────────────────
+  class _Image_ extends VElement {
+    constructor(width?: number, height?: number) {
+      super('img');
+      if (width  !== undefined) this.setAttribute('width',  String(width));
+      if (height !== undefined) this.setAttribute('height', String(height));
+    }
+  }
+  class _Audio_ extends VElement {
+    constructor(src?: string) {
+      super('audio');
+      if (src) this.setAttribute('src', src);
+    }
+  }
+
+  // ── matchMedia helper (item 373) ─────────────────────────────────────────
+  // Evaluate a CSS media query string against a fixed 1024×768 viewport.
+  function _evalMediaQuery(query: string): boolean {
+    var q = query.trim().toLowerCase();
+    // Comma-separated OR
+    if (q.includes(',')) return q.split(',').some(part => _evalMediaQuery(part.trim()));
+    // 'not' prefix
+    var negated = false;
+    if (q.startsWith('not ')) { negated = true; q = q.slice(4).trim(); }
+    // Strip leading media type: screen, print, all
+    var result = _evalMQCore(q);
+    return negated ? !result : result;
+  }
+  function _evalMQCore(q: string): boolean {
+    // Pure media type
+    if (q === 'screen') return true;
+    if (q === 'print')  return false;
+    if (q === 'all')    return true;
+    if (q === 'speech') return false;
+    // Strip media type prefix like "screen and (...)"
+    var andIdx = q.indexOf(' and ');
+    if (andIdx > 0) {
+      var mtype = q.slice(0, andIdx).trim();
+      if (mtype === 'screen' || mtype === 'all') { q = q.slice(andIdx + 5).trim(); }
+      else if (mtype === 'print' || mtype === 'speech') return false;
+    }
+    // Evaluate individual feature queries inside parens — all parts ANDed
+    var w = 1024, h = 768;
+    var parts = q.match(/\([^)]+\)/g) || [q];
+    return parts.every(part => {
+      var inner = part.replace(/^\(|\)$/g, '').trim();
+      // min-width / max-width
+      var mw = inner.match(/^(min|max)-width\s*:\s*([\d.]+)(px|em|rem)?$/);
+      if (mw) { var v = parseFloat(mw[2]); return mw[1] === 'min' ? w >= v : w <= v; }
+      // min-height / max-height
+      var mh = inner.match(/^(min|max)-height\s*:\s*([\d.]+)(px|em|rem)?$/);
+      if (mh) { var v = parseFloat(mh[2]); return mh[1] === 'min' ? h >= v : h <= v; }
+      // aspect-ratio
+      var ar = inner.match(/^(min-|max-)?aspect-ratio\s*:\s*(\d+)\s*\/\s*(\d+)$/);
+      if (ar) { var ratio = parseInt(ar[2]) / parseInt(ar[3]); var actual = w / h; return ar[1] === 'min-' ? actual >= ratio : ar[1] === 'max-' ? actual <= ratio : Math.abs(actual - ratio) < 0.01; }
+      // orientation
+      if (inner === 'orientation: portrait')  return h >= w;
+      if (inner === 'orientation: landscape') return w > h;
+      // prefers-color-scheme
+      if (inner === 'prefers-color-scheme: light') return true;
+      if (inner === 'prefers-color-scheme: dark')  return false;
+      // prefers-reduced-motion
+      if (inner === 'prefers-reduced-motion: no-preference') return true;
+      if (inner === 'prefers-reduced-motion: reduce')        return false;
+      // prefers-contrast
+      if (inner === 'prefers-contrast: no-preference') return true;
+      if (inner.startsWith('prefers-contrast:'))       return false;
+      // color
+      if (inner === 'color')               return true;
+      if (inner.match(/^color:\s*\d+$/))   return true;
+      if (inner.match(/^min-color:/))      return true;
+      if (inner === 'color-gamut: srgb')   return true;
+      if (inner.startsWith('color-gamut')) return false;
+      // hover / pointer
+      if (inner === 'hover: none')    return false;
+      if (inner === 'hover: hover')   return true;
+      if (inner === 'pointer: fine')  return true;
+      if (inner === 'pointer: coarse')return false;
+      if (inner === 'pointer: none')  return false;
+      // display-mode
+      if (inner === 'display-mode: browser')  return true;
+      if (inner.startsWith('display-mode:'))  return false;
+      // Unknown — be permissive
+      return true;
+    });
+  }
+  function _makeMediaQueryList(q: string): any {
+    var listeners: Array<(ev: {matches: boolean; media: string}) => void> = [];
+    return {
+      get matches() { return _evalMediaQuery(q); },
+      media: q,
+      onchange: null as ((ev: unknown) => void) | null,
+      addEventListener(_type: string, fn: (ev: unknown) => void): void { listeners.push(fn as any); },
+      removeEventListener(_type: string, fn: (ev: unknown) => void): void { var i = listeners.indexOf(fn as any); if (i >= 0) listeners.splice(i, 1); },
+      addListener(fn: (ev: unknown) => void)    { listeners.push(fn as any); },    // legacy
+      removeListener(fn: (ev: unknown) => void) { var i = listeners.indexOf(fn as any); if (i >= 0) listeners.splice(i, 1); }, // legacy
+    };
+  }
+
   // ── Build the global window object ────────────────────────────────────────
 
   var win: Record<string, unknown> = {
@@ -1838,10 +2600,23 @@ export function createPageJS(
     TextEncoder: TextEncoder_,
     TextDecoder: TextDecoder_,
     HTMLCanvasElement: HTMLCanvas,
+    // Streams API
+    ReadableStream:  ReadableStream_,
+    WritableStream:  WritableStream_,
+    TransformStream: TransformStream_,
+    ReadableStreamDefaultReader: ReadableStreamDefaultReader_,
+    CountQueuingStrategy:    CountQueuingStrategy_,
+    ByteLengthQueuingStrategy: ByteLengthQueuingStrategy_,
+    // Transform streams (item 545 adjacent)
+    TextEncoderStream:     TextEncoderStream_,
+    TextDecoderStream:     TextDecoderStream_,
+    CompressionStream:     CompressionStream_,
+    DecompressionStream:   DecompressionStream_,
 
     // Custom Elements
     customElements:      customElementsAPI,
     HTMLElement:         VElement,
+    HTMLMediaElement:    VElement,    // HTMLMediaElement constructor alias
     HTMLInputElement:    VElement,
     HTMLSelectElement:   VElement,
     HTMLTextAreaElement: VElement,
@@ -1849,6 +2624,10 @@ export function createPageJS(
     HTMLButtonElement:   VElement,
     HTMLAnchorElement:   VElement,
     HTMLImageElement:    VElement,
+    // Image() constructor shorthand
+    Image: _Image_,
+    // Audio() constructor shorthand
+    Audio: _Audio_,
     HTMLDivElement:      VElement,
     HTMLSpanElement:     VElement,
     HTMLParagraphElement: VElement,
@@ -1894,6 +2673,8 @@ export function createPageJS(
     console: console_,
     Blob,
     File,
+    FileReader:      FileReader_,
+    FileList:        FileList_,
     URL: URL_,
     URLSearchParams: URLSearchParamsImpl,
     FormData:        FormData_,
@@ -1902,18 +2683,59 @@ export function createPageJS(
     AbortSignal:     AbortSignalImpl,
     WebSocket:       WebSocket_,
     CSSStyleSheet:   CSSStyleSheet_,
+    // CSS rule constructors (items 580-582)
+    CSSRule:          CSSRule_,
+    CSSStyleRule:     CSSStyleRule_,
+    CSSMediaRule:     CSSMediaRule_,
+    CSSKeyframesRule: CSSKeyframesRule_,
+    CSSSupportsRule:  CSSSupportsRule_,
+    CSSFontFaceRule:  CSSFontFaceRule_,
+    CSSImportRule:    CSSImportRule_,
     AggregateError:  AggregateError_,
     RTCPeerConnection:      RTCPeerConnection_,
     RTCSessionDescription:  RTCSessionDescription_,
     RTCIceCandidate:        RTCIceCandidate_,
     Notification:           Notification_,
 
+    // Web Audio API
+    AudioContext: AudioContext_,
+    webkitAudioContext: AudioContext_,   // Safari legacy alias
+    AudioBuffer:     AudioContext_.prototype.createBuffer,
+    AudioNode:       AudioNode_,
+    AudioParam:      AudioParam_,
+    SpeechSynthesisUtterance: SpeechSynthesisUtterance_,
+
+    // Clipboard & Fonts
+    ClipboardItem:    ClipboardItem_,
+    FontFace:         FontFace_,
+
+    // EventSource (SSE)
+    EventSource: EventSource_,
+
+    // OffscreenCanvas
+    OffscreenCanvas: OffscreenCanvas_,
+
+    // Geometry primitives (DOMRect, DOMPoint, DOMMatrix)
+    DOMRect:          DOMRect_,
+    DOMRectReadOnly:  DOMRectReadOnly_,
+    DOMPoint:         DOMPoint_,
+    DOMPointReadOnly: DOMPoint_,
+    DOMMatrix:        DOMMatrix_,
+    DOMMatrixReadOnly: DOMMatrixReadOnly_,
+
+    // XPathResult constants — used with document.evaluate()
+    XPathResult: { ANY_TYPE: 0, NUMBER_TYPE: 1, STRING_TYPE: 2, BOOLEAN_TYPE: 3, UNORDERED_NODE_ITERATOR_TYPE: 4, ORDERED_NODE_ITERATOR_TYPE: 5, UNORDERED_NODE_SNAPSHOT_TYPE: 6, ORDERED_NODE_SNAPSHOT_TYPE: 7, ANY_UNORDERED_NODE_TYPE: 8, FIRST_ORDERED_NODE_TYPE: 9 },
+
+    // Speech + Cache
+    speechSynthesis: _speechSynthesis,
+    caches: _caches,
+
     // Utilities
     getComputedStyle,
     CSS:          CSS_,
     visualViewport: _visualViewport,
     getSelection: (): unknown => _selection,   // window.getSelection (item 581)
-    matchMedia: (_q: string) => ({ matches: false, media: _q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} } as any),
+    matchMedia: (q: string) => _makeMediaQueryList(q),
     open:     (_url: string) => { win.location = { href: _url }; cb.navigate(_url); return null; },
     close:    () => {},
     focus:    () => {},
@@ -1929,6 +2751,23 @@ export function createPageJS(
     status:   '',           // window.status (item 865)
     onpopstate: null as unknown,   // window.onpopstate (item 499)
     onerror: null as unknown,      // window.onerror
+    /** Navigation API (Chrome 102+, item 712) */
+    navigation: {
+      currentEntry: { url: cb.baseURL, id: '1', index: 0, sameDocument: true, getState() { return undefined; } },
+      entries(): any[] { return [(win as any).navigation.currentEntry]; },
+      navigate(url: string): { committed: Promise<void>; finished: Promise<void> } {
+        cb.navigate(url);
+        return { committed: Promise.resolve(), finished: Promise.resolve() };
+      },
+      back():    { committed: Promise<void>; finished: Promise<void> } { history.back();    return { committed: Promise.resolve(), finished: Promise.resolve() }; },
+      forward(): { committed: Promise<void>; finished: Promise<void> } { history.forward(); return { committed: Promise.resolve(), finished: Promise.resolve() }; },
+      traverseTo(_key: string): { committed: Promise<void>; finished: Promise<void> } { return { committed: Promise.resolve(), finished: Promise.resolve() }; },
+      onnavigate: null as any,
+      onnavigatesuccess: null as any,
+      onnavigateerror: null as any,
+      oncurrententrychange: null as any,
+      addEventListener(_t: string, _fn: unknown) {}, removeEventListener(_t: string, _fn: unknown) {},
+    },
     onunhandledrejection: null as unknown,
     onrejectionhandled:   null as unknown,
     onstorage: null as unknown,
@@ -1941,7 +2780,32 @@ export function createPageJS(
     onmessage:  null as unknown,
     onmessageerror: null as unknown,
     postMessage: (_data: unknown, _origin?: string): void => {},
-    dispatchEvent: (ev: VEvent) => doc.dispatchEvent(ev),
+    // reportError — report an error to the console and fire window error event
+    reportError(err: unknown): void {
+      cb.log('[reportError] ' + String(err));
+      var ev = new VEvent('error', { bubbles: false, cancelable: true });
+      (ev as any).error = err; (ev as any).message = String(err);
+      try { doc.dispatchEvent(ev); } catch(_) {}
+    },
+    // createImageBitmap — returns a resolved promise with a stub ImageBitmap
+    createImageBitmap(_image: unknown, _sxOrOpts?: unknown, _sy?: number, _sw?: number, _sh?: number): Promise<unknown> {
+      var bm = { width: 0, height: 0, close() {} };
+      return Promise.resolve(bm);
+    },
+    // Secure context flags (item 548 adjacent — needed for crypto.subtle, clipboard, etc.)
+    isSecureContext: true,          // treat JSOS as a secure context
+    crossOriginIsolated: false,     // no SharedArrayBuffer isolation
+    // Trusted Types stub — checked by CSP-strict apps to see if API exists
+    trustedTypes: null as unknown,
+    // origin — used by service workers and fetch
+    get origin(): string { try { return new URL_(cb.baseURL).origin; } catch(_) { return 'null'; } },
+    dispatchEvent: (ev: VEvent) => {
+      // Also invoke window.on<type> handler if set (item 530)
+      var onProp = 'on' + ev.type;
+      var handler = (win as any)[onProp];
+      if (typeof handler === 'function') { try { handler(ev); } catch(_) {} }
+      return doc.dispatchEvent(ev);
+    },
     addEventListener:    (t: string, fn: (e: VEvent) => void) => doc.addEventListener(t, fn),
     removeEventListener: (t: string, fn: (e: VEvent) => void) => doc.removeEventListener(t, fn),
 
@@ -2038,6 +2902,14 @@ export function createPageJS(
       fn(...keys.map(k => win[k]));
     } catch (e) {
       cb.log('[JS error] ' + String(e));
+      // Fire window.onerror and window error event (item 530)
+      var onErr = (win as any).onerror;
+      if (typeof onErr === 'function') {
+        try { onErr(String(e), '', 0, 0, e); } catch(_) {}
+      }
+      var errEv = new VEvent('error', { bubbles: false, cancelable: true });
+      (errEv as any).error = e; (errEv as any).message = String(e);
+      try { doc.dispatchEvent(errEv); } catch(_) {}
     }
     checkDirty();
   }
@@ -2045,7 +2917,7 @@ export function createPageJS(
   // ── Load external scripts synchronously via fetchAsync ───────────────────
 
   function loadExternalScript(src: string, done: (code?: string) => void, noAutoExec = false): void {
-    var url = src.startsWith('http') ? src : (cb.baseURL.replace(/\/[^/]*$/, '/') + src);
+    var url = src.startsWith('http') ? src : _resolveURL(src, _baseHref);
     os.fetchAsync(url, (resp: FetchResponse | null, _err?: string) => {
       if (resp && resp.status === 200) {
         if (!noAutoExec) execScript(resp.bodyText);
@@ -2100,11 +2972,11 @@ export function createPageJS(
     }
     var isModule = s.type && s.type.toLowerCase().includes('module');
     if (s.inline) {
-      var code = isModule ? _transformModuleCode(s.code, cb.baseURL + '#script-' + idx) : s.code;
+      var code = isModule ? _transformModuleCode(s.code, _baseHref + '#script-' + idx) : s.code;
       execScript(code);
       runScripts(idx + 1);
     } else {
-      var scriptBaseURL = s.src.startsWith('http') ? s.src : cb.baseURL.replace(/\/[^/]*$/, '/') + s.src;
+      var scriptBaseURL = _resolveURL(s.src, _baseHref);
       loadExternalScript(s.src, (loadedCode?: string) => {
         if (isModule && loadedCode) {
           execScript(_transformModuleCode(loadedCode, scriptBaseURL));

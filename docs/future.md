@@ -1,2 +1,3 @@
 can we implement a generic system to utilize the JIT in the sdk like run_optimized(func) returning a promise so that we can have all of the optimizations abstracted into the sdk and everything is clean and nice so if you just build an app (that's easy to build) it will run super performant
 
+we want our vendor extract to ideally be in the same git repo so we don't get changes to quickjs misaligned with the state of the rest of the repo. is there a way to legally do that? already forked but that's not ideal

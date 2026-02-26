@@ -17,8 +17,12 @@ export class VEvent {
   defaultPrevented = false;
   target: VNode | null = null;
   currentTarget: VNode | null = null;
-  _stopProp = false;
+  _stopProp = false;        // stops bubbling to parent nodes
+  _stopImmediate = false;   // also stops other handlers on same node
   _data: Record<string, unknown> = {};   // extra data for input/change etc.
+  timeStamp: number = Date.now();
+  isTrusted: boolean = false;
+  eventPhase: number = 0;  // 0=none, 1=capture, 2=at-target, 3=bubble
 
   constructor(type: string, init?: { bubbles?: boolean; cancelable?: boolean }) {
     this.type      = type;
@@ -27,7 +31,16 @@ export class VEvent {
   }
   preventDefault():            void { if (this.cancelable) this.defaultPrevented = true; }
   stopPropagation():           void { this._stopProp = true; }
-  stopImmediatePropagation(): void { this._stopProp = true; }
+  stopImmediatePropagation(): void { this._stopProp = true; this._stopImmediate = true; }
+  /** Legacy initEvent() for compatibility with document.createEvent() */
+  initEvent(type: string, bubbles = false, cancelable = false): void {
+    this.type = type; this.bubbles = bubbles; this.cancelable = cancelable;
+  }
+  composedPath(): VNode[] { 
+    var path: VNode[] = [];
+    if (this.target) { var n: VNode | null = this.target as VNode; while (n) { path.push(n); n = n.parentNode; } }
+    return path;
+  }
 }
 
 // ── VNode base ────────────────────────────────────────────────────────────────
@@ -128,7 +141,7 @@ export class VNode {
   _fireList(ev: VEvent): void {
     ev.currentTarget = this;
     var arr = this._handlers.get(ev.type);
-    if (arr) { for (var fn of [...arr]) { try { fn(ev); } catch(_) {} if (ev._stopProp) break; } }
+    if (arr) { for (var fn of [...arr]) { try { fn(ev); } catch(_) {} if (ev._stopImmediate) break; } }
   }
   get textContent(): string {
     if (this.nodeType === 3) return (this as any).data || '';
@@ -272,6 +285,51 @@ export class VElement extends VNode {
   removeAttribute(name: string): void { this._attrs.delete(name.toLowerCase()); if (this.ownerDocument) this.ownerDocument._dirty = true; }
   hasAttribute(name: string): boolean { return this._attrs.has(name.toLowerCase()); }
   getAttributeNames(): string[] { return [...this._attrs.keys()]; }
+  // Namespaced attribute variants — ignore namespace, treat as plain attributes
+  getAttributeNS(_ns: string | null, name: string): string | null { return this.getAttribute(name); }
+  setAttributeNS(_ns: string | null, name: string, value: string): void { this.setAttribute(name, value); }
+  removeAttributeNS(_ns: string | null, name: string): void { this.removeAttribute(name); }
+  hasAttributeNS(_ns: string | null, name: string): boolean { return this.hasAttribute(name); }
+  getAttributeNode(name: string): { name: string; value: string; specified: boolean } | null {
+    var v = this.getAttribute(name); return v !== null ? { name, value: v, specified: true } : null;
+  }
+  setAttributeNode(attr: { name: string; value: string }): null { this.setAttribute(attr.name, attr.value); return null; }
+  removeAttributeNode(attr: { name: string; value: string }): void { this.removeAttribute(attr.name); }
+  // ARIA property shortcuts (used by accessibility tools and React-ARIA)
+  get role(): string { return this.getAttribute('role') || ''; }
+  set role(v: string) { this.setAttribute('role', v); }
+  get ariaLabel(): string | null { return this.getAttribute('aria-label'); }
+  set ariaLabel(v: string | null) { if (v !== null) this.setAttribute('aria-label', v); else this.removeAttribute('aria-label'); }
+  get ariaHidden(): string | null { return this.getAttribute('aria-hidden'); }
+  set ariaHidden(v: string | null) { if (v !== null) this.setAttribute('aria-hidden', v); else this.removeAttribute('aria-hidden'); }
+  get ariaDisabled(): string | null { return this.getAttribute('aria-disabled'); }
+  set ariaDisabled(v: string | null) { if (v !== null) this.setAttribute('aria-disabled', v); else this.removeAttribute('aria-disabled'); }
+  get ariaExpanded(): string | null { return this.getAttribute('aria-expanded'); }
+  set ariaExpanded(v: string | null) { if (v !== null) this.setAttribute('aria-expanded', v); else this.removeAttribute('aria-expanded'); }
+  get ariaSelected(): string | null { return this.getAttribute('aria-selected'); }
+  set ariaSelected(v: string | null) { if (v !== null) this.setAttribute('aria-selected', v); else this.removeAttribute('aria-selected'); }
+  get ariaChecked(): string | null { return this.getAttribute('aria-checked'); }
+  set ariaChecked(v: string | null) { if (v !== null) this.setAttribute('aria-checked', v); else this.removeAttribute('aria-checked'); }
+  get ariaBusy(): string | null { return this.getAttribute('aria-busy'); }
+  set ariaBusy(v: string | null) { if (v !== null) this.setAttribute('aria-busy', v); else this.removeAttribute('aria-busy'); }
+  get ariaLive(): string | null { return this.getAttribute('aria-live'); }
+  set ariaLive(v: string | null) { if (v !== null) this.setAttribute('aria-live', v); else this.removeAttribute('aria-live'); }
+  get ariaAtomic(): string | null { return this.getAttribute('aria-atomic'); }
+  set ariaAtomic(v: string | null) { if (v !== null) this.setAttribute('aria-atomic', v); else this.removeAttribute('aria-atomic'); }
+  get ariaPressed(): string | null { return this.getAttribute('aria-pressed'); }
+  set ariaPressed(v: string | null) { if (v !== null) this.setAttribute('aria-pressed', v); else this.removeAttribute('aria-pressed'); }
+  get ariaValueNow(): string | null { return this.getAttribute('aria-valuenow'); }
+  set ariaValueNow(v: string | null) { if (v !== null) this.setAttribute('aria-valuenow', v); else this.removeAttribute('aria-valuenow'); }
+  get ariaValueMin(): string | null { return this.getAttribute('aria-valuemin'); }
+  set ariaValueMin(v: string | null) { if (v !== null) this.setAttribute('aria-valuemin', v); else this.removeAttribute('aria-valuemin'); }
+  get ariaValueMax(): string | null { return this.getAttribute('aria-valuemax'); }
+  set ariaValueMax(v: string | null) { if (v !== null) this.setAttribute('aria-valuemax', v); else this.removeAttribute('aria-valuemax'); }
+  get ariaValueText(): string | null { return this.getAttribute('aria-valuetext'); }
+  set ariaValueText(v: string | null) { if (v !== null) this.setAttribute('aria-valuetext', v); else this.removeAttribute('aria-valuetext'); }
+  get ariaRequired(): string | null { return this.getAttribute('aria-required'); }
+  set ariaRequired(v: string | null) { if (v !== null) this.setAttribute('aria-required', v); else this.removeAttribute('aria-required'); }
+  get ariaReadOnly(): string | null { return this.getAttribute('aria-readonly'); }
+  set ariaReadOnly(v: string | null) { if (v !== null) this.setAttribute('aria-readonly', v); else this.removeAttribute('aria-readonly'); }
   toggleAttribute(name: string, force?: boolean): boolean {
     if (force === true || (force === undefined && !this.hasAttribute(name))) { this.setAttribute(name, ''); return true; }
     this.removeAttribute(name); return false;
@@ -430,6 +488,25 @@ export class VElement extends VNode {
     return [this.getBoundingClientRect()];
   }
 
+  /** CSS Typed OM — computedStyleMap() — checked by CSS Houdini and some frameworks */
+  computedStyleMap(): any {
+    var self = this;
+    return {
+      get(prop: string): unknown {
+        var val = self._style.getPropertyValue(prop);
+        return val ? { value: parseFloat(val) || 0, unit: val.replace(/[\d.\-]/g, '').trim() || '', toString() { return val; } } : undefined;
+      },
+      has(prop: string): boolean { return !!self._style.getPropertyValue(prop); },
+      getAll(_prop: string): unknown[] { return []; },
+      forEach(_fn: unknown): void {},
+      entries() { return [][Symbol.iterator](); },
+      keys() { return [][Symbol.iterator](); },
+      values() { return [][Symbol.iterator](); },
+      [Symbol.iterator]() { return [][Symbol.iterator](); },
+      size: 0,
+    };
+  }
+
   // ── Pointer capture stubs (item 527) ──────────────────────────────────────────
   setPointerCapture(_pointerId: number): void {}
   releasePointerCapture(_pointerId: number): void {}
@@ -463,6 +540,75 @@ export class VElement extends VNode {
     if (typeof xOrOpts === 'object') { this.scrollTop += xOrOpts?.top ?? 0; this.scrollLeft += xOrOpts?.left ?? 0; }
     else { this.scrollLeft += xOrOpts ?? 0; this.scrollTop += dy ?? 0; }
   }
+
+  // ── HTMLMediaElement stubs (audio/video) ──────────────────────────────────
+  // These live on VElement so that querySelector('video') etc. work out of the box.
+  _paused = true;
+  _currentTime = 0;
+  _volume = 1;
+  _muted = false;
+  _playbackRate = 1;
+  _defaultPlaybackRate = 1;
+  _duration = NaN;
+  _ended = false;
+  _readyStateMedia = 0;   // HAVE_NOTHING
+  _networkState = 0;      // NETWORK_EMPTY
+
+  play(): Promise<void> {
+    this._paused = false; this._ended = false;
+    this.dispatchEvent(new VEvent('play', { bubbles: false }));
+    return Promise.resolve();
+  }
+  pause(): void {
+    if (!this._paused) { this._paused = true; this.dispatchEvent(new VEvent('pause', { bubbles: false })); }
+  }
+  load(): void { this._paused = true; this._currentTime = 0; this.dispatchEvent(new VEvent('emptied', { bubbles: false })); }
+  canPlayType(_type: string): '' | 'maybe' | 'probably' { return ''; }
+  get paused(): boolean { return this._paused; }
+  get ended(): boolean  { return this._ended; }
+  get seeking(): boolean { return false; }
+  get duration(): number { return this._duration; }
+  get currentTime(): number { return this._currentTime; }
+  set currentTime(v: number) { this._currentTime = v; }
+  get volume(): number { return this._volume; }
+  set volume(v: number) { this._volume = Math.max(0, Math.min(1, v)); }
+  get muted(): boolean { return this._muted || this.hasAttribute('muted'); }
+  set muted(v: boolean) { this._muted = v; }
+  get playbackRate(): number { return this._playbackRate; }
+  set playbackRate(v: number) { this._playbackRate = v; }
+  get defaultPlaybackRate(): number { return this._defaultPlaybackRate; }
+  set defaultPlaybackRate(v: number) { this._defaultPlaybackRate = v; }
+  get readyStateMedia(): number { return this._readyStateMedia; }
+  get networkState(): number { return this._networkState; }
+  get loop(): boolean { return this.hasAttribute('loop'); }
+  set loop(v: boolean) { if (v) this.setAttribute('loop', ''); else this.removeAttribute('loop'); }
+  get autoplay(): boolean { return this.hasAttribute('autoplay'); }
+  set autoplay(v: boolean) { if (v) this.setAttribute('autoplay', ''); else this.removeAttribute('autoplay'); }
+  get controls(): boolean { return this.hasAttribute('controls'); }
+  set controls(v: boolean) { if (v) this.setAttribute('controls', ''); else this.removeAttribute('controls'); }
+  get preload(): string { return this.getAttribute('preload') || 'auto'; }
+  set preload(v: string) { this.setAttribute('preload', v); }
+  get buffered(): any { return { length: 0, start(_i: number) { return 0; }, end(_i: number) { return 0; } }; }
+  get played(): any   { return { length: 0, start(_i: number) { return 0; }, end(_i: number) { return 0; } }; }
+  get seekable(): any { return { length: 0, start(_i: number) { return 0; }, end(_i: number) { return 0; } }; }
+  get videoWidth():  number { return parseInt(this.getAttribute('width') || '0', 10); }
+  get videoHeight(): number { return parseInt(this.getAttribute('height') || '0', 10); }
+  get textTracks(): any { return { length: 0, addEventListener() {}, removeEventListener() {} }; }
+  get audioTracks(): any { return { length: 0 }; }
+  get videoTracks(): any { return { length: 0 }; }
+  addTextTrack(_kind: string, _label?: string, _lang?: string): any { return { kind: _kind, label: _label || '', language: _lang || '', mode: 'disabled', cues: [], addCue() {}, removeCue() {} }; }
+  fastSeek(time: number): void { this._currentTime = time; }
+  getStartDate(): Date { return new Date(0); }
+  // Constants
+  static readonly HAVE_NOTHING         = 0;
+  static readonly HAVE_METADATA        = 1;
+  static readonly HAVE_CURRENT_DATA    = 2;
+  static readonly HAVE_FUTURE_DATA     = 3;
+  static readonly HAVE_ENOUGH_DATA     = 4;
+  static readonly NETWORK_EMPTY        = 0;
+  static readonly NETWORK_IDLE         = 1;
+  static readonly NETWORK_LOADING      = 2;
+  static readonly NETWORK_NO_SOURCE    = 3;
 
   get dataset(): Record<string, string> {
     var self = this;
@@ -509,9 +655,12 @@ export class VDocument extends VNode {
   _cookie = '';
   _activeElement: VElement | null = null;
   _styleSheets: unknown[] = [];
+  _currentScript: VElement | null = null;  // set by jsruntime while executing <script>
   head: VElement;
   body: VElement;
   documentElement: VElement;
+
+  get currentScript(): VElement | null { return this._currentScript; }
 
   constructor() {
     super(); this.ownerDocument = this;
@@ -554,12 +703,104 @@ export class VDocument extends VNode {
   hasFocus(): boolean { return true; }
   execCommand(_cmd: string, _show?: boolean, _val?: string): boolean { return false; }
   getSelection(): unknown { return (this as any)._selectionRef ?? null; }
+  /**
+   * Legacy document.createEvent() + initEvent() pattern.
+   * e.g. var ev = document.createEvent('Event'); ev.initEvent('click', true, true);
+   */
+  createEvent(type: string): VEvent {
+    var ev = new VEvent('');
+    // Add initEvent() for legacy compatibility
+    (ev as any).initEvent = function(typeArg: string, bubbles = false, cancelable = false) {
+      this.type = typeArg; this.bubbles = bubbles; this.cancelable = cancelable;
+    };
+    // Mouse event extra properties
+    if (/mouse|pointer|click|drag|wheel/i.test(type)) {
+      (ev as any).clientX = 0; (ev as any).clientY = 0; (ev as any).button = 0;
+      (ev as any).initMouseEvent = function(t: string, bb: boolean, cc: boolean, _view: unknown, _detail: number, _sx: number, _sy: number, cx: number, cy: number, ctrl: boolean, alt: boolean, shift: boolean, meta: boolean, btn: number, _related: unknown) {
+        this.type = t; this.bubbles = bb; this.cancelable = cc; this.clientX = cx; this.clientY = cy;
+        this.ctrlKey = ctrl; this.altKey = alt; this.shiftKey = shift; this.metaKey = meta; this.button = btn;
+      };
+    }
+    if (/keyboard/i.test(type)) {
+      (ev as any).key = ''; (ev as any).keyCode = 0; (ev as any).which = 0;
+      (ev as any).initKeyboardEvent = function(t: string, bb: boolean, cc: boolean, _view: unknown, key: string, _loc: number, ctrl: boolean, alt: boolean, shift: boolean, meta: boolean) {
+        this.type = t; this.bubbles = bb; this.cancelable = cc; this.key = key;
+        this.ctrlKey = ctrl; this.altKey = alt; this.shiftKey = shift; this.metaKey = meta;
+      };
+    }
+    if (/custom/i.test(type)) {
+      (ev as any).detail = null;
+      (ev as any).initCustomEvent = function(t: string, bb: boolean, cc: boolean, detail: unknown) {
+        this.type = t; this.bubbles = bb; this.cancelable = cc; this.detail = detail;
+      };
+    }
+    return ev;
+  }
   createRange(): any { return { selectNodeContents() {}, collapse() {}, toString() { return ''; }, commonAncestorContainer: null, startContainer: null, endContainer: null, startOffset: 0, endOffset: 0, collapsed: true, detach() {}, cloneRange() { return this; }, deleteContents() {}, selectNode() {}, surroundContents() {} }; }
   importNode(node: VNode, deep = false): VNode { return node.cloneNode(deep); }
   adoptNode(node: VNode): VNode { if (node.parentNode) node.parentNode.removeChild(node); node.ownerDocument = this; return node; }
+
+  /**
+   * document.evaluate() — XPath evaluation stub (item 591).
+   * Handles simple expressions like //*[@id='foo'], //tagname, /tag/tag, text().
+   * Returns a minimal XPathResult-like object.
+   */
+  evaluate(expression: string, contextNode: VNode, _resolver?: unknown, resultType?: number, _result?: unknown): any {
+    var root = contextNode instanceof VDocument ? contextNode : (contextNode ?? this);
+    var nodes: VElement[] = [];
+    var docRoot = root instanceof VDocument ? (root as VDocument) : this;
+
+    // Simple XPath patterns we can handle:
+    var expr = expression.trim();
+
+    // //*[@id='X'] or //*[@id="X"]
+    var idMatch = expr.match(/^\/\/\*\[@id=['"]([^'"]+)['"]\]$/);
+    if (idMatch) { var found = docRoot.getElementById(idMatch[1]); if (found) nodes = [found]; }
+    // //tagname or //tag[@attr='val']
+    else if (expr.startsWith('//')) {
+      var rest = expr.slice(2);
+      var tagPart = rest.replace(/\[.*\]$/, '').split('/')[0].trim();
+      if (tagPart && tagPart !== '*' && tagPart !== 'text()') {
+        _walk(docRoot.body, el => { if (el.tagName === tagPart.toUpperCase()) nodes.push(el); });
+        _walk(docRoot.head, el => { if (el.tagName === tagPart.toUpperCase()) nodes.push(el); });
+      } else if (tagPart === '*') {
+        _walk(docRoot.body, el => nodes.push(el));
+        _walk(docRoot.head, el => nodes.push(el));
+      }
+    }
+    // /root/or/path
+    else if (expr.startsWith('/') && !expr.startsWith('//')) {
+      var parts = expr.split('/').filter(Boolean);
+      var cur: VElement[] = [docRoot.documentElement ?? docRoot.body];
+      for (var p of parts) { cur = cur.flatMap(el => el.getElementsByTagName(p)); }
+      nodes = cur;
+    }
+
+    // Build XPathResult-like object
+    var _idx = 0;
+    return {
+      resultType:    resultType ?? 5,
+      invalidIteratorState: false,
+      snapshotLength: nodes.length,
+      numberValue:  nodes.length,
+      stringValue:  nodes.length > 0 ? (nodes[0].textContent || '') : '',
+      booleanValue: nodes.length > 0,
+      singleNodeValue: nodes[0] ?? null,
+      iterateNext(): VElement | null { return _idx < nodes.length ? nodes[_idx++] : null; },
+      snapshotItem(i: number): VElement | null { return nodes[i] ?? null; },
+    };
+  }
   elementFromPoint(_x: number, _y: number): VElement | null { return this.body; }
   elementsFromPoint(_x: number, _y: number): VElement[] { return [this.body]; }
   caretPositionFromPoint(_x: number, _y: number): null { return null; }
+  exitPointerLock(): void {}
+  exitFullscreen(): Promise<void> { return Promise.resolve(); }
+  exitPictureInPicture(): Promise<void> { return Promise.resolve(); }
+  get fullscreenElement(): VElement | null { return null; }
+  get pointerLockElement(): VElement | null { return null; }
+  get pictureInPictureElement(): VElement | null { return null; }
+  get fullscreenEnabled(): boolean { return false; }
+  get pictureInPictureEnabled(): boolean { return false; }
 
   /** 'loading' | 'interactive' | 'complete' — set by jsruntime during page lifecycle */
   get readyState(): string { return (this as any)._readyState ?? 'complete'; }
@@ -567,6 +808,10 @@ export class VDocument extends VNode {
   get styleSheets(): unknown[] { return this._styleSheets; }
   get defaultView(): unknown { return (this as any)._defaultView ?? null; }
   get visibilityState(): string { return 'visible'; }
+  /** Document.timeline — Animation timeline (used by GSAP, Framer Motion, Anime.js) */
+  get timeline(): any {
+    return { currentTime: Date.now(), phase: 'active' };
+  }
   get hidden(): boolean { return false; }
   get domain(): string { try { return new URL((this as any)._url ?? '').hostname; } catch(_) { return ''; } }
   get URL(): string { return (this as any)._url ?? ''; }
@@ -577,6 +822,27 @@ export class VDocument extends VNode {
   get images(): VElement[] { return this.querySelectorAll('img'); }
   get links(): VElement[] { return this.querySelectorAll('a[href],area[href]'); }
   get scripts(): VElement[] { return this.querySelectorAll('script'); }
+
+  /** FontFaceSet — document.fonts (used by frameworks to detect font loading readiness) */
+  get fonts(): any {
+    return {
+      status: 'loaded',
+      size: 0,
+      ready: Promise.resolve(this.fonts),
+      check(_font: string, _text?: string): boolean { return true; },
+      load(_font: string, _text?: string): Promise<unknown[]> { return Promise.resolve([]); },
+      forEach(_fn: unknown): void {},
+      [Symbol.iterator]() { return [][Symbol.iterator](); },
+      values() { return [][Symbol.iterator](); },
+      keys() { return [][Symbol.iterator](); },
+      entries() { return [][Symbol.iterator](); },
+      add(_face: unknown): void {},
+      delete(_face: unknown): boolean { return false; },
+      has(_face: unknown): boolean { return false; },
+      clear(): void {},
+      addEventListener() {}, removeEventListener() {},
+    };
+  }
 
   createTreeWalker(root: VElement, _whatToShow?: number, _filter?: unknown): any {
     var nodes: VNode[] = [];
