@@ -283,8 +283,20 @@ export interface CSSProps {
   // ── Transform / transition / animation ───────────────────────────────────
   transform?:       string;
   transformOrigin?: string;   // e.g. '50% 50%', 'top left'
-  transition?:      string;
-  animation?:       string;
+  transition?:      string;   // shorthand
+  transitionProperty?:        string;
+  transitionDuration?:        string;
+  transitionTimingFunction?:  string;
+  transitionDelay?:           string;
+  animation?:       string;   // shorthand
+  animationName?:             string;
+  animationDuration?:         string;
+  animationTimingFunction?:   string;
+  animationDelay?:            string;
+  animationIterationCount?:   string;
+  animationDirection?:        string;
+  animationFillMode?:         string;
+  animationPlayState?:        string;
   // ── Cursor / pointer ──────────────────────────────────────────────────────
   cursor?:        string;
   pointerEvents?: 'auto' | 'none';
@@ -306,17 +318,35 @@ export interface CSSProps {
   // ── Grid ──────────────────────────────────────────────────────────────────
   gridTemplateColumns?: string;
   gridTemplateRows?:    string;
+  gridTemplateAreas?:   string;
+  gridAutoColumns?:     string;
+  gridAutoRows?:        string;
+  gridAutoFlow?:        string;
   gridColumn?:          string;
   gridRow?:             string;
+  gridColumnStart?:     string;
+  gridColumnEnd?:       string;
+  gridRowStart?:        string;
+  gridRowEnd?:          string;
   gridArea?:            string;
+  justifyItems?:        string;
+  justifySelf?:         string;
+  placeItems?:          string;
+  placeContent?:        string;
+  placeSelf?:           string;
   // ── Background ────────────────────────────────────────────────────────────
-  backgroundImage?:    string;
-  backgroundSize?:     string;
-  backgroundPosition?: string;
-  backgroundRepeat?:   string;
+  backgroundImage?:      string;
+  backgroundSize?:       string;
+  backgroundPosition?:   string;
+  backgroundRepeat?:     string;
+  backgroundAttachment?: string;   // scroll | fixed | local
+  backgroundClip?:       string;   // border-box | padding-box | content-box | text
+  backgroundOrigin?:     string;   // border-box | padding-box | content-box
   // ── Text overflow / wrapping ──────────────────────────────────────────────
   wordBreak?:       'normal' | 'break-all' | 'break-word' | 'keep-all';
   overflowWrap?:    'normal' | 'break-word' | 'anywhere';
+  lineBreak?:       string;
+  tabSize?:         number;
   // ── Table ─────────────────────────────────────────────────────────────────
   tableLayout?:     'auto' | 'fixed';
   borderCollapse?:  'separate' | 'collapse';
@@ -325,10 +355,44 @@ export interface CSSProps {
   visibility?:      'visible' | 'hidden' | 'collapse';
   userSelect?:      'none' | 'text' | 'all' | 'auto';
   appearance?:      string;
+  caretColor?:      number;   // ARGB — input caret color
+  accentColor?:     number;   // ARGB — form control accent color
+  // ── Font extended ─────────────────────────────────────────────────────────
+  fontStretch?:     string;   // condensed | expanded | normal etc.
+  // ── Outline extended ──────────────────────────────────────────────────────
+  outlineStyle?:    string;
+  outlineOffset?:   number;
+  // ── List style ────────────────────────────────────────────────────────────
+  listStylePosition?: 'inside' | 'outside';
+  listStyleImage?:    string;
   // ── Generated content / counters ─────────────────────────────────────────
   content?:           string;   // CSS content property (for ::before/::after)
   counterReset?:      string;   // counter-reset: name [initial]
   counterIncrement?:  string;   // counter-increment: name [step]
+  // ── Image / media ────────────────────────────────────────────────────────
+  objectFit?:       'fill' | 'contain' | 'cover' | 'none' | 'scale-down';
+  objectPosition?:  string;
+  aspectRatio?:     string;    // e.g. '16/9', 'auto', '1'
+  imageRendering?:  string;
+  // ── Multi-column ─────────────────────────────────────────────────────────
+  columnCount?:     number | 'auto';
+  columnWidth?:     number | 'auto';
+  // ── Text (extended) ──────────────────────────────────────────────────────
+  textIndent?:      number;    // px
+  textAlignLast?:   'auto' | 'left' | 'center' | 'right' | 'justify' | 'start' | 'end';
+  fontVariant?:     string;    // normal | small-caps | etc.
+  fontKerning?:     'auto' | 'normal' | 'none';
+  hyphens?:         'none' | 'manual' | 'auto';
+  lineClamp?:       number;    // -webkit-line-clamp
+  quotes?:          string;
+  // ── Layout / interaction helpers ─────────────────────────────────────────
+  isolation?:       'auto' | 'isolate';
+  touchAction?:     string;
+  colorScheme?:     string;
+  // ── SVG CSS properties ────────────────────────────────────────────────────
+  fill?:            string;
+  stroke?:          string;
+  strokeWidth?:     number;
   // ── !important tracking (set of property names that carried !important) ──
   important?:     Set<string>;
 }

@@ -1150,6 +1150,54 @@ export class VElement extends VNode {
   // ── outerText / innerText ─────────────────────────────────────────────────────
   get outerText(): string { return this.textContent || ''; }
   set outerText(v: string) { if (this.parentNode) { var t = new VText(v); t.parentNode = this.parentNode; t.ownerDocument = this.ownerDocument; var idx = this.parentNode.childNodes.indexOf(this as any); if (idx >= 0) this.parentNode.childNodes.splice(idx, 1, t as any); } }
+
+  /**
+   * innerText: layout-aware text content.
+   * Getter returns visible text content with block elements separated by \n
+   * and <br> converted to \n.  Setter replaces children with text nodes,
+   * converting \n sequences to <br> elements.
+   */
+  get innerText(): string {
+    // Block-level tags that produce newlines
+    var BLOCK = new Set(['div','p','h1','h2','h3','h4','h5','h6','li','tr','blockquote','pre','article','section','header','footer','aside','main','nav','figure','figcaption','dl','dt','dd']);
+    function walk(node: VNode): string {
+      if (node instanceof VText) return (node as VText).data || '';
+      if (!(node instanceof VElement)) return '';
+      var el = node as VElement;
+      var tag = el.tagName.toLowerCase();
+      if (tag === 'br') return '\n';
+      // Skip hidden / script / style elements
+      if (tag === 'script' || tag === 'style' || tag === 'head') return '';
+      var style = el.getAttribute('style') || '';
+      if (style.indexOf('display:none') >= 0 || style.indexOf('display: none') >= 0 ||
+          style.indexOf('visibility:hidden') >= 0) return '';
+      var parts = '';
+      for (var c of el.childNodes) parts += walk(c);
+      if (BLOCK.has(tag)) parts = '\n' + parts + '\n';
+      return parts;
+    }
+    var raw = walk(this);
+    // Collapse multiple newlines to at most 2, trim leading/trailing
+    return raw.replace(/\n{3,}/g, '\n\n').trim();
+  }
+  set innerText(v: string) {
+    var removed = this.childNodes.slice();
+    this.childNodes = [];
+    // Split on \n and interleave <br> elements
+    var parts = String(v).split('\n');
+    for (var pi = 0; pi < parts.length; pi++) {
+      var txt = new VText(parts[pi]!); txt.ownerDocument = this.ownerDocument; txt.parentNode = this;
+      this.childNodes.push(txt as any);
+      if (pi < parts.length - 1) {
+        var br = new VElement('br'); br.ownerDocument = this.ownerDocument; br.parentNode = this;
+        this.childNodes.push(br as any);
+      }
+    }
+    if (this.ownerDocument) {
+      this.ownerDocument._dirty = true;
+      this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: this.childNodes.slice(), removedNodes: removed, previousSibling: null, nextSibling: null });
+    }
+  }
 }
 
 // ── VRange ────────────────────────────────────────────────────────────────────

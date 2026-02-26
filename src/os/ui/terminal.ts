@@ -25,6 +25,46 @@ function blankRow(color: number): Row {
   return r;
 }
 
+// ── ANSI colour helpers (item 666) ────────────────────────────────────────────
+
+// ANSI 3-bit colour index → VGA 4-bit index
+// ANSI: 0=Black,1=Red,2=Green,3=Yellow,4=Blue,5=Magenta,6=Cyan,7=White
+// VGA:  0=Black,1=Blue,2=Green,3=Cyan,4=Red,5=Magenta,6=Brown,7=LightGrey
+var _ANSI_TO_VGA = [0, 4, 2, 6, 1, 5, 3, 7];
+
+// Approximate an RGB triplet (0-255 each) to the nearest VGA colour index (0-15)
+var _VGA_RGB: [number, number, number][] = [
+  [0, 0, 0], [0, 0, 170], [0, 170, 0], [0, 170, 170],
+  [170, 0, 0], [170, 0, 170], [170, 85, 0], [170, 170, 170],
+  [85, 85, 85], [85, 85, 255], [85, 255, 85], [85, 255, 255],
+  [255, 85, 85], [255, 85, 255], [255, 255, 85], [255, 255, 255],
+];
+
+function _rgbToVga(r: number, g: number, b: number): number {
+  var best = 0; var bestD = 1e9;
+  for (var i = 0; i < 16; i++) {
+    var dr = r - _VGA_RGB[i][0]; var dg = g - _VGA_RGB[i][1]; var db = b - _VGA_RGB[i][2];
+    var d = dr * dr + dg * dg + db * db;
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+function _256toVga(n: number): number {
+  if (n < 16) return n;      // standard VGA colours 0-15
+  if (n < 232) {             // 6×6×6 cube
+    var idx = n - 16;
+    var bi = idx % 6; idx = (idx - bi) / 6;
+    var gi = idx % 6;
+    var ri = (idx - gi) / 6;
+    var v = (i2: number) => i2 === 0 ? 0 : 55 + i2 * 40;
+    return _rgbToVga(v(ri), v(gi), v(bi));
+  }
+  // Grayscale ramp 232-255 → 8+(n-232)*10
+  var lum = 8 + (n - 232) * 10;
+  return _rgbToVga(lum, lum, lum);
+}
+
 export class Terminal {
   // Logical cursor tracked in JavaScript
   private _row = 0;
@@ -42,6 +82,59 @@ export class Terminal {
 
   // Scroll-view state
   private _viewOffset = 0;
+
+  // ── ANSI escape parser state (item 666) ────────────────────────────────────
+  private _escMode = 0;    // 0=normal, 1=saw ESC, 2=in CSI
+  private _escBuf  = '';   // accumulated parameter bytes
+  private _fgIdx   = 7;   // current ANSI logical fg colour (0-15, 7=default white)
+  private _bgIdx   = 0;   // current ANSI logical bg colour (0-7, 0=default black)
+  private _bold    = false;
+
+  private _rebuildColor(): void {
+    var fg = (this._bold && this._fgIdx < 8) ? this._fgIdx + 8 : this._fgIdx;
+    this._color = ((this._bgIdx & 7) << 4) | (fg & 0xF);
+  }
+
+  private _processAnsiSGR(params: string): void {
+    var parts = params ? params.split(';') : ['0'];
+    var i = 0;
+    while (i < parts.length) {
+      var n = parseInt(parts[i++] || '0', 10);
+      if (n === 0 || isNaN(n)) { this._fgIdx = 7; this._bgIdx = 0; this._bold = false; }
+      else if (n === 1)  { this._bold = true; }
+      else if (n === 2 || n === 22) { this._bold = false; }
+      else if (n >= 30 && n <= 37)  { this._fgIdx = _ANSI_TO_VGA[n - 30]; }
+      else if (n === 39)             { this._fgIdx = 7; }
+      else if (n >= 40 && n <= 47)  { this._bgIdx = _ANSI_TO_VGA[n - 40]; }
+      else if (n === 49)             { this._bgIdx = 0; }
+      else if (n >= 90 && n <= 97)  { this._fgIdx = _ANSI_TO_VGA[n - 90] + 8; }
+      else if (n >= 100 && n <= 107){ this._bgIdx = _ANSI_TO_VGA[n - 100]; }
+      else if (n === 38 && i < parts.length && parseInt(parts[i] || '0', 10) === 5) {
+        // 38;5;n — 256-colour fg
+        i++; var c256 = parseInt(parts[i++] || '0', 10);
+        this._fgIdx = _256toVga(c256);
+      } else if (n === 38 && i < parts.length && parseInt(parts[i] || '0', 10) === 2) {
+        // 38;2;r;g;b — true-colour fg
+        i++;
+        var rr = parseInt(parts[i++] || '0', 10);
+        var gg = parseInt(parts[i++] || '0', 10);
+        var bb = parseInt(parts[i++] || '0', 10);
+        this._fgIdx = _rgbToVga(rr, gg, bb);
+      } else if (n === 48 && i < parts.length && parseInt(parts[i] || '0', 10) === 5) {
+        // 48;5;n — 256-colour bg
+        i++; var c256b = parseInt(parts[i++] || '0', 10);
+        this._bgIdx = _256toVga(c256b) & 7;
+      } else if (n === 48 && i < parts.length && parseInt(parts[i] || '0', 10) === 2) {
+        // 48;2;r;g;b — true-colour bg
+        i++;
+        var rr2 = parseInt(parts[i++] || '0', 10);
+        var gg2 = parseInt(parts[i++] || '0', 10);
+        var bb2 = parseInt(parts[i++] || '0', 10);
+        this._bgIdx = _rgbToVga(rr2, gg2, bb2) & 7;
+      }
+    }
+    this._rebuildColor();
+  }
 
   readonly width = VGA_W;
   readonly height = VGA_H;
@@ -113,6 +206,34 @@ export class Terminal {
    */
   private _putchar_vga(ch: string): void {
     var code = ch.charCodeAt(0);
+
+    // ── ANSI escape state machine (item 666) ──────────────────────────────
+    if (this._escMode === 1) {
+      if (ch === '[') { this._escMode = 2; this._escBuf = ''; return; }
+      // Unrecognized ESC sequence — drop the ESC and re-process this char
+      this._escMode = 0;
+      // fall through to normal processing
+    } else if (this._escMode === 2) {
+      if (code >= 0x40 && code <= 0x7E) {
+        // Final byte of CSI sequence
+        if (ch === 'm') this._processAnsiSGR(this._escBuf); // SGR
+        else if (ch === 'J') { /* clear screen/line — ignore for now */ }
+        else if (ch === 'K') { /* erase line — ignore */ }
+        // Cursor movement CSI sequences: A=up B=down C=right D=left H/f=position
+        // not implemented yet but silently consumed
+        this._escMode = 0;
+      } else {
+        // Parameter or intermediate byte — accumulate
+        this._escBuf += ch;
+      }
+      return;
+    }
+    if (code === 0x1B) { // ESC
+      this._escMode = 1;
+      return;
+    }
+    if (code === 7) return; // BEL — ignore
+
     if (code === 10) {        // \n  newline
       this._col = 0;
       this._row++;
@@ -192,6 +313,8 @@ export class Terminal {
       for (var c = 0; c < VGA_W; c++) row[c] = 0x0720;
     }
     this._row = 0; this._col = 0; this._color = 0x07;
+    this._fgIdx = 7; this._bgIdx = 0; this._bold = false;
+    this._escMode = 0; this._escBuf = '';
     this._viewOffset = 0;
     kernel.vgaSetCursor(0, 0);
   }

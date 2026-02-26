@@ -319,6 +319,23 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
   var inTableCell   = false;
   var tableCellHead = false;
 
+  // Track open <p> tags for implicit auto-close (HTML5 tree builder rule, item 359)
+  var pOpen = 0;
+  // Tags that implicitly close an open <p>
+  var P_CLOSERS = new Set([
+    'p', 'div', 'article', 'section', 'header', 'footer', 'aside', 'main', 'nav',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'pre', 'blockquote',
+    'details', 'summary', 'dl', 'dt', 'dd', 'table', 'hr', 'figure', 'figcaption',
+    'form', 'fieldset', 'address', 'menu',
+  ]);
+  function autoClosePIfOpen(): void {
+    if (pOpen > 0) { popCSS(); pOpen--; flushInline(); if (openBlock) { nodes.push(openBlock); openBlock = null; } }
+  }
+
+  // <picture> element tracking (item 366)
+  var inPicture      = false;
+  var pictureSources: string[] = [];  // collected src URLs from <source> tags
+
   var BLOCK_TAGS = new Set([
     'p', 'div', 'section', 'article', 'main', 'header', 'footer', 'nav', 'aside',
     'figure', 'figcaption', 'address', 'details', 'dd', 'dt', 'caption',
@@ -593,6 +610,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
         // ── Headings ────────────────────────────────────────────────────────
         case 'h1': case 'h2': case 'h3':
         case 'h4': case 'h5': case 'h6': {
+          autoClosePIfOpen();
           flushInline();
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
           applyStyle(tok.tag, tok.attrs);
@@ -665,6 +683,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
 
         // ── Blockquote ───────────────────────────────────────────────────────
         case 'blockquote': {
+          autoClosePIfOpen();
           flushInline();
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
           applyStyle(tok.tag, tok.attrs);
@@ -789,12 +808,29 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
           var iHStr = tok.attrs.get('height') || '0';
           var iNatW = parseInt(iWStr, 10) || 0;
           var iNatH = parseInt(iHStr, 10) || 0;
+          // If inside <picture>, prefer the first collected <source> srcset URL
+          if (inPicture && pictureSources.length > 0) iSrc = pictureSources[0];
           // Inline images with data: src are valid — keep the src as-is
           pushWidget({
             kind: 'img', name: '', value: iAlt,
             checked: false, disabled: false, readonly: false, formIdx: -1,
             imgSrc: iSrc, imgAlt: iAlt, imgNatW: iNatW, imgNatH: iNatH,
           });
+          break;
+        }
+
+        // ── Picture element + source srcset (item 366) ─────────────────────────
+        case 'picture':
+          inPicture = true; pictureSources = []; break;
+        case 'source': {
+          // Collect the first usable URL from srcset or src
+          var srcset = tok.attrs.get('srcset') || tok.attrs.get('src') || '';
+          if (srcset) {
+            // srcset format: "url [descriptor], url [descriptor], ..."
+            // Pick the first URL (simplest selection, ignores viewport descriptors)
+            var firstSrc = srcset.split(',')[0].trim().split(/\s+/)[0];
+            if (firstSrc) pictureSources.push(firstSrc);
+          }
           break;
         }
 
@@ -824,7 +860,10 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
         // ── Default block ─────────────────────────────────────────────────────
         default: {
           if (BLOCK_TAGS.has(tok.tag)) {
+            // Implicitly close any open <p> (HTML5 item 359)
+            if (P_CLOSERS.has(tok.tag)) autoClosePIfOpen();
             applyStyle(tok.tag, tok.attrs);
+            if (tok.tag === 'p') pOpen++;  // track for implicit close
             flushInline();
             if (openBlock) { nodes.push(openBlock); openBlock = null; }
             nodes.push({ type: 'p-break', spans: [] });
@@ -873,6 +912,15 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
           nodes.push({ type: 'p-break', spans: [] });
           popCSS(); break;
 
+        case 'p': {
+          // Explicit </p>: only pop CSS if it wasn't already auto-closed
+          flushInline();
+          if (openBlock) { nodes.push(openBlock); openBlock = null; }
+          nodes.push({ type: 'p-break', spans: [] });
+          if (pOpen > 0) { popCSS(); pOpen--; }
+          break;
+        }
+
         case 'li':
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
           popCSS(); break;
@@ -887,6 +935,9 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
           listDepth = Math.max(0, listDepth - 1);
           nodes.push({ type: 'p-break', spans: [] });
           popCSS(); break;
+
+        case 'picture':
+          inPicture = false; pictureSources = []; break;
 
         case 'pre':
           inPre = false;

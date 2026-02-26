@@ -415,6 +415,11 @@ export function computeElementStyle(
     visibility:    inherited.visibility,
     borderCollapse: inherited.borderCollapse,
     borderSpacing:  inherited.borderSpacing,
+    hyphens:        inherited.hyphens,
+    quotes:         inherited.quotes,
+    fontVariant:    inherited.fontVariant,
+    fontKerning:    inherited.fontKerning,
+    colorScheme:    inherited.colorScheme,
   };
 
   // ── Choose candidate set: indexed fast-path or full linear scan ────────────
@@ -532,6 +537,18 @@ function mergeProps(target: CSSProps, src: CSSProps, importantOnly?: Set<string>
   // ── Transform / transition ────────────────────────────────────────────────
   set('transform', src.transform); set('transformOrigin', src.transformOrigin);
   set('transition', src.transition); set('animation', src.animation);
+  set('transitionProperty', src.transitionProperty);
+  set('transitionDuration', src.transitionDuration);
+  set('transitionTimingFunction', src.transitionTimingFunction);
+  set('transitionDelay', src.transitionDelay);
+  set('animationName', src.animationName);
+  set('animationDuration', src.animationDuration);
+  set('animationTimingFunction', src.animationTimingFunction);
+  set('animationDelay', src.animationDelay);
+  set('animationIterationCount', src.animationIterationCount);
+  set('animationDirection', src.animationDirection);
+  set('animationFillMode', src.animationFillMode);
+  set('animationPlayState', src.animationPlayState);
   // ── Cursor / pointer ──────────────────────────────────────────────────────
   set('cursor', src.cursor); set('pointerEvents', src.pointerEvents);
   // ── Flexbox ───────────────────────────────────────────────────────────────
@@ -544,19 +561,49 @@ function mergeProps(target: CSSProps, src: CSSProps, importantOnly?: Set<string>
   // ── Grid ──────────────────────────────────────────────────────────────────
   set('gridTemplateColumns', src.gridTemplateColumns);
   set('gridTemplateRows', src.gridTemplateRows);
+  set('gridTemplateAreas', src.gridTemplateAreas);
+  set('gridAutoColumns', src.gridAutoColumns);
+  set('gridAutoRows', src.gridAutoRows);
+  set('gridAutoFlow', src.gridAutoFlow);
   set('gridColumn', src.gridColumn); set('gridRow', src.gridRow);
+  set('gridColumnStart', src.gridColumnStart); set('gridColumnEnd', src.gridColumnEnd);
+  set('gridRowStart', src.gridRowStart); set('gridRowEnd', src.gridRowEnd);
   set('gridArea', src.gridArea);
+  set('justifyItems', src.justifyItems); set('justifySelf', src.justifySelf);
+  set('placeItems', src.placeItems); set('placeContent', src.placeContent);
+  set('placeSelf', src.placeSelf);
   // ── Background ────────────────────────────────────────────────────────────
   set('backgroundImage', src.backgroundImage); set('backgroundSize', src.backgroundSize);
   set('backgroundPosition', src.backgroundPosition); set('backgroundRepeat', src.backgroundRepeat);
+  set('backgroundAttachment', src.backgroundAttachment); set('backgroundClip', src.backgroundClip);
+  set('backgroundOrigin', src.backgroundOrigin);
   // ── Text wrapping / table / visibility ───────────────────────────────────
   set('wordBreak', src.wordBreak); set('overflowWrap', src.overflowWrap);
+  set('lineBreak', src.lineBreak); set('tabSize', src.tabSize);
   set('tableLayout', src.tableLayout); set('borderCollapse', src.borderCollapse);
   set('borderSpacing', src.borderSpacing);
   set('visibility', src.visibility);
   set('userSelect', src.userSelect); set('appearance', src.appearance);
+  set('caretColor', src.caretColor); set('accentColor', src.accentColor);
+  set('fontStretch', src.fontStretch);
+  set('outlineStyle', src.outlineStyle); set('outlineOffset', src.outlineOffset);
+  set('listStylePosition', src.listStylePosition); set('listStyleImage', src.listStyleImage);
   set('content', src.content);
   set('counterReset', src.counterReset); set('counterIncrement', src.counterIncrement);
+  // ── Image / media ──────────────────────────────────────────────────────────────
+  set('objectFit', src.objectFit); set('objectPosition', src.objectPosition);
+  set('aspectRatio', src.aspectRatio); set('imageRendering', src.imageRendering);
+  // ── Multi-column ──────────────────────────────────────────────────────────────
+  set('columnCount', src.columnCount); set('columnWidth', src.columnWidth);
+  // ── Text (extended) ───────────────────────────────────────────────────────────
+  set('textIndent', src.textIndent); set('textAlignLast', src.textAlignLast);
+  set('fontVariant', src.fontVariant); set('fontKerning', src.fontKerning);
+  set('hyphens', src.hyphens); set('lineClamp', src.lineClamp); set('quotes', src.quotes);
+  // ── Layout / interaction helpers ──────────────────────────────────────────────
+  set('isolation', src.isolation); set('touchAction', src.touchAction);
+  set('colorScheme', src.colorScheme);
+  // ── SVG CSS ───────────────────────────────────────────────────────────────────
+  set('fill', src.fill); set('stroke', src.stroke); set('strokeWidth', src.strokeWidth);
   // ── Visual effects ───────────────────────────────────────────────────────────
   set('filter', src.filter); set('clipPath', src.clipPath);
   set('backdropFilter', src.backdropFilter); set('mixBlendMode', src.mixBlendMode);

@@ -80,6 +80,112 @@ interface TimerEntry {
   delay:    number;
 }
 
+// ── Cookie jar (items 303–304) ────────────────────────────────────────────────
+
+interface CookieEntry {
+  name: string; value: string; domain: string; path: string;
+  expires: number; // ms timestamp, Infinity = session
+  secure: boolean; httpOnly: boolean; sameSite: string;
+}
+
+class CookieJar {
+  _store: CookieEntry[] = [];
+
+  /** Parse and store a Set-Cookie header value for the given origin URL. */
+  setCookie(header: string, originUrl: string): void {
+    var now = Date.now();
+    try {
+      var parts = header.split(';').map(p => p.trim());
+      var main = parts[0];
+      var eqIdx = main.indexOf('=');
+      if (eqIdx < 0) return;
+      var name  = main.slice(0, eqIdx).trim();
+      var value = main.slice(eqIdx + 1).trim();
+      if (!name) return;
+
+      // Parse URL for defaults
+      var originParsed: { hostname: string; pathname: string; protocol: string } = { hostname: '', pathname: '/', protocol: 'http:' };
+      try { var u = new URL(originUrl); originParsed = { hostname: u.hostname, pathname: u.pathname, protocol: u.protocol }; } catch (_) {}
+
+      var domain = originParsed.hostname;
+      var path   = '/';
+      var expires = Infinity;
+      var secure  = false;
+      var httpOnly = false;
+      var sameSite = 'Lax';
+
+      for (var i = 1; i < parts.length; i++) {
+        var attr = parts[i];
+        var aEq  = attr.indexOf('=');
+        var aKey = (aEq >= 0 ? attr.slice(0, aEq) : attr).trim().toLowerCase();
+        var aVal = aEq >= 0 ? attr.slice(aEq + 1).trim() : '';
+        if      (aKey === 'domain')   { domain   = aVal.replace(/^\./, ''); }
+        else if (aKey === 'path')     { path     = aVal || '/'; }
+        else if (aKey === 'secure')   { secure   = true; }
+        else if (aKey === 'httponly') { httpOnly = true; }
+        else if (aKey === 'samesite') { sameSite = aVal; }
+        else if (aKey === 'expires')  { var d = Date.parse(aVal); if (!isNaN(d)) expires = d; }
+        else if (aKey === 'max-age')  { var ma = parseInt(aVal, 10); expires = isNaN(ma) ? Infinity : now + ma * 1000; }
+      }
+
+      // Remove existing matching cookie
+      this._store = this._store.filter(c => !(c.name === name && c.domain === domain && c.path === path));
+      // Add or delete (max-age=0 or expires in past = delete)
+      if (expires > now) {
+        this._store.push({ name, value, domain, path, expires, secure, httpOnly, sameSite });
+      }
+    } catch (_) {}
+  }
+
+  /** Get the Cookie request header string for the given URL. */
+  getCookieHeader(url: string): string {
+    var now = Date.now();
+    var hostname = '';
+    var pathname = '/';
+    var isSecure = false;
+    try { var u = new URL(url); hostname = u.hostname; pathname = u.pathname; isSecure = u.protocol === 'https:'; } catch (_) { return ''; }
+
+    // Remove expired
+    this._store = this._store.filter(c => c.expires > now);
+
+    var matching = this._store.filter(c => {
+      if (c.secure && !isSecure) return false;
+      // Domain matching: exact or suffix
+      if (hostname !== c.domain && !hostname.endsWith('.' + c.domain)) return false;
+      // Path matching: path must be a prefix
+      if (!pathname.startsWith(c.path)) return false;
+      return true;
+    });
+    return matching.map(c => c.name + '=' + c.value).join('; ');
+  }
+
+  /** Get all non-httpOnly cookies for a domain as "name=value; ..." (document.cookie) */
+  getDocumentCookies(url: string): string {
+    var now = Date.now();
+    var hostname = '';
+    var pathname = '/';
+    try { var u = new URL(url); hostname = u.hostname; pathname = u.pathname; } catch (_) {}
+    this._store = this._store.filter(c => c.expires > now);
+    return this._store
+      .filter(c => !c.httpOnly && (hostname === c.domain || hostname.endsWith('.' + c.domain)) && pathname.startsWith(c.path))
+      .map(c => c.name + '=' + c.value).join('; ');
+  }
+
+  /** Set a cookie from document.cookie = "name=value[; attrs]" (page-visible only, no httpOnly) */
+  setFromPage(cookieStr: string, pageUrl: string): void {
+    // Treat like a Set-Cookie header but force httpOnly=false (page can't set httpOnly)
+    this.setCookie(cookieStr, pageUrl);
+    // Ensure the last added cookie is not httpOnly (pages cannot set httponly cookies)
+    if (this._store.length > 0) {
+      var last = this._store[this._store.length - 1];
+      last.httpOnly = false;
+    }
+  }
+}
+
+/** Module-level cookie jar — shared across page loads (session-persistent) */
+var _cookieJar = new CookieJar();
+
 // ── Storage (per-origin, in-memory + optional VFS persistence) ───────────────
 
 class VStorage {
@@ -908,6 +1014,10 @@ export function createPageJS(
           bodyStr = String(opts.body);
         }
       }
+      // Inject stored cookies (items 303-304)
+      var cookieHdr = _cookieJar.getCookieHeader(urlStr);
+      if (cookieHdr) extraHeaders['cookie'] = extraHeaders['cookie'] || cookieHdr;
+
       var aborted = false;
       if (signal) {
         signal.addEventListener('abort', () => { aborted = true; reject(signal.reason ?? new Error('AbortError')); });
@@ -918,6 +1028,9 @@ export function createPageJS(
         var text  = resp.bodyText;
         var respHeaders = new Headers_();
         resp.headers.forEach((v: string, k: string) => respHeaders.set(k, v));
+        // Process Set-Cookie headers (items 303-304)
+        var sc = respHeaders.get('set-cookie');
+        if (sc) _cookieJar.setCookie(sc, urlStr);
         var response: any = {
           ok: resp.status >= 200 && resp.status < 300,
           status: resp.status,
@@ -1782,7 +1895,32 @@ export function createPageJS(
           this.cssRules.push(mr2);
         } else if (lhdr.startsWith('@keyframes') || lhdr.startsWith('@-webkit-keyframes')) {
           var kr2 = new CSSKeyframesRule_(hdr.replace(/@-?(?:webkit-)?keyframes\s*/i, '').trim());
-          kr2.parentStyleSheet = this; this.cssRules.push(kr2);
+          kr2.parentStyleSheet = this;
+          // Parse individual keyframe stops from body2
+          var kfBody = body2.trim();
+          var kfi = 0;
+          while (kfi < kfBody.length) {
+            while (kfi < kfBody.length && kfBody[kfi] <= ' ') kfi++;
+            var kfSel = '';
+            while (kfi < kfBody.length && kfBody[kfi] !== '{') kfSel += kfBody[kfi++];
+            kfSel = kfSel.trim();
+            if (kfi >= kfBody.length) break;
+            kfi++; // consume {
+            var kfDeclaration = '';
+            var kfDepth = 1;
+            while (kfi < kfBody.length && kfDepth > 0) {
+              if (kfBody[kfi] === '{') kfDepth++;
+              else if (kfBody[kfi] === '}') kfDepth--;
+              if (kfDepth > 0) kfDeclaration += kfBody[kfi];
+              kfi++;
+            }
+            if (kfSel) {
+              var kfRule = new CSSKeyframeRule_(kfSel, kfDeclaration.trim());
+              kfRule.parentStyleSheet = this; (kfRule as any).parentRule = kr2;
+              kr2.cssRules.push(kfRule);
+            }
+          }
+          this.cssRules.push(kr2);
         } else if (lhdr.startsWith('@supports')) {
           var sp2 = new CSSSupportsRule_(hdr.slice(9).trim()); sp2.parentStyleSheet = this;
           var inner3 = new CSSStyleSheet_(); inner3._parseText(body2); sp2.cssRules = inner3.cssRules;
@@ -1874,6 +2012,27 @@ export function createPageJS(
     appendRule(rule: string): void { this.cssRules.push(new CSSStyleRule_(rule, '')); }
     deleteRule(select: string): void { this.cssRules = this.cssRules.filter(r => (r as any).keyText !== select); }
     findRule(select: string): CSSRule_ | null { return this.cssRules.find(r => (r as any).keyText === select) ?? null; }
+  }
+
+  /** CSSKeyframeRule — individual keyframe stop (type=8, e.g. "0%" or "from") */
+  class CSSKeyframeRule_ extends CSSRule_ {
+    type = 8;
+    keyText = '';
+    style: { cssText: string } & Record<string, string> = { cssText: '' } as any;
+    constructor(keyText: string, body?: string) {
+      super();
+      this.keyText = keyText;
+      if (body) {
+        body.split(';').forEach(pair => {
+          var ci = pair.indexOf(':'); if (ci < 0) return;
+          var p2 = pair.slice(0, ci).trim();
+          var v  = pair.slice(ci + 1).replace(/!\s*important\s*$/i, '').trim();
+          if (p2 && v) (this.style as any)[p2] = v;
+        });
+        this.style.cssText = body;
+      }
+      this.cssText = keyText + ' { ' + (this.style.cssText || '') + ' }';
+    }
   }
 
   /** CSSSupportRule — @supports rule (type=12) */
@@ -3273,6 +3432,7 @@ export function createPageJS(
     CSSStyleRule:     CSSStyleRule_,
     CSSMediaRule:     CSSMediaRule_,
     CSSKeyframesRule: CSSKeyframesRule_,
+    CSSKeyframeRule:  CSSKeyframeRule_,   // individual keyframe stop (type=8)
     CSSSupportsRule:  CSSSupportsRule_,
     CSSFontFaceRule:  CSSFontFaceRule_,
     CSSImportRule:    CSSImportRule_,
@@ -3600,6 +3760,17 @@ export function createPageJS(
   (doc as any)._defaultView = win;
   (doc as any)._url = cb.baseURL;
   (doc as any)._selectionRef = _selection;
+
+  // Wire document.cookie to the module-level cookie jar (items 303-304)
+  Object.defineProperty(doc, 'cookie', {
+    get(): string {
+      return _cookieJar.getDocumentCookies(_effectiveHref());
+    },
+    set(v: string): void {
+      _cookieJar.setFromPage(String(v), _effectiveHref());
+    },
+    configurable: true,
+  });
 
   // Populate doc.styleSheets from <style> and <link rel="stylesheet"> (item 579)
   {

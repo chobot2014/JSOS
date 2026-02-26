@@ -95,11 +95,18 @@ var _CSS_NAMED: Record<string, number> = {
 };
 
 /**
+ * Sentinel value returned by parseCSSColor for the `currentColor` keyword.
+ * The renderer must substitute the element's own `color` value when it encounters this.
+ */
+export const CSS_CURRENT_COLOR = 0x01FEFCFC >>> 0;
+
+/**
  * Parse a CSS color string (named, #RGB, #RRGGBB, #RRGGBBAA, rgb(), rgba())
  * and return it as a 32-bit ARGB pixel value, or undefined if unrecognised.
  */
 export function parseCSSColor(val: string): number | undefined {
   val = val.trim().toLowerCase();
+  if (val === 'currentcolor') return CSS_CURRENT_COLOR;
   if (_CSS_NAMED[val] !== undefined) return _CSS_NAMED[val];
   if (val.startsWith('#')) {
     var hex = val.slice(1);
@@ -123,7 +130,121 @@ export function parseCSSColor(val: string): number | undefined {
     var fh = (n: number) => { var k2 = (n + hh / 30) % 12; return Math.round((ll - cc * Math.max(-1, Math.min(k2 - 3, 9 - k2, 1))) * 255); };
     return ((aha & 0xFF) << 24 | fh(0) << 16 | fh(8) << 8 | fh(4)) >>> 0;
   }
-  return undefined;
+  // CSS Color Level 4: space-separated hsl(h s% l% / a) or hsl(h s% l%)
+  var mh2 = val.match(/^hsla?\(\s*([\d.]+)(?:deg)?\s+([\d.]+)%\s+([\d.]+)%(?:\s*\/\s*([\d.]+%?))?\s*\)/);
+  if (mh2) {
+    var hh2 = parseFloat(mh2[1]) % 360; var ss2 = parseFloat(mh2[2]) / 100; var ll2 = parseFloat(mh2[3]) / 100;
+    var aha2 = mh2[4] !== undefined ? (mh2[4].endsWith('%') ? Math.round(parseFloat(mh2[4]) * 2.55) : Math.round(parseFloat(mh2[4]) * 255)) : 255;
+    var cc2 = ss2 * Math.min(ll2, 1 - ll2);
+    var fh2 = (n: number) => { var k3 = (n + hh2 / 30) % 12; return Math.round((ll2 - cc2 * Math.max(-1, Math.min(k3 - 3, 9 - k3, 1))) * 255); };
+    return ((aha2 & 0xFF) << 24 | fh2(0) << 16 | fh2(8) << 8 | fh2(4)) >>> 0;
+  }
+  // CSS Color Level 4: space-separated rgb(r g b / a) or rgb(r g b)
+  var mr2 = val.match(/^rgba?\(\s*([\d.]+%?)\s+([\d.]+%?)\s+([\d.]+%?)(?:\s*\/\s*([\d.]+%?))?\s*\)/);
+  if (mr2) {
+    var _chan = (s: string) => s.endsWith('%') ? Math.round(parseFloat(s) * 2.55) : parseInt(s);
+    var rr = _chan(mr2[1]); var gg = _chan(mr2[2]); var bb2 = _chan(mr2[3]);
+    var aa2 = mr2[4] !== undefined ? (mr2[4].endsWith('%') ? Math.round(parseFloat(mr2[4]) * 2.55) : Math.round(parseFloat(mr2[4]) * 255)) : 255;
+    return ((aa2 & 0xFF) << 24 | (rr & 0xFF) << 16 | (gg & 0xFF) << 8 | (bb2 & 0xFF)) >>> 0;
+  }
+  // hwb(h w% b% / a) — W3C HWB model
+  var mhwb = val.match(/^hwb\(\s*([\d.]+)(?:deg)?\s+([\d.]+)%\s+([\d.]+)%(?:\s*\/\s*([\d.]+%?))?\s*\)/);
+  if (mhwb) {
+    var hwbH = parseFloat(mhwb[1]) / 360; var hwbW = parseFloat(mhwb[2]) / 100; var hwbB = parseFloat(mhwb[3]) / 100;
+    var hwbA = mhwb[4] !== undefined ? (mhwb[4].endsWith('%') ? Math.round(parseFloat(mhwb[4]) * 2.55) : Math.round(parseFloat(mhwb[4]) * 255)) : 255;
+    // Normalize if w+b > 1
+    if (hwbW + hwbB >= 1) { var s3 = hwbW + hwbB; hwbW /= s3; hwbB /= s3; }
+    var hwbI = Math.floor(hwbH * 6); var hwbF = hwbH * 6 - hwbI;
+    var hwbRot = (hwbI & 1) ? 1 - hwbF : hwbF;
+    var hwbV = (n3: number) => Math.round((n3 * (1 - hwbW - hwbB) + hwbW) * 255);
+    var hwbR: number, hwbG: number, hwbBB: number;
+    switch (hwbI % 6) {
+      case 0: hwbR = hwbV(1); hwbG = hwbV(hwbRot); hwbBB = hwbV(0); break;
+      case 1: hwbR = hwbV(hwbRot); hwbG = hwbV(1); hwbBB = hwbV(0); break;
+      case 2: hwbR = hwbV(0); hwbG = hwbV(1); hwbBB = hwbV(hwbRot); break;
+      case 3: hwbR = hwbV(0); hwbG = hwbV(hwbRot); hwbBB = hwbV(1); break;
+      case 4: hwbR = hwbV(hwbRot); hwbG = hwbV(0); hwbBB = hwbV(1); break;
+      default: hwbR = hwbV(1); hwbG = hwbV(0); hwbBB = hwbV(hwbRot); break;
+    }
+    return ((hwbA & 0xFF) << 24 | (hwbR & 0xFF) << 16 | (hwbG & 0xFF) << 8 | (hwbBB & 0xFF)) >>> 0;
+  }
+  // oklch(l c h / a) — approximate to RGB via oklab → linear sRGB conversion
+  var moklch = val.match(/^oklch\(\s*([\d.]+%?)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+%?))?\s*\)/);
+  if (moklch) {
+    var okL = moklch[1].endsWith('%') ? parseFloat(moklch[1]) / 100 : parseFloat(moklch[1]);
+    var okC = parseFloat(moklch[2]); var okH = parseFloat(moklch[3]) * Math.PI / 180;
+    var okA = moklch[4] !== undefined ? (moklch[4].endsWith('%') ? Math.round(parseFloat(moklch[4]) * 2.55) : Math.round(parseFloat(moklch[4]) * 255)) : 255;
+    // Convert oklch → oklab
+    var okLabA = okC * Math.cos(okH); var okLabB = okC * Math.sin(okH);
+    // Oklab → linear sRGB (approximate)
+    var ll3 = okL + 0.3963377774 * okLabA + 0.2158037573 * okLabB;
+    var mm = okL - 0.1055613458 * okLabA - 0.0638541728 * okLabB;
+    var ss3 = okL - 0.0894841775 * okLabA - 1.2914855480 * okLabB;
+    var ll4 = ll3 * ll3 * ll3; var mm2 = mm * mm * mm; var ss4 = ss3 * ss3 * ss3;
+    var okRLin =  4.0767416621 * ll4 - 3.3077115913 * mm2 + 0.2309699292 * ss4;
+    var okGLin = -1.2684380046 * ll4 + 2.6097574011 * mm2 - 0.3413193965 * ss4;
+    var okBLin = -0.0041960863 * ll4 - 0.7034186147 * mm2 + 1.7076147010 * ss4;
+    // Linear → gamma sRGB
+    var gammaC = (x: number) => { var v = Math.max(0, Math.min(1, x)); return Math.round((v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1/2.4) - 0.055) * 255); };
+    return ((okA & 0xFF) << 24 | gammaC(okRLin) << 16 | gammaC(okGLin) << 8 | gammaC(okBLin)) >>> 0;
+  }
+  // lab(l a b / alpha) — CIELAB approximate conversion
+  var mlab = val.match(/^lab\(\s*([\d.]+%?)\s+([-\d.]+)\s+([-\d.]+)(?:\s*\/\s*([\d.]+%?))?\s*\)/);
+  if (mlab) {
+    var labL = mlab[1].endsWith('%') ? parseFloat(mlab[1]) : parseFloat(mlab[1]);
+    var labA2 = parseFloat(mlab[2]); var labB2 = parseFloat(mlab[3]);
+    var labAlpha = mlab[4] !== undefined ? (mlab[4].endsWith('%') ? Math.round(parseFloat(mlab[4]) * 2.55) : Math.round(parseFloat(mlab[4]) * 255)) : 255;
+    var fy = (labL + 16) / 116; var fx = labA2 / 500 + fy; var fz = fy - labB2 / 200;
+    var D65 = [0.95047, 1.0, 1.08883];
+    var _cube = (t: number) => t > 0.206897 ? t * t * t : (t - 16/116) / 7.787;
+    var Xn = D65[0] * _cube(fx); var Yn = D65[1] * _cube(fy); var Zn = D65[2] * _cube(fz);
+    var rLin2 =  3.2406 * Xn - 1.5372 * Yn - 0.4986 * Zn;
+    var gLin2 = -0.9689 * Xn + 1.8758 * Yn + 0.0415 * Zn;
+    var bLin2 =  0.0557 * Xn - 0.2040 * Yn + 1.0570 * Zn;
+    var gC2 = (x: number) => { var v = Math.max(0, Math.min(1, x)); return Math.round((v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1/2.4) - 0.055) * 255); };
+    return ((labAlpha & 0xFF) << 24 | gC2(rLin2) << 16 | gC2(gLin2) << 8 | gC2(bLin2)) >>> 0;
+  }
+  // lch(l c h / alpha) — CIELCh polar form of CIELAB
+  var mlch = val.match(/^lch\(\s*([\d.]+%?)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+%?))?\s*\)/);
+  if (mlch) {
+    var lchL = parseFloat(mlch[1]); var lchC = parseFloat(mlch[2]); var lchH = parseFloat(mlch[3]) * Math.PI / 180;
+    // Convert to LAB then reuse lab() logic inline
+    return parseCSSColor('lab(' + lchL + ' ' + (lchC * Math.cos(lchH)).toFixed(4) + ' ' + (lchC * Math.sin(lchH)).toFixed(4) + (mlch[4] ? ' / ' + mlch[4] : '') + ')') ?? 0xFF808080;
+  }
+  // color(display-p3 r g b / a) — approximate as sRGB (gamut mapping not critical for rendering)
+  var mcolorFn = val.match(/^color\(\s*(?:display-p3|srgb|srgb-linear|a98-rgb|prophoto-rgb|rec2020)\s+([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)(?:\s*\/\s*([\d.]+))?\s*\)/);
+  if (mcolorFn) {
+    var cr = Math.round(Math.max(0, Math.min(1, parseFloat(mcolorFn[1]))) * 255);
+    var cg = Math.round(Math.max(0, Math.min(1, parseFloat(mcolorFn[2]))) * 255);
+    var cb2 = Math.round(Math.max(0, Math.min(1, parseFloat(mcolorFn[3]))) * 255);
+    var ca = mcolorFn[4] !== undefined ? Math.round(parseFloat(mcolorFn[4]) * 255) : 255;
+    return ((ca & 0xFF) << 24 | (cr & 0xFF) << 16 | (cg & 0xFF) << 8 | (cb2 & 0xFF)) >>> 0;
+  }
+  // color-mix(in <space>, <color1> [<pct1>], <color2> [<pct2>]) — sRGB mix approximation
+  // e.g. color-mix(in srgb, red 40%, blue) or color-mix(in oklch, #fff, #000 30%)
+  var mcm = val.match(/^color-mix\(\s*in\s+\S+\s*,\s*(.+?)\s*,\s*(.+?)\s*\)$/);
+  if (mcm) {
+    // Parse each part: color [percentage]
+    var _parseCMPart = (part: string): [number | undefined, number] => {
+      var pm = part.trim().match(/^(.*?)\s+([\d.]+)%\s*$/);
+      if (pm) return [parseCSSColor(pm[1].trim()), parseFloat(pm[2]) / 100];
+      return [parseCSSColor(part.trim()), 0.5];
+    };
+    var [c1, p1] = _parseCMPart(mcm[1]);
+    var [c2, p2] = _parseCMPart(mcm[2]);
+    if (c1 === undefined) c1 = 0xFF000000;
+    if (c2 === undefined) c2 = 0xFF000000;
+    // Normalize percentages
+    if (p1 === 0.5 && p2 === 0.5) { p1 = 0.5; p2 = 0.5; }
+    else if (p2 === 0.5) { p2 = 1 - p1; }
+    else if (p1 === 0.5) { p1 = 1 - p2; }
+    var _cm = (ch1: number, ch2: number, w1: number, w2: number) => Math.round(((ch1 * w1 + ch2 * w2) / (w1 + w2)));
+    var cmR = _cm((c1 >>> 16) & 0xFF, (c2 >>> 16) & 0xFF, p1, p2);
+    var cmG = _cm((c1 >>> 8)  & 0xFF, (c2 >>> 8)  & 0xFF, p1, p2);
+    var cmB = _cm( c1         & 0xFF,  c2         & 0xFF, p1, p2);
+    var cmA = _cm((c1 >>> 24) & 0xFF, (c2 >>> 24) & 0xFF, p1, p2);
+    return ((cmA & 0xFF) << 24 | (cmR & 0xFF) << 16 | (cmG & 0xFF) << 8 | (cmB & 0xFF)) >>> 0;
+  }
 }
 
 /**
@@ -133,6 +254,10 @@ export function parseCSSColor(val: string): number | undefined {
  */
 export function evalCalc(expr: string): number {
   var s = expr.replace(/calc\(/g, '(').replace(/\s+/g, ' ').trim();
+  // Replace env(safe-area-inset-*) and other env() calls with 0 (no safe area in OS)
+  s = s.replace(/env\([^)]*\)/g, '0');
+  // Replace var(--*) CSS custom properties with 0 (no runtime value available here)
+  s = s.replace(/var\(--[^)]*\)/g, '0');
   // Replace unit suffixes with numeric px values
   s = s.replace(/([\d.]+)rem/g, (_m: string, n: string) => String(parseFloat(n) * 16));
   s = s.replace(/([\d.]+)em/g,  (_m: string, n: string) => String(parseFloat(n) * 16));
@@ -272,23 +397,47 @@ export function parseInlineStyle(style: string): CSSProps {
         if (bg !== undefined) p.bgColor = bg; break;
       }
       case 'background': {
-        // background shorthand — extract first color token, ignore image/pos/size
-        var bgParts = val.split(/\s+/);
+        // background shorthand — color, url, position [/ size], repeat, attachment
+        // 1. Extract url(...)
+        var urlM = val.match(/url\(\s*['"]?([^'")\s]+)['"]?\s*\)/i);
+        if (urlM) p.backgroundImage = 'url(' + urlM[1] + ')';
+        // Work on a version with url() stripped for token parsing
+        var bgNoUrl = val.replace(/url\([^)]*\)/gi, '').trim();
+        // 2. background-size in "pos / size" notation
+        var bgsM = bgNoUrl.match(/(?:^|\s)((?:left|right|center|top|bottom|[\d.]+(?:px|%|em|rem)?)\s+)+\s*\/\s*(.+?)(?:\s+(?:no-repeat|repeat[^\s]*|fixed|scroll|local)|$)/i);
+        if (bgsM) p.backgroundSize = bgsM[2].trim();
+        // 3. Extract repeat keyword
+        var bgRepM = bgNoUrl.match(/\b(no-repeat|repeat-x|repeat-y|repeat|round|space)\b/i);
+        if (bgRepM) p.backgroundRepeat = bgRepM[1].toLowerCase();
+        // 4. Extract attachment keyword
+        var bgAttM = bgNoUrl.match(/\b(fixed|scroll|local)\b/i);
+        if (bgAttM) p.backgroundAttachment = bgAttM[1].toLowerCase();
+        // 5. Try to find position keywords / values (before size)
+        var posBefore = bgsM ? bgNoUrl.slice(0, bgNoUrl.indexOf('/')) : bgNoUrl;
+        var posM = posBefore.match(/\b(left|right|center|top|bottom)\b/i);
+        if (posM) { p.backgroundPosition = posM[0].toLowerCase(); }
+        else {
+          var pctM = posBefore.match(/(\d+(?:\.\d+)?%)\s+(\d+(?:\.\d+)?%)/);
+          if (pctM) p.backgroundPosition = pctM[1] + ' ' + pctM[2];
+        }
+        // 6. Find color (last non-url/position/repeat token, try each token)
+        var bgParts = bgNoUrl.replace(/\b(no-repeat|repeat[^\s]*|fixed|scroll|local)\b/gi, '').split(/\s+/);
         for (var bpi = 0; bpi < bgParts.length; bpi++) {
           var bgCol = parseCSSColor(bgParts[bpi].toLowerCase());
           if (bgCol !== undefined) { p.bgColor = bgCol; break; }
         }
-        // Also check for url(...)
-        var urlM = val.match(/url\(\s*['"]?([^'")\s]+)['"]?\s*\)/i);
-        if (urlM) p.backgroundImage = 'url(' + urlM[1] + ')';
         break;
       }
       case 'background-image': {
         p.backgroundImage = val; break;
       }
-      case 'background-size':     { p.backgroundSize     = val; break; }
-      case 'background-position': { p.backgroundPosition = val; break; }
-      case 'background-repeat':   { p.backgroundRepeat   = val; break; }
+      case 'background-size':       { p.backgroundSize       = val; break; }
+      case 'background-position':   { p.backgroundPosition   = val; break; }
+      case 'background-repeat':     { p.backgroundRepeat     = val; break; }
+      case 'background-attachment': { p.backgroundAttachment = vl;  break; }
+      case 'background-clip':       { p.backgroundClip       = vl;  break; }
+      case 'background-origin':     { p.backgroundOrigin     = vl;  break; }
+      case '-webkit-background-clip': { if (!p.backgroundClip) p.backgroundClip = vl; break; }
 
       // ── Font / text ───────────────────────────────────────────────────────
       case 'font-weight': {
@@ -347,7 +496,15 @@ export function parseInlineStyle(style: string): CSSProps {
         var fpit = vl.match(/\b(italic|oblique)\b/);
         if (fpit) p.italic = true;
         var fpsz = vl.match(/\b(\d+(?:\.\d+)?(?:px|pt|em|rem|%))\b/);
-        if (fpsz) { var fszv = parseLengthPx(fpsz[1]); if (!isNaN(fszv)) p.fontScale = fszv < 12 ? 0.75 : fszv < 16 ? 1 : fszv < 24 ? 2 : 3; }
+        if (fpsz) {
+          var fszv = parseLengthPx(fpsz[1]);
+          if (!isNaN(fszv)) p.fontScale = fszv < 12 ? 0.75 : fszv < 16 ? 1 : fszv < 24 ? 2 : 3;
+          // Family is everything after the "size[/line-height]" part
+          var afterSize = vl.slice(vl.indexOf(fpsz[1]) + fpsz[1].length);
+          // Skip /line-height if present
+          afterSize = afterSize.replace(/^\s*\/\s*[\d.]+(?:px|em|rem|%|)\s*/, '').trim();
+          if (afterSize.length > 0) p.fontFamily = afterSize;
+        }
         break;
       }
       case 'text-decoration': {
@@ -507,7 +664,17 @@ export function parseInlineStyle(style: string): CSSProps {
       }
       case 'outline-width': { var owv2 = parseLengthPx(vl); if (!isNaN(owv2)) p.outlineWidth = owv2; break; }
       case 'outline-color': { var occ2 = parseCSSColor(vl); if (occ2 !== undefined) p.outlineColor = occ2; break; }
-      case 'outline-style': break; // stored as part of border render — ignored separately
+      case 'outline-style':  { p.outlineStyle = vl; break; }
+      case 'outline-offset': { var oofsV = parseLengthPx(vl); if (!isNaN(oofsV)) p.outlineOffset = oofsV; break; }
+      case 'caret-color':    { var ccc = parseCSSColor(vl); if (ccc !== undefined) p.caretColor = ccc; break; }
+      case 'accent-color':   { var acc = parseCSSColor(vl); if (acc !== undefined) p.accentColor = acc; break; }
+      case 'font-stretch':   { p.fontStretch = vl; break; }
+      case 'font-feature-settings': case '-webkit-font-feature-settings': break; // no-op
+      case 'font-variant-numeric': case 'font-variant-ligatures': case 'font-variant-alternates': break; // no-op
+      case 'tab-size': case '-moz-tab-size': { var tsv = parseInt(vl); if (!isNaN(tsv)) p.tabSize = tsv; break; }
+      case 'line-break': { p.lineBreak = vl; break; }
+      case 'list-style-position': { if (vl === 'inside' || vl === 'outside') p.listStylePosition = vl; break; }
+      case 'list-style-image':    { p.listStyleImage = val; break; }
       case 'word-break': {
         if (vl === 'break-all' || vl === 'break-word' || vl === 'keep-all' || vl === 'normal')
           p.wordBreak = vl as CSSProps['wordBreak']; break;
@@ -536,6 +703,209 @@ export function parseInlineStyle(style: string): CSSProps {
       case 'content': { p.content = val; break; }
       case 'counter-reset':     { p.counterReset     = val; break; }
       case 'counter-increment': { p.counterIncrement = val; break; }
+
+      // ── Image / media ─────────────────────────────────────────────────────
+      case 'object-fit': {
+        if (vl === 'fill' || vl === 'contain' || vl === 'cover' || vl === 'none' || vl === 'scale-down')
+          p.objectFit = vl as CSSProps['objectFit']; break;
+      }
+      case 'object-position': { p.objectPosition = val; break; }
+      case 'aspect-ratio': { p.aspectRatio = vl !== 'auto' ? val : undefined; break; }
+      case 'image-rendering': { p.imageRendering = vl; break; }
+
+      // ── Multi-column (item 457) ────────────────────────────────────────────
+      case 'column-count': {
+        if (vl === 'auto') p.columnCount = 'auto';
+        else { var ccv = parseInt(vl); if (!isNaN(ccv) && ccv > 0) p.columnCount = ccv; }
+        break;
+      }
+      case 'column-width': {
+        if (vl === 'auto') p.columnWidth = 'auto';
+        else { var cwv = parseLengthPx(vl); if (!isNaN(cwv)) p.columnWidth = cwv; }
+        break;
+      }
+      case 'columns': {
+        // shorthand: column-count column-width (either order)
+        var colParts = vl.split(/\s+/);
+        for (var cpi = 0; cpi < colParts.length; cpi++) {
+          var cpv = colParts[cpi]!;
+          if (cpv === 'auto') continue;
+          var cpwv = parseLengthPx(cpv);
+          if (!isNaN(cpwv) && (cpv.includes('px') || cpv.includes('em') || cpv.includes('rem')))
+            p.columnWidth = cpwv;
+          else { var cpcv = parseInt(cpv); if (!isNaN(cpcv) && cpcv > 0) p.columnCount = cpcv; }
+        }
+        break;
+      }
+
+      // ── Text (extended) ───────────────────────────────────────────────────
+      case 'text-indent': { var tiv = parseLengthPx(vl); if (!isNaN(tiv)) p.textIndent = tiv; break; }
+      case 'text-align-last': {
+        if (vl==='auto'||vl==='left'||vl==='center'||vl==='right'||vl==='justify'||vl==='start'||vl==='end')
+          p.textAlignLast = vl as CSSProps['textAlignLast'];
+        break;
+      }
+      case 'font-variant': case 'font-variant-caps': { p.fontVariant = vl; break; }
+      case 'font-kerning': {
+        if (vl === 'normal' || vl === 'none') p.fontKerning = vl; else p.fontKerning = 'auto'; break;
+      }
+      case 'hyphens': case '-webkit-hyphens': case '-ms-hyphens': {
+        if (vl === 'none' || vl === 'manual' || vl === 'auto') p.hyphens = vl; break;
+      }
+      case '-webkit-line-clamp': case 'line-clamp': {
+        if (vl !== 'none') { var lcv = parseInt(vl); if (!isNaN(lcv) && lcv > 0) p.lineClamp = lcv; }
+        else p.lineClamp = undefined;
+        break;
+      }
+      case 'quotes': { p.quotes = val; break; }
+
+      // ── Layout / interaction helpers ──────────────────────────────────────
+      case 'isolation': { p.isolation = vl === 'isolate' ? 'isolate' : 'auto'; break; }
+      case 'touch-action': { p.touchAction = vl; break; }
+      case 'color-scheme': { p.colorScheme = val; break; }
+
+      // ── SVG CSS properties ────────────────────────────────────────────────
+      case 'fill':         { p.fill        = val; break; }
+      case 'stroke':       { p.stroke      = val; break; }
+      case 'stroke-width': {
+        var swv2 = parseLengthPx(vl); if (!isNaN(swv2)) p.strokeWidth = swv2; break;
+      }
+
+      // ── Accepted no-ops (property known but not yet rendered) ─────────────
+      case 'text-rendering':             break; // rendering hint
+      case 'text-size-adjust':           break; // mobile zoom hint
+      case '-webkit-text-size-adjust':   break;
+      case '-ms-text-size-adjust':       break;
+      case 'break-before':               break; // column/page break hint
+      case 'break-after':                break;
+      case 'break-inside':               break;
+      case 'page-break-before':          break;
+      case 'page-break-after':           break;
+      case 'page-break-inside':          break;
+      case 'box-decoration-break':       break;
+      case '-webkit-overflow-scrolling': break; // legacy iOS momentum scroll
+      case 'scrollbar-width':            break; // custom scrollbar
+      case 'scrollbar-color':            break;
+      case 'scrollbar-gutter':           break;
+      case 'scroll-behavior':            break;
+      case 'scroll-snap-type':           break;
+      case 'scroll-snap-align':          break;
+      case 'scroll-snap-stop':           break;
+      case 'scroll-margin':              break;
+      case 'scroll-padding':             break;
+      case 'overscroll-behavior':        break;
+      case 'overscroll-behavior-x':      break;
+      case 'overscroll-behavior-y':      break;
+      case '-webkit-font-smoothing':     break; // antialiasing hint
+      case '-moz-osx-font-smoothing':    break;
+      case 'font-optical-sizing':        break;
+      case 'font-synthesis':             break;
+      case 'forced-color-adjust':        break; // Windows HCM
+      case 'print-color-adjust':         break;
+      case 'color-interpolation':        break; // SVG hint
+      case 'shape-rendering':            break; // SVG hint
+      case 'dominant-baseline':          break; // SVG text
+      case 'text-anchor':                break; // SVG text
+      case 'paint-order':                break; // SVG paint order
+      case 'marker': case 'marker-start': case 'marker-end': case 'marker-mid': break;
+      case 'writing-mode':               break; // vertical text stub
+      case 'direction':                  break; // RTL/LTR stub
+      case 'unicode-bidi':               break; // BiDi stub
+      case 'caption-side':               break; // table stub
+      case 'empty-cells':                break; // table stub
+      case 'speak':                      break; // aural CSS
+      // ── Modern/experimental no-ops ────────────────────────────────────────
+      case 'content-visibility':         break; // rendering optimization
+      case 'contain':                    break; // containment hint
+      case 'contain-intrinsic-size':     break;
+      case 'contain-intrinsic-width':    break;
+      case 'contain-intrinsic-height':   break;
+      case 'text-wrap':                  break; // text-wrap: balance/pretty
+      case 'text-wrap-mode':             break;
+      case 'text-wrap-style':            break;
+      case 'text-box':                   break; // CSS text-box-trim
+      case 'text-box-trim':              break;
+      case 'text-box-edge':              break;
+      case 'text-spacing-trim':          break;
+      case 'anchor-name':                break; // CSS anchor positioning
+      case 'anchor-scope':               break;
+      case 'position-anchor':            break;
+      case 'position-area':              break;
+      case 'position-try':               break;
+      case 'position-try-fallbacks':     break;
+      case 'position-visibility':        break;
+      case 'field-sizing':               break; // CSS form sizing
+      case 'interpolate-size':           break; // intrinsic size animations
+      case 'counter-set':                break; // CSS counter-set
+      case 'user-modify':                break; // legacy editable
+      case '-webkit-user-modify':        break;
+      case 'rotate':                     break; // individual transform props (stored in transform)
+      case 'scale':                      break;
+      case 'translate':                  break;
+      case 'offset':                     break; // motion path
+      case 'offset-path':                break;
+      case 'offset-distance':            break;
+      case 'offset-rotate':              break;
+      case 'offset-anchor':              break;
+      case 'motion-path':                break;
+      case 'shape-outside':              break; // float shapes
+      case 'shape-margin':               break;
+      case 'shape-image-threshold':      break;
+      case '-webkit-tap-highlight-color': break; // iOS tap highlight
+      case '-webkit-touch-callout':      break;
+      case 'orphans': case 'widows':     break; // paged media
+      case 'image-orientation':          break;
+      case 'image-resolution':           break;
+      case 'text-underline-offset':      break;
+      case 'text-underline-position':    break;
+      case 'text-decoration-thickness':  break;
+      case 'text-decoration-skip-ink':   break;
+      case 'text-emphasis':              break;
+      case 'text-emphasis-color':        break;
+      case 'text-emphasis-style':        break;
+      case 'text-emphasis-position':     break;
+      case '-webkit-text-stroke':        break;
+      case '-webkit-text-stroke-width':  break;
+      case '-webkit-text-stroke-color':  break;
+      case '-webkit-text-fill-color':    break;
+      case 'mix-blend-mode':             break;
+      case 'background-blend-mode':      break;
+      case 'backdrop-filter':            break;
+      case '-webkit-backdrop-filter':    break;
+      case 'mask': case 'mask-image': case 'mask-size': case 'mask-repeat':
+      case 'mask-position': case 'mask-composite': case 'mask-mode': break;
+      case 'clip':                       break; // legacy clip rect()
+      case 'all':                        break; // CSS reset shorthand
+      case 'perspective':                break; // 3D perspective
+      case 'perspective-origin':         break;
+      case 'transform-style':            break; // flat / preserve-3d
+      case 'transform-box':              break;
+      case 'backface-visibility':        break;
+      case '-webkit-backface-visibility': break;
+      case '-webkit-perspective':        break;
+      case '-webkit-transform-style':    break;
+      case 'border-image':               break; // border image shorthand
+      case 'border-image-source':        break;
+      case 'border-image-slice':         break;
+      case 'border-image-width':         break;
+      case 'border-image-outset':        break;
+      case 'border-image-repeat':        break;
+      case 'column-rule':                break; // column rule between columns
+      case 'column-rule-color':          break;
+      case 'column-rule-style':          break;
+      case 'column-rule-width':          break;
+      case 'column-fill':                break;
+      case 'column-span':                break;
+      case '-webkit-column-count':       break;
+      case '-webkit-column-width':       break;
+      case '-webkit-column-rule':        break;
+      case '-moz-column-count':          break;
+      case '-moz-column-width':          break;
+      case '-moz-column-rule':           break;
+      case 'math-style': case 'math-depth': break; // MathML
+      case 'page': case 'size': break; // @page rules
+      case 'speak-as': break; // aural extended
+      case 'nav-up': case 'nav-down': case 'nav-left': case 'nav-right': break; // D-pad nav
 
       // border-[side] shorthands: map to unified border props (renderer uses single border)
       case 'border-top': case 'border-right': case 'border-bottom': case 'border-left': {
@@ -620,7 +990,33 @@ export function parseInlineStyle(style: string): CSSProps {
       case 'transform-origin':  { p.transformOrigin  = val; break; }
       case '-webkit-transform-origin': { if (!p.transformOrigin) p.transformOrigin = val; break; }
       case 'transition':        { p.transition        = val; break; }
+      case 'transition-property':        { p.transitionProperty        = val; break; }
+      case 'transition-duration':        { p.transitionDuration        = val; break; }
+      case 'transition-timing-function': { p.transitionTimingFunction  = val; break; }
+      case 'transition-delay':           { p.transitionDelay           = val; break; }
+      case '-webkit-transition':                    { if (!p.transition)       p.transition       = val; break; }
+      case '-webkit-transition-property':           { if (!p.transitionProperty) p.transitionProperty = val; break; }
+      case '-webkit-transition-duration':           { if (!p.transitionDuration) p.transitionDuration = val; break; }
+      case '-webkit-transition-timing-function':    { if (!p.transitionTimingFunction) p.transitionTimingFunction = val; break; }
+      case '-webkit-transition-delay':              { if (!p.transitionDelay)    p.transitionDelay    = val; break; }
       case 'animation':         { p.animation         = val; break; }
+      case 'animation-name':             { p.animationName            = val; break; }
+      case 'animation-duration':         { p.animationDuration        = val; break; }
+      case 'animation-timing-function':  { p.animationTimingFunction  = val; break; }
+      case 'animation-delay':            { p.animationDelay           = val; break; }
+      case 'animation-iteration-count':  { p.animationIterationCount  = val; break; }
+      case 'animation-direction':        { p.animationDirection       = val; break; }
+      case 'animation-fill-mode':        { p.animationFillMode        = val; break; }
+      case 'animation-play-state':       { p.animationPlayState       = val; break; }
+      case '-webkit-animation':                   { if (!p.animation) p.animation = val; break; }
+      case '-webkit-animation-name':              { if (!p.animationName) p.animationName = val; break; }
+      case '-webkit-animation-duration':          { if (!p.animationDuration) p.animationDuration = val; break; }
+      case '-webkit-animation-timing-function':   { if (!p.animationTimingFunction) p.animationTimingFunction = val; break; }
+      case '-webkit-animation-delay':             { if (!p.animationDelay) p.animationDelay = val; break; }
+      case '-webkit-animation-iteration-count':   { if (!p.animationIterationCount) p.animationIterationCount = val; break; }
+      case '-webkit-animation-direction':         { if (!p.animationDirection) p.animationDirection = val; break; }
+      case '-webkit-animation-fill-mode':         { if (!p.animationFillMode) p.animationFillMode = val; break; }
+      case '-webkit-animation-play-state':        { if (!p.animationPlayState) p.animationPlayState = val; break; }
 
       // ── Cursor / pointer events ───────────────────────────────────────────
       case 'cursor':         { p.cursor        = vl; break; }
@@ -679,9 +1075,23 @@ export function parseInlineStyle(style: string): CSSProps {
       // ── Grid ──────────────────────────────────────────────────────────────
       case 'grid-template-columns': { p.gridTemplateColumns = val; break; }
       case 'grid-template-rows':    { p.gridTemplateRows    = val; break; }
+      case 'grid-template-areas':   { p.gridTemplateAreas   = val; break; }
+      case 'grid-auto-columns':     { p.gridAutoColumns     = val; break; }
+      case 'grid-auto-rows':        { p.gridAutoRows        = val; break; }
+      case 'grid-auto-flow':        { p.gridAutoFlow        = val; break; }
       case 'grid-column':           { p.gridColumn          = val; break; }
       case 'grid-row':              { p.gridRow             = val; break; }
+      case 'grid-column-start':     { p.gridColumnStart     = val; break; }
+      case 'grid-column-end':       { p.gridColumnEnd       = val; break; }
+      case 'grid-row-start':        { p.gridRowStart        = val; break; }
+      case 'grid-row-end':          { p.gridRowEnd          = val; break; }
       case 'grid-area':             { p.gridArea            = val; break; }
+      case 'grid-template': case 'grid': break;  // complex shorthand — no-op silencer
+      case 'justify-items':  { p.justifyItems  = vl; break; }
+      case 'justify-self':   { p.justifySelf   = vl; break; }
+      case 'place-items':    { p.placeItems    = val; break; }
+      case 'place-content':  { p.placeContent  = val; break; }
+      case 'place-self':     { p.placeSelf     = val; break; }
 
       // ── Vendor prefixes → standard property aliases ───────────────────────
       case '-webkit-flex-direction': case '-moz-flex-direction':
