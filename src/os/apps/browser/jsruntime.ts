@@ -17,7 +17,7 @@ import { os } from '../../core/sdk.js';
 import type { FetchResponse } from '../../core/sdk.js';
 import {
   VDocument, VElement, VEvent, VText,
-  buildDOM, serializeDOM, _walk, _matchSel,
+  buildDOM, serializeDOM, _serializeEl, _walk, _matchSel,
 } from './dom.js';
 import { BrowserPerformance, BrowserPerformanceObserver } from './perf.js';
 import { WorkerImpl, MessageChannel, BroadcastChannelImpl, tickAllWorkers } from './workers.js';
@@ -1873,6 +1873,34 @@ export function createPageJS(
     }
   }
 
+  // ── FontFaceSet (document.fonts) ──────────────────────────────────────────
+
+  class FontFaceSet_ {
+    _fonts: Set<FontFace_> = new Set();
+    ready: Promise<FontFaceSet_> = Promise.resolve(this);
+    status: 'loading' | 'loaded' = 'loaded';
+    onloading:     null = null;
+    onloadingdone: null = null;
+    onloadingerror: null = null;
+    get size(): number { return this._fonts.size; }
+    add(font: FontFace_): FontFaceSet_ { this._fonts.add(font); return this; }
+    delete(font: FontFace_): boolean { return this._fonts.delete(font); }
+    has(font: FontFace_): boolean { return this._fonts.has(font); }
+    clear(): void { this._fonts.clear(); }
+    forEach(fn: (font: FontFace_, set: FontFaceSet_) => void): void { this._fonts.forEach(f => fn(f, this)); }
+    [Symbol.iterator](): Iterator<FontFace_> { return this._fonts[Symbol.iterator](); }
+    values(): IterableIterator<FontFace_> { return this._fonts.values(); }
+    keys(): IterableIterator<FontFace_> { return this._fonts.keys(); }
+    entries(): IterableIterator<[FontFace_, FontFace_]> { return this._fonts.entries(); }
+    check(_font: string, _text?: string): boolean { return true; }
+    load(_font: string, _text?: string): Promise<FontFace_[]> { return Promise.resolve([]); }
+    addEventListener(_t: string, _fn: unknown): void {}
+    removeEventListener(_t: string, _fn: unknown): void {}
+  }
+
+  var _documentFonts = new FontFaceSet_();
+  (doc as any).fonts = _documentFonts;
+
   // ── EventSource (Server-Sent Events) ─────────────────────────────────────
 
   class EventSource_ {
@@ -2203,10 +2231,17 @@ export function createPageJS(
   class XMLSerializer {
     serializeToString(node: VElement | any): string {
       if (!node) return '';
-      // If it's a full document, serialize its body/html
-      if (node.nodeType === 9) { return serializeDOM(node as any); }
-      // If it's an element, use the dom serializer
-      return serializeDOM(node as any);
+      // Full document
+      if (node.nodeType === 9) {
+        return '<!DOCTYPE html>' + _serializeEl(node.documentElement ?? node.body);
+      }
+      // Element or fragment
+      if (node instanceof VElement) return _serializeEl(node);
+      // Text node
+      if (node.nodeType === 3) return (node as any).data || '';
+      // Comment
+      if (node.nodeType === 8) return '<!--' + ((node as any).data || '') + '-->';
+      return '';
     }
   }
 
@@ -2967,6 +3002,7 @@ export function createPageJS(
     // Clipboard & Fonts
     ClipboardItem:    ClipboardItem_,
     FontFace:         FontFace_,
+    FontFaceSet:      FontFaceSet_,
 
     // EventSource (SSE)
     EventSource: EventSource_,

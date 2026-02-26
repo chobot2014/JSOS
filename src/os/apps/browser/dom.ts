@@ -217,6 +217,48 @@ export class VNode {
     return false;
   }
   getRootNode(): VNode { var n: VNode = this; while (n.parentNode) n = n.parentNode; return n; }
+  /** True if this is the exact same node instance as other. */
+  isSameNode(other: VNode | null): boolean { return this === other; }
+  /** True if two nodes have the same structure and attributes. */
+  isEqualNode(other: VNode | null): boolean {
+    if (!other) return false;
+    if (this.nodeType !== other.nodeType) return false;
+    if (this.nodeName !== other.nodeName) return false;
+    if (this.childNodes.length !== other.childNodes.length) return false;
+    for (var i = 0; i < this.childNodes.length; i++) {
+      if (!this.childNodes[i].isEqualNode(other.childNodes[i])) return false;
+    }
+    return true;
+  }
+  /** compareDocumentPosition bitmask. */
+  compareDocumentPosition(other: VNode): number {
+    if (this === other) return 0;
+    // 20 = PRECEDING | CONTAINS, 10 = FOLLOWING | CONTAINED_BY
+    if (this.contains(other)) return 20;
+    if (other.contains(this)) return 10;
+    return 1; // DISCONNECTED
+  }
+  /** Merge adjacent text nodes and remove empty text nodes. */
+  normalize(): void {
+    var i = 0;
+    while (i < this.childNodes.length) {
+      var ch = this.childNodes[i];
+      if (ch.nodeType === 3) {
+        // merge with next text nodes
+        var text = (ch as any).data || '';
+        var j = i + 1;
+        while (j < this.childNodes.length && this.childNodes[j].nodeType === 3) {
+          text += (this.childNodes[j] as any).data || '';
+          j++;
+        }
+        if (j > i + 1) { (ch as any).data = text; this.childNodes.splice(i + 1, j - i - 1); }
+        if (!text) { this.childNodes.splice(i, 1); continue; }
+      } else {
+        ch.normalize();
+      }
+      i++;
+    }
+  }
 }
 
 // ── VText ─────────────────────────────────────────────────────────────────────
@@ -1292,17 +1334,62 @@ function _matchSimple(part: string, el: VElement): boolean {
 
 function _matchPseudo(pseudo: string, _arg: string, el: VElement): boolean {
   var siblings = () => el.parentNode ? el.parentNode.childNodes.filter(c => c instanceof VElement) as VElement[] : [el];
-  if (pseudo === 'first-child')  return siblings()[0] === el;
-  if (pseudo === 'last-child')   return siblings()[siblings().length - 1] === el;
-  if (pseudo === 'only-child')   return siblings().length === 1;
-  if (pseudo === 'nth-child')    { var n = parseInt(_arg, 10); return siblings()[n - 1] === el; }
-  if (pseudo === 'nth-last-child') { var a = siblings(); var n2 = parseInt(_arg, 10); return a[a.length - n2] === el; }
-  if (pseudo === 'empty')        return el.childNodes.length === 0;
-  if (pseudo === 'checked')      return el.checked;
-  if (pseudo === 'disabled')     return el.disabled;
-  if (pseudo === 'not')          return !_matchSel(_arg, el);
-  if (pseudo === 'focus')        return false; // we don't track real focus on VElement
-  if (pseudo === 'hover')        return false;
+  var sibsOfType = () => el.parentNode ? el.parentNode.childNodes.filter(c => c instanceof VElement && (c as VElement).tagName === el.tagName) as VElement[] : [el];
+  // Helper: parse an+b → match index (1-based)
+  function nthMatch(arg: string, index: number): boolean {
+    var s = arg.trim().toLowerCase();
+    if (s === 'odd')  { return index % 2 === 1; }
+    if (s === 'even') { return index % 2 === 0; }
+    var plain = parseInt(s, 10);
+    if (!isNaN(plain) && s.indexOf('n') < 0) return index === plain;
+    var m = s.match(/^(-?\d*)n(?:\s*\+\s*(\d+))?$/);
+    if (m) {
+      var a = m[1] === '' ? 1 : m[1] === '-' ? -1 : parseInt(m[1], 10);
+      var b = m[2] ? parseInt(m[2], 10) : 0;
+      if (a === 0) return index === b;
+      var rem = (index - b); return rem % a === 0 && rem / a >= 0;
+    }
+    return false;
+  }
+  if (pseudo === 'first-child')    return siblings()[0] === el;
+  if (pseudo === 'last-child')     return siblings()[siblings().length - 1] === el;
+  if (pseudo === 'only-child')     return siblings().length === 1;
+  if (pseudo === 'nth-child')      { var ss = siblings(); return nthMatch(_arg, ss.indexOf(el) + 1); }
+  if (pseudo === 'nth-last-child') { var ss = siblings(); return nthMatch(_arg, ss.length - ss.indexOf(el)); }
+  if (pseudo === 'first-of-type')  return sibsOfType()[0] === el;
+  if (pseudo === 'last-of-type')   { var st = sibsOfType(); return st[st.length - 1] === el; }
+  if (pseudo === 'only-of-type')   return sibsOfType().length === 1;
+  if (pseudo === 'nth-of-type')    { var st = sibsOfType(); return nthMatch(_arg, st.indexOf(el) + 1); }
+  if (pseudo === 'nth-last-of-type') { var st = sibsOfType(); return nthMatch(_arg, st.length - st.indexOf(el)); }
+  if (pseudo === 'empty')          return el.childNodes.filter(c => c.nodeType === 1 || (c.nodeType === 3 && (c as any).data?.trim())).length === 0;
+  if (pseudo === 'checked')        return el.checked;
+  if (pseudo === 'disabled')       return el.disabled;
+  if (pseudo === 'enabled')        return !el.disabled;
+  if (pseudo === 'required')       return el.hasAttribute('required');
+  if (pseudo === 'optional')       return !el.hasAttribute('required');
+  if (pseudo === 'valid')          return el.checkValidity();
+  if (pseudo === 'invalid')        return !el.checkValidity();
+  if (pseudo === 'placeholder-shown') { var tag2 = el.tagName.toLowerCase(); return (tag2 === 'input' || tag2 === 'textarea') && !!(el as any).value === false && el.hasAttribute('placeholder'); }
+  if (pseudo === 'read-only')      return el.hasAttribute('readonly') || el.hasAttribute('disabled');
+  if (pseudo === 'read-write')     return !el.hasAttribute('readonly') && !el.hasAttribute('disabled');
+  if (pseudo === 'root')           return el.tagName === 'HTML';
+  if (pseudo === 'target')         return false;
+  if (pseudo === 'link')           return el.tagName === 'A' && el.hasAttribute('href');
+  if (pseudo === 'visited')        return false;
+  if (pseudo === 'active')         return false;
+  if (pseudo === 'hover')          return false;
+  if (pseudo === 'focus')          return el.ownerDocument?._activeElement === el;
+  if (pseudo === 'focus-within')   { var ae = el.ownerDocument?._activeElement; return !!(ae && el.contains(ae)); }
+  if (pseudo === 'focus-visible')  return el.ownerDocument?._activeElement === el;
+  if (pseudo === 'not')            return !_matchSel(_arg, el);
+  if (pseudo === 'is' || pseudo === 'where' || pseudo === 'matches') {
+    var alts = _arg.split(',');
+    return alts.some(alt => _matchSel(alt.trim(), el));
+  }
+  if (pseudo === 'has')            { var alts = _arg.split(','); return alts.some(alt => el.querySelectorAll(alt.trim()).length > 0); }
+  if (pseudo === 'scope')          return true;  // :scope means the root element of the selector context
+  // pseudo-elements — don't filter elements by them
+  if (pseudo === 'before' || pseudo === 'after' || pseudo === 'first-line' || pseudo === 'first-letter' || pseudo === 'selection' || pseudo === 'placeholder') return true;
   return true; // unknown pseudo — ignore
 }
 
