@@ -78,6 +78,15 @@ typedef struct {
 } JITProcPending_t;
 static JITProcPending_t _jit_proc_pending[JSPROC_MAX];
 
+/* Forward declaration — defined in the Step-5 block below (~line 1880).
+ * Called from js_proc_create which is compiled before that block. */
+#ifdef JSOS_JIT_HOOK
+extern void JS_SetJITHook(JSRuntime *rt,
+    int (*hook)(JSRuntime *, JSContext *, void *, void *, int));
+static int _jit_hook_child(JSRuntime *rt, JSContext *hook_ctx,
+                            void *bc_ptr, void *sp, int argc);
+#endif
+
 /* ── Phase A: Per-app BSS render surfaces (3 MB each = 1024×768 @ 32bpp) ──
  * Stable BSS address — both main and child runtimes see the same bytes.
  * Exposed via getRenderBuffer() (child) / getProcRenderBuffer(id) (main). */

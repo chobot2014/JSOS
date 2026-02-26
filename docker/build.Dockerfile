@@ -54,18 +54,11 @@ RUN cd build-gcc && \
 # Clean up
 RUN rm -rf /tmp/*
 
-# Download QuickJS source from official GitHub repo
-WORKDIR /opt
-RUN git clone --depth 1 https://github.com/bellard/quickjs.git quickjs
-
-# Patch QuickJS for bare-metal cross-compilation (no pthreads, no atomics)
-RUN cd quickjs && \
-    # Disable CONFIG_ATOMICS (requires pthread) as recommended by QuickJS docs
-    sed -i 's/^#define CONFIG_ATOMICS/\/\/ #define CONFIG_ATOMICS  \/\* disabled for bare-metal *\//' quickjs.c && \
-    # Fix tm_gmtoff - newlib doesn't have this GNU extension (use dot accessor)
-    sed -i 's/tm\.tm_gmtoff/0 \/\* tm_gmtoff unavailable \*\//' quickjs.c && \
-    # Fix C11 asm keyword - use __asm__ instead
-    sed -i 's/\basm volatile\b/__asm__ volatile/g; s/\basm(\b/__asm__(/g' quickjs.c
+# QuickJS vendored at src/kernel/vendor/quickjs (upstream commit f1139494, 2025-09-13).
+# Pre-patched: bare-metal compat (no atomics, no tm_gmtoff, __asm__) +
+#              JSOS_JIT_HOOK support (call_count, jit_native_ptr, JS_SetJITHook).
+# Copy it into the expected /opt/quickjs path used by Makefile.
+COPY src/kernel/vendor/quickjs /opt/quickjs
 
 # Set up working directory for our project
 WORKDIR /workspace

@@ -263,6 +263,20 @@ function main(): void {
       var wmInst = new WindowManager(screen);
       setWM(wmInst);
 
+      // Register the child-process FS bridge so child runtimes spawned via
+      // wm.launchApp() / os.wm.launchApp() can perform file I/O via the main
+      // runtime's filesystem implementation (in-memory VFS + FAT32/FAT16).
+      kernel.registerChildFSBridge({
+        readFile:  function(path: string) { return fs.readFile(path); },
+        writeFile: function(path: string, data: string) { return fs.writeFile(path, data); },
+        readDir:   function(path: string) {
+          var entries = fs.ls(path);
+          return JSON.stringify(entries ? (entries as any[]).map(function(e: any) { return e.name; }) : []);
+        },
+        exists:    function(path: string) { return fs.readFile(path) !== null || fs.ls(path) !== null; },
+        stat:      function(path: string) { var s = fs.stat(path); return s ? JSON.stringify(s) : null; },
+      });
+
       // Step 11: Install the QJS bytecode JIT compiler.
       // The hook fires from QuickJS's call dispatch when a function becomes hot
       // (call_count >= 100).  Requires JSOS_JIT_HOOK + Step-5 quickjs.c patch;

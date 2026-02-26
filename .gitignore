@@ -44,6 +44,9 @@ temp/
 *.tmp
 *.temp
 
+# QuickJS vendor extraction (used to bootstrap src/kernel/vendor/quickjs)
+vendor-extract/
+
 # Logs
 logs/
 *.log

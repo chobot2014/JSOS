@@ -1647,6 +1647,49 @@ const sdk = {
     dismissContextMenu(): void { if (wm) wm.dismissContextMenu(); },
 
     /**
+     * Launch a sandboxed child JS process in a new managed window.
+     * The child runtime gets:
+     *   - A BSS-backed render surface (blitted to the window each frame)
+     *   - File I/O via the main runtime's VFS (registerChildFSBridge)
+     *   - Per-process timers (setTimeout / setInterval)
+     *   - An event queue for keyboard / mouse / focus events
+     *   - A window-command channel (setTitle, close, renderReady)
+     *
+     * The child code runs in a completely isolated QuickJS runtime.
+     * Up to 8 child slots (0–7) are available simultaneously.
+     *
+     * Returns the child process slot id (0–7), or -1 if no slot is free.
+     * In text mode (no WM), always returns -1.
+     *
+     * Example:
+     *   var id = os.wm.launchApp({
+     *     name: 'counter',
+     *     title: 'Counter',
+     *     width: 320,
+     *     height: 240,
+     *     code: `
+     *       var n = 0;
+     *       function render() {
+     *         var buf = new Uint32Array(kernel.getRenderBuffer());
+     *         buf.fill(0xFF1E1E2E);
+     *         kernel.windowCommand({ type: 'renderReady' });
+     *       }
+     *       kernel.setInterval(render, 33);
+     *     `,
+     *   });
+     */
+    launchApp(opts: {
+      name: string;
+      title: string;
+      width: number;
+      height: number;
+      code: string;
+      singleInstance?: boolean;
+    }): number {
+      return wm ? wm.launchApp(opts as any) : -1;
+    },
+
+    /**
      * Modal dialogs.  Callbacks are called when the dialog closes.
      * In text mode, dialogs fall back to print() with a default response.
      *

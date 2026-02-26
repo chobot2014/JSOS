@@ -1,5 +1,5 @@
 CC = i686-elf-gcc
-CFLAGS = -ffreestanding -O2 -Wall -Wextra -std=c11 -DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca
+CFLAGS = -ffreestanding -O2 -Wall -Wextra -std=c11 -DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK
 LDFLAGS = -ffreestanding -O2 -nostartfiles -lgcc -lc -lnosys -lm
 QUICKJS_DIR = /opt/quickjs
 
@@ -38,6 +38,7 @@ $(QJS_OBJECTS): $(QJS_SOURCES)
 	$(CC) -ffreestanding -O2 -std=c11 -DCONFIG_VERSION=\"2025.09\" \
 	  -D_GNU_SOURCE -fwrapv -Dasm=__asm__ -Dalloca=__builtin_alloca \
 	  -D'PRId64="lld"' -D'PRIi64="lli"' -D'PRIu64="llu"' -D'PRIx64="llx"' \
+	  -DJSOS_JIT_HOOK \
 	  -w -I$(QUICKJS_DIR) -c $(QUICKJS_DIR)/$(patsubst %.o,%.c,$@) -o $@
 
 %.o: %.s
