@@ -225,14 +225,28 @@ export function createPageJS(
 
   // ── window.history ─────────────────────────────────────────────────────────
 
+  function _firePopState(state: unknown): void {
+    var ev = new VEvent('popstate', { bubbles: false, cancelable: false });
+    (ev as any).state = state ?? null;
+    // win may not exist yet at definition time but will be set by time back/forward is called
+    try { (win['dispatchEvent'] as (e: VEvent) => void)(ev); } catch(_) {}
+  }
+
   var history = {
-    _stack: [cb.baseURL], _pos: 0,
+    _stack: [cb.baseURL], _pos: 0, _states: [null as unknown],
     get length(): number { return this._stack.length; },
-    pushState(_state: unknown, _title: string, url: string) { this._stack.push(url); this._pos = this._stack.length - 1; location.href = url; },
-    replaceState(_state: unknown, _title: string, url: string) { this._stack[this._pos] = url; },
-    back()    { if (this._pos > 0) { this._pos--; cb.navigate(this._stack[this._pos]); } },
-    forward() { if (this._pos < this._stack.length - 1) { this._pos++; cb.navigate(this._stack[this._pos]); } },
-    go(delta: number) { var t = this._pos + delta; if (t >= 0 && t < this._stack.length) { this._pos = t; cb.navigate(this._stack[this._pos]); } },
+    get state(): unknown { return this._states[this._pos] ?? null; },
+    pushState(state: unknown, _title: string, url: string) {
+      this._stack.splice(this._pos + 1); this._states.splice(this._pos + 1);
+      this._stack.push(url); this._states.push(state);
+      this._pos = this._stack.length - 1; location.href = url;
+    },
+    replaceState(state: unknown, _title: string, url: string) {
+      this._stack[this._pos] = url; this._states[this._pos] = state;
+    },
+    back()    { if (this._pos > 0) { this._pos--; cb.navigate(this._stack[this._pos]); _firePopState(this._states[this._pos]); } },
+    forward() { if (this._pos < this._stack.length - 1) { this._pos++; cb.navigate(this._stack[this._pos]); _firePopState(this._states[this._pos]); } },
+    go(delta: number) { var t = this._pos + delta; if (t >= 0 && t < this._stack.length) { this._pos = t; cb.navigate(this._stack[this._pos]); _firePopState(this._states[this._pos]); } },
   };
 
   // ── window.navigator ───────────────────────────────────────────────────────

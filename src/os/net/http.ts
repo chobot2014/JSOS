@@ -276,6 +276,38 @@ function buildGetRequest(host: string, path: string, keepAlive = true, etag = ''
   return strToBytes(req);
 }
 
+// ── Multipart/form-data encoder (item 305) ───────────────────────────────────
+
+/**
+ * Encode a set of form fields as multipart/form-data.
+ * Returns { body: number[], boundary: string }.
+ * Use Content-Type: multipart/form-data; boundary=<boundary>
+ */
+export function encodeMultipartFormData(
+    fields: Array<{ name: string; value: string; filename?: string; contentType?: string }>
+): { body: number[]; boundary: string } {
+  // Generate a stable boundary
+  var boundary = '----JSBoundary' + (Math.random() * 0x100000000 >>> 0).toString(16).padStart(8, '0');
+  var parts: number[] = [];
+
+  for (var field of fields) {
+    var disp = 'Content-Disposition: form-data; name="' + field.name + '"';
+    if (field.filename) disp += '; filename="' + field.filename + '"';
+    var ct = field.contentType || (field.filename ? 'application/octet-stream' : 'text/plain');
+    var partHeader = '--' + boundary + '\r\n' + disp + '\r\n' +
+                     'Content-Type: ' + ct + '\r\n\r\n';
+    var hBytes = strToBytes(partHeader);
+    var vBytes = strToBytes(field.value);
+    for (var b of hBytes) parts.push(b);
+    for (var b2 of vBytes) parts.push(b2);
+    for (var b3 of strToBytes('\r\n')) parts.push(b3);
+  }
+  var epilogue = strToBytes('--' + boundary + '--\r\n');
+  for (var b4 of epilogue) parts.push(b4);
+
+  return { body: parts, boundary };
+}
+
 function buildPostRequest(
     host: string, path: string, body: number[],
     contentType = 'application/x-www-form-urlencoded', cookies = ''): number[] {

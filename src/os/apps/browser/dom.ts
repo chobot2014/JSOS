@@ -110,6 +110,8 @@ export class VNode {
     if (v) { var t = new VText(v); t.parentNode = this; t.ownerDocument = this.ownerDocument; this.childNodes.push(t); }
     if (this.ownerDocument) this.ownerDocument._dirty = true;
   }
+  /** Removes this node from its parent. */
+  remove(): void { if (this.parentNode) this.parentNode.removeChild(this); }
   /** Returns true if this node is in a document (has ownerDocument set). */
   get isConnected(): boolean { return this.ownerDocument !== null; }
   /** Checks if this node contains another (inclusive). */
@@ -172,7 +174,12 @@ export class VClassList {
   [Symbol.iterator]() { return this._clss()[Symbol.iterator](); }
   get length(): number { return this._clss().length; }
   item(n: number): string | null { return this._clss()[n] ?? null; }
+  entries(): IterableIterator<[number, string]> { return (this._clss() as string[]).entries() as IterableIterator<[number, string]>; }
+  values(): IterableIterator<string> { return (this._clss() as string[]).values() as IterableIterator<string>; }
+  forEach(fn: (value: string, key: number, parent: VClassList) => void): void { this._clss().forEach((v, i) => fn(v, i, this)); }
   toString(): string { return this.value; }
+  keys(): IterableIterator<number> { return (this._clss() as string[]).keys() as IterableIterator<number>; }
+  supports(_token: string): boolean { return false; }
 }
 
 // ── VElement ──────────────────────────────────────────────────────────────────
@@ -235,6 +242,7 @@ export class VElement extends VNode {
   setAttribute(name: string, value: string): void { this._attrs.set(name.toLowerCase(), String(value)); if (this.ownerDocument) this.ownerDocument._dirty = true; }
   removeAttribute(name: string): void { this._attrs.delete(name.toLowerCase()); if (this.ownerDocument) this.ownerDocument._dirty = true; }
   hasAttribute(name: string): boolean { return this._attrs.has(name.toLowerCase()); }
+  getAttributeNames(): string[] { return [...this._attrs.keys()]; }
   toggleAttribute(name: string, force?: boolean): boolean {
     if (force === true || (force === undefined && !this.hasAttribute(name))) { this.setAttribute(name, ''); return true; }
     this.removeAttribute(name); return false;
@@ -269,6 +277,57 @@ export class VElement extends VNode {
     }
   }
   insertAdjacentText(pos: string, text: string): void { this.insertAdjacentHTML(pos, _escapeText(text)); }
+  insertAdjacentElement(pos: string, el: VElement): VElement | null { this.insertAdjacentHTML(pos, _serializeEl(el)); return el; }
+
+  /** Append multiple nodes or strings (coerced to Text nodes). */
+  append(...nodes: (VNode | string)[]): void {
+    for (var n of nodes) {
+      if (typeof n === 'string') { var t = new VText(n); t.ownerDocument = this.ownerDocument; this.appendChild(t); }
+      else this.appendChild(n);
+    }
+  }
+
+  /** Prepend multiple nodes or strings before first child. */
+  prepend(...nodes: (VNode | string)[]): void {
+    var ref = this.firstChild;
+    for (var n of nodes) {
+      var node: VNode = typeof n === 'string' ? (() => { var t = new VText(n); t.ownerDocument = this.ownerDocument; return t; })() : n;
+      this.insertBefore(node, ref);
+    }
+  }
+
+  /** Replace all children. */
+  replaceChildren(...nodes: (VNode | string)[]): void {
+    this.childNodes = [];
+    if (this.ownerDocument) this.ownerDocument._dirty = true;
+    this.append(...nodes);
+  }
+
+  /** Insert nodes before this element in its parent. */
+  before(...nodes: (VNode | string)[]): void {
+    if (!this.parentNode) return;
+    for (var n of nodes) {
+      var node: VNode = typeof n === 'string' ? (() => { var t = new VText(n); t.ownerDocument = this.ownerDocument; return t; })() : n;
+      this.parentNode.insertBefore(node, this);
+    }
+  }
+
+  /** Insert nodes after this element in its parent. */
+  after(...nodes: (VNode | string)[]): void {
+    if (!this.parentNode) return;
+    var ref: VNode | null = this.nextSibling;
+    for (var n of nodes) {
+      var node2: VNode = typeof n === 'string' ? (() => { var t = new VText(n); t.ownerDocument = this.ownerDocument; return t; })() : n;
+      this.parentNode.insertBefore(node2, ref);
+    }
+  }
+
+  /** Replace this element with the given nodes. */
+  replaceWith(...nodes: (VNode | string)[]): void {
+    if (!this.parentNode) return;
+    this.before(...nodes);
+    this.parentNode!.removeChild(this);
+  }
 
   get children(): VElement[] { return this.childNodes.filter(c => c instanceof VElement) as VElement[]; }
   get childElementCount(): number { return this.children.length; }

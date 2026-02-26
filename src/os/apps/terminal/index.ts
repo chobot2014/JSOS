@@ -132,6 +132,7 @@ export class TerminalApp implements App {
     this._win  = win;
     this._term = new CanvasTerminal(win.canvas);
     this._dirty = true;
+    this._loadHistory();
     this._printWelcome();
     this._printPrompt();
   }
@@ -184,6 +185,7 @@ export class TerminalApp implements App {
       if (cmd && (this._history.length === 0 || this._history[this._history.length - 1] !== cmd)) {
         this._history.push(cmd);
         if (this._history.length > 500) this._history.shift();  // cap history size
+        this._saveHistory();
       }
       this._inputBuf = '';
       this._printPrompt();
@@ -206,6 +208,25 @@ export class TerminalApp implements App {
     // Print new value
     this._inputBuf = newVal;
     this._term.print(newVal);
+  }
+
+  /** Load history from persistent storage (/home/.repl_history). */
+  private _loadHistory(): void {
+    try {
+      var raw = os.fs.read('/home/.repl_history');
+      if (raw) {
+        var lines = raw.split('\n').filter(function(l: string) { return l.trim().length > 0; });
+        this._history = lines.slice(-500);
+        this._historyPos = -1;
+      }
+    } catch (_) {}
+  }
+
+  /** Save history to persistent storage (/home/.repl_history). */
+  private _saveHistory(): void {
+    try {
+      os.fs.write('/home/.repl_history', this._history.join('\n'));
+    } catch (_) {}
   }
 
   onMouse(_event: MouseEvent): void { /* no-op for terminal */ }
