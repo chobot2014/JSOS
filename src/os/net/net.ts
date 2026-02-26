@@ -18,6 +18,7 @@
  *   net.close(s);
  */
 
+import { JITChecksum } from '../process/jit-os.js';
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
 // ── Byte-level helpers ───────────────────────────────────────────────────────
@@ -97,14 +98,9 @@ function sameSubnet(a: IPv4Address, b: IPv4Address, mask: IPv4Address): boolean 
 // ── Internet checksum (RFC 1071) ──────────────────────────────────────────────
 
 function checksum(data: number[], offset: number = 0, length?: number): number {
-  var len = (length !== undefined) ? length : data.length - offset;
-  var sum = 0;
-  for (var i = 0; i < len - 1; i += 2) {
-    sum += ((data[offset + i] & 0xff) << 8) | (data[offset + i + 1] & 0xff);
-  }
-  if (len & 1) sum += (data[offset + len - 1] & 0xff) << 8;
-  while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
-  return (~sum) & 0xffff;
+  // Delegates to JIT-compiled native code (tier-2) when JITOSKernels.init() has run.
+  // Falls back to pure TypeScript automatically via JITChecksum internals.
+  return JITChecksum.computeArray(data, offset, length);
 }
 
 // ── Ethernet ─────────────────────────────────────────────────────────────────

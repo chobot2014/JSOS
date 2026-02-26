@@ -41,6 +41,7 @@ import { physAlloc } from '../process/physalloc.js';
 import { JSProcess, listProcesses } from '../process/jsprocess.js';
 import { os } from '../core/sdk.js';
 import { systemProfiler } from '../process/optimizer.js';
+import { JITChecksum, JITMem, JITCRC32, JITOSKernels } from '../process/jit-os.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -200,6 +201,8 @@ export function registerCommands(g: any): void {
     processManager, physAlloc, threadManager,
     // Always-on optimizer / profiler
     profiler: systemProfiler,
+    // OS JIT kernels (checksum, memcpy, CRC-32)
+    JITChecksum, JITMem, JITCRC32, JITOSKernels,
     // POSIX FD API
     getpid()            { return scheduler.getpid(); },
     getppid()           { return scheduler.getCurrentProcess()?.ppid ?? 0; },
