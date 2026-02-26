@@ -40,6 +40,7 @@ import { threadManager } from '../process/threads.js';
 import { physAlloc } from '../process/physalloc.js';
 import { JSProcess, listProcesses } from '../process/jsprocess.js';
 import { os } from '../core/sdk.js';
+import { systemProfiler } from '../process/optimizer.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -197,6 +198,8 @@ export function registerCommands(g: any): void {
     // OS subsystem references
     scheduler, vmm, init, syscalls, net, users, ipc,
     processManager, physAlloc, threadManager,
+    // Always-on optimizer / profiler
+    profiler: systemProfiler,
     // POSIX FD API
     getpid()            { return scheduler.getpid(); },
     getppid()           { return scheduler.getCurrentProcess()?.ppid ?? 0; },

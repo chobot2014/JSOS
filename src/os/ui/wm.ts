@@ -17,6 +17,7 @@ import { net } from '../net/net.js';
 import { threadManager } from '../process/threads.js';
 import { scheduler } from '../process/scheduler.js';
 import { _serviceChildJIT, clearChildJITForProc } from '../process/qjs-jit.js';
+import { systemProfiler } from '../process/optimizer.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -567,6 +568,7 @@ export class WindowManager {
     this._tickChildProcs();
     scheduler.tick();                 // process-level accounting, signals, time-slice
     threadManager.tickCoroutines();   // cooperative fetch / async coroutines
+    systemProfiler.tick();            // always-on optimizer & profiler
     this._composite();
   }
   /** Mark the WM as needing a repaint (call from app code or external events). */

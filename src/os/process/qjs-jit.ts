@@ -570,6 +570,7 @@ export class QJSJITHook {
     const entry = this._funcs.get(bcAddr);
     if (!entry) return;
     entry.deoptCount++;
+    this._incDeopt();
     entry.nativeAddr = 0; // clear so it can be recompiled
     if (entry.deoptCount >= MAX_DEOPTS) {
       entry.blacklisted = true;
@@ -579,6 +580,12 @@ export class QJSJITHook {
 
   get compiledCount(): number { return this._compiled; }
   get bailedCount():   number { return this._bailed;   }
+  get deoptCount():    number { return this._jitDeopts; }
+
+  private _jitDeopts: number = 0;
+
+  /** Increment deopt counter (called from deopt()). */
+  private _incDeopt(): void { this._jitDeopts++; }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
