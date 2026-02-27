@@ -2,6 +2,87 @@
 ; These save registers and call the C dispatch function
 
 extern irq_handler_dispatch
+extern exception_dispatch
+
+; ── CPU exception stubs (ISR 0-31) ────────────────────────────────────────
+;
+; ISR_NOERR: exceptions that do NOT push an error code.
+;   Push dummy 0 first so the frame layout is uniform.
+; ISR_ERR:   exceptions that DO push an error code (CPU already pushed it).
+;   Only push the vector — error code already on stack below EIP/CS/EFLAGS.
+;
+; After either macro, exception_common_stub runs:
+;   pusha, save DS, switch to kernel DS (0x10), push ESP → call exception_dispatch
+;   then restore DS, popa, skip vector+error_code, iret.
+
+%macro ISR_NOERR 1
+global isr%1
+isr%1:
+    cli
+    push dword 0          ; dummy error code
+    push dword %1         ; vector number
+    jmp  exception_common_stub
+%endmacro
+
+%macro ISR_ERR 1
+global isr%1
+isr%1:
+    cli
+    push dword %1         ; vector number (CPU already pushed error code)
+    jmp  exception_common_stub
+%endmacro
+
+; Vectors without error code
+ISR_NOERR  0   ; #DE  Divide-by-zero
+ISR_NOERR  1   ; #DB  Debug
+ISR_NOERR  2   ;      NMI
+ISR_NOERR  3   ; #BP  Breakpoint
+ISR_NOERR  4   ; #OF  Overflow
+ISR_NOERR  5   ; #BR  Bound Range
+ISR_NOERR  6   ; #UD  Invalid Opcode
+ISR_NOERR  7   ; #NM  Device Not Available
+ISR_ERR    8   ; #DF  Double Fault          (error code = 0)
+ISR_NOERR  9   ;      Coprocessor Seg Overrun (legacy)
+ISR_ERR   10   ; #TS  Invalid TSS
+ISR_ERR   11   ; #NP  Segment Not Present
+ISR_ERR   12   ; #SS  Stack-Segment Fault
+ISR_ERR   13   ; #GP  General Protection
+ISR_ERR   14   ; #PF  Page Fault
+ISR_NOERR 15   ;      Reserved
+ISR_NOERR 16   ; #MF  x87 FP Exception
+ISR_ERR   17   ; #AC  Alignment Check
+ISR_NOERR 18   ; #MC  Machine Check
+ISR_NOERR 19   ; #XM  SIMD FP Exception
+ISR_NOERR 20   ; #VE  Virtualization
+ISR_ERR   21   ; #CP  Control-Protection
+ISR_NOERR 22
+ISR_NOERR 23
+ISR_NOERR 24
+ISR_NOERR 25
+ISR_NOERR 26
+ISR_NOERR 27
+ISR_NOERR 28
+ISR_NOERR 29
+ISR_ERR   30   ; #SX  Security Exception
+ISR_NOERR 31
+
+; Common stub: save all registers → call exception_dispatch(frame*) → restore
+exception_common_stub:
+    pusha                           ; push edi,esi,ebp,esp,ebx,edx,ecx,eax
+    push ds                         ; save data segment
+    mov ax, 0x10                    ; kernel data selector
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    push esp                        ; arg: pointer to exception_frame_t
+    call exception_dispatch
+    add esp, 4                      ; pop frame pointer argument
+    pop ds                          ; restore data segment
+    popa                            ; restore general-purpose registers
+    add esp, 8                      ; discard vector + error_code
+    sti
+    iret
 
 %macro IRQ_STUB 1
 global irq%1

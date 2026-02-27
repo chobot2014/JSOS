@@ -1610,9 +1610,9 @@ static JSValue js_proc_eval_slice(JSContext *c, JSValueConst this_val,
         return JS_NewString(c, "error:invalid process id");
     const char *code = JS_ToCString(c, argv[1]);
     if (!code) return JS_NewString(c, "error:null code");
-    /* Arm deadline: timer_get_ticks() runs at 100 Hz (10 ms/tick) */
+    /* Arm deadline: timer_get_ticks() runs at TIMER_HZ (1000 Hz = 1 ms/tick) */
     if (max_ms > 0)
-        _proc_slice_deadline = timer_get_ticks() + (uint32_t)(max_ms / 10u + 1u);
+        _proc_slice_deadline = timer_get_ticks() + MS_TO_TICKS((uint32_t)max_ms);
     else
         _proc_slice_deadline = 0;
     _cur_proc = id;
@@ -2113,10 +2113,21 @@ static JSValue js_service_timers(JSContext *c, JSValueConst this_val,
         if ((int32_t)(now - t->due_ticks) < 0) continue; /* not yet due */
         /* Fire callback */
         JSValue r = JS_Call(cc, t->cb, JS_UNDEFINED, 0, NULL);
-        if (JS_IsException(r)) JS_GetException(cc); /* discard exception */
+        if (JS_IsException(r)) {
+            /* item 113: log exception instead of silently discarding */
+            JSValue exc = JS_GetException(cc);
+            const char *msg = JS_ToCString(cc, exc);
+            if (msg) {
+                platform_serial_puts("[timer] exception in callback: ");
+                platform_serial_puts(msg);
+                platform_serial_puts("\n");
+                JS_FreeCString(cc, msg);
+            }
+            JS_FreeValue(cc, exc);
+        }
         JS_FreeValue(cc, r);
         if (t->repeat) {
-            t->due_ticks = now + (t->interval_ms / 10u + 1u);
+            t->due_ticks = now + MS_TO_TICKS(t->interval_ms);
         } else {
             JS_FreeValue(cc, t->cb);
             t->cb = JS_UNDEFINED;
@@ -2250,7 +2261,7 @@ static JSValue js_child_set_timeout(JSContext *c, JSValueConst this_val,
         if (t->active) continue;
         t->id          = ++_proc_timer_next_id[id];
         t->interval_ms = (uint32_t)(ms > 0 ? ms : 1);
-        t->due_ticks   = timer_get_ticks() + (t->interval_ms / 10u + 1u);
+        t->due_ticks   = timer_get_ticks() + MS_TO_TICKS(t->interval_ms);
         t->repeat      = 0;
         t->active      = 1;
         t->cb          = JS_DupValue(c, argv[0]);
@@ -2284,7 +2295,7 @@ static JSValue js_child_set_interval(JSContext *c, JSValueConst this_val,
         if (t->active) continue;
         t->id          = ++_proc_timer_next_id[id];
         t->interval_ms = (uint32_t)(ms > 0 ? ms : 1);
-        t->due_ticks   = timer_get_ticks() + (t->interval_ms / 10u + 1u);
+        t->due_ticks   = timer_get_ticks() + MS_TO_TICKS(t->interval_ms);
         t->repeat      = 1;
         t->active      = 1;
         t->cb          = JS_DupValue(c, argv[0]);
@@ -2346,6 +2357,565 @@ static JSValue js_child_window_command(JSContext *c, JSValueConst this_val,
     return JS_TRUE;
 }
 
+/* ── sys.gc() — run the QuickJS garbage collector (item 116) ─────────────── */
+static JSValue js_gc(JSContext *c, JSValueConst this_val,
+                     int argc, JSValueConst *argv) {
+    (void)c; (void)this_val; (void)argc; (void)argv;
+    JS_RunGC(rt);
+    return JS_UNDEFINED;
+}
+
+/* ── New system bindings (items 118-127) ─────────────────────────────────── */
+
+/* Pull in new subsystem headers */
+/* timer.h already included above */
+#include "acpi.h"
+#include "cpuid.h"
+#include "cmdline.h"
+#include "memory.h"
+#include "symtab.h"
+#include "irq.h"
+#include "hpet.h"
+#include "virtio_blk.h"
+#include "virtio_gpu.h"
+
+/* kernel.tscHz() → number of TSC ticks per second (item 46) */
+static JSValue js_tsc_hz(JSContext *c, JSValueConst _t,
+                         int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewUint32(c, timer_tsc_hz());
+}
+
+/* kernel.rtcRead() → {seconds,minutes,hours,day,month,year,unix} (item 50) */
+static JSValue js_rtc_read(JSContext *c, JSValueConst _t,
+                            int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    rtc_time_t t;
+    rtc_read(&t);
+    JSValue o = JS_NewObject(c);
+    JS_SetPropertyStr(c, o, "seconds", JS_NewUint32(c, t.seconds));
+    JS_SetPropertyStr(c, o, "minutes", JS_NewUint32(c, t.minutes));
+    JS_SetPropertyStr(c, o, "hours",   JS_NewUint32(c, t.hours));
+    JS_SetPropertyStr(c, o, "day",     JS_NewUint32(c, t.day));
+    JS_SetPropertyStr(c, o, "month",   JS_NewUint32(c, t.month));
+    JS_SetPropertyStr(c, o, "year",    JS_NewUint32(c, t.year));
+    JS_SetPropertyStr(c, o, "unix",    JS_NewUint32(c, rtc_unix_time()));
+    return o;
+}
+
+/* kernel.allocPage() → physical address of a 4 KB page, 0 on OOM (item 33) */
+static JSValue js_alloc_page(JSContext *c, JSValueConst _t,
+                              int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewUint32(c, alloc_page());
+}
+
+/* kernel.freePage(physAddr) — return a page to the allocator (item 34) */
+static JSValue js_free_page(JSContext *c, JSValueConst _t,
+                             int ac, JSValueConst *av) {
+    (void)_t;
+    if (ac < 1) return JS_EXCEPTION;
+    uint32_t addr;
+    if (JS_ToUint32(c, &addr, av[0])) return JS_EXCEPTION;
+    free_page(addr);
+    return JS_UNDEFINED;
+}
+
+/* kernel.pagesFree() → number of free 4 KB pages */
+static JSValue js_pages_free(JSContext *c, JSValueConst _t,
+                              int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewUint32(c, (uint32_t)memory_get_pages_free());
+}
+
+/* kernel.acpiShutdown() — power off via ACPI S5 (item 105) */
+static JSValue js_acpi_shutdown(JSContext *c, JSValueConst _t,
+                                 int _ac, JSValueConst *_av) {
+    (void)c; (void)_t; (void)_ac; (void)_av;
+    acpi_shutdown();    /* noreturn */
+    return JS_UNDEFINED;
+}
+
+/* kernel.acpiReboot() — reboot via ACPI reset / KBC (item 106) */
+static JSValue js_acpi_reboot(JSContext *c, JSValueConst _t,
+                               int _ac, JSValueConst *_av) {
+    (void)c; (void)_t; (void)_ac; (void)_av;
+    acpi_reboot();      /* noreturn */
+    return JS_UNDEFINED;
+}
+
+/* kernel.symLookup(addr) → {name,offset} — kernel symbol table (item 104) */
+static JSValue js_sym_lookup(JSContext *c, JSValueConst _t,
+                              int ac, JSValueConst *av) {
+    (void)_t;
+    if (ac < 1) return JS_EXCEPTION;
+    uint32_t addr;
+    if (JS_ToUint32(c, &addr, av[0])) return JS_EXCEPTION;
+    uint32_t off = 0;
+    const char *name = symtab_lookup(addr, &off);
+    JSValue o = JS_NewObject(c);
+    JS_SetPropertyStr(c, o, "name",   JS_NewString(c, name));
+    JS_SetPropertyStr(c, o, "offset", JS_NewUint32(c, off));
+    return o;
+}
+
+/* kernel.cmdlineGet(key) → string | null (item 4) */
+static JSValue js_cmdline_get(JSContext *c, JSValueConst _t,
+                               int ac, JSValueConst *av) {
+    (void)_t;
+    if (ac < 1) return JS_NULL;
+    const char *key = JS_ToCString(c, av[0]);
+    if (!key) return JS_NULL;
+    const char *val = cmdline_get(key);
+    JS_FreeCString(c, key);
+    return val ? JS_NewString(c, val) : JS_NULL;
+}
+
+/* kernel.cpuidInfo() → CPU feature flags object (item 8) */
+static JSValue js_cpuid_info(JSContext *c, JSValueConst _t,
+                              int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    JSValue o = JS_NewObject(c);
+    JS_SetPropertyStr(c, o, "vendor",  JS_NewString(c, cpuid_features.vendor));
+    JS_SetPropertyStr(c, o, "family",  JS_NewUint32(c, cpuid_features.family));
+    JS_SetPropertyStr(c, o, "model",   JS_NewUint32(c, cpuid_features.model));
+    JS_SetPropertyStr(c, o, "step",    JS_NewUint32(c, cpuid_features.stepping));
+    JS_SetPropertyStr(c, o, "sse",     JS_NewBool(c, cpuid_features.sse));
+    JS_SetPropertyStr(c, o, "sse2",    JS_NewBool(c, cpuid_features.sse2));
+    JS_SetPropertyStr(c, o, "sse3",    JS_NewBool(c, cpuid_features.sse3));
+    JS_SetPropertyStr(c, o, "sse41",   JS_NewBool(c, cpuid_features.sse41));
+    JS_SetPropertyStr(c, o, "sse42",   JS_NewBool(c, cpuid_features.sse42));
+    JS_SetPropertyStr(c, o, "avx",     JS_NewBool(c, cpuid_features.avx));
+    JS_SetPropertyStr(c, o, "aes",     JS_NewBool(c, cpuid_features.aes));
+    JS_SetPropertyStr(c, o, "rdrand",  JS_NewBool(c, cpuid_features.rdrand));
+    JS_SetPropertyStr(c, o, "nx",      JS_NewBool(c, cpuid_features.nx));
+    JS_SetPropertyStr(c, o, "tsc",     JS_NewBool(c, cpuid_features.tsc));
+    JS_SetPropertyStr(c, o, "mtrr",    JS_NewBool(c, cpuid_features.mtrr));
+    JS_SetPropertyStr(c, o, "apic",    JS_NewBool(c, cpuid_features.apic));
+    JS_SetPropertyStr(c, o, "htt",     JS_NewBool(c, cpuid_features.htt));
+    JS_SetPropertyStr(c, o, "lm",      JS_NewBool(c, cpuid_features.lm));
+    return o;
+}
+
+/* kernel.getTimeNs() → BigInt nanoseconds since boot via TSC (item 48) */
+static JSValue js_gettime_ns(JSContext *c, JSValueConst _t,
+                             int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    uint64_t ns = timer_gettime_ns();
+    /* Return as a regular JS number — at ~4e9 ns/sec, float64 precision is
+     * acceptable for uptime < 104 days; use BigInt if caller needs full res */
+    return JS_NewFloat64(c, (double)ns);
+}
+
+/* kernel.uptimeUs() → microseconds since boot (item 48) */
+static JSValue js_uptime_us(JSContext *c, JSValueConst _t,
+                            int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewFloat64(c, (double)timer_uptime_us());
+}
+
+/* kernel.reserveRegion(base, size) → mark MMIO region used (item 40) */
+static JSValue js_reserve_region(JSContext *c, JSValueConst _t,
+                                  int argc, JSValueConst *argv) {
+    (void)_t;
+    if (argc < 2) return JS_ThrowTypeError(c, "reserveRegion(base, size)");
+    uint32_t base = 0, size = 0;
+    JS_ToUint32(c, &base, argv[0]);
+    JS_ToUint32(c, &size, argv[1]);
+    memory_reserve_region(base, size);
+    return JS_UNDEFINED;
+}
+
+/* kernel.irqSetTpr(class) → set LAPIC TPR (item 26) */
+static JSValue js_irq_set_tpr(JSContext *c, JSValueConst _t,
+                               int argc, JSValueConst *argv) {
+    (void)_t;
+    uint32_t cls = 0;
+    if (argc >= 1) JS_ToUint32(c, &cls, argv[0]);
+    irq_set_tpr((uint8_t)(cls & 0xFu));
+    return JS_UNDEFINED;
+}
+
+/* kernel.hpetInit(mmioBase) → int (item 47) */
+static JSValue js_hpet_init(JSContext *c, JSValueConst _t,
+                             int argc, JSValueConst *argv) {
+    (void)_t;
+    uint32_t base = 0;
+    if (argc >= 1) JS_ToUint32(c, &base, argv[0]);
+    return JS_NewInt32(c, hpet_init(base));
+}
+
+/* kernel.hpetRead() → number (lower 32 bits of main counter) (item 47) */
+static JSValue js_hpet_read(JSContext *c, JSValueConst _t,
+                             int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewUint32(c, hpet_read_counter32());
+}
+
+/* kernel.hpetFreq() → Hz (item 47) */
+static JSValue js_hpet_freq(JSContext *c, JSValueConst _t,
+                             int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewUint32(c, hpet_frequency());
+}
+
+/* kernel.ataIsAtapi() → 1/0/-1 (item 80) */
+static JSValue js_ata_is_atapi(JSContext *c, JSValueConst _t,
+                                int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewInt32(c, ata_is_atapi());
+}
+
+/* kernel.virtioBlkPresent() → boolean (item 81) */
+static JSValue js_virtio_blk_present(JSContext *c, JSValueConst _t,
+                                      int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewBool(c, virtio_blk_present());
+}
+
+/* kernel.virtioBlkSectors() → number (item 81) */
+static JSValue js_virtio_blk_sectors(JSContext *c, JSValueConst _t,
+                                      int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewFloat64(c, (double)virtio_blk_sector_count());
+}
+
+/* kernel.virtioGpuPresent() → boolean (item 68) */
+static JSValue js_virtio_gpu_present(JSContext *c, JSValueConst _t,
+                                      int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewBool(c, virtio_gpu_present());
+}
+
+/* ── APIC / IOAPIC / APIC timer (items 24, 28, 49) ──────────────────────── */
+#include "apic.h"
+
+static JSValue js_apic_init(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; apic_init(); return JS_UNDEFINED; }
+static JSValue js_apic_eoi(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; apic_eoi(); return JS_UNDEFINED; }
+static JSValue js_apic_timer_calibrate(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; apic_timer_calibrate(); return JS_UNDEFINED; }
+static JSValue js_apic_timer_start(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t ms = 10;
+    if (_ac >= 1) { double v; if (!JS_ToFloat64(c, &v, av[0])) ms = (uint32_t)v; }
+    apic_timer_start_periodic(ms); return JS_UNDEFINED; }
+static JSValue js_ioapic_init(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t base = 0xFEC00000u;
+    if (_ac >= 1) { double v; if (!JS_ToFloat64(c, &v, av[0])) base = (uint32_t)v; }
+    ioapic_init(base); return JS_UNDEFINED; }
+static JSValue js_ioapic_unmask(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t irq = 0;
+    if (_ac >= 1) { double v; if (!JS_ToFloat64(c, &v, av[0])) irq = (uint32_t)v; }
+    ioapic_unmask_irq((uint8_t)irq); return JS_UNDEFINED; }
+
+/* ── NVMe (item 82) ──────────────────────────────────────────────────────── */
+#include "nvme.h"
+
+static JSValue js_nvme_init(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewBool(c, nvme_init() == 0); }
+static JSValue js_nvme_present(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewBool(c, nvme_present()); }
+static JSValue js_nvme_enable(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewBool(c, nvme_enable() == 0); }
+
+/* ── AHCI (item 83) ──────────────────────────────────────────────────────── */
+#include "ahci.h"
+
+static JSValue js_ahci_init(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewBool(c, ahci_init() == 0); }
+static JSValue js_ahci_present(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewBool(c, ahci_present()); }
+
+/* ── Memory extensions (items 37, 38, 39, 42) ───────────────────────────── */
+static JSValue js_mem_enable_pae(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; memory_enable_pae(); return JS_UNDEFINED; }
+static JSValue js_mem_enable_nx(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; memory_enable_nx(); return JS_UNDEFINED; }
+static JSValue js_mem_tlb_flush(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t vaddr = 0;
+    if (_ac >= 1) { double v; if (!JS_ToFloat64(c, &v, av[0])) vaddr = (uint32_t)v; }
+    memory_tlb_flush_local(vaddr); return JS_UNDEFINED; }
+static JSValue js_mem_tlb_flush_all(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; memory_tlb_flush_all(); return JS_UNDEFINED; }
+static JSValue js_mem_large_page_en(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; memory_enable_large_pages(); return JS_UNDEFINED; }
+static JSValue js_mem_hotplug_add(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t base = 0, size = 0;
+    if (_ac >= 2) {
+        double b, s;
+        if (!JS_ToFloat64(c, &b, av[0])) base = (uint32_t)b;
+        if (!JS_ToFloat64(c, &s, av[1])) size = (uint32_t)s;
+    }
+    return JS_NewInt32(c, (int32_t)memory_hotplug_add_region(base, size)); }
+
+/* ── ACPI PM timer (item 52) ────────────────────────────────────────────── */
+static JSValue js_acpi_pm_timer(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewInt32(c, (int32_t)acpi_pm_timer_read()); }
+
+/* ── Framebuffer / display extras (items 69-72) ─────────────────────────── */
+static JSValue js_fb_alloc_backbuf(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewBool(c, platform_fb_alloc_backbuffer() == 0); }
+static JSValue js_fb_flip(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; platform_fb_flip(); return JS_UNDEFINED; }
+static JSValue js_vsync_wait(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; platform_vsync_wait(); return JS_UNDEFINED; }
+static JSValue js_cursor_enable(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; int en = (_ac >= 1) ? JS_ToBool(c, av[0]) : 1;
+    platform_cursor_enable(en); return JS_UNDEFINED; }
+static JSValue js_cursor_set_pos(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t col = 0, row = 0;
+    if (_ac >= 2) { double a, b;
+        if (!JS_ToFloat64(c, &a, av[0])) col = (uint32_t)a;
+        if (!JS_ToFloat64(c, &b, av[1])) row = (uint32_t)b; }
+    platform_cursor_set_pos((uint8_t)col, (uint8_t)row); return JS_UNDEFINED; }
+static JSValue js_dpms_set(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t st = 0;
+    if (_ac >= 1) { double v; if (!JS_ToFloat64(c, &v, av[0])) st = (uint32_t)v; }
+    platform_dpms_set((dpms_state_t)st); return JS_UNDEFINED; }
+
+/* ── Keyboard layout (items 60-62) ──────────────────────────────────────── */
+#include "keyboard_layout.h"
+
+static JSValue js_kb_layout_set(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t id = 0;
+    if (_ac >= 1) { double v; if (!JS_ToFloat64(c, &v, av[0])) id = (uint32_t)v; }
+    return JS_NewBool(c, kb_layout_set((kb_layout_id_t)id) == 0); }
+static JSValue js_kb_layout_get(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewInt32(c, (int32_t)kb_layout_get()); }
+static JSValue js_kb_ime_enable(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; int en = (_ac >= 1) ? JS_ToBool(c, av[0]) : 1;
+    kb_ime_enable(en); return JS_UNDEFINED; }
+
+/* ── Selftest (item 108) ─────────────────────────────────────────────────── */
+#include "selftest.h"
+
+static JSValue js_selftest_run(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewInt32(c, selftest_run_all()); }
+
+/* ── kprobes (item 110) ──────────────────────────────────────────────────── */
+#include "kprobes.h"
+
+static JSValue js_kprobes_init(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; kprobes_init(); return JS_UNDEFINED; }
+static JSValue js_kprobes_dump(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; kprobes_dump(); return JS_UNDEFINED; }
+
+/* ── Item 123: debugger statement → serial breakpoint ───────────────────── */
+/* QuickJS skips the `debugger` keyword by default.  TypeScript code that
+ * is transpiled by the JSOS build system has `debugger` replaced with a
+ * call to kernel.debugBreak() at bundle time.  This binding handles it. */
+static JSValue js_debug_break(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    platform_serial_puts("[DEBUGGER] JS debugger breakpoint — EIP on serial\n");
+    /* Print current JS context backtrace to COM1 */
+    JSValue exc = JS_GetException(c);
+    if (!JS_IsNull(exc)) {
+        JSValue stk = JS_GetPropertyStr(c, exc, "stack");
+        if (JS_IsString(stk)) {
+            const char *s = JS_ToCString(c, stk);
+            if (s) { platform_serial_puts(s); platform_serial_puts("\n"); JS_FreeCString(c, s); }
+        }
+        JS_FreeValue(c, stk);
+        JS_FreeValue(c, exc);
+    }
+    return JS_UNDEFINED;
+}
+
+/* ── Item 122: SourceMap registry (stack trace decoration) ──────────────── */
+/* Stores at most 8 registered source maps (url+content) for the stack
+ * trace formatter in the OS TypeScript layer.                               */
+#define SRCMAP_MAX 8
+static struct { char url[128]; JSValue map; } _srcmaps[SRCMAP_MAX];
+static int _srcmap_count = 0;
+
+static JSValue js_sourcemap_register(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t;
+    if (_ac < 2) return JS_NewBool(c, 0);
+    const char *url = JS_ToCString(c, av[0]);
+    if (!url) return JS_NewBool(c, 0);
+    if (_srcmap_count < SRCMAP_MAX) {
+        int i = _srcmap_count++;
+        /* Copy URL (truncate to fit) */
+        int n = 0;
+        while (url[n] && n < 127) { _srcmaps[i].url[n] = url[n]; n++; }
+        _srcmaps[i].url[n] = '\0';
+        _srcmaps[i].map = JS_DupValue(c, av[1]);
+    }
+    JS_FreeCString(c, url);
+    return JS_NewBool(c, 1);
+}
+
+static JSValue js_sourcemap_lookup(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t;
+    if (_ac < 1) return JS_NULL;
+    const char *url = JS_ToCString(c, av[0]);
+    if (!url) return JS_NULL;
+    for (int i = 0; i < _srcmap_count; i++) {
+        int match = 1;
+        for (int j = 0; _srcmaps[i].url[j] || url[j]; j++) {
+            if (_srcmaps[i].url[j] != url[j]) { match = 0; break; }
+        }
+        if (match) { JS_FreeCString(c, url); return JS_DupValue(c, _srcmaps[i].map); }
+    }
+    JS_FreeCString(c, url);
+    return JS_NULL;
+}
+
+/* ── Item 124: Remote DevTools Protocol stub ─────────────────────────────── */
+/* Stub: exposes a JSON-RPC endpoint over COM2 (0x2F8).  Real implementation
+ * would parse Chrome DevTools Protocol messages and forward to QuickJS
+ * inspector hooks.                                                          */
+static JSValue js_devtools_enable(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    platform_serial_puts("[DevTools] CDP stub enabled on COM2 (not implemented)\n");
+    return JS_NewBool(c, 0);  /* Not yet available */
+}
+
+/* ── Item 125: BigInt64Array / BigUint64Array ───────────────────────────── */
+/* QuickJS already implements BigInt64Array and BigUint64Array natively as
+ * part of the TypedArray bigint extension.  This binding just exposes a
+ * probe so TypeScript can verify availability.                              */
+static JSValue js_bigint64array_test(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    /* Evaluate a quick test to see if BigInt64Array is available */
+    JSValue r = JS_Eval(c, "typeof BigInt64Array !== 'undefined'", 36,
+                        "<bigint64_test>", JS_EVAL_TYPE_GLOBAL);
+    return r;
+}
+
+/* ── Items 126-127: WASM interpreter stub ───────────────────────────────── */
+/* A minimal stub that accepts a WASM binary buffer and either interprets it
+ * (item 126: wasm3/wabt binding) or JIT-compiles it (item 127).
+ * Real implementation would integrate wasm3 or a custom WASM JIT.         */
+static JSValue js_wasm_instantiate(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t;
+    platform_serial_puts("[WASM] wasm_instantiate() stub — not yet implemented\n");
+    if (_ac < 1) return JS_ThrowTypeError(c, "Expected ArrayBuffer");
+    /* Return null to indicate failure */
+    return JS_NULL;
+}
+
+static JSValue js_wasm_jit_compile(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t;
+    platform_serial_puts("[WASM-JIT] wasm_jit_compile() stub — not yet implemented\n");
+    if (_ac < 1) return JS_ThrowTypeError(c, "Expected ArrayBuffer");
+    return JS_NULL;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * MODULE LOADER — item 118 (filesystem import()) + item 119 (@jsos/* pkgs)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* JS-registered callback: (path: string) => string | null
+ * Registered by the TS OS once the VFS is ready, via kernel.setModuleReader() */
+static JSValue _module_fs_read_cb; /* initialised to JS_UNDEFINED in quickjs_initialize */
+
+/* Built-in @jsos/ packages that forward to the matching sys.* sub-objects
+ * already present on globalThis after the OS has booted (item 119). */
+static const struct { const char *name; const char *src; } _jsos_builtins[] = {
+    { "@jsos/net",     "export default globalThis.sys?.net;"     },
+    { "@jsos/fs",      "export default globalThis.sys?.fs;"      },
+    { "@jsos/proc",    "export default globalThis.sys?.proc;"    },
+    { "@jsos/ui",      "export default globalThis.sys?.ui;"      },
+    { "@jsos/ipc",     "export default globalThis.sys?.ipc;"     },
+    { "@jsos/storage", "export default globalThis.sys?.storage;" },
+    { "@jsos/crypto",  "export default globalThis.sys?.crypto;"  },
+    { "@jsos/http",    "export default globalThis.sys?.http;"    },
+    { NULL, NULL }
+};
+
+/* Normalize module specifier: resolve relative paths against the importing
+ * module's directory.  @jsos/ and absolute paths pass through unchanged. */
+static char *_module_normalize(JSContext *c,
+                                const char *base, const char *name,
+                                void *opaque __attribute__((unused)))
+{
+    /* @jsos/ built-in packages — return unchanged */
+    if (name[0] == '@') return js_strdup(c, name);
+    /* Absolute paths — return unchanged */
+    if (name[0] == '/') return js_strdup(c, name);
+    /* Relative specifiers — join with importing module's directory */
+    if (base && name[0] == '.') {
+        const char *last_slash = NULL;
+        const char *p = base;
+        while (*p) { if (*p == '/') last_slash = p; p++; }
+        if (last_slash) {
+            size_t dir_len = (size_t)(last_slash - base) + 1; /* include '/' */
+            size_t nm_len  = strlen(name);
+            char  *out     = js_malloc(c, dir_len + nm_len + 1);
+            if (!out) return NULL;
+            memcpy(out, base, dir_len);
+            memcpy(out + dir_len, name, nm_len + 1);
+            return out;
+        }
+    }
+    return js_strdup(c, name);
+}
+
+/* Load a module by its normalised name.  Priority:
+ *  1. @jsos/* built-in packages (item 119)
+ *  2. Filesystem source via registered JS reader callback (item 118) */
+static JSModuleDef *_module_load(JSContext *c, const char *name,
+                                  void *opaque __attribute__((unused)))
+{
+    const char *src = NULL;
+
+    /* 1. Check @jsos/ built-in packages */
+    for (int i = 0; _jsos_builtins[i].name; i++) {
+        if (strcmp(name, _jsos_builtins[i].name) == 0) {
+            src = _jsos_builtins[i].src;
+            break;
+        }
+    }
+
+    /* 2. Filesystem path via JS-registered reader (item 118) */
+    const char *fs_cstr = NULL;
+    JSValue     fs_ret  = JS_UNDEFINED;
+    if (!src && !JS_IsUndefined(_module_fs_read_cb)) {
+        JSValue arg = JS_NewString(c, name);
+        fs_ret = JS_Call(c, _module_fs_read_cb, JS_UNDEFINED, 1, &arg);
+        JS_FreeValue(c, arg);
+        if (!JS_IsException(fs_ret) && JS_IsString(fs_ret)) {
+            fs_cstr = JS_ToCString(c, fs_ret);
+            src = fs_cstr;
+        }
+    }
+
+    if (!src) {
+        if (!JS_IsUndefined(fs_ret)) JS_FreeValue(c, fs_ret);
+        JS_ThrowReferenceError(c, "cannot load module '%s'", name);
+        return NULL;
+    }
+
+    /* Compile module source — compile-only; runtime evaluates on demand */
+    JSValue compiled = JS_Eval(c, src, strlen(src), name,
+                               JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    if (fs_cstr) JS_FreeCString(c, fs_cstr);
+    JS_FreeValue(c, fs_ret);
+
+    if (JS_IsException(compiled)) return NULL;
+
+    /* Extract raw pointer — do NOT JS_FreeValue; runtime now owns this def */
+    JSModuleDef *m = JS_VALUE_GET_PTR(compiled);
+    return m;
+}
+
+/* kernel.setModuleReader(fn: (path: string) => string | null)
+ * Called by the TS OS after the VFS is ready.  fn must return the UTF-8
+ * source text for the given path, or null if the file does not exist. */
+static JSValue js_set_module_reader(JSContext *c,
+                                     JSValueConst this_val __attribute__((unused)),
+                                     int argc, JSValueConst *argv)
+{
+    if (argc < 1 || !JS_IsFunction(c, argv[0]))
+        return JS_ThrowTypeError(c, "setModuleReader: expected a function");
+    if (!JS_IsUndefined(_module_fs_read_cb))
+        JS_FreeValue(c, _module_fs_read_cb);
+    _module_fs_read_cb = JS_DupValue(c, argv[0]);
+    return JS_UNDEFINED;
+}
+
 static const JSCFunctionListEntry js_kernel_funcs[] = {
     /* VGA raw access */
     JS_CFUNC_DEF("vgaPut",        4, js_vga_put),
@@ -2386,6 +2956,7 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     /* System */
     JS_CFUNC_DEF("halt",   0, js_halt),
     JS_CFUNC_DEF("reboot", 0, js_reboot),
+    JS_CFUNC_DEF("gc",     0, js_gc),
     /* Serial */
     JS_CFUNC_DEF("serialPut",     1, js_serial_put),
     JS_CFUNC_DEF("serialGetchar", 0, js_serial_getchar),
@@ -2464,6 +3035,88 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("procSendEvent",          2, js_proc_send_event),
     JS_CFUNC_DEF("procDequeueWindowCommand", 1, js_proc_dequeue_window_cmd),
     JS_CFUNC_DEF("serviceTimers",          1, js_service_timers),
+    /* New subsystem bindings (items 8, 4, 33, 34, 46, 50, 104, 105, 106, 118-127) */
+    JS_CFUNC_DEF("tscHz",         0, js_tsc_hz),
+    JS_CFUNC_DEF("rtcRead",       0, js_rtc_read),
+    JS_CFUNC_DEF("allocPage",     0, js_alloc_page),
+    JS_CFUNC_DEF("freePage",      1, js_free_page),
+    JS_CFUNC_DEF("pagesFree",     0, js_pages_free),
+    JS_CFUNC_DEF("acpiShutdown",  0, js_acpi_shutdown),
+    JS_CFUNC_DEF("acpiReboot",    0, js_acpi_reboot),
+    JS_CFUNC_DEF("symLookup",     1, js_sym_lookup),
+    JS_CFUNC_DEF("cmdlineGet",          1, js_cmdline_get),
+    JS_CFUNC_DEF("cpuidInfo",           0, js_cpuid_info),
+    /* High-resolution time (item 48) */
+    JS_CFUNC_DEF("getTimeNs",           0, js_gettime_ns),
+    JS_CFUNC_DEF("uptimeUs",            0, js_uptime_us),
+    /* MMIO region reservation (item 40) */
+    JS_CFUNC_DEF("reserveRegion",       2, js_reserve_region),
+    /* LAPIC Task Priority Register (item 26) */
+    JS_CFUNC_DEF("irqSetTpr",           1, js_irq_set_tpr),
+    /* HPET (item 47) */
+    JS_CFUNC_DEF("hpetInit",            1, js_hpet_init),
+    JS_CFUNC_DEF("hpetRead",            0, js_hpet_read),
+    JS_CFUNC_DEF("hpetFreq",            0, js_hpet_freq),
+    /* ATAPI (item 80) */
+    JS_CFUNC_DEF("ataIsAtapi",          0, js_ata_is_atapi),
+    /* VirtIO-BLK (item 81) */
+    JS_CFUNC_DEF("virtioBlkPresent",    0, js_virtio_blk_present),
+    JS_CFUNC_DEF("virtioBlkSectors",    0, js_virtio_blk_sectors),
+    /* VirtIO-GPU (item 68) */
+    JS_CFUNC_DEF("virtioGpuPresent",    0, js_virtio_gpu_present),
+    /* APIC / IOAPIC / APIC timer (items 24, 28, 49) */
+    JS_CFUNC_DEF("apicInit",            0, js_apic_init),
+    JS_CFUNC_DEF("apicEoi",             0, js_apic_eoi),
+    JS_CFUNC_DEF("apicTimerCalibrate",  0, js_apic_timer_calibrate),
+    JS_CFUNC_DEF("apicTimerStart",      1, js_apic_timer_start),
+    JS_CFUNC_DEF("ioapicInit",          1, js_ioapic_init),
+    JS_CFUNC_DEF("ioapicUnmask",        1, js_ioapic_unmask),
+    /* NVMe (item 82) */
+    JS_CFUNC_DEF("nvmeInit",            0, js_nvme_init),
+    JS_CFUNC_DEF("nvmePresent",         0, js_nvme_present),
+    JS_CFUNC_DEF("nvmeEnable",          0, js_nvme_enable),
+    /* AHCI (item 83) */
+    JS_CFUNC_DEF("ahciInit",            0, js_ahci_init),
+    JS_CFUNC_DEF("ahciPresent",         0, js_ahci_present),
+    /* Memory extensions (items 37, 38, 39, 42, 44) */
+    JS_CFUNC_DEF("memoryEnablePae",     0, js_mem_enable_pae),
+    JS_CFUNC_DEF("memoryEnableNx",      0, js_mem_enable_nx),
+    JS_CFUNC_DEF("memoryTlbFlush",      1, js_mem_tlb_flush),
+    JS_CFUNC_DEF("memoryTlbFlushAll",   0, js_mem_tlb_flush_all),
+    JS_CFUNC_DEF("memoryEnableLargePages", 0, js_mem_large_page_en),
+    JS_CFUNC_DEF("memoryHotplugAdd",    2, js_mem_hotplug_add),
+    /* ACPI PM timer (item 52) */
+    JS_CFUNC_DEF("acpiPmTimer",         0, js_acpi_pm_timer),
+    /* Display extras (items 69-72) */
+    JS_CFUNC_DEF("fbAllocBackbuffer",   0, js_fb_alloc_backbuf),
+    JS_CFUNC_DEF("fbFlip",              0, js_fb_flip),
+    JS_CFUNC_DEF("vsyncWait",           0, js_vsync_wait),
+    JS_CFUNC_DEF("cursorEnable",        1, js_cursor_enable),
+    JS_CFUNC_DEF("cursorSetPos",        2, js_cursor_set_pos),
+    JS_CFUNC_DEF("dpmsSet",             1, js_dpms_set),
+    /* Keyboard layout (items 60-62) */
+    JS_CFUNC_DEF("kbLayoutSet",         1, js_kb_layout_set),
+    JS_CFUNC_DEF("kbLayoutGet",         0, js_kb_layout_get),
+    JS_CFUNC_DEF("kbImeEnable",         1, js_kb_ime_enable),
+    /* Selftest (item 108) */
+    JS_CFUNC_DEF("selftestRun",         0, js_selftest_run),
+    /* kprobes (item 110) */
+    JS_CFUNC_DEF("kprobesInit",         0, js_kprobes_init),
+    JS_CFUNC_DEF("kprobesDump",         0, js_kprobes_dump),
+    /* debugger → serial (item 123) */
+    JS_CFUNC_DEF("debugBreak",          0, js_debug_break),
+    /* SourceMap registry (item 122) */
+    JS_CFUNC_DEF("sourceMapRegister",   2, js_sourcemap_register),
+    JS_CFUNC_DEF("sourceMapLookup",     1, js_sourcemap_lookup),
+    /* Remote DevTools stub (item 124) */
+    JS_CFUNC_DEF("devToolsEnable",      0, js_devtools_enable),
+    /* BigInt64Array availability probe (item 125) */
+    JS_CFUNC_DEF("bigInt64ArrayTest",   0, js_bigint64array_test),
+    /* WASM stubs (items 126-127) */
+    JS_CFUNC_DEF("wasmInstantiate",     1, js_wasm_instantiate),
+    JS_CFUNC_DEF("wasmJitCompile",      1, js_wasm_jit_compile),
+    /* Module loader registration (items 118, 119) */
+    JS_CFUNC_DEF("setModuleReader",     1, js_set_module_reader),
 };
 
 /*  Initialization  */
@@ -2471,8 +3124,12 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
 int quickjs_initialize(void) {
     /* Probe ATA before starting QuickJS */
     ata_initialize();
-    platform_boot_print(ata_present() ? "ATA disk detected\n"
-                                      : "[ATA] No drive\n");
+    if (ata_present()) {
+        ata_enable_irq();   /* switch to IRQ14-driven mode (item 78) */
+        platform_boot_print("[ATA] IRQ-driven mode enabled\n");
+    } else {
+        platform_boot_print("[ATA] No drive\n");
+    }
 
     rt = JS_NewRuntime();
     if (!rt) return -1;
@@ -2480,12 +3137,36 @@ int quickjs_initialize(void) {
     JS_SetMemoryLimit(rt, 50 * 1024 * 1024);  /* 50 MB — Phase 3 needs space for framebuffer */
     JS_SetMaxStackSize(rt, 256 * 1024);
 
+    /* Wire dynamic import() module loader (items 118 + 119) */
+    JS_SetModuleLoaderFunc(rt, _module_normalize, _module_load, NULL);
+
+    /* ── Item 120: SharedArrayBuffer via JS_SetSharedArrayBufferFunctions ─
+     * Single-threaded OS: alloc/free use the QuickJS runtime allocator;
+     * dup is a no-op (no reference counting needed).                      */
+    {
+        static const JSSharedArrayBufferFunctions _sab_fns = {
+            /* sab_alloc/free/dup are resolved at link time in C99/C11 via
+             * a thin wrapper because the rt pointer is not yet available
+             * at static init time.  We rely on the callback receiving
+             * rt itself as the opaque pointer.                            */
+            .sab_alloc  = NULL,   /* QuickJS uses fallback js_malloc when NULL */
+            .sab_free   = NULL,
+            .sab_dup    = NULL,
+            .sab_opaque = NULL,
+        };
+        JS_SetSharedArrayBufferFunctions(rt, &_sab_fns);
+    }
+
+    /* ── Item 121: Atomics.wait() — declare single-threaded can_block ─── */
+    JS_SetCanBlock(rt, 1);
+
     ctx = JS_NewContext(rt);
     if (!ctx) { JS_FreeRuntime(rt); rt = NULL; return -1; }
 
     /* Phase 5: initialise scheduler hook slot + TSS data structure */
-    _scheduler_hook = JS_UNDEFINED;
-    _fs_bridge_obj   = JS_UNDEFINED;
+    _scheduler_hook      = JS_UNDEFINED;
+    _fs_bridge_obj       = JS_UNDEFINED;
+    _module_fs_read_cb   = JS_UNDEFINED;  /* module loader reader (items 118/119) */
     /* Step 5: JIT hook globals */
     _jit_ts_callback = JS_UNDEFINED;
     _in_jit_hook     = 0;

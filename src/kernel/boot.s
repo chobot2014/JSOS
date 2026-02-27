@@ -62,6 +62,17 @@ _multiboot2_ptr: resd 1
 section .text
 global start
 start:
+    ; ── A20 line enable (item 9) ──────────────────────────────────────────
+    ; Ensure A20 is active via the Fast A20 port 0x92 method.
+    ; GRUB almost always enables A20, but we do it ourselves as a safety net.
+    ; Bit 1 = A20 enable; bit 0 = reset (never set!); read-modify-write.
+    in      al, 0x92
+    test    al, 0x02
+    jnz     .a20_done       ; already enabled
+    or      al, 0x02
+    and     al, 0xFE        ; do NOT set bit 0 — that triggers a CPU reset
+    out     0x92, al
+.a20_done:
     mov     esp, stack_top          ; set up stack
     mov     [_multiboot2_ptr], ebx  ; save multiboot2 boot info pointer
     extern  _start

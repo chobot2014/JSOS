@@ -17,6 +17,7 @@ typedef struct {
     int8_t  dx;       /* signed relative motion in X */
     int8_t  dy;       /* signed relative motion in Y (positive = up in PS/2) */
     uint8_t buttons;  /* bit0=left, bit1=right, bit2=middle */
+    int8_t  scroll;   /* scroll wheel delta: >0 = up, <0 = down (0 if no wheel) */
 } mouse_packet_t;
 
 /* Initialise PS/2 mouse and register IRQ12 handler */
