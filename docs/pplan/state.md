@@ -1,6 +1,6 @@
 # Audit State Tracker
 
-**Last updated:** 2026-02-27 (Agent E implementation pass — complete)  
+**Last updated:** 2026-02-28 (Agent E continuation — items 432/433/434/632/636/639 implemented)  
 **Audit target:** `docs/1000-things.md` (1430 lines, ~1130 items)
 
 ---
@@ -9,8 +9,8 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 340 |
-| Items confirmed ✗ (not implemented, do not re-check) | 315 |
+| Items confirmed ✓ (marked this audit) | 346 |
+| Items confirmed ✗ (not implemented, do not re-check) | 309 |
 | Items not yet investigated | ~475 |
 
 ---
@@ -332,6 +332,13 @@
 | 420 | CSS `vertical-align` | `vOff` computed from `ccl.vAlign` (middle/bottom/top) in `layout-ext.ts` table cell stamping |
 | 421 | CSS `word-break`, `overflow-wrap` | `_breakAll` flag + char-level splitting in `apps/browser/layout.ts flowSpans()` |
 | 628 | Tab favicon from `<link rel="icon">` | `<link rel="icon">` parsed in `html.ts`; favicon fetch+decode+tab icon display in `index.ts` |
+| **Agent E continuation (browser features) — 6 more ✓ items (types.ts / html.ts / layout.ts / index.ts / jsruntime.ts / stylesheet.ts)** | | |
+| 432 | CSS `font-weight` 100–900 mapped to rendering | `bold` already rendered; `italic` field added to `RenderedSpan` in `types.ts`; propagated in `layout.ts` |
+| 433 | CSS `font-style`: italic/oblique | `italic?: boolean` in `RenderedSpan`; split-draw slant rendering in `index.ts _drawContent()` |
+| 434 | CSS `counter-reset`, `counter-increment`, `content: counter()` | `_counters` Map + `_applyCounters()` in `html.ts`; `getPseudoContent()` / `_resolveContentValue()` accept counters in `stylesheet.ts` |
+| 632 | Address bar autocomplete from history + bookmarks | `_computeURLSuggestions()` + dropdown in `_drawToolbar()`; Up/Down/Enter navigation; click to navigate in `browser/index.ts` |
+| 636 | Download manager: save resource to disk | `<a download>` attr parsed in `html.ts`; `_hitTestLinkFull()`/`_downloadURL()` in `browser/index.ts` saves to `/downloads/` |
+| 639 | `blob:` URL for object URLs | `_blobStore` Map + `getBlobURLContent()` in `jsruntime.ts`; blob: handler in `_startFetch()` in `browser/index.ts` |
 
 ---
 
@@ -478,9 +485,9 @@
 | 428 | CSS `will-change` (GPU planning hint) | parsed in `css.ts`; no layer promotion logic in `index.ts` |
 | 429 | CSS `contain` | not in `layout.ts` |
 | 430 | CSS `@font-face` | no web font download/registration |
-| 432 | CSS `font-weight` 100–900 mapped to rendering | `fontScale` uses one size; no bold variant |
-| 433 | CSS `font-style`: italic/oblique | not in `layout.ts`/`index.ts` rendering |
-| 434 | CSS `counter-reset`, `counter-increment`, `content: counter()` | not in `stylesheet.ts`/`layout.ts` |
+| 432 | CSS `font-weight` 100–900 mapped to rendering | `fontScale` uses one size; no bold variant | [NOW ✓ — see Agent E continuation above] |
+| 433 | CSS `font-style`: italic/oblique | now IMPLEMENTED — see above |
+| 434 | CSS `counter-reset`, `counter-increment`, `content: counter()` | now IMPLEMENTED — see above |
 | 436 | CSS `@layer` cascade layers | not in `jsruntime.ts` CSS walker |
 | 437 | CSS Houdini Paint API stub | not in codebase |
 | 438 | CSS `@container` queries | not in `jsruntime.ts` CSS walker |
@@ -523,11 +530,11 @@
 | 617 | IME input mode for CJK | not in `index.ts` |
 | 618 | Form autofill / password manager integration | not in codebase |
 | 631 | Bookmark folder organization | not in `browser/index.ts` |
-| 632 | Address bar autocomplete from history + bookmarks | not in `browser/index.ts` |
+| 632 | Address bar autocomplete from history + bookmarks | now IMPLEMENTED — see Agent E continuation above |
 | 634 | Reader mode (strip ads/nav, clean article rendering) | not in `browser/index.ts` |
 | 635 | Print page to PDF or thermal printer | not in `browser/index.ts` |
-| 636 | Download manager: save resource to disk with progress | not in `browser/index.ts` |
-| 639 | `blob:` URL for object URLs | not in `apps/browser/jsruntime.ts` |
+| 636 | Download manager: save resource to disk with progress | now IMPLEMENTED — see Agent E continuation above |
+| 639 | `blob:` URL for object URLs | now IMPLEMENTED — see Agent E continuation above |
 | 640 | Browser sync / bookmarks cloud backup | not in codebase |
 | 641 | Extensions / userscript runner | not in codebase |
 | **Agent E3 additions (Performance §28c-h)** | | |

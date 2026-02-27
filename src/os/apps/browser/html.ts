@@ -202,6 +202,33 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
   var templateId     = '';
   var templateNodes: RenderNode[] = [];
 
+  // ── CSS counter state (item 434) ─────────────────────────────────────────
+  // Tracks named counter values for counter-reset / counter-increment / counter()
+  var _counters = new Map<string, number>();
+
+  function _applyCounters(css: { counterReset?: string; counterIncrement?: string }): void {
+    if (css.counterReset) {
+      var resets = css.counterReset.trim().split(/\s+/);
+      for (var _ri = 0; _ri < resets.length; _ri += 1) {
+        var _rn = resets[_ri]!;
+        if (!_rn || _rn === 'none') continue;
+        var _rv = (resets[_ri + 1] !== undefined && /^-?\d+$/.test(resets[_ri + 1]!))
+          ? (parseInt(resets[++_ri]!, 10)) : 0;
+        _counters.set(_rn, _rv);
+      }
+    }
+    if (css.counterIncrement) {
+      var incs = css.counterIncrement.trim().split(/\s+/);
+      for (var _ii = 0; _ii < incs.length; _ii += 1) {
+        var _in = incs[_ii]!;
+        if (!_in || _in === 'none') continue;
+        var _iv = (incs[_ii + 1] !== undefined && /^-?\d+$/.test(incs[_ii + 1]!))
+          ? (parseInt(incs[++_ii]!, 10)) : 1;
+        _counters.set(_in, (_counters.get(_in) ?? 0) + _iv);
+      }
+    }
+  }
+
   var inTitle      = false;
   var inPre        = false;
   var inHead       = false;
@@ -322,8 +349,9 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
   }
 
   var inlineSpans: InlineSpan[]       = [];
-  var linkHref    = '';
-  var linkDepth   = 0;
+  var linkHref     = '';
+  var linkDownload = '';   // <a download> attribute hint (item 636)
+  var linkDepth    = 0;
   var openBlock:  RenderNode | null   = null;
 
   // Form tracking
@@ -470,6 +498,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     if (skipDepth > 0) return;
     var sp: InlineSpan = { text };
     if (linkHref)                          sp.href      = linkHref;
+    if (linkDownload)                      sp.download  = linkDownload;   // item 636
     if (bold > 0      || curCSS.bold)      sp.bold      = true;
     if (italic > 0    || curCSS.italic)    sp.italic    = true;
     if (codeInl > 0)                       sp.code      = true;
@@ -497,8 +526,10 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     var hasPseudo = sheets.length > 0;
     if (!inl && !hasPseudo) { cssStack.push({ ...curCSS }); return false; }
     var ep = computeElementStyle(tag, id, cls, attrs, curCSS, sheets, inl);
+    // Apply counter-reset / counter-increment from computed style (item 434)
+    _applyCounters(ep);
     if (hasPseudo) {
-      var pseudo = getPseudoContent(tag, id, cls, attrs, sheets);
+      var pseudo = getPseudoContent(tag, id, cls, attrs, sheets, undefined, _counters);
       if (pseudo.before) ep._pseudoBefore = pseudo.before;
       if (pseudo.after)  ep._pseudoAfter  = pseudo.after;
     }
@@ -746,6 +777,14 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
           var href = tok.attrs.get('href') || '';
           if (href && !href.startsWith('javascript:')) {
             linkHref = href;
+            // Parse download attribute (item 636): value is filename hint, empty=use URL filename
+            if (tok.attrs.has('download')) {
+              // Use the attribute value as filename; empty value means derive from URL
+              var dlVal = tok.attrs.get('download') || '';
+              linkDownload = dlVal || href.split('?')[0]!.split('/').pop() || 'download';
+            } else {
+              linkDownload = '';
+            }
           }
           linkDepth++;
           break;
@@ -1061,7 +1100,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
 
         case 'a':
           linkDepth = Math.max(0, linkDepth - 1);
-          if (linkDepth === 0) linkHref = '';
+          if (linkDepth === 0) { linkHref = ''; linkDownload = ''; }  // item 636
           popCSS(); break;
 
         case 'h1': case 'h2': case 'h3':

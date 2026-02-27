@@ -507,10 +507,15 @@ function _applyKeywords(result: CSSProps, props: CSSProps, inherited: CSSProps):
 
 /**
  * Resolve a CSS `content` property value to a plain string for rendering.
- * Handles: "string" literals, 'single-quoted' literals, none/normal (→''), attr(x).
+ * Handles: "string" literals, 'single-quoted' literals, none/normal (→''), attr(x),
+ * and counter(name) / counter(name, style) using an optional counter value map.
  * Returns empty string for url() or unrecognised values.
  */
-function _resolveContentValue(raw: string, attrs?: Map<string, string>): string {
+function _resolveContentValue(
+  raw: string,
+  attrs?: Map<string, string>,
+  counters?: Map<string, number>,
+): string {
   raw = raw.trim();
   if (!raw || raw === 'none' || raw === 'normal') return '';
   // Concatenated strings/tokens (e.g. "«" " " attr(title))
@@ -542,9 +547,14 @@ function _resolveContentValue(raw: string, attrs?: Map<string, string>): string 
       var urlEnd = raw.indexOf(')', i + 4);
       i = urlEnd >= 0 ? urlEnd + 1 : raw.length;
     } else if (raw.slice(i, i + 8).toLowerCase() === 'counter(') {
-      // counter() — skip for now
-      var cnt = raw.indexOf(')', i + 8);
-      i = cnt >= 0 ? cnt + 1 : raw.length;
+      // counter(name) / counter(name, style) — look up counter value (item 434)
+      var cntEnd = raw.indexOf(')', i + 8);
+      if (cntEnd < 0) { i = raw.length; break; }
+      var cntArgs = raw.slice(i + 8, cntEnd).trim();
+      var cntName = cntArgs.split(',')[0]!.trim();
+      var cntVal = counters ? (counters.get(cntName) ?? 0) : 0;
+      out += String(cntVal);
+      i = cntEnd + 1;
     } else {
       // bare word — check for "open-quote"/"close-quote"
       var tok = '';
@@ -569,6 +579,7 @@ export function getPseudoContent(
   attrs: Map<string, string>,
   sheets: CSSRule[],
   index?: RuleIndex | null,
+  counters?: Map<string, number>,
 ): { before: string; after: string } {
   var before = '';
   var after  = '';
@@ -587,7 +598,7 @@ export function getPseudoContent(
       var hostSel = sel.slice(0, sel.length - pem[0].length).trim() || '*';
       if (!matchesSingleSel(tag, id, cls, attrs, hostSel)) continue;
       var which = pem[1]!.toLowerCase();
-      var resolved = _resolveContentValue(rule.props.content, attrs);
+      var resolved = _resolveContentValue(rule.props.content, attrs, counters);
       if (which === 'before' && rule.spec > beforeSpec) {
         before = resolved; beforeSpec = rule.spec;
       } else if (which === 'after' && rule.spec > afterSpec) {

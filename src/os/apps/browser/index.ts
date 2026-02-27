@@ -42,7 +42,7 @@ import { decodePNG }    from './img-png.js';
 import { decodeJPEG }   from './img-jpeg.js';
 import { layoutNodes }  from './layout.js';
 import { aboutJsosHTML, errorHTML, jsonViewerHTML } from './pages.js';
-import { createPageJS, type PageJS } from './jsruntime.js';
+import { createPageJS, getBlobURLContent, type PageJS } from './jsruntime.js';
 import { flushAllCaches } from './cache.js';
 import { renderGradientCSS } from './gradient.js';
 
@@ -130,6 +130,10 @@ export class BrowserApp implements App {
 
   // Async fetch coroutine id
   private _fetchCoroId = -1;
+
+  // URL bar autocomplete (item 632)
+  private _urlSuggestions: HistoryEntry[] = [];
+  private _urlSuggestIdx  = -1;  // -1 = none selected; 0..n-1 = highlighted row
 
   // JavaScript runtime for the current page (null if page has no scripts)
   private _pageJS: PageJS | null = null;
@@ -259,20 +263,52 @@ export class BrowserApp implements App {
     if (this._urlBarFocus) {
       if (ch === '\x0c') {
         this._urlInput = ''; this._urlCursorPos = 0; this._urlScrollOff = 0;
-        this._urlAllSelected = false; this._dirty = true; return;
+        this._urlAllSelected = false; this._urlSuggestions = []; this._urlSuggestIdx = -1;
+        this._dirty = true; return;
       }
       if (ch === '\n' || ch === '\r') {
-        var raw = this._urlInput.trim();
         this._urlAllSelected = false;
+        // If a suggestion is selected, navigate to it (item 632)
+        if (this._urlSuggestIdx >= 0 && this._urlSuggestIdx < this._urlSuggestions.length) {
+          var sugUrl = this._urlSuggestions[this._urlSuggestIdx]!.url;
+          this._urlSuggestions = []; this._urlSuggestIdx = -1;
+          this._urlBarFocus = false;
+          this._navigate(sugUrl);
+          return;
+        }
+        var raw = this._urlInput.trim();
+        this._urlSuggestions = []; this._urlSuggestIdx = -1;
         if (raw) { this._urlBarFocus = false; this._navigate(raw); }
         return;
       }
       if (ch === '\x1b') {
-        this._urlBarFocus = false; this._urlAllSelected = false; this._dirty = true; return;
+        this._urlBarFocus = false; this._urlAllSelected = false;
+        this._urlSuggestions = []; this._urlSuggestIdx = -1;
+        this._dirty = true; return;
       }
       if (ext) {
         this._urlAllSelected = false;
-        if      (ext === 0x4B) { this._urlCursorPos = Math.max(0, this._urlCursorPos - 1); }
+        if (ext === 0x48) {
+          // Up arrow — move suggestion selection up (item 632)
+          if (this._urlSuggestions.length > 0) {
+            this._urlSuggestIdx = this._urlSuggestIdx <= 0
+              ? this._urlSuggestions.length - 1
+              : this._urlSuggestIdx - 1;
+            this._urlInput = this._urlSuggestions[this._urlSuggestIdx]!.url;
+            this._urlCursorPos = this._urlInput.length;
+            this._dirty = true; return;
+          }
+        } else if (ext === 0x50) {
+          // Down arrow — move suggestion selection down (item 632)
+          if (this._urlSuggestions.length > 0) {
+            this._urlSuggestIdx = this._urlSuggestIdx >= this._urlSuggestions.length - 1
+              ? 0
+              : this._urlSuggestIdx + 1;
+            this._urlInput = this._urlSuggestions[this._urlSuggestIdx]!.url;
+            this._urlCursorPos = this._urlInput.length;
+            this._dirty = true; return;
+          }
+        } else if (ext === 0x4B) { this._urlCursorPos = Math.max(0, this._urlCursorPos - 1); }
         else if (ext === 0x4D) { this._urlCursorPos = Math.min(this._urlInput.length, this._urlCursorPos + 1); }
         else if (ext === 0x47) { this._urlCursorPos = 0; this._urlScrollOff = 0; }
         else if (ext === 0x4F) { this._urlCursorPos = this._urlInput.length; }
@@ -288,6 +324,8 @@ export class BrowserApp implements App {
           this._urlCursorPos--;
           this._urlScrollOff = Math.min(this._urlScrollOff, this._urlCursorPos);
         }
+        this._urlSuggestIdx = -1;
+        this._urlSuggestions = this._computeURLSuggestions(this._urlInput);
         this._dirty = true; return;
       }
       if (ch >= ' ') {
@@ -299,6 +337,8 @@ export class BrowserApp implements App {
                            this._urlInput.slice(this._urlCursorPos);
           this._urlCursorPos++;
         }
+        this._urlSuggestIdx = -1;
+        this._urlSuggestions = this._computeURLSuggestions(this._urlInput);
         this._dirty = true; return;
       }
       return;
@@ -407,6 +447,22 @@ export class BrowserApp implements App {
           this._urlAllSelected = true;
           this._urlCursorPos   = this._urlInput.length;
           this._urlScrollOff   = Math.max(0, this._urlInput.length - maxCh);
+          // Check if click landed on an autocomplete suggestion row (item 632)
+          var dropY = TAB_BAR_H + TOOLBAR_H;
+          if (this._urlSuggestions.length > 0 && event.y >= dropY) {
+            var rowH  = LINE_H + 4;
+            var relY  = event.y - dropY;
+            var rcIdx = Math.floor(relY / rowH);
+            if (rcIdx >= 0 && rcIdx < this._urlSuggestions.length) {
+              var sugEntry = this._urlSuggestions[rcIdx]!;
+              this._urlSuggestions = []; this._urlSuggestIdx = -1;
+              this._urlBarFocus = false;
+              this._navigate(sugEntry.url);
+              return;
+            }
+          }
+          this._urlSuggestIdx = -1;
+          this._urlSuggestions = this._computeURLSuggestions(this._urlInput);
           this._dirty = true; return;
         }
       }
@@ -429,9 +485,15 @@ export class BrowserApp implements App {
         var widgetIdx = this._hitTestWidget(cx, cy);
         if (widgetIdx >= 0) { this._handleWidgetClick(widgetIdx, cx, cy); return; }
 
-        var href = this._hitTestLink(cx, cy);
-        if (href) {
-          var resolved = this._resolveHref(href);
+        var hitSpan = this._hitTestLinkFull(cx, cy);  // item 636: use full span for download info
+        if (hitSpan && hitSpan.href) {
+          if (hitSpan.download) {
+            // <a download> — save resource to disk instead of navigating (item 636)
+            this._urlBarFocus = false;
+            this._downloadURL(hitSpan.href, hitSpan.download);
+            return;
+          }
+          var resolved = this._resolveHref(hitSpan.href);
           this._visited.add(resolved);
           this._urlBarFocus = false;
           this._navigate(resolved);
@@ -440,7 +502,9 @@ export class BrowserApp implements App {
 
         if (this._focusedWidget >= 0) { this._focusedWidget = -1; this._dirty = true; }
         if (this._urlBarFocus) {
-          this._urlBarFocus = false; this._urlAllSelected = false; this._dirty = true;
+          this._urlBarFocus = false; this._urlAllSelected = false;
+          this._urlSuggestions = []; this._urlSuggestIdx = -1;
+          this._dirty = true;
         } else {
           this._dirty = true;
         }
@@ -601,6 +665,30 @@ export class BrowserApp implements App {
       var showTxt2 = display.length > maxChars ? display.slice(display.length - maxChars) : display;
       canvas.drawText(urlX + 4, tbY + 12, showTxt2, CLR_BODY);
     }
+
+    // Autocomplete dropdown (item 632) — drawn below URL bar when suggestions are available
+    if (this._urlBarFocus && this._urlSuggestions.length > 0) {
+      var dropX  = urlX;
+      var dropY  = tbY + TOOLBAR_H;   // just below the toolbar
+      var dropW  = urlW;
+      var rowH   = LINE_H + 4;
+      var dropH  = rowH * this._urlSuggestions.length;
+      // Background + border
+      canvas.fillRect(dropX, dropY, dropW, dropH, CLR_URL_BG);
+      canvas.drawRect(dropX, dropY, dropW, dropH, CLR_TOOLBAR_BD);
+      for (var si = 0; si < this._urlSuggestions.length; si++) {
+        var ry   = dropY + si * rowH;
+        var sug  = this._urlSuggestions[si]!;
+        var isHl = si === this._urlSuggestIdx;
+        if (isHl) canvas.fillRect(dropX + 1, ry, dropW - 2, rowH - 1, CLR_URL_FOCUS);
+        var hlClr = isHl ? 0xFFFFFFFF : CLR_BODY;
+        // Show title + url (truncated)
+        var sugLabel = sug.title ? sug.title + '  ' + sug.url : sug.url;
+        var maxSugCh = Math.max(1, Math.floor((dropW - 8) / CHAR_W));
+        if (sugLabel.length > maxSugCh) sugLabel = sugLabel.slice(0, maxSugCh - 1) + '\u2026';
+        canvas.drawText(dropX + 4, ry + 4, sugLabel, hlClr);
+      }
+    }
   }
 
   private _drawContent(canvas: Canvas): void {
@@ -681,9 +769,17 @@ export class BrowserApp implements App {
         }
         if (sc > 1) {
           canvas.drawTextScaled(span.x, absY, span.text, clr, sc);
-          if (span.bold) canvas.drawTextScaled(span.x + sc, absY, span.text, clr, sc);
+          if (span.bold)   canvas.drawTextScaled(span.x + sc, absY, span.text, clr, sc);
+          if (span.italic) canvas.drawTextScaled(span.x + Math.floor(sc / 2), absY, span.text, clr, sc);
         } else {
-          canvas.drawText(span.x, absY, span.text, clr);
+          // Italic: draw text twice with a 1-px horizontal offset at the top half
+          // to simulate a forward slant (item 433)
+          if (span.italic) {
+            canvas.drawText(span.x + 1, absY, span.text, clr);
+            canvas.drawText(span.x,     absY + Math.floor(CHAR_H / 2), span.text, clr);
+          } else {
+            canvas.drawText(span.x, absY, span.text, clr);
+          }
           if (span.bold) canvas.drawText(span.x + 1, absY, span.text, clr);
         }
         if (span.href)      canvas.drawLine(span.x, absY + sCH, span.x + span.text.length * sCW, absY + sCH, clr);
@@ -1214,7 +1310,8 @@ export class BrowserApp implements App {
 
   private _resolveHref(href: string): string {
     if (href.startsWith('http://') || href.startsWith('https://') ||
-        href.startsWith('about:')  || href.startsWith('data:')) {
+        href.startsWith('about:')  || href.startsWith('data:')    ||
+        href.startsWith('blob:')) {
       return href;
     }
     if (href.startsWith('//')) {
@@ -1282,6 +1379,23 @@ export class BrowserApp implements App {
 
     var parsed = parseURL(rawURL);
     if (!parsed) { this._showError(rawURL, 'Invalid URL'); return; }
+
+    // ── blob: URLs (item 639) ─────────────────────────────────────────────────
+    // blob: URLs are created by URL.createObjectURL() in page JS.
+    // Their content is stored in the jsruntime _blobStore and retrieved here.
+    if (rawURL.startsWith('blob:')) {
+      var blobEntry = getBlobURLContent(rawURL);
+      if (!blobEntry) { this._showError(rawURL, 'Blob URL not found or revoked'); return; }
+      this._pageSource = blobEntry.content;
+      this._loading    = false;
+      var blobType = blobEntry.type.toLowerCase();
+      if (blobType.indexOf('text/html') >= 0 || blobType.indexOf('application/xhtml') >= 0) {
+        this._showHTML(blobEntry.content, '', rawURL);
+      } else {
+        this._showPlainText(blobEntry.content, rawURL);
+      }
+      return;
+    }
 
     // ── data: URLs ───────────────────────────────────────────────────────────
     if (parsed.protocol === 'data') {
@@ -1366,6 +1480,96 @@ export class BrowserApp implements App {
       }
     }
     return '';
+  }
+
+  /** Returns the full span (href + download hint) under (x, cy). (item 636) */
+  private _hitTestLinkFull(x: number, cy: number): RenderedSpan | null {
+    for (var i = 0; i < this._pageLines.length; i++) {
+      var line = this._pageLines[i];
+      if (line.y > cy) break;
+      if (line.y + line.lineH <= cy) continue;
+      for (var j = 0; j < line.nodes.length; j++) {
+        var span = line.nodes[j];
+        if (span.href && x >= span.x && x <= span.x + span.text.length * CHAR_W) {
+          return span;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Download a URL to /downloads/<filename>. (item 636) */
+  private _downloadURL(rawURL: string, filename: string): void {
+    var self = this;
+    var dlURL = this._resolveHref(rawURL);
+    this._status = 'Downloading ' + filename + '...';
+    this._dirty  = true;
+    // For blob: URLs, retrieve content directly
+    if (dlURL.startsWith('blob:')) {
+      var blobEntry = getBlobURLContent(dlURL);
+      if (!blobEntry) { self._status = 'Download failed: blob not found'; self._dirty = true; return; }
+      os.fs.mkdir('/downloads');
+      var saved = os.fs.write('/downloads/' + filename, blobEntry.content);
+      self._status = saved ? 'Saved to /downloads/' + filename : 'Download failed: write error';
+      self._dirty  = true;
+      return;
+    }
+    // For data: URLs, decode inline
+    var parsed = parseURL(dlURL);
+    if (parsed && parsed.protocol === 'data') {
+      var body = parsed.dataBody || '';
+      if ((parsed.dataMediaType || '').indexOf(';base64') >= 0) {
+        var bytes = decodeBase64(body);
+        body = bytes.map(function(b: number) { return String.fromCharCode(b); }).join('');
+      } else {
+        try { body = decodeURIComponent(body.replace(/\+/g, ' ')); } catch (_) {}
+      }
+      os.fs.mkdir('/downloads');
+      var saved2 = os.fs.write('/downloads/' + filename, body);
+      self._status = saved2 ? 'Saved to /downloads/' + filename : 'Download failed: write error';
+      self._dirty  = true;
+      return;
+    }
+    // HTTP fetch
+    this._fetchCoroId = os.fetchAsync(dlURL, function(resp: FetchResponse | null, err?: string) {
+      self._fetchCoroId = -1;
+      if (!resp || err) { self._status = 'Download failed: ' + (err || 'network error'); self._dirty = true; return; }
+      os.fs.mkdir('/downloads');
+      var saved3 = os.fs.write('/downloads/' + filename, resp.bodyText);
+      self._status = saved3 ? 'Saved to /downloads/' + filename : 'Download failed: write error';
+      self._dirty  = true;
+    });
+  }
+
+  // ── URL bar autocomplete (item 632) ──────────────────────────────────────
+
+  /** Compute up to 5 matching history + bookmark entries for the given input. */
+  private _computeURLSuggestions(input: string): HistoryEntry[] {
+    if (!input || input.length < 1) return [];
+    var q   = input.toLowerCase();
+    var seen = new Set<string>();
+    var out: HistoryEntry[] = [];
+    // Search history (most recent first — history is in order, highest idx = most recent)
+    for (var hi = this._history.length - 1; hi >= 0; hi--) {
+      var he = this._history[hi]!;
+      if (seen.has(he.url)) continue;
+      if (he.url.toLowerCase().indexOf(q) >= 0 || (he.title && he.title.toLowerCase().indexOf(q) >= 0)) {
+        seen.add(he.url);
+        out.push(he);
+        if (out.length >= 5) return out;
+      }
+    }
+    // Then bookmarks
+    for (var bi = 0; bi < this._bookmarks.length; bi++) {
+      var bk = this._bookmarks[bi]!;
+      if (seen.has(bk.url)) continue;
+      if (bk.url.toLowerCase().indexOf(q) >= 0 || (bk.title && bk.title.toLowerCase().indexOf(q) >= 0)) {
+        seen.add(bk.url);
+        out.push(bk);
+        if (out.length >= 5) return out;
+      }
+    }
+    return out;
   }
 
   // ── Bookmarks ─────────────────────────────────────────────────────────────

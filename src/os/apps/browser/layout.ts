@@ -68,7 +68,9 @@ export function flowSpans(
       var display = (nspc ? ' ' : '') + chunk;
       var rsp: RenderedSpan = { x: curX, text: display, color: clr };
       if (sp.href)      rsp.href      = sp.href;
+      if (sp.download)  rsp.download  = sp.download;  // item 636
       if (sp.bold)      rsp.bold      = true;
+      if (sp.italic)    rsp.italic    = true;
       if (sp.del)       rsp.del       = true;
       if (sp.mark)      rsp.mark      = true;
       if (sp.code)      rsp.codeBg    = true;

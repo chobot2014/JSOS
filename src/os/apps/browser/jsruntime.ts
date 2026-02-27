@@ -143,6 +143,18 @@ class VStorage {
 var _localStorage  = new VStorage();
 var _sessionStorage = new VStorage();
 
+// ── Blob object URL store (item 639) ─────────────────────────────────────────
+// Maps blob: URLs → { content: string; type: string }
+var _blobStore = new Map<string, { content: string; type: string }>();
+
+/**
+ * Look up the content of a blob: URL created via URL.createObjectURL().
+ * Returns null if the URL is not found or has been revoked.
+ */
+export function getBlobURLContent(url: string): { content: string; type: string } | null {
+  return _blobStore.get(url) ?? null;
+}
+
 // ── Main factory ──────────────────────────────────────────────────────────────
 
 export function createPageJS(
@@ -1255,8 +1267,15 @@ export function createPageJS(
     toString(): string { return this.href; }
     toJSON(): string { return this.href; }
 
-    static createObjectURL(_b: unknown): string { return 'blob:jsos/' + Math.random().toString(36).slice(2); }
-    static revokeObjectURL(_u: string): void {}
+    static createObjectURL(b: unknown): string {
+      var url = 'blob:jsos/' + Math.random().toString(36).slice(2);
+      if (b instanceof Blob) {
+        // Store blob content for browser navigation (item 639)
+        _blobStore.set(url, { content: b._parts.join(''), type: b.type || 'text/html' });
+      }
+      return url;
+    }
+    static revokeObjectURL(u: string): void { _blobStore.delete(u); }
     static canParse(url: string, base?: string): boolean { try { new URLImpl(url, base); return true; } catch (_) { return false; } }
     static parse(url: string, base?: string): URLImpl | null { try { return new URLImpl(url, base); } catch (_) { return null; } }
   }

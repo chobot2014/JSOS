@@ -17,6 +17,7 @@ export interface ParsedURL {
 export interface InlineSpan {
   text:       string;
   href?:      string;
+  download?:  string;  // <a download="filename"> hint (item 636)
   bold?:      boolean;
   italic?:    boolean;
   code?:      boolean;
@@ -136,7 +137,9 @@ export interface RenderedSpan {
   text:       string;
   color:      PixelColor;
   href?:      string;
+  download?:  string;  // <a download="filename"> hint (item 636)
   bold?:      boolean;
+  italic?:    boolean;   // CSS font-style: italic/oblique (item 433)
   del?:       boolean;
   mark?:      boolean;
   codeBg?:    boolean;
