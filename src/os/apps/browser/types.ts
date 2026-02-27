@@ -30,8 +30,11 @@ export interface InlineSpan {
 export type BlockType =
   | 'block' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6'
   | 'hr' | 'li' | 'pre' | 'p-break' | 'blockquote' | 'widget' | 'summary'
-  | 'aside'       // float:right/left — rendered as a boxed indented block
-  | 'flex-row';   // display:flex row — children rendered inline
+  | 'aside'        // float:right/left — rendered as a boxed indented block
+  | 'flex-row'     // display:flex row — children rendered inline
+  | 'table'        // <table> container node (item 449)
+  | 'table-row'    // <tr> row — contains table-cell children
+  | 'table-cell';  // <td>/<th> — cell node
 
 export interface RenderNode {
   type:         BlockType;
@@ -83,6 +86,16 @@ export interface RenderNode {
   flexGrow?:    number;
   order?:       number;
   alignSelf?:   string;
+  // Clear floats (item 400)
+  clear?:       'left' | 'right' | 'both' | 'none';
+  // Box sizing (item 448)
+  boxSizing?:   'content-box' | 'border-box';
+  // Block formatting context root (item 441)
+  bfcRoot?:     boolean;
+  // Table (item 449)
+  tableLayout?:  'auto' | 'fixed';
+  colspan?:      number;
+  rowspan?:      number;
 }
 
 // ── Rendered output ───────────────────────────────────────────────────────────
@@ -142,6 +155,15 @@ export interface WidgetBlueprint {
   imgNatW?:   number;       // natural width from HTML attr
   imgNatH?:   number;
   radioGroup?: string;      // name used for radio grouping
+  // ── Form validation attributes (item 603) ─────────────────────────────────
+  required?:   boolean;     // field must not be empty on submit
+  minLength?:  number;      // minimum character count
+  maxLength?:  number;      // maximum character count
+  pattern?:    string;      // regex pattern (without delimiters)
+  inputMin?:   string;      // min value (for number/date inputs)
+  inputMax?:   string;      // max value (for number/date inputs)
+  inputType?:  string;      // original input type attr (email, url, number, tel)
+  placeholder?: string;     // hint text shown when empty
 }
 
 /** A widget after layout — knows its position in page space. */
@@ -203,6 +225,10 @@ export interface ParseResult {
   styles:     string[];
   /** Href values of <link rel="stylesheet"> tags (for external fetch). */
   styleLinks: string[];
+  /** True when no valid DOCTYPE is present (item 349). */
+  quirksMode?: boolean;
+  /** Named template fragments from <template> elements (item 357). Key = template id. */
+  templates?: Map<string, RenderNode[]>;
 }
 
 // ── CSS ───────────────────────────────────────────────────────────────────────

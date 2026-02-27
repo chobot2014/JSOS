@@ -9,6 +9,7 @@
 import { net, strToBytes, bytesToStr } from './net.js';
 import { TLSSocket } from './tls.js';
 import { httpDecompress } from './deflate.js';
+import { waterfallRecorder } from './net-perf.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -463,41 +464,48 @@ export function httpGet(
   var hit = _cacheGet(cacheKey);
   if (hit && !hit.stale) return hit.response;
 
+  // [Item 971] Waterfall timing
+  var _wt = waterfallRecorder.startRequest(cacheKey);
+
   // Try to reuse pooled keep-alive connection
   var pooled = _poolGet(host, port, false);
   var sock = pooled?.sock ?? null;
 
+  var _t0 = kernel.getTicks();
   if (!sock) {
     sock = net.createSocket('tcp');
-    if (!net.connect(sock, ip, port)) { net.close(sock); return hit?.response ?? null; }
+    if (!net.connect(sock, ip, port)) { net.close(sock); _wt.finish(0, 0); return hit?.response ?? null; }
   }
+  _wt.markConnect(Math.max(0, (kernel.getTicks() - _t0) * 10));
 
   // Include If-None-Match if we have a cached ETag, and Cookie header
   var etag = _cacheGetEtag(cacheKey);
   var cookies = cookieJar.getCookieHeader(host, path, false);
   var req = buildGetRequest(host, path, true, etag, cookies);
-  if (!net.sendBytes(sock, req)) { net.close(sock); return hit?.response ?? null; }
+  if (!net.sendBytes(sock, req)) { net.close(sock); _wt.finish(0, 0); return hit?.response ?? null; }
 
   // Accumulate response into a chunk list — avoid O(n²) concat on every packet
   var chunks: number[][] = [];
   var deadline = kernel.getTicks() + 500;  // 5 seconds
+  var _ttfbMarked = false;
   while (kernel.getTicks() < deadline) {
     if (net.nicReady) net.pollNIC();
     var chunk = net.recvBytes(sock, 50);
     if (chunk && chunk.length > 0) {
+      if (!_ttfbMarked) { _wt.markTtfb(); _ttfbMarked = true; }
       chunks.push(chunk);
       deadline = kernel.getTicks() + 100;  // reset on new data
     }
   }
 
-  if (chunks.length === 0) { net.close(sock); return hit?.response ?? null; }
+  if (chunks.length === 0) { net.close(sock); _wt.finish(0, 0); return hit?.response ?? null; }
   var buf: number[] = [];
   for (var ci = 0; ci < chunks.length; ci++) {
     var ch = chunks[ci];
     for (var cj = 0; cj < ch.length; cj++) buf.push(ch[cj]);
   }
   var resp = parseHttpResponse(buf);
-  if (!resp) { net.close(sock); return hit?.response ?? null; }
+  if (!resp) { net.close(sock); _wt.finish(0, 0); return hit?.response ?? null; }
 
   // Handle 304 Not Modified — return cached body unchanged
   if (resp.status === 304 && hit) {
@@ -506,6 +514,7 @@ export function httpGet(
     if (connHdr0.toLowerCase() !== 'close') {
       _poolReturn({ sock, tls: null, host, port, https: false, expiry: 0 });
     } else { net.close(sock); }
+    _wt.finish(304, 0);
     return hit.response;
   }
 
@@ -517,6 +526,7 @@ export function httpGet(
 
   _processSetCookie(resp, host, path, false);
   _cacheSet(cacheKey, resp);
+  _wt.finish(resp.status, buf.length);
   return resp;
 }
 
@@ -537,17 +547,26 @@ export function httpsGet(
   var hit2 = _cacheGet(cacheKey);
   if (hit2 && !hit2.stale) return { tlsOk: true, response: hit2.response };
 
+  // [Item 971] Waterfall timing
+  var _wt2 = waterfallRecorder.startRequest(cacheKey);
+
   // Try to reuse a pooled TLS connection
   var pooled = _poolGet(host, port, true);
   var tls: TLSSocket;
   if (pooled?.tls) {
     tls = pooled.tls;
+    _wt2.markConnect(0); // reusing existing connection
   } else {
+    var _tConn = kernel.getTicks();
     tls = new TLSSocket(host);
+    var _tHs = kernel.getTicks();
+    _wt2.markConnect(Math.max(0, (_tHs - _tConn) * 10));
     if (!tls.handshake(ip, port)) {
       tls.close();
+      _wt2.finish(0, 0);
       return { tlsOk: false, response: hit2?.response ?? null };
     }
+    _wt2.markTls(Math.max(0, (kernel.getTicks() - _tHs) * 10));
   }
 
   // Send HTTP request with optional If-None-Match
@@ -555,28 +574,31 @@ export function httpsGet(
   var req = buildGetRequest(host, path, true, etag2);
   if (!tls.write(req)) {
     tls.close();
+    _wt2.finish(0, 0);
     return { tlsOk: true, response: hit2?.response ?? null };
   }
 
   // Receive and accumulate response
   var tlsChunks: number[][] = [];
   var tlsDeadline = kernel.getTicks() + 500;  // 5 seconds
+  var _ttfb2Marked = false;
   while (kernel.getTicks() < tlsDeadline) {
     var chunk2 = tls.read(100);
     if (chunk2 && chunk2.length > 0) {
+      if (!_ttfb2Marked) { _wt2.markTtfb(); _ttfb2Marked = true; }
       tlsChunks.push(chunk2);
       tlsDeadline = kernel.getTicks() + 100;  // reset on new data
     }
   }
 
-  if (tlsChunks.length === 0) { tls.close(); return { tlsOk: true, response: hit2?.response ?? null }; }
+  if (tlsChunks.length === 0) { tls.close(); _wt2.finish(0, 0); return { tlsOk: true, response: hit2?.response ?? null }; }
   var tlsBuf: number[] = [];
   for (var tci = 0; tci < tlsChunks.length; tci++) {
     var tch = tlsChunks[tci];
     for (var tcj = 0; tcj < tch.length; tcj++) tlsBuf.push(tch[tcj]);
   }
   var resp2 = parseHttpResponse(tlsBuf);
-  if (!resp2) { tls.close(); return { tlsOk: true, response: hit2?.response ?? null }; }
+  if (!resp2) { tls.close(); _wt2.finish(0, 0); return { tlsOk: true, response: hit2?.response ?? null }; }
 
   // Handle 304 Not Modified
   if (resp2.status === 304 && hit2) {
@@ -585,6 +607,7 @@ export function httpsGet(
     if (connHdr3.toLowerCase() !== 'close') {
       _poolReturn({ sock: null, tls, host, port, https: true, expiry: 0 });
     } else { tls.close(); }
+    _wt2.finish(304, 0);
     return { tlsOk: true, response: hit2.response };
   }
 
@@ -596,6 +619,7 @@ export function httpsGet(
 
   _processSetCookie(resp2, host, path, true);
   _cacheSet(cacheKey, resp2);
+  _wt2.finish(resp2.status, tlsBuf.length);
   return { tlsOk: true, response: resp2 };
 }
 

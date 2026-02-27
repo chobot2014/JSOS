@@ -462,6 +462,56 @@ export interface KernelAPI {
   /** Fire any expired timers for child process `id` (call after procTick). */
   serviceTimers(id: number): void;
 
+  // ─ Disk I/O (item 177) ────────────────────────────────────────────────────
+  /**
+   * Read a 512-byte sector from disk `diskId` at sector number `sectorNo`.
+   * Returns a Uint8Array of length 512, or an empty Uint8Array on error.
+   * diskId: 0 = primary ATA (same as ataRead), 1 = secondary, etc.
+   */
+  readDiskSector(diskId: number, sectorNo: number): Uint8Array;
+
+  // ─ Initramfs (item 168) ───────────────────────────────────────────────────
+  /**
+   * Return the embedded CPIO initramfs image as an ArrayBuffer, or null if
+   * no initramfs was embedded in the kernel binary.
+   */
+  getInitramfs(): ArrayBuffer | null;
+
+  // ─ Zero-copy NIC DMA (item 922) ──────────────────────────────────────────
+  /**
+   * Register `buffer` as a DMA target for connection `connFd`.
+   * Returns an opaque NIC handle used by nicDmaRecv / nicDmaUnregister.
+   */
+  nicDmaRegister(connFd: number, buffer: ArrayBuffer): number;
+  /**
+   * Receive data into the previously registered DMA buffer.
+   * Returns the number of bytes received, or 0 if no data is available.
+   */
+  nicDmaRecv(nicHandle: number): number;
+  /** Unregister the DMA buffer for `nicHandle`. */
+  nicDmaUnregister(nicHandle: number): void;
+
+  // ─ TCP primitives (item 924 / 932) ────────────────────────────────────────
+  /**
+   * Send `data` on connection `connFd`.
+   * Zero-copy path: an ArrayBuffer is passed directly to the kernel TX ring.
+   */
+  tcpSend(connFd: number, data: ArrayBuffer): void;
+  /**
+   * Open a new TCP connection to `host:port`.
+   * `https` = true wraps in TLS.
+   * Returns a connection file descriptor (>= 0) or -1 on failure.
+   * Non-blocking: caller should poll or await completion via event.
+   */
+  tcpConnect(host: string, port: number, https: boolean): number;
+
+  // ─ Idle scheduler (item 932) ─────────────────────────────────────────────
+  /**
+   * Schedule `fn` to run the next time the system is idle (no runnable processes).
+   * The callback is called at most once; re-register to run again.
+   */
+  scheduleIdle(fn: () => void): void;
+
   //  Constants 
   colors: KernelColors;
   KEY_UP: number;    KEY_DOWN: number;   KEY_LEFT: number;  KEY_RIGHT: number;

@@ -422,4 +422,128 @@ export function flushAllCaches(): void {
   _linePool.length = 0;
   _spansOut = 0;
   _linesOut = 0;
+  flushStyleDirtyTracker();
+  _fslReadQueue.length = 0;
+  _fslWriteQueue.length = 0;
+}
+
+// ── StyleDirtyTracker ─────────────────────────────────────────────────────────
+//
+// Item 892: Style recalc — dirty-mark only elements whose computed style
+// actually changes; batch before layout pass.
+//
+// A dirty element id is tracked in a Set.  After any style mutation
+// (class change, attribute change, inline style mutation), the element is
+// marked dirty.  Before layout, `flushStyleDirty()` recomputes styles only
+// for dirty elements and bumps `_styleGeneration`.
+
+var _dirtyElements  = new Set<string>();  // element IDs (or unique keys)
+var _containBodies  = new Set<string>();  // IDs of contain:layout boundaries (item 893)
+
+/** Mark an element as needing style recalc. */
+export function markStyleDirty(elementKey: string): void {
+  _dirtyElements.add(elementKey);
+}
+
+/** Mark an element as a `contain: layout` boundary (item 893). */
+export function markContainLayout(elementKey: string): void {
+  _containBodies.add(elementKey);
+}
+
+/** Unmark a contain boundary. */
+export function unmarkContainLayout(elementKey: string): void {
+  _containBodies.delete(elementKey);
+}
+
+/**
+ * Return true if `elementKey` is inside a `contain:layout` boundary.
+ * Dirty-propagation stops at the boundary (item 893).
+ */
+export function isContainLayoutBoundary(elementKey: string): boolean {
+  return _containBodies.has(elementKey);
+}
+
+/**
+ * Flush all dirty style entries — invalidate their cache entries so the next
+ * `getComputedStyle` call recomputes fresh values.
+ * Returns the number of elements that were recalculated.
+ */
+export function flushStyleDirty(): number {
+  if (_dirtyElements.size === 0) return 0;
+  var count = 0;
+  _dirtyElements.forEach(key => {
+    // Invalidate cached style for this element by deleting its entry
+    _styleCache.delete(key);
+    count++;
+  });
+  _dirtyElements.clear();
+  // Bump generation so any consumers that check the gen will recompute
+  bumpStyleGeneration();
+  return count;
+}
+
+/** Clear all dirty tracking state (on navigation). */
+export function flushStyleDirtyTracker(): void {
+  _dirtyElements.clear();
+  _containBodies.clear();
+}
+
+/** How many elements are pending style recalc. */
+export function pendingStyleRecalcCount(): number { return _dirtyElements.size; }
+
+// ── FSL Batcher ───────────────────────────────────────────────────────────────
+//
+// Item 894: Avoid Forced Synchronous Layout (FSL) — batch all DOM reads
+// before any DOM writes per frame.
+//
+// Callers queue reads and writes; `flushFSL()` runs reads first, then writes.
+// This prevents the browser from interleaving layout-invalidating writes with
+// layout-requiring reads (the FSL anti-pattern).
+
+type VoidCallback = () => void;
+
+var _fslReadQueue:  VoidCallback[] = [];
+var _fslWriteQueue: VoidCallback[] = [];
+var _fslInFlush = false;
+
+/**
+ * Schedule a DOM read callback for the next FSL flush.
+ * Will execute before any queued writes.
+ */
+export function scheduleRead(cb: VoidCallback): void {
+  if (_fslInFlush) { cb(); return; }  // already in flush — run immediately
+  _fslReadQueue.push(cb);
+}
+
+/**
+ * Schedule a DOM write callback for the next FSL flush.
+ * Will execute after all queued reads.
+ */
+export function scheduleWrite(cb: VoidCallback): void {
+  if (_fslInFlush) { _fslWriteQueue.push(cb); return; }
+  _fslWriteQueue.push(cb);
+}
+
+/**
+ * Flush all queued reads then all queued writes.
+ * Call once per frame before the layout pass.
+ */
+export function flushFSL(): void {
+  _fslInFlush = true;
+  // Phase 1: all reads
+  var readers = _fslReadQueue.splice(0);
+  for (var i = 0; i < readers.length; i++) {
+    try { readers[i](); } catch (_) {}
+  }
+  // Phase 2: all writes (may queue more reads — those run next frame)
+  var writers = _fslWriteQueue.splice(0);
+  for (var j = 0; j < writers.length; j++) {
+    try { writers[j](); } catch (_) {}
+  }
+  _fslInFlush = false;
+}
+
+/** How many pending reads/writes are queued. */
+export function fslQueueDepth(): { reads: number; writes: number } {
+  return { reads: _fslReadQueue.length, writes: _fslWriteQueue.length };
 }

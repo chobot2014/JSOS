@@ -173,6 +173,77 @@ const PROTO_ICMP = 1;
 const PROTO_TCP  = 6;
 const PROTO_UDP  = 17;
 
+// ── IP Options (item 231) ─────────────────────────────────────────────────────
+/** Parsed IP option (record-route, timestamp, strict/loose source route). */
+export interface IPOption {
+  type:    number;           // raw option-type byte
+  kind:    'record-route' | 'timestamp' | 'strict-source-route' | 'loose-source-route' | 'other';
+  data:    number[];         // raw option bytes (excluding type/len)
+  /** Populated for record-route: list of IP addresses recorded so far */
+  addresses?: IPv4Address[];
+  /** Populated for timestamp: list of { address?, timestamp } entries */
+  timestamps?: Array<{ address?: IPv4Address; ts: number }>;
+  /** Populated for source routes: ordered list of hop addresses */
+  route?: IPv4Address[];
+}
+
+/**
+ * [Item 231] Parse IP options from the header bytes between byte 20 and ihl*4.
+ * Handles: End-of-option (0), NOP (1), Record Route (7), Timestamp (68=0x44),
+ * Strict Source Route (137=0x89), Loose Source Route (131=0x83).
+ */
+function _parseIPOptions(raw: number[], ihl: number): IPOption[] {
+  var opts: IPOption[] = [];
+  var off = 20; // options start after the fixed 20-byte IP header
+  var end = ihl;
+  while (off < end) {
+    var type = raw[off] & 0xff;
+    if (type === 0) break;          // EOOL – end of option list
+    if (type === 1) { off++; continue; } // NOP
+    if (off + 1 >= end) break;
+    var len = raw[off + 1] & 0xff;
+    if (len < 2 || off + len > end) break;
+    var bytes = raw.slice(off + 2, off + len);
+    if (type === 7) {
+      // Record Route: pointer (1-based) at [2], then 4-byte address slots
+      var ptr = (raw[off + 2] & 0xff) - 1; // convert to 0-based
+      var addrs: IPv4Address[] = [];
+      for (var i = 3; i + 3 < len; i += 4) {
+        if (i < ptr) addrs.push(bytesToIp(raw, off + i));
+      }
+      opts.push({ type, kind: 'record-route', data: bytes, addresses: addrs });
+    } else if (type === 0x44) {
+      // Internet Timestamp: flags at [3] bits 0-3
+      var flags = raw[off + 3] & 0x0f;
+      var tss: Array<{ address?: IPv4Address; ts: number }> = [];
+      var j = 4;
+      while (j + 3 < len) {
+        if (flags === 0) {
+          tss.push({ ts: u32be(raw, off + j) }); j += 4;
+        } else {
+          if (j + 7 >= len) break;
+          tss.push({ address: bytesToIp(raw, off + j), ts: u32be(raw, off + j + 4) }); j += 8;
+        }
+      }
+      opts.push({ type, kind: 'timestamp', data: bytes, timestamps: tss });
+    } else if (type === 0x89) {
+      // Strict Source Route
+      var route: IPv4Address[] = [];
+      for (var k = 3; k + 3 < len; k += 4) route.push(bytesToIp(raw, off + k));
+      opts.push({ type, kind: 'strict-source-route', data: bytes, route });
+    } else if (type === 0x83) {
+      // Loose Source Route
+      var lroute: IPv4Address[] = [];
+      for (var m = 3; m + 3 < len; m += 4) lroute.push(bytesToIp(raw, off + m));
+      opts.push({ type, kind: 'loose-source-route', data: bytes, route: lroute });
+    } else {
+      opts.push({ type, kind: 'other', data: bytes });
+    }
+    off += len;
+  }
+  return opts;
+}
+
 export interface IPv4Packet {
   ihl:      number;
   dscp:     number;
@@ -185,6 +256,8 @@ export interface IPv4Packet {
   src:      IPv4Address;
   dst:      IPv4Address;
   payload:  number[];
+  /** Parsed IP options (empty array when IHL=5, i.e. no options). */
+  options?: IPOption[];
 }
 
 function parseIPv4(raw: number[]): IPv4Packet | null {
@@ -205,6 +278,7 @@ function parseIPv4(raw: number[]): IPv4Packet | null {
     src:       bytesToIp(raw, 12),
     dst:       bytesToIp(raw, 16),
     payload:   raw.slice(ihl, totalLen),
+    options:   ihl > 20 ? _parseIPOptions(raw, ihl) : [],
   };
 }
 function buildIPv4(pkt: IPv4Packet): number[] {

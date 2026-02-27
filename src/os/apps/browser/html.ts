@@ -187,6 +187,18 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
   var styleLinks: string[]       = [];
   var baseURL  = '';
 
+  // ── DOCTYPE quirks mode detection (item 349) ───────────────────────────────
+  // Standards mode requires a valid HTML5 DOCTYPE: <!DOCTYPE html>.
+  // Anything else (no DOCTYPE, legacy DOCTYPE) triggers quirks mode.
+  var _dtMatch = /<!DOCTYPE\s+html\s*>/i.test(html.slice(0, 512));
+  var quirksMode = !_dtMatch;
+
+  // ── Template element support (item 357) ──────────────────────────────────── 
+  var templates: Map<string, RenderNode[]> = new Map();
+  var inTemplate     = false;
+  var templateId     = '';
+  var templateNodes: RenderNode[] = [];
+
   var inTitle      = false;
   var inPre        = false;
   var inHead       = false;
@@ -474,6 +486,27 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
       continue;
     }
     if (skipUntilClose) { if (tok.kind === 'close' && tok.tag === skipUntilClose) skipUntilClose = ''; continue; }
+
+    // ── <template> element (item 357) ─────────────────────────────────────
+    // Content inside <template> is parsed into a detached document fragment
+    // and stored in `templates` by the element's `id`; not rendered.
+    if (inTemplate) {
+      if (tok.kind === 'close' && tok.tag === 'template') {
+        templates.set(templateId, templateNodes);
+        inTemplate = false; templateId = ''; templateNodes = [];
+      }
+      // Collect text tokens as a simple text block for the template fragment
+      if (tok.kind === 'text' && tok.text.trim()) {
+        templateNodes.push({ type: 'block', spans: [{ text: tok.text, color: undefined as any }] });
+      }
+      continue;
+    }
+    if (tok.kind === 'open' && tok.tag === 'template') {
+      inTemplate = true;
+      templateId = tok.attrs.get('id') || `tpl_${templates.size}`;
+      templateNodes = [];
+      continue;
+    }
 
     // ── text inside <select> options or <textarea> ────────────────────────
     if (inSelect) {
@@ -765,6 +798,20 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
             formIdx: curFormIdx, cols: iSize || 20,
           };
           if (iType === 'radio') bp.radioGroup = iName;
+          // ── Validation attributes (item 603) ────────────────────────────────
+          if (tok.attrs.has('required'))  bp.required   = true;
+          var minLenA = tok.attrs.get('minlength');
+          if (minLenA)  bp.minLength  = parseInt(minLenA, 10) || 0;
+          var maxLenA = tok.attrs.get('maxlength');
+          if (maxLenA)  bp.maxLength  = parseInt(maxLenA, 10) || 0;
+          var patA = tok.attrs.get('pattern');
+          if (patA)  bp.pattern = patA;
+          var minA = tok.attrs.get('min');
+          if (minA)  bp.inputMin  = minA;
+          var maxA = tok.attrs.get('max');
+          if (maxA)  bp.inputMax  = maxA;
+          bp.inputType    = (tok.attrs.get('type') || 'text').toLowerCase();
+          bp.placeholder  = iPlaceh || undefined;
           pushWidget(bp);
           break;
         }
@@ -1081,5 +1128,5 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
   }
 
   flushInline();
-  return { nodes, title, forms, widgets, baseURL, scripts, styles, styleLinks };
+  return { nodes, title, forms, widgets, baseURL, scripts, styles, styleLinks, quirksMode, templates };
 }

@@ -742,16 +742,40 @@ export class Canvas {
   // ── Framebuffer output ────────────────────────────────────────────────
 
   /**
+   * [Item 905] Double-buffer vsync state.
+   * Initialised on the first flip() of the root canvas.
+   */
+  private static _dbEnabled: boolean = false;
+  private static _dbInit:    boolean = false;
+
+  private static _initDoubleBuffer(): void {
+    if (Canvas._dbInit) return;
+    Canvas._dbInit = true;
+    try {
+      // Allocate C-side back-buffer; falls back gracefully if unsupported.
+      var result = (kernel as any).fbAllocBackbuffer?.();
+      Canvas._dbEnabled = result === true || result === 1;
+    } catch (_) { Canvas._dbEnabled = false; }
+  }
+
+  /**
    * Double-buffer flip: send the entire canvas to the physical framebuffer.
-   * For the screen canvas, blits at (0,0).
-   * For sub-canvases, blits at the registered (fb_x, fb_y) offset.
+   * [Item 905] When hardware double-buffering is available, waits for vsync
+   * before swapping front/back buffers to eliminate tearing.
    */
   flip(): void {
     /* External-buffer canvases are owned by the WM render slab; don't blit. */
     if (this._external) return;
+    // Init double-buffer once on the first real flip.
+    if (!Canvas._dbInit) Canvas._initDoubleBuffer();
     // Zero-copy fast path: pass the Uint32Array's backing ArrayBuffer directly.
     // C side detects it via JS_GetArrayBuffer() and calls a single memcpy.
     (kernel.fbBlit as any)(this._buf.buffer, this._fb_x, this._fb_y, this.width, this.height);
+    if (Canvas._dbEnabled) {
+      // [Item 905] Wait for vsync then swap front/back buffers.
+      try { (kernel as any).vsyncWait?.(); } catch (_) {}
+      try { (kernel as any).fbFlip?.();    } catch (_) {}
+    }
   }
 
   /**

@@ -319,7 +319,8 @@ export class BrowserApp implements App {
     if (ch === ' ')           { this._scrollBy(this._contentH()); return; }
     if (ch === 'b' || ch === 'B') { this._goBack();    return; }
     if (ch === 'f' || ch === 'F') { this._goForward(); return; }
-    if (ch === 'r' || ch === 'R') { this._reload();    return; }
+    if (ch === 'r') { this._reload();     return; }
+    if (ch === 'R') { this._hardReload(); return; }  // Shift+R = hard reload (item 624)
     if (ch === '/' || ch === 'l') {
       this._urlBarFocus = true; this._urlInput = this._pageURL;
       this._urlCursorPos = this._urlInput.length; this._urlScrollOff = 0;
@@ -1154,6 +1155,20 @@ export class BrowserApp implements App {
   }
 
   private _reload(): void { this._startFetch(this._pageURL); }
+
+  /**
+   * Hard reload: clear all caches for the current page before re-fetching.
+   * Bound to Shift+R in the browser navigation mode.
+   * Implements item 624: hard reload — clear cache for current page (Ctrl+Shift+R).
+   */
+  private _hardReload(): void {
+    // Flush all browser-level caches (layout, style, fetch, image, etc.)
+    flushAllCaches();
+    // Also clear the local image cache for this tab
+    this._imgCache.clear();
+    // Re-navigate from scratch
+    this._startFetch(this._pageURL);
+  }
 
   private _cancelFetch(): void {
     if (this._fetchCoroId >= 0) { os.cancel(this._fetchCoroId); this._fetchCoroId = -1; }

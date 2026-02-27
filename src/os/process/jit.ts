@@ -646,6 +646,69 @@ export class _Emit {
   popEax():  void { this._w(0x58); }                                 // POP EAX
   popEdx():  void { this._w(0x5A); }                                 // POP EDX
   popEbx():  void { this._w(0x5B); }                                 // POP EBX
+  pushEbx(): void { this._w(0x53); }                                 // PUSH EBX (callee-save)
+  movEbxEax(): void { this._w(0x89); this._w(0xC3); }               // MOV EBX, EAX
+  movEaxEbx(): void { this._w(0x89); this._w(0xD8); }               // MOV EAX, EBX
+  /** Restore callee-saved EBX from [EBP-4] before epilogue when reg-alloc is active. */
+  restoreSavedEbx(): void { this._w(0x8B); this._w(0x5D); this._w(0xFC); } // MOV EBX, [EBP-4]
+  /** Load [ECX + imm32] into ECX (for JSObject shape-pointer fetch). */
+  movEcxEcxDisp(disp: number): void {
+    if (disp === 0) { this._w(0x8B); this._w(0x09); }
+    else if (disp >= -128 && disp <= 127) { this._w(0x8B); this._w(0x49); this._w(disp & 0xFF); }
+    else { this._w(0x8B); this._w(0x89); this._u32(disp); }
+  }
+  /** MOV [addr], imm8 — write one byte to a fixed physical address (deopt-log flag). */
+  movByteAbsImm(addr: number, val: number): void {
+    // C6 05 <addr32> <imm8>
+    this._w(0xC6); this._w(0x05); this._u32(addr); this._w(val & 0xFF);
+  }
+  /** Conditional jump if less (JL / JB signed), 32-bit relative. */
+  jl2(): number { this._w(0x0F); this._w(0x8C); const o = this.here(); this._u32(0); return o; }
+  /** Conditional jump if greater-or-equal (JGE signed), 32-bit relative. */
+  jge2(): number { this._w(0x0F); this._w(0x8D); const o = this.here(); this._u32(0); return o; }
+  /** CMP ECX, imm32 */
+  cmpEcxImm32(v: number): void {
+    if (v >= -128 && v <= 127) { this._w(0x83); this._w(0xF9); this._w(v & 0xFF); }
+    else { this._w(0x81); this._w(0xF9); this._u32(v); }
+  }
+  /** MOVSD — store EAX as a 64-bit float stub (x87 fallback write path). Not a real SSE2 op. */
+  // For the SSE2/x87 float tier (item 851), we use the x87 FPU stack.
+  /** FLD DWORD [ESP] — load float32 from stack top into ST(0). */
+  fldDwordEsp():    void { this._w(0xD9); this._w(0x04); this._w(0x24); }
+  /** FLD QWORD [ESP] — load float64 from stack top into ST(0). */
+  fldQwordEsp():    void { this._w(0xDD); this._w(0x04); this._w(0x24); }
+  /** FADD ST(0), ST(1) */
+  faddSt1():        void { this._w(0xD8); this._w(0xC1); }
+  /** FSUB ST(0), ST(1) */
+  fsubSt1():        void { this._w(0xD8); this._w(0xE1); }
+  /** FMUL ST(0), ST(1) */
+  fmulSt1():        void { this._w(0xD8); this._w(0xC9); }
+  /** FDIV ST(0), ST(1) */
+  fdivSt1():        void { this._w(0xD8); this._w(0xF1); }
+  /** FSTP QWORD [ESP] — store ST(0) as float64 to stack top. */
+  fstpQwordEsp():   void { this._w(0xDD); this._w(0x1C); this._w(0x24); }
+  /** FIST DWORD [ESP] — store ST(0) as int32 to stack top (round to integer). */
+  fistDwordEsp():   void { this._w(0xDB); this._w(0x1C); this._w(0x24); }
+  /** FLD QWORD [EBP+disp] — load float64 local into ST(0). */
+  fldQwordEbpDisp(disp: number): void {
+    if (disp >= -128 && disp <= 127) { this._w(0xDD); this._w(0x45); this._w(disp & 0xFF); }
+    else { this._w(0xDD); this._w(0x85); this._u32(disp); }
+  }
+  /** FSTP QWORD [EBP+disp] — store ST(0) as float64 to local. */
+  fstpQwordEbpDisp(disp: number): void {
+    if (disp >= -128 && disp <= 127) { this._w(0xDD); this._w(0x5D); this._w(disp & 0xFF); }
+    else { this._w(0xDD); this._w(0x9D); this._u32(disp); }
+  }
+  /** FILD DWORD [EBP+disp] — load int32 local as float64 in ST(0). */
+  fildDwordEbpDisp(disp: number): void {
+    if (disp >= -128 && disp <= 127) { this._w(0xDB); this._w(0x45); this._w(disp & 0xFF); }
+    else { this._w(0xDB); this._w(0x85); this._u32(disp); }
+  }
+  /** FISTTP DWORD [EBP+disp] — SSE3 truncating int convert (use FIST + adjust if SSE3 unavailable). */
+  fisttpDwordEbpDisp(disp: number): void {
+    if (disp >= -128 && disp <= 127) { this._w(0xDB); this._w(0x4D); this._w(disp & 0xFF); }
+    else { this._w(0xDB); this._w(0x8D); this._u32(disp); }
+  }
 
   addEaxImm32(v: number): void {                                     // ADD EAX, imm32 / imm8
     if (v >= -128 && v <= 127) { this._w(0x83); this._w(0xC0); this._w(v & 0xFF); }
