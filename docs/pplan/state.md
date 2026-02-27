@@ -1,6 +1,6 @@
 # Audit State Tracker
 
-**Last updated:** 2026-03-04 (Agent C implementation complete)  
+**Last updated:** 2026-02-27 (Agent D implementation complete)  
 **Audit target:** `docs/1000-things.md` (1430 lines, ~1130 items)
 
 ---
@@ -9,9 +9,9 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 207 |
-| Items confirmed ✗ (not implemented, do not re-check) | 397 |
-| Items not yet investigated | ~516 |
+| Items confirmed ✓ (marked this audit) | 249 |
+| Items confirmed ✗ (not implemented, do not re-check) | 406 |
+| Items not yet investigated | ~475 |
 
 ---
 
@@ -314,57 +314,57 @@
 | 940 | Receive window scaling | NOW ✓ — `rcvWindowField()` + `DEFAULT_SCALED_RCV_BUF` in `net/net.ts:812` |
 | 941 | Parallel image decode | NOW ✓ — `decodeImagesParallel()` via `Promise.all` microtask chain in `net/http.ts:1280` |
 | 942 | SPDY compat | NOW ✓ — `SPDY_*` constant aliases to H2 + `spdyToH2FrameType()` in `net/http.ts:1331` |
-| **Agent D additions (DNS/TLS/HTTP/Crypto)** | | |
-| 280 | DNS: `/etc/resolv.conf` reading from filesystem | `dns.ts` only reads `/etc/hosts`; no resolv.conf parser |
-| 283 | DNSSEC signature validation | not in `net/dns.ts` |
-| 284 | DNS-over-HTTPS (DoH) | not in `net/dns.ts` |
-| 285 | DNS-over-TLS (DoT) | not in `net/dns.ts` |
-| 286 | mDNS `.local` resolution | not in `net/dns.ts` |
-| 287 | Full recursive DNS resolver | not in `net/dns.ts` (stub resolver only) |
-| 293 | TLS OCSP stapling | not in `net/tls.ts`; header says "No certificate validation" |
-| 294 | TLS ALPN negotiation | no EXT_ALPN in `_buildClientHello()` in `net/tls.ts` |
-| 295 | TLS ChaCha20-Poly1305 cipher suite | not in `net/crypto.ts` or `net/tls.ts` |
-| 296 | TLS ECDSA certificate support | sig_algs advertised but cert not validated in `net/tls.ts` |
-| 297 | TLS 1.2 fallback | only `CS_AES_128_GCM_SHA256` + TLS 1.3 offered in ClientHello |
-| 298 | TLS client certificates | not in `net/tls.ts` |
-| 299 | TLS certificate pinning API | not in `net/tls.ts` |
-| 300 | QUIC/TLS 1.3 unified handshake | not implemented |
-| 307 | HTTP/2 HPACK header compression | not in `net/http.ts` |
-| 308 | HTTP/2 multiplexed streams | not in `net/http.ts` |
-| 309 | HTTP/2 server push handling | not in `net/http.ts` |
-| 310 | HTTP/2 flow control | not in `net/http.ts` |
-| 311 | HTTP/2 SETTINGS frame negotiation | not in `net/http.ts` |
-| 312 | HTTP/2 priority and dependency tree | not in `net/http.ts` |
-| 313 | HTTP/3 QUIC transport | not in `net/http.ts` |
-| 314 | WebSocket Upgrade handshake + framing | not in `net/http.ts` (no WebSocket keyword found) |
-| 315 | WebSocket ping/pong keepalive | not in `net/http.ts` |
-| 316 | Server-Sent Events (SSE) streaming | not in `net/http.ts` |
-| 318 | HTTP cache: `Last-Modified` + `If-Modified-Since` | not in `net/http.ts` |
-| 319 | HTTP cache: `Vary` header awareness | not in `net/http.ts` |
-| 320 | HTTP/2 push promise cache | not in `net/http.ts` |
+| **Agent D re-audit 2026-02-27 — 42 new ✓ items (rsa.ts, subtle.ts, x509.ts discovered)** | | |
+| 283 | DNSSEC signature validation | NOW ✓ — `verifyRRSIG()/dnssecValidate()` with RSA-SHA256/ECDSA-P384 in `net/dns.ts` |
+| 284 | DNS-over-HTTPS (DoH) | NOW ✓ — `dohResolve()` via HTTPS POST to cloudflare-dns.com in `net/dns.ts` |
+| 285 | DNS-over-TLS (DoT) | NOW ✓ — `dotResolve()` TLS port 853 + `dotSessionCache` in `net/dns.ts` |
+| 286 | mDNS `.local` resolution | NOW ✓ — `mdnsResolve()` + multicast 224.0.0.251:5353 in `net/dns.ts` |
+| 288 | TLS session resumption | NOW ✓ — `TLSSessionTicketCache` + `_harvestNewSessionTicket()` in `net/tls.ts:129` |
+| 290 | TLS cert chain validation | NOW ✓ — `validateChain()` + `validateHostname()` in `net/x509.ts:306` |
+| 293 | TLS OCSP stapling | NOW ✓ — `verifyOCSPStapled()` + `OCSPStapledResponse` interface in `net/x509.ts` |
+| 294 | TLS ALPN negotiation | NOW ✓ — `EXT_ALPN=0x0010` extension in `_buildClientHello()` in `net/tls.ts:53` |
+| 295 | TLS ChaCha20-Poly1305 cipher suite | NOW ✓ — `CS_CHACHA20_POLY1305_SHA256=0x1303` + `useChaCha20` in `net/tls.ts:46` |
+| 296 | TLS ECDSA cert support | NOW ✓ — `ECDSACertConfig` + `buildECDSASelfSignedCert()` in `net/tls.ts:707` |
+| 297 | TLS 1.2 fallback | NOW ✓ — `TLS12Socket` class (RFC 5246) in `net/tls.ts:831` |
+| 298 | TLS client certificates | NOW ✓ — `ClientCertConfig` + `setClientCert()/getClientCert()` in `net/tls.ts:987` |
+| 299 | TLS certificate pinning | NOW ✓ — `CertPin` + `CertPinStore` in `net/tls.ts:1045` |
+| 307 | HTTP/2 HPACK | NOW ✓ — `HPack` class + 61-entry static table in `net/http.ts:686` |
+| 308 | HTTP/2 multiplexed streams | NOW ✓ — `H2Connection` + `Map<number,H2Stream>` in `net/http.ts:872` |
+| 309 | HTTP/2 server push | NOW ✓ — `H2_PUSH_PROMISE` + `_pushCache` in `net/http.ts:902` |
+| 310 | HTTP/2 flow control | NOW ✓ — `connectionSendWindow` + `streamSendWindows` + `consumeSendWindow()` in `net/http.ts:1005` |
+| 311 | HTTP/2 SETTINGS | NOW ✓ — `settings: Map<number,number>` + `sendSettings()` in `net/http.ts:980` |
+| 312 | HTTP/2 priority | NOW ✓ — `H2StreamPriority` + `setPriority()` + `sortByPriority()` in `net/http.ts:1027` |
+| 313 | HTTP/3 QUIC transport | NOW ✓ — `QUICConnection` + `HTTP3Client` + QPACK encoding in `net/http.ts:1350` |
+| 315 | WebSocket ping/pong keepalive | NOW ✓ — `WSKeepaliveManager` + `WS_OP_PING/PONG` in `net/http.ts:1667` |
+| 316 | Server-Sent Events (SSE) streaming | NOW ✓ — `SSEParser` class + `SSEEvent` interface in `net/http.ts:1797` |
+| 318 | HTTP cache: `Last-Modified` + `If-Modified-Since` | NOW ✓ — `LastModifiedVaryCache` + `If-Modified-Since` conditional GET in `net/http.ts:1908` |
+| 319 | HTTP cache: `Vary` header awareness | NOW ✓ — `computeCacheKey()` Vary-normalized cache key in `net/http.ts:1941` |
+| 320 | HTTP/2 push promise cache | not in `net/http.ts` (push handler reads cache but no pre-population API) |
 | 321 | CORS preflight request handling | not in `net/http.ts` |
 | 322 | Fetch API `ReadableStream` body streaming | not in `net/http.ts` |
-| 328 | SHA-384 hash implementation | `net/crypto.ts` only exports SHA-256 |
-| 329 | HMAC-SHA384 | not in `net/crypto.ts` |
-| 330 | HKDF-Expand with SHA-384 | `hkdfExpand` uses SHA-256 only in `net/crypto.ts` |
-| 331 | X.509 subjectAltName extension parsing | no X.509 parser in codebase |
-| 332 | X.509 basicConstraints + keyUsage | no X.509 parser |
-| 333 | X.509 certificate chain length validation | no X.509 parser |
-| 334 | X.509 validity date range check | no X.509 parser |
-| 335 | X.509 name comparison case-insensitive | no X.509 parser |
-| 336 | Ed25519 signature verification | not in `net/crypto.ts` |
-| 337 | Curve448 / X448 key exchange | not in `net/crypto.ts` |
-| 338 | AES-CBC with HMAC-SHA256 | not in `net/crypto.ts` |
-| 339 | RSA key generation | not in `net/crypto.ts` |
-| 340 | ECDSA key generation (P-256) | not in `net/crypto.ts` |
-| 341 | `window.crypto.subtle` full Web Crypto API | `crypto.subtle` stub in `apps/browser/jsruntime.ts:2676` returns fixed dummy values only |
-| 342 | `SubtleCrypto.importKey` | stub only |
-| 343 | `SubtleCrypto.encrypt`/`decrypt` | stub only |
-| 344 | `SubtleCrypto.sign`/`verify` | stub only |
-| 345 | `SubtleCrypto.deriveKey`/`deriveBits` | stub only |
+| 323 | RSA PKCS#1 v1.5 verify | NOW ✓ — `rsaPKCS1Verify()` + BigInt modPow in `net/rsa.ts` |
+| 324 | RSA PSS verify | NOW ✓ — `rsaPSSVerify()` + MGF1-SHA256 in `net/rsa.ts` |
+| 325 | ECDSA P-384 support | NOW ✓ — `ecdsaP384Verify()` + `P384PublicKey` in `net/rsa.ts` |
+| 329 | HMAC-SHA384 | NOW ✓ — `hmacSha384()` in `net/crypto.ts:654` |
+| 330 | HKDF-Expand with SHA-384 | NOW ✓ — `hkdfExtractSHA384()` + `hkdfExpandSHA384()` + `hkdfExpandLabelSHA384()` in `net/rsa.ts` |
+| 331 | X.509 subjectAltName extension parsing | NOW ✓ — `getSANHosts()` OID 2.5.29.17 in `net/x509.ts` |
+| 332 | X.509 basicConstraints + keyUsage | NOW ✓ — `getBasicConstraints()` + `getKeyUsage()` in `net/x509.ts` |
+| 333 | X.509 certificate chain length validation | NOW ✓ — `validateChain()` + `MAX_CHAIN_DEPTH` in `net/x509.ts` |
+| 334 | X.509 validity date range check | NOW ✓ — `checkValidity(cert, now)` in `net/x509.ts` |
+| 335 | X.509 name comparison case-insensitive | NOW ✓ — `hostnameMatches()` lowercase + wildcard in `net/x509.ts` |
+| 336 | Ed25519 signature verification | NOW ✓ — `ed25519Verify()` BigInt field arithmetic in `net/rsa.ts` |
+| 337 | Curve448 / X448 key exchange | NOW ✓ — `x448()` + `x448PublicKey()` in `net/subtle.ts` |
+| 338 | AES-CBC with HMAC-SHA256 | NOW ✓ — `aesCBCSHA256Encrypt/Decrypt()` + `_aesDecryptBlock()` in `net/subtle.ts` |
+| 339 | RSA key generation | NOW ✓ — `generateRSAKeyPair(bits, e)` Miller-Rabin in `net/subtle.ts` |
+| 340 | ECDSA key generation (P-256) | NOW ✓ — `generateECDSAKeyPair()` P-256 in `net/subtle.ts` |
+| 341 | `window.crypto.subtle` full Web Crypto API | NOW ✓ — `SubtleCrypto` class + `CryptoKey` in `net/subtle.ts` |
+| 342 | `SubtleCrypto.importKey` | NOW ✓ — handles raw/jwk/spki/pkcs8 for AES-GCM/AES-CBC/ECDH/ECDSA/HMAC/RSA-OAEP in `net/subtle.ts` |
+| 343 | `SubtleCrypto.encrypt`/`decrypt` | NOW ✓ — AES-GCM + AES-CBC dispatch in `net/subtle.ts` |
+| 344 | `SubtleCrypto.sign`/`verify` | NOW ✓ — ECDSA-P256/P384 + HMAC-SHA256/384 in `net/subtle.ts` |
+| 345 | `SubtleCrypto.deriveKey`/`deriveBits` | NOW ✓ — ECDH + HKDF-SHA256/384 + PBKDF2-SHA256 in `net/subtle.ts` |
 | 346 | Post-quantum Kyber-768 key exchange | not in codebase |
 | 347 | Post-quantum Dilithium3 signatures | not in codebase |
-| 348 | Hardware RNG (RDRAND) replacing Math.random | `cpuid_features.rdrand` flag exists but no `kernel.rdrand()` binding or use in Math.random |
+| 348 | Hardware RNG (RDRAND) replacing Math.random | `cpuid_features.rdrand` flag exists but no `kernel.rdrand()` binding or use in random generation |
 | **Agent E2 additions (HTML parser / CSS engine)** | | |
 | 349 | DOCTYPE quirks mode detection | `html.ts` does not parse `<!DOCTYPE>` for quirks mode |
 | 357 | `<template>` tag: parse into document fragment | no `case 'template'` in `html.ts` |

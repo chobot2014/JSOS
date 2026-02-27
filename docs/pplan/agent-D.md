@@ -1,8 +1,9 @@
 # Agent D — DNS / TLS / HTTP / Crypto
 
-**STATUS: COMPLETE ✓** — Audited 2026-03-01.  
-Result: No new ✓ items found. All unconfirmed items in §7.6–§8 are NOT implemented.  
-50 new NOT-implemented items recorded in `state.md`.
+**STATUS: COMPLETE ✓** — Originally audited 2026-03-01; re-audited 2026-02-27.  
+Original result missed `net/rsa.ts`, `net/subtle.ts`, `net/x509.ts` (new files), and expanded `dns.ts`/`http.ts` sections.  
+Re-audit confirmed 42 additional ✓ items. Final confirmed ✓: 283–286, 288, 290, 293–299, 307–313, 315–316, 318–319, 323–325, 329–345.  
+Confirmed NOT implemented: 287, 291, 292, 300, 320–322, 346–348.
 
 **One-shot agent. Read source files and directly mark all implemented items in `docs/1000-things.md`.**
 

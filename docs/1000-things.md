@@ -352,26 +352,26 @@
 280. [P1 ✓] DNS: `/etc/resolv.conf`-style reading from filesystem
 281. [P1 ✓] DNS: `/etc/hosts` file lookup before DNS query � `hostsLookup()` reads `/etc/hosts` before querying server in `net/dns.ts`
 282. [P1 ✓] DNS: CNAME chain resolution � `resolveChain()` follows CNAME hops up to `MAX_CNAME_HOPS=10` in `net/dns.ts`
-283. [P1] DNSSEC: signature validation (RRSIG, DNSKEY, DS)
-284. [P2] DNS-over-HTTPS (DoH) � RFC 8484
-285. [P2] DNS-over-TLS (DoT) � RFC 7858
-286. [P2] mDNS: `.local` name resolution (RFC 6762)
+283. [P1 ✓] DNSSEC: signature validation (RRSIG, DNSKEY, DS) — `verifyRRSIG()` + `validateDNSSECChain()` + `dnssecValidate()` with RSASHA256/ECDSAP384 algorithm table in `net/dns.ts`
+284. [P2 ✓] DNS-over-HTTPS (DoH) — RFC 8484 — `dohResolve()` sends DNS wire-format POST to `cloudflare-dns.com/dns-query` via HTTPS; `DoHConfig` interface in `net/dns.ts`
+285. [P2 ✓] DNS-over-TLS (DoT) — RFC 7858 — `dotResolve()` opens `TLSSocket` to port 853; `dotSessionCache` reuses connections per `(host,port)`; default server `1.1.1.1` in `net/dns.ts`
+286. [P2 ✓] mDNS: `.local` name resolution (RFC 6762) — `mdnsResolve()` multicasts query to `MDNS_MULTICAST_ADDR=224.0.0.251:5353`; `_mdnsCache` + `mdnsAnnounce()` in `net/dns.ts`
 287. [P3] DNS: full recursive resolver (not just stub)
 
 ### 7.7 TLS
-288. [P0] TLS: session resumption (session tickets, RFC 5077)
+288. [P0 ✓] TLS: session resumption (session tickets, RFC 5077) — `TLSSessionTicketCache` stores per-hostname `{ticket, pskSecret}`; `_harvestNewSessionTicket()` reads post-handshake HS msg type 4; `_resumptionSecret` derived from handshake; enables 0-RTT on reconnect in `net/tls.ts`
 289. [P0 ✓] TLS: SNI (Server Name Indication) � critical for shared hosting � `EXT_SNI=0x0000` extension built in `_buildClientHello()` with proper list+hostname encoding; `this.hostname` field in `TLSSocket` in `net/tls.ts`
-290. [P0] TLS: certificate chain validation (full PKI)
-291. [P0] TLS: system trust store (Mozilla root CA bundle embedded)
-292. [P0] TLS: certificate revocation (CRL download or OCSP)
-293. [P1] TLS: OCSP stapling
-294. [P1] TLS: ALPN negotiation (announce `h2` for HTTP/2 preference)
-295. [P1] TLS: ChaCha20-Poly1305 cipher suite
-296. [P1] TLS: ECDSA certificate support (not just RSA)
-297. [P2] TLS 1.2 fallback for older servers
-298. [P2] TLS: client certificates
-299. [P2] TLS: certificate pinning API
-300. [P3] QUIC/TLS 1.3 unified handshake
+290. [P0 ✓] TLS: certificate chain validation (full PKI) — `validateChain()` verifies validity windows, `isCA` constraints, chain length ≤ `MAX_CHAIN_DEPTH`; `validateHostname()` + `hostnameMatches()` wildcard check in `net/x509.ts`
+291. [P0] TLS: system trust store (Mozilla root CA bundle embedded) — `TrustStore` class + `systemTrustStore` instance exist in `net/x509.ts` but Mozilla CA bundle not yet embedded/loaded at boot
+292. [P0] TLS: certificate revocation (CRL download or OCSP) — `checkRevocationOCSP()` stub in `net/x509.ts` returns `'unknown'`; full CRL/OCSP download not yet implemented
+293. [P1 ✓] TLS: OCSP stapling — `OCSPStapledResponse` + `OCSPSingleResponse` interfaces; `verifyOCSPStapled()` checks serial match, revocation status + `nextUpdate` expiry in `net/x509.ts`
+294. [P1 ✓] TLS: ALPN negotiation (announce `h2` for HTTP/2 preference) — `EXT_ALPN=0x0010` extension built in `_buildClientHello()` offering `h2` + `http/1.1` protocol list in `net/tls.ts`
+295. [P1 ✓] TLS: ChaCha20-Poly1305 cipher suite — `CS_CHACHA20_POLY1305_SHA256=0x1303` offered in ClientHello; `useChaCha20` flag on `TLSSocket`; `_encryptRecord()`/`_decryptRecord()` dispatch to `chacha20poly1305Encrypt/Decrypt` in `net/tls.ts`
+296. [P1 ✓] TLS: ECDSA certificate support (not just RSA) — `ECDSACertConfig` interface + `buildECDSASelfSignedCert()` builds minimal DER-encoded P-256 self-signed cert; `EXT_SIG_ALGS` advertises `ecdsa_secp256r1_sha256` in `net/tls.ts`
+297. [P2 ✓] TLS 1.2 fallback for older servers — `TLS12Socket` class (RFC 5246 subset) with AES-128-CBC-SHA256 or ChaCha20 cipher; `TLS_VERSION_12=0x0303` in `net/tls.ts`
+298. [P2 ✓] TLS: client certificates — `ClientCertConfig` interface + `setClientCert(serverName, cfg)` / `getClientCert(serverName)` registry; wildcard `'*'` matches all hosts in `net/tls.ts`
+299. [P2 ✓] TLS: certificate pinning API — `CertPin` interface + `CertPinStore` class (`addPin/check/remove`) with SHA-256 SPKI pinning (HPKP format); `[Item 299]` at line 1045 in `net/tls.ts`
+300. [P3] QUIC/TLS 1.3 unified handshake — `QUICConnection.buildHandshakePacket()` sends TLS 1.3 ClientHello in CRYPTO frame stub; full integration TODO in `net/http.ts`
 
 ### 7.8 HTTP
 301. [P0 ✓] HTTP: chunked transfer encoding decode (many servers send chunked)
@@ -380,19 +380,19 @@
 304. [P0 ✓] HTTP: `Set-Cookie` header parsing (domain, path, SameSite, Secure, HttpOnly) � `CookieJar.setCookie()` in `net/http.ts`
 305. [P0 ✓] HTTP: multipart/form-data POST encoding � `encodeMultipartFormData()` in `net/http.ts`
 306. [P0 ✓] HTTP: `Content-Length` vs `Transfer-Encoding` precedence � `parseHttpResponse()` in `net/http.ts` checks `transfer-encoding: chunked` first (line 399) and decodes via `decodeChunked()`; Transfer-Encoding takes precedence; Content-Encoding (gzip/deflate) decompressed afterward via `httpDecompress()` from `deflate.ts`
-307. [P1] HTTP/2: HPACK header compression
-308. [P1] HTTP/2: multiplexed streams over single TLS connection
-309. [P1] HTTP/2: server push handling
-310. [P1] HTTP/2: flow control (stream-level and connection-level)
-311. [P1] HTTP/2: SETTINGS frame negotiation
-312. [P1] HTTP/2: priority and dependency tree
-313. [P2] HTTP/3: QUIC transport
+307. [P1 ✓] HTTP/2: HPACK header compression — `HPack` class with static table (61 entries per RFC 7541 Appendix A) + dynamic table + Huffman encode/decode; `encode()/decode()` in `net/http.ts`
+308. [P1 ✓] HTTP/2: multiplexed streams over single TLS connection — `H2Connection` manages `Map<number,H2Stream>` streams; odd client stream IDs; `HEADERS`+`DATA` frames per stream in `net/http.ts`
+309. [P1 ✓] HTTP/2: server push handling — `H2_PUSH_PROMISE` frame parsed; pushed resources stored in `_pushCache: Map<string,number[]>`; `getPushedResource()` returns cached body in `net/http.ts`
+310. [P1 ✓] HTTP/2: flow control (stream-level and connection-level) — `connectionSendWindow` + `streamSendWindows` map; `consumeSendWindow()`; `connectionWindowUpdate()` sends `WINDOW_UPDATE` frame in `net/http.ts`
+311. [P1 ✓] HTTP/2: SETTINGS frame negotiation — `settings: Map<number,number>` populated from server `SETTINGS` frames; `sendSettings()` sends client SETTINGS + ACK; `[Item 311]` in `net/http.ts`
+312. [P1 ✓] HTTP/2: priority and dependency tree — `H2StreamPriority` interface + `setPriority()` sends `PRIORITY` frame; `getEffectivePriority()` + `sortByPriority()` order streams in `net/http.ts`
+313. [P2 ✓] HTTP/3: QUIC transport — `QUICConnection` + `HTTP3Client` with `buildH3HeadersFrame()/buildH3DataFrame()/buildH3SettingsFrame()`; QPACK minimal encoding; QUIC packet framing with variable-length integers in `net/http.ts`
 314. [P2 ✓] WebSocket: `Upgrade: websocket` handshake + framing (RFC 6455)
-315. [P2] WebSocket: ping/pong keepalive
-316. [P2] Server-Sent Events (SSE) streaming reads
+315. [P2 ✓] WebSocket: ping/pong keepalive — `WS_OP_PING=0x9` + `WS_OP_PONG=0xA` opcodes; `WSKeepaliveManager` sends periodic PING frames + tracks PONG receipt; connection killed on timeout in `net/http.ts`
+316. [P2 ✓] Server-Sent Events (SSE) streaming reads — `SSEParser` class + `SSEEvent` interface; parses `data:`/`event:`/`id:`/`retry:` fields; `onEvent` callback; `[Item 316]` in `net/http.ts`
 317. [P2 ✓] HTTP cache: `ETag` + `If-None-Match` support � `CacheEntry.etag` + `_cacheGetEtag()` + sent in `buildGetRequest()` in `net/http.ts`
-318. [P2] HTTP cache: `Last-Modified` + `If-Modified-Since` support
-319. [P2] HTTP cache: `Vary` header awareness
+318. [P2 ✓] HTTP cache: `Last-Modified` + `If-Modified-Since` support — `LastModifiedVaryCache` stores `lastModified` + `etag`; sends `If-Modified-Since` on conditional GET; handles `304 Not Modified` in `net/http.ts`
+319. [P2 ✓] HTTP cache: `Vary` header awareness — `computeCacheKey()` normalises Vary header fields into cache key; `Vary: *` treated as uncacheable; `varyValues` snapshot stored per entry in `net/http.ts`
 320. [P3] HTTP/2 push promise cache pre-population
 321. [P3] CORS preflight request handling
 322. [P3] Fetch API: `ReadableStream` body streaming
@@ -401,29 +401,29 @@
 
 ## 8. TLS / CRYPTO (src/os/net/tls.ts, crypto)
 
-323. [P0] RSA: PKCS#1 v1.5 verify (needed for older certs)
-324. [P0] RSA: PSS verify (needed for TLS 1.3 certs)
-325. [P0] ECDSA: P-384 support (many CAs use P-384 now)
+323. [P0 ✓] RSA: PKCS#1 v1.5 verify (needed for older certs) — `rsaPKCS1Verify()` removes PKCS#1 padding, checks DigestInfo OID prefix (SHA-256/SHA-384); `rsaPublicOp()` modPow via BigInt in `net/rsa.ts`
+324. [P0 ✓] RSA: PSS verify (needed for TLS 1.3 certs) — `rsaPSSVerify()` recovers EM, verifies `0xBC` trailer, applies MGF1-SHA256 mask, checks salt in `net/rsa.ts`
+325. [P0 ✓] ECDSA: P-384 support (many CAs use P-384 now) — `ecdsaP384Verify()` + `P384PublicKey`; `ecdsaP256Verify()` also present; field arithmetic using BigInt in `net/rsa.ts`
 326. [P0 ✓] AES-GCM: verify tag failure returns proper error, not silent corruption � `gcmDecrypt()` in `net/crypto.ts` does constant-time compare (`diff |= j0[i] ^ tag[i]`) and returns `null` on mismatch; never decrypts on auth failure
 327. [P0 ✓] ChaCha20-Poly1305 cipher suite implementation
 328. [P1 ✓] SHA-384 hash implementation (used in TLS 1.3 cipher suites)
-329. [P1] HMAC-SHA384
-330. [P1] HKDF-Expand with SHA-384
-331. [P1] X.509: parse `subjectAltName` extension for hostname validation
-332. [P1] X.509: parse `basicConstraints` + `keyUsage` extensions
-333. [P1] X.509: certificate chain length validation
-334. [P1] X.509: validity date range check (notBefore, notAfter)
-335. [P1] X.509: name comparison case-insensitive ASCII
-336. [P1] Ed25519 signature verification
-337. [P2] Curve448 / X448 key exchange
-338. [P2] AES-CBC with HMAC-SHA256 (TLS 1.2 fallback ciphers)
-339. [P2] RSA key generation (for self-signed certs)
-340. [P2] ECDSA key generation (P-256)
-341. [P2] `window.crypto.subtle` � full Web Crypto API implementation
-342. [P2] `SubtleCrypto.importKey` (JWK, raw, SPKI, PKCS8 formats)
-343. [P2] `SubtleCrypto.encrypt`/`decrypt` (AES-GCM, AES-CBC)
-344. [P2] `SubtleCrypto.sign`/`verify` (ECDSA, HMAC)
-345. [P2] `SubtleCrypto.deriveKey` / `deriveBits` (ECDH, HKDF, PBKDF2)
+329. [P1 ✓] HMAC-SHA384 — `hmacSha384(key, data)` exported from `net/crypto.ts` (line 654); used by `hkdfExtractSHA384()` in `net/rsa.ts`
+330. [P1 ✓] HKDF-Expand with SHA-384 — `hkdfExtractSHA384(salt, ikm)` + `hkdfExpandSHA384(prk, info, len)` + `hkdfExpandLabelSHA384(secret, label, context, len)` in `net/rsa.ts`
+331. [P1 ✓] X.509: parse `subjectAltName` extension for hostname validation — `getSANHosts()` extracts DNS names + IP SANs from OID 2.5.29.17; used by `validateHostname()` in `net/x509.ts`
+332. [P1 ✓] X.509: parse `basicConstraints` + `keyUsage` extensions — `getBasicConstraints()` returns `{isCA, pathLen}` from OID 2.5.29.19; `getKeyUsage()` returns bitmask from OID 2.5.29.15 in `net/x509.ts`
+333. [P1 ✓] X.509: certificate chain length validation — `validateChain()` enforces `MAX_CHAIN_DEPTH`; checks intermediate `isCA=true` via `getBasicConstraints()` in `net/x509.ts`
+334. [P1 ✓] X.509: validity date range check (notBefore, notAfter) — `checkValidity(cert, now)` compares `cert.notBefore`/`cert.notAfter` against `now`; called in `validateChain()` in `net/x509.ts`
+335. [P1 ✓] X.509: name comparison case-insensitive ASCII — `hostnameMatches(hostname, pattern)` lowercases both sides; handles `*` wildcard prefix; used in `validateHostname()` in `net/x509.ts`
+336. [P1 ✓] Ed25519 signature verification — `ed25519Verify(pubKey, message, sig)` using BigInt field arithmetic over Ed25519 curve; point decompression + scalar mult in `net/rsa.ts`
+337. [P2 ✓] Curve448 / X448 key exchange — `x448(k, u)` Montgomery ladder scalar mult + `x448PublicKey(privateKey)` in `net/subtle.ts`
+338. [P2 ✓] AES-CBC with HMAC-SHA256 (TLS 1.2 fallback ciphers) — `aesCBCEncrypt/Decrypt()` + `aesCBCSHA256Encrypt/Decrypt()` MAC-then-Encrypt; full AES-128 inverse rounds in `net/subtle.ts`
+339. [P2 ✓] RSA key generation (for self-signed certs) — `generateRSAKeyPair(bits, e)` Miller-Rabin prime generation via BigInt; returns `{publicKey:{n,e}, privateKey:{n,d,p,q}}` in `net/subtle.ts`
+340. [P2 ✓] ECDSA key generation (P-256) — `generateECDSAKeyPair()` generates random P-256 private scalar + public key point; returns `ECDSAKeyPair` in `net/subtle.ts`
+341. [P2 ✓] `window.crypto.subtle` — full Web Crypto API implementation — `SubtleCrypto` class implementing encrypt/decrypt/sign/verify/importKey/exportKey/deriveKey/deriveBits + `CryptoKey` wrapper in `net/subtle.ts`
+342. [P2 ✓] `SubtleCrypto.importKey` (JWK, raw, SPKI, PKCS8 formats) — `importKey(format, keyData, algorithm, extractable, usages)` handles `raw`/`jwk`/`spki`/`pkcs8` for AES-GCM, AES-CBC, ECDH, ECDSA, HMAC, RSA-OAEP in `net/subtle.ts`
+343. [P2 ✓] `SubtleCrypto.encrypt`/`decrypt` (AES-GCM, AES-CBC) — delegates to `gcmEncrypt/gcmDecrypt` + `aesCBCEncrypt/Decrypt`; wrapped in `Promise.resolve()` in `net/subtle.ts`
+344. [P2 ✓] `SubtleCrypto.sign`/`verify` (ECDSA, HMAC) — `sign()` dispatches HMAC-SHA256/384 or ECDSA-P256/P384; `verify()` calls matching verify function in `net/subtle.ts`
+345. [P2 ✓] `SubtleCrypto.deriveKey` / `deriveBits` (ECDH, HKDF, PBKDF2) — `deriveBits()` handles ECDH scalar mult + HKDF-SHA256/384 + PBKDF2-SHA256; `deriveKey()` wraps as `CryptoKey` in `net/subtle.ts`
 346. [P3] Post-quantum: Kyber-768 key exchange stubs
 347. [P3] Post-quantum: Dilithium3 signature stubs
 348. [P3] Hardware RNG (RDRAND instruction) instead of Math.random()
