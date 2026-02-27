@@ -232,7 +232,7 @@ function _decodePNG(bytes: Uint8Array): DecodedImage | null {
   if (bytes.length < 8) return null;
   if (bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4E || bytes[3] !== 0x47) return null;
 
-  var w = 0, h = 0, bitDepth = 8, colorType = 2;
+  var w = 0, h = 0, bitDepth = 8, colorType = 2, interlace = 0;
   var palette: number[] = [];
   var idatBufs: Uint8Array[] = [];
 
@@ -251,7 +251,7 @@ function _decodePNG(bytes: Uint8Array): DecodedImage | null {
       h         = u32be(bytes, pos + 4);
       bitDepth  = bytes[pos + 8] ?? 8;
       colorType = bytes[pos + 9] ?? 2;
-      // bytes[10]=compression(0), [11]=filter(0), [12]=interlace
+      interlace = bytes[pos + 12] ?? 0; // [Item 476] 0=none, 1=Adam7
     } else if (chunkType === 'PLTE') {
       for (var pi = 0; pi < chunkLen; pi++) palette.push(bytes[pos + pi] ?? 0);
     } else if (chunkType === 'IDAT') {
@@ -287,30 +287,91 @@ function _decodePNG(bytes: Uint8Array): DecodedImage | null {
   var bypp = getBypp(colorType, bitDepth);
   var stride = Math.ceil(w * bypp);
 
-  // Apply PNG filter functions row by row
+  // [Item 476] Adam7 interlaced PNG support
+  // For interlaced images, deinterlace first into a full linear filtered buffer,
+  // then fall through to normal pixel conversion.
   var filtered = new Uint8Array(h * stride);
 
-  for (var row = 0; row < h; row++) {
-    var fByte  = raw[row * (stride + 1)] ?? 0;
-    var inOff  = row * (stride + 1) + 1;
-    var outOff = row * stride;
+  if (interlace === 1) {
+    // Adam7 pass parameters: [xOrigin, yOrigin, xStep, yStep]
+    var _A7 = [
+      [0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8],
+      [2, 0, 4, 4], [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2],
+    ];
+    var rawPos = 0;
+    for (var pass = 0; pass < 7; pass++) {
+      var xOrig = _A7[pass]![0] ?? 0;
+      var yOrig = _A7[pass]![1] ?? 0;
+      var xStep = _A7[pass]![2] ?? 1;
+      var yStep = _A7[pass]![3] ?? 1;
 
-    for (var col = 0; col < stride; col++) {
-      var bpp = Math.max(1, Math.floor(bypp));
-      var a   = col >= bpp ? filtered[outOff + col - bpp]! : 0;
-      var b   = row  > 0  ? filtered[(row - 1) * stride + col]! : 0;
-      var c   = (row > 0 && col >= bpp) ? filtered[(row - 1) * stride + col - bpp]! : 0;
-      var x   = raw[inOff + col] ?? 0;
-      var result: number;
-      switch (fByte) {
-        case 0:  result = x; break;
-        case 1:  result = (x + a)                           & 0xFF; break;
-        case 2:  result = (x + b)                           & 0xFF; break;
-        case 3:  result = (x + Math.floor((a + b) / 2))    & 0xFF; break;
-        case 4:  result = (x + paethPredictor(a, b, c))    & 0xFF; break;
-        default: result = x;
+      var passW = Math.ceil((w - xOrig) / xStep);
+      var passH = Math.ceil((h - yOrig) / yStep);
+      if (passW <= 0 || passH <= 0) continue;
+
+      var passStride = Math.ceil(passW * bypp);
+      // Temporary buffer for this pass's filtered data
+      var passBuf = new Uint8Array(passH * passStride);
+
+      for (var pRow = 0; pRow < passH; pRow++) {
+        var fB = raw[rawPos++] ?? 0;
+        var pOff = pRow * passStride;
+        for (var pCol = 0; pCol < passStride; pCol++) {
+          var pBpp = Math.max(1, Math.floor(bypp));
+          var pA = pCol >= pBpp ? passBuf[pOff + pCol - pBpp]! : 0;
+          var pB = pRow > 0 ? passBuf[(pRow - 1) * passStride + pCol]! : 0;
+          var pC = (pRow > 0 && pCol >= pBpp) ? passBuf[(pRow - 1) * passStride + pCol - pBpp]! : 0;
+          var pX = raw[rawPos++] ?? 0;
+          var pR: number;
+          switch (fB) {
+            case 1: pR = (pX + pA) & 0xFF; break;
+            case 2: pR = (pX + pB) & 0xFF; break;
+            case 3: pR = (pX + Math.floor((pA + pB) / 2)) & 0xFF; break;
+            case 4: pR = (pX + paethPredictor(pA, pB, pC)) & 0xFF; break;
+            default: pR = pX;
+          }
+          passBuf[pOff + pCol] = pR;
+        }
       }
-      filtered[outOff + col] = result;
+
+      // Scatter pass pixels back to full image buffer
+      for (var prY = 0; prY < passH; prY++) {
+        for (var prX = 0; prX < passW; prX++) {
+          var srcOff2 = prY * passStride + Math.round(prX * bypp);
+          var dstX = xOrig + prX * xStep;
+          var dstY = yOrig + prY * yStep;
+          var dstOff = dstY * stride + Math.round(dstX * bypp);
+          var pLen = Math.ceil(bypp);
+          for (var pi2 = 0; pi2 < pLen; pi2++) {
+            filtered[dstOff + pi2] = passBuf[srcOff2 + pi2] ?? 0;
+          }
+        }
+      }
+    }
+  } else {
+    // Non-interlaced: Apply PNG filter functions row by row
+    for (var row = 0; row < h; row++) {
+      var fByte  = raw[row * (stride + 1)] ?? 0;
+      var inOff  = row * (stride + 1) + 1;
+      var outOff = row * stride;
+
+      for (var col = 0; col < stride; col++) {
+        var bpp = Math.max(1, Math.floor(bypp));
+        var a   = col >= bpp ? filtered[outOff + col - bpp]! : 0;
+        var b   = row  > 0  ? filtered[(row - 1) * stride + col]! : 0;
+        var c   = (row > 0 && col >= bpp) ? filtered[(row - 1) * stride + col - bpp]! : 0;
+        var x   = raw[inOff + col] ?? 0;
+        var result: number;
+        switch (fByte) {
+          case 0:  result = x; break;
+          case 1:  result = (x + a)                           & 0xFF; break;
+          case 2:  result = (x + b)                           & 0xFF; break;
+          case 3:  result = (x + Math.floor((a + b) / 2))    & 0xFF; break;
+          case 4:  result = (x + paethPredictor(a, b, c))    & 0xFF; break;
+          default: result = x;
+        }
+        filtered[outOff + col] = result;
+      }
     }
   }
 

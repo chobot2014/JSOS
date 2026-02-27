@@ -8,6 +8,7 @@ import {
   CLR_QUOTE_TXT,
 } from './constants.js';
 import { getLayoutCache, setLayoutCache, layoutFingerprint } from './cache.js';
+import { layoutGrid } from './layout-ext.js';
 
 // ── Inline word-flow layout ───────────────────────────────────────────────────
 
@@ -259,6 +260,26 @@ function _layoutNodesImpl(
       commit(flowSpans(bqSpans, bqLeft, maxX - CHAR_W * 2, nodeLineH(nd), CLR_QUOTE_TXT,
                        { quoteBg: true, quoteBar: true }));
       lastBottomMargin = nd.marginBottom || (LINE_H >> 1);
+      continue;
+    }
+
+    // ── CSS Grid layout (items 404-405) ──────────────────────────────────────
+    if (nd.type === 'grid' && nd.children) {
+      var gGridY = y;
+      var gLines = layoutGrid(
+        nd, maxX, CHAR_W, LINE_H,
+        function(ch: RenderNode[], cw: number) { return _layoutNodesImpl(ch, [], cw); }
+      );
+      var gMaxY = gGridY;
+      for (var gli = 0; gli < gLines.length; gli++) {
+        var gln = gLines[gli];
+        lines.push({ y: gGridY + gln.y, nodes: gln.nodes, lineH: gln.lineH,
+                     bgColor: gln.bgColor, preBg: gln.preBg });
+        var gLineEnd = gGridY + gln.y + (gln.lineH || LINE_H);
+        if (gLineEnd > gMaxY) gMaxY = gLineEnd;
+      }
+      y = gMaxY + (nd.marginBottom || 0);
+      lastBottomMargin = nd.marginBottom || 0;
       continue;
     }
 

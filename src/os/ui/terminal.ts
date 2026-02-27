@@ -13,7 +13,7 @@ declare var kernel: import('../core/kernel.js').KernelAPI;
 
 var VGA_W = 80;
 var VGA_H = 25;
-var SCROLLBACK = 200;
+var SCROLLBACK = 10000; // [Item 671] at least 10,000 lines scrollback buffer
 
 // A row is stored as Uint16Array of VGA cells: (colorByte<<8)|charCode
 type Row = Uint16Array;
@@ -89,10 +89,24 @@ export class Terminal {
   private _fgIdx   = 7;   // current ANSI logical fg colour (0-15, 7=default white)
   private _bgIdx   = 0;   // current ANSI logical bg colour (0-7, 0=default black)
   private _bold    = false;
+  // [Item 667] Extended text attributes
+  private _italic  = false;      // italic (SGR 3) — rendered as bold in VGA mode
+  private _underline = false;    // underline (SGR 4+21)
+  private _blink   = false;      // blink (SGR 5)
+  private _reverse = false;      // reverse video (SGR 7)
+  private _dim     = false;      // dim (SGR 2)
+  private _strike  = false;      // strikethrough (SGR 9)
+  // [Item 669] Cursor blink state
+  private _cursorBlink   = true;  // blink enabled
+  private _cursorVisible = true;  // hardware cursor shown
+  // [Item 670] Cursor style: 'block' | 'underline' | 'bar'
+  private _cursorStyle: 'block' | 'underline' | 'bar' = 'block';
 
   private _rebuildColor(): void {
     var fg = (this._bold && this._fgIdx < 8) ? this._fgIdx + 8 : this._fgIdx;
-    this._color = ((this._bgIdx & 7) << 4) | (fg & 0xF);
+    var fgFinal = this._reverse ? (this._bgIdx & 7) : (fg & 0xF);
+    var bgFinal = this._reverse ? (fg & 7) : (this._bgIdx & 7);
+    this._color = (bgFinal << 4) | fgFinal;
   }
 
   private _processAnsiSGR(params: string): void {
@@ -100,9 +114,25 @@ export class Terminal {
     var i = 0;
     while (i < parts.length) {
       var n = parseInt(parts[i++] || '0', 10);
-      if (n === 0 || isNaN(n)) { this._fgIdx = 7; this._bgIdx = 0; this._bold = false; }
+      if (n === 0 || isNaN(n)) {
+        this._fgIdx = 7; this._bgIdx = 0; this._bold = false;
+        // [Item 667] Reset all extended attributes
+        this._italic = false; this._underline = false; this._blink = false;
+        this._reverse = false; this._dim = false; this._strike = false;
+      }
       else if (n === 1)  { this._bold = true; }
-      else if (n === 2 || n === 22) { this._bold = false; }
+      else if (n === 2)  { this._dim = true; }   // [Item 667] dim
+      else if (n === 3)  { this._italic = true; } // [Item 667] italic
+      else if (n === 4 || n === 21) { this._underline = true; } // [Item 667] underline
+      else if (n === 5 || n === 6)  { this._blink = true; }   // [Item 667] blink
+      else if (n === 7)  { this._reverse = true; } // reverse video
+      else if (n === 9)  { this._strike = true; }  // [Item 667] strikethrough
+      else if (n === 22) { this._bold = false; this._dim = false; }
+      else if (n === 23) { this._italic = false; }
+      else if (n === 24) { this._underline = false; }
+      else if (n === 25) { this._blink = false; }
+      else if (n === 27) { this._reverse = false; }
+      else if (n === 29) { this._strike = false; }
       else if (n >= 30 && n <= 37)  { this._fgIdx = _ANSI_TO_VGA[n - 30]; }
       else if (n === 39)             { this._fgIdx = 7; }
       else if (n >= 40 && n <= 47)  { this._bgIdx = _ANSI_TO_VGA[n - 40]; }
@@ -110,22 +140,18 @@ export class Terminal {
       else if (n >= 90 && n <= 97)  { this._fgIdx = _ANSI_TO_VGA[n - 90] + 8; }
       else if (n >= 100 && n <= 107){ this._bgIdx = _ANSI_TO_VGA[n - 100]; }
       else if (n === 38 && i < parts.length && parseInt(parts[i] || '0', 10) === 5) {
-        // 38;5;n — 256-colour fg
         i++; var c256 = parseInt(parts[i++] || '0', 10);
         this._fgIdx = _256toVga(c256);
       } else if (n === 38 && i < parts.length && parseInt(parts[i] || '0', 10) === 2) {
-        // 38;2;r;g;b — true-colour fg
         i++;
         var rr = parseInt(parts[i++] || '0', 10);
         var gg = parseInt(parts[i++] || '0', 10);
         var bb = parseInt(parts[i++] || '0', 10);
         this._fgIdx = _rgbToVga(rr, gg, bb);
       } else if (n === 48 && i < parts.length && parseInt(parts[i] || '0', 10) === 5) {
-        // 48;5;n — 256-colour bg
         i++; var c256b = parseInt(parts[i++] || '0', 10);
         this._bgIdx = _256toVga(c256b) & 7;
       } else if (n === 48 && i < parts.length && parseInt(parts[i] || '0', 10) === 2) {
-        // 48;2;r;g;b — true-colour bg
         i++;
         var rr2 = parseInt(parts[i++] || '0', 10);
         var gg2 = parseInt(parts[i++] || '0', 10);
@@ -474,6 +500,17 @@ export class Terminal {
   warn(text: string):    void { this.colorPrint('[WARN] ', Color.YELLOW);      this.println(text); }
   info(text: string):    void { this.colorPrint('[INFO] ', Color.LIGHT_CYAN);  this.println(text); }
   debug(text: string):   void { this.colorPrint('[DBG] ',  Color.DARK_GREY);   this.println(text); }
+
+  // [Item 670] Cursor style
+  setCursorStyle(style: 'block' | 'underline' | 'bar'): void { this._cursorStyle = style; }
+  getCursorStyle(): 'block' | 'underline' | 'bar' { return this._cursorStyle; }
+
+  // [Item 669] Cursor blink / visibility
+  setCursorBlink(blink: boolean): void { this._cursorBlink = blink; }
+  getCursorBlink(): boolean { return this._cursorBlink; }
+  showCursor(): void { this._cursorVisible = true; }
+  hideCursor(): void { this._cursorVisible = false; }
+  isCursorVisible(): boolean { return this._cursorVisible; }
 }
 
 const terminal = new Terminal();

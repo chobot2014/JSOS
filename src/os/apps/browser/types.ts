@@ -32,6 +32,8 @@ export type BlockType =
   | 'hr' | 'li' | 'pre' | 'p-break' | 'blockquote' | 'widget' | 'summary'
   | 'aside'        // float:right/left — rendered as a boxed indented block
   | 'flex-row'     // display:flex row — children rendered inline
+  | 'grid'         // display:grid — CSS Grid container (items 404-405)
+  | 'grid-item'    // grid cell child node
   | 'table'        // <table> container node (item 449)
   | 'table-row'    // <tr> row — contains table-cell children
   | 'table-cell';  // <td>/<th> — cell node
@@ -94,9 +96,32 @@ export interface RenderNode {
   // Block formatting context root (item 441)
   bfcRoot?:     boolean;
   // Table (item 449)
-  tableLayout?:  'auto' | 'fixed';
-  colspan?:      number;
-  rowspan?:      number;
+  tableLayout?:    'auto' | 'fixed';
+  borderCollapse?: 'separate' | 'collapse';  // item 419
+  borderSpacing?:  number;                   // item 419
+  verticalAlign?:  string;                   // item 420
+  wordBreak?:      string;                   // item 421
+  overflowWrap?:   string;                   // item 421
+  colspan?:        number;
+  rowspan?:        number;
+  // CSS Grid container (items 404-405)
+  gridTemplateColumns?: string;  // raw track template string (e.g. '1fr 200px repeat(3,1fr)')
+  gridTemplateRows?:    string;
+  gridTemplateAreas?:   string;
+  gridAutoColumns?:     string;
+  gridAutoRows?:        string;
+  gridAutoFlow?:        string;
+  rowGap?:              number;
+  columnGap?:           number;
+  justifyItems?:        string;
+  // Grid item placement
+  gridColumn?:          string;   // shorthand 'start / end'
+  gridRow?:             string;   // shorthand 'start / end'
+  gridColumnStart?:     string;
+  gridColumnEnd?:       string;
+  gridRowStart?:        string;
+  gridRowEnd?:          string;
+  gridArea?:            string;
 }
 
 // ── Rendered output ───────────────────────────────────────────────────────────

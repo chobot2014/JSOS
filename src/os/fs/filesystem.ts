@@ -1162,3 +1162,331 @@ function simpleMatch(str: string, pattern: string): boolean {
 
 const fs = new FileSystem();
 export default fs;
+
+// ════════════════════════════════════════════════════════════════════════════
+// [Item 195] Filesystem Quota: per-user limit enforcement
+// ════════════════════════════════════════════════════════════════════════════
+
+export interface QuotaEntry {
+  uid:         number;
+  /** Soft limit in bytes (0 = unlimited). */
+  softBytes:   number;
+  /** Hard limit in bytes (0 = unlimited). */
+  hardBytes:   number;
+  /** Soft limit in inodes (0 = unlimited). */
+  softInodes:  number;
+  /** Hard limit in inodes (0 = unlimited). */
+  hardInodes:  number;
+  /** Current byte usage. */
+  usedBytes:   number;
+  /** Current inode count. */
+  usedInodes:  number;
+  /** Grace period expiry (ms epoch, 0 = not in grace). */
+  graceExpiry: number;
+}
+
+const QUOTA_GRACE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/**
+ * [Item 195] Per-user filesystem quota manager.
+ *
+ * Tracks byte usage and inode count per UID.  Enforces:
+ *   - Soft limit: usage can exceed for up to `QUOTA_GRACE_MS` (7 days)
+ *   - Hard limit: usage never exceeds hard limit (write returns EDQUOT)
+ *
+ * Called by the VFS write/create paths to check before allocating.
+ */
+export class QuotaManager {
+  private _quotas = new Map<number, QuotaEntry>();
+
+  /** Set limits for a user (uid=0 means root, no limits). */
+  setLimits(uid: number, softBytes: number, hardBytes: number,
+            softInodes: number, hardInodes: number): void {
+    var entry = this._quotas.get(uid) ?? {
+      uid, softBytes: 0, hardBytes: 0, softInodes: 0, hardInodes: 0,
+      usedBytes: 0, usedInodes: 0, graceExpiry: 0,
+    };
+    entry.softBytes  = softBytes;
+    entry.hardBytes  = hardBytes;
+    entry.softInodes = softInodes;
+    entry.hardInodes = hardInodes;
+    this._quotas.set(uid, entry);
+  }
+
+  /** Get quota info for a user. */
+  getQuota(uid: number): QuotaEntry | null {
+    return this._quotas.get(uid) ?? null;
+  }
+
+  /**
+   * Check if a write of `bytes` bytes with `newInodes` new inodes is permitted.
+   * @returns null if allowed, or an error string if quota exceeded.
+   */
+  checkWrite(uid: number, bytes: number, newInodes: number = 0): string | null {
+    if (uid === 0) return null; // root is exempt
+    var entry = this._quotas.get(uid);
+    if (!entry) return null; // no quota set = unlimited
+
+    var nowBytes  = entry.usedBytes  + bytes;
+    var nowInodes = entry.usedInodes + newInodes;
+
+    // Hard limits — absolute refusal
+    if (entry.hardBytes  > 0 && nowBytes  > entry.hardBytes)  return 'EDQUOT: byte hard limit exceeded';
+    if (entry.hardInodes > 0 && nowInodes > entry.hardInodes) return 'EDQUOT: inode hard limit exceeded';
+
+    // Soft limits — allow with grace period
+    if (entry.softBytes > 0 && nowBytes > entry.softBytes) {
+      if (!entry.graceExpiry) entry.graceExpiry = Date.now() + QUOTA_GRACE_MS;
+      else if (Date.now() > entry.graceExpiry) return 'EDQUOT: byte soft limit grace expired';
+    } else if (nowBytes <= entry.softBytes) {
+      entry.graceExpiry = 0; // clear grace period
+    }
+
+    return null;
+  }
+
+  /** Record bytes used (called after successful write). */
+  recordUsage(uid: number, bytes: number, inodes: number = 0): void {
+    var entry = this._quotas.get(uid);
+    if (!entry) return;
+    entry.usedBytes  += bytes;
+    entry.usedInodes += inodes;
+  }
+
+  /** Release bytes (called after file deletion). */
+  releaseUsage(uid: number, bytes: number, inodes: number = 0): void {
+    var entry = this._quotas.get(uid);
+    if (!entry) return;
+    entry.usedBytes  = Math.max(0, entry.usedBytes  - bytes);
+    entry.usedInodes = Math.max(0, entry.usedInodes - inodes);
+  }
+
+  /** Repquota: list all quotas for display. */
+  repquota(): QuotaEntry[] {
+    return Array.from(this._quotas.values());
+  }
+}
+
+export const quotaManager = new QuotaManager();
+
+// ════════════════════════════════════════════════════════════════════════════
+// [Item 197] Sparse File Support
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * [Item 197] Sparse file — a virtual file whose "holes" (unwritten regions)
+ * read as zeroes but do not occupy disk space.
+ *
+ * The implementation tracks "extents" (written data regions) in a sorted list.
+ * Reads from unwritten regions return zero bytes.  Writes create new extents
+ * or extend existing ones.  Adjacent extents are merged.
+ *
+ * This mirrors the Linux fallocate(2) / lseek(SEEK_HOLE, SEEK_DATA) model.
+ */
+
+export interface SparseExtent {
+  offset: number;   // byte offset of the start of this extent
+  data:   number[]; // actual data bytes
+}
+
+export class SparseFile {
+  /** Sorted list of non-overlapping extents. */
+  private _extents: SparseExtent[] = [];
+  /** Logical file size (including holes up to the last written byte). */
+  private _size = 0;
+
+  get size(): number { return this._size; }
+
+  /** Write `data` at `offset`. Creates or extends extents. */
+  write(offset: number, data: number[]): void {
+    if (data.length === 0) return;
+    var end = offset + data.length;
+    if (end > this._size) this._size = end;
+
+    // Find overlapping extents and patch/merge
+    var newExtent: SparseExtent = { offset, data: data.slice() };
+    var merged: SparseExtent[] = [];
+    var inserted = false;
+
+    for (var i = 0; i < this._extents.length; i++) {
+      var ex = this._extents[i];
+      var exEnd = ex.offset + ex.data.length;
+
+      // Extent comes entirely before the new write
+      if (exEnd <= offset) { merged.push(ex); continue; }
+      // Extent comes entirely after the new write — ensure insertion
+      if (ex.offset >= end) {
+        if (!inserted) { merged.push(newExtent); inserted = true; }
+        merged.push(ex); continue;
+      }
+
+      // Overlapping or adjacent — merge
+      var mergeStart = Math.min(newExtent.offset, ex.offset);
+      var mergeEnd   = Math.max(newExtent.offset + newExtent.data.length, exEnd);
+      var mergedData = new Array(mergeEnd - mergeStart).fill(0);
+
+      // Copy old extent data
+      for (var j = 0; j < ex.data.length; j++) {
+        mergedData[ex.offset - mergeStart + j] = ex.data[j];
+      }
+      // Overwrite with new data (new data wins)
+      for (var k = 0; k < newExtent.data.length; k++) {
+        mergedData[newExtent.offset - mergeStart + k] = newExtent.data[k];
+      }
+      newExtent = { offset: mergeStart, data: mergedData };
+    }
+
+    if (!inserted) merged.push(newExtent);
+    this._extents = merged;
+  }
+
+  /** Read `length` bytes from `offset`. Holes read as zero. */
+  read(offset: number, length: number): number[] {
+    var result = new Array(length).fill(0);
+    for (var i = 0; i < this._extents.length; i++) {
+      var ex = this._extents[i];
+      var exEnd = ex.offset + ex.data.length;
+      // No overlap
+      if (exEnd <= offset || ex.offset >= offset + length) continue;
+      // Copy the overlapping portion
+      var copyStart = Math.max(ex.offset, offset);
+      var copyEnd   = Math.min(exEnd, offset + length);
+      for (var j = copyStart; j < copyEnd; j++) {
+        result[j - offset] = ex.data[j - ex.offset];
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Seek to next data region (SEEK_DATA) or next hole (SEEK_HOLE).
+   * Returns the offset, or -1 if not found.
+   */
+  seekHole(offset: number): number {
+    for (var i = 0; i < this._extents.length; i++) {
+      var ex = this._extents[i];
+      if (ex.offset > offset) return offset; // we're already in a hole
+      if (ex.offset + ex.data.length > offset) {
+        // We're inside an extent — next hole is after it
+        return ex.offset + ex.data.length;
+      }
+    }
+    return offset >= this._size ? -1 : this._size;
+  }
+
+  seekData(offset: number): number {
+    for (var i = 0; i < this._extents.length; i++) {
+      var ex = this._extents[i];
+      if (ex.offset + ex.data.length > offset) {
+        return Math.max(ex.offset, offset);
+      }
+    }
+    return -1; // no data after offset
+  }
+
+  /**
+   * Punch a hole (zero-fill and release) from `offset` for `length` bytes.
+   * Used by fallocate(FALLOC_FL_PUNCH_HOLE).
+   */
+  punchHole(offset: number, length: number): void {
+    var patched: SparseExtent[] = [];
+    for (var i = 0; i < this._extents.length; i++) {
+      var ex = this._extents[i];
+      var exEnd = ex.offset + ex.data.length;
+      var holeEnd = offset + length;
+      if (exEnd <= offset || ex.offset >= holeEnd) { patched.push(ex); continue; }
+      // Split before hole
+      if (ex.offset < offset) {
+        patched.push({ offset: ex.offset, data: ex.data.slice(0, offset - ex.offset) });
+      }
+      // Split after hole
+      if (exEnd > holeEnd) {
+        patched.push({ offset: holeEnd, data: ex.data.slice(holeEnd - ex.offset) });
+      }
+    }
+    this._extents = patched;
+  }
+
+  /** Report the number of bytes actually stored (excluding holes). */
+  get storedBytes(): number {
+    return this._extents.reduce(function(sum, ex) { return sum + ex.data.length; }, 0);
+  }
+
+  /** List all extents (for debugging / defragmentation). */
+  extents(): ReadonlyArray<SparseExtent> { return this._extents; }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// [Item 199] sendfile() zero-copy syscall
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * [Item 199] sendfile() — transfer bytes between file descriptors without
+ * copying through user space.
+ *
+ * In the JSOS model, "zero-copy" means we avoid an intermediate ArrayBuffer
+ * in the JS layer: we read directly from the source file object and write to
+ * the destination socket/pipe without creating a full intermediate copy.
+ *
+ * API mirrors the Linux sendfile(2) syscall:
+ *   sendfile(outFd, inFd, offset, count): number_of_bytes_sent
+ *
+ * Supported sources:
+ *   - In-memory file (regular FileSystem files via `fs.readFile()`)
+ *   - SparseFile (reads the sparse representation)
+ *
+ * Supported destinations:
+ *   - TCP socket (via `net.sendBytes` or a send-callback)
+ *   - Pipe / IPC channel
+ */
+
+export interface SendfileSource {
+  read(offset: number, length: number): number[];
+  readonly size: number;
+}
+
+export interface SendfileDest {
+  write(data: number[]): number; // returns bytes written
+}
+
+/** In-memory file wrapper for sendfile. */
+export class MemFileSendfileSource implements SendfileSource {
+  constructor(private _data: number[]) {}
+  read(offset: number, length: number): number[] {
+    return this._data.slice(offset, offset + length);
+  }
+  get size(): number { return this._data.length; }
+}
+
+/** SparseFile wrapper for sendfile. */
+export class SparseSendfileSource implements SendfileSource {
+  constructor(private _sf: SparseFile) {}
+  read(offset: number, length: number): number[] { return this._sf.read(offset, length); }
+  get size(): number { return this._sf.size; }
+}
+
+/**
+ * [Item 199] sendfile() — transfer `count` bytes from `src` to `dst`,
+ * starting at `offset`.  Sends in chunks to avoid large allocations.
+ *
+ * @returns Total bytes transferred.
+ */
+export function sendfile(
+  dst:    SendfileDest,
+  src:    SendfileSource,
+  offset: number,
+  count:  number,
+  chunkSize: number = 65536,
+): number {
+  var sent    = 0;
+  var remaining = Math.min(count, src.size - offset);
+  while (sent < remaining) {
+    var toRead  = Math.min(chunkSize, remaining - sent);
+    var chunk   = src.read(offset + sent, toRead);
+    if (chunk.length === 0) break;
+    var written = dst.write(chunk);
+    sent += written;
+    if (written < chunk.length) break; // destination is full
+  }
+  return sent;
+}

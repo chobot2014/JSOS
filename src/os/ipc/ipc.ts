@@ -750,3 +750,142 @@ export function ipcStats(): IPCStats {
     timersActive:     pendingTimers.length,
   };
 }
+
+// ── Unix Domain Sockets (Item 209) ────────────────────────────────────────────
+
+/** [Item 209] Connection state of a Unix domain socket. */
+export type UnixSocketState = 'UNBOUND' | 'LISTENING' | 'CONNECTING' | 'CONNECTED' | 'CLOSED';
+
+/** [Item 209] A datagram or stream Unix domain socket. */
+export class UnixSocket {
+  readonly path: string;
+  state: UnixSocketState = 'UNBOUND';
+  /** Receive buffer: chunks of data written by the peer. */
+  private rxBuf: string[] = [];
+  /** Peer socket, set after accept()/connect(). */
+  private _peer: UnixSocket | null = null;
+  /** Pending FDs shared via sendFd(). */
+  private _pendingFds: number[] = [];
+  /** PID of the process owning this socket. */
+  readonly pid: number;
+
+  constructor(path: string, pid: number) {
+    this.path = path;
+    this.pid  = pid;
+  }
+
+  /** [Item 209] Bind to a path in the abstract namespace. */
+  bind(path: string): boolean {
+    if (unixSocketRegistry.has(path)) return false;
+    (this as any).path = path;
+    unixSocketRegistry.set(path, this);
+    return true;
+  }
+
+  /** [Item 209] Place the socket in the listening state. */
+  listen(): void {
+    if (this.state !== 'UNBOUND') return;
+    this.state = 'LISTENING';
+    unixAcceptQueues.set(this.path, []);
+  }
+
+  /** [Item 209] Block until a client connects; return the connected peer socket. */
+  accept(timeoutTicks = 2000): UnixSocket | null {
+    var deadline = kernel.getTicks() + timeoutTicks;
+    while (kernel.getTicks() < deadline) {
+      var q = unixAcceptQueues.get(this.path);
+      if (q && q.length > 0) {
+        var client = q.shift()!;
+        var serverSide = new UnixSocket(this.path, this.pid);
+        serverSide.state = 'CONNECTED';
+        serverSide._peer = client;
+        client._peer = serverSide;
+        client.state = 'CONNECTED';
+        return serverSide;
+      }
+      kernel.sleep(1);
+    }
+    return null;
+  }
+
+  /** [Item 209] Connect to a listening socket at the given path. */
+  connect(path: string, timeoutTicks = 1000): boolean {
+    if (this.state !== 'UNBOUND') return false;
+    var server = unixSocketRegistry.get(path);
+    if (!server || server.state !== 'LISTENING') return false;
+    this.state = 'CONNECTING';
+    var q = unixAcceptQueues.get(path);
+    if (!q) return false;
+    q.push(this);
+    // Wait for accept()
+    var deadline = kernel.getTicks() + timeoutTicks;
+    while (this.state !== 'CONNECTED' && kernel.getTicks() < deadline) {
+      kernel.sleep(1);
+    }
+    return this.state === 'CONNECTED';
+  }
+
+  /** [Item 209] Send data to the peer. */
+  write(data: string): boolean {
+    if (this.state !== 'CONNECTED' || !this._peer) return false;
+    if (this._peer.state !== 'CONNECTED') return false;
+    this._peer.rxBuf.push(data);
+    return true;
+  }
+
+  /** [Item 209] Read from the receive buffer. Returns null if nothing available. */
+  read(maxChars?: number): string | null {
+    if (this.rxBuf.length === 0) return null;
+    var all = this.rxBuf.join('');
+    if (maxChars !== undefined && all.length > maxChars) {
+      var chunk = all.slice(0, maxChars);
+      this.rxBuf = [all.slice(maxChars)];
+      return chunk;
+    }
+    this.rxBuf = [];
+    return all;
+  }
+
+  /**
+   * [Item 210] Send a file descriptor reference to the peer (credential passing).
+   * The peer can then call recvFd() to retrieve it.
+   */
+  sendFd(fd: number): boolean {
+    if (this.state !== 'CONNECTED' || !this._peer) return false;
+    this._peer._pendingFds.push(fd);
+    return true;
+  }
+
+  /** [Item 210] Receive a file descriptor sent by the peer via sendFd(). */
+  recvFd(): number | null {
+    return this._pendingFds.length > 0 ? this._pendingFds.shift()! : null;
+  }
+
+  close(): void {
+    if (this._peer && this._peer.state === 'CONNECTED') this._peer.state = 'CLOSED';
+    this.state = 'CLOSED';
+    unixSocketRegistry.delete(this.path);
+    unixAcceptQueues.delete(this.path);
+  }
+
+  get peer(): UnixSocket | null { return this._peer; }
+}
+
+/** Global registry: socket path → listening UnixSocket. */
+const unixSocketRegistry = new Map<string, UnixSocket>();
+/** Accept queues: path → waiting client sockets. */
+const unixAcceptQueues   = new Map<string, UnixSocket[]>();
+
+/** [Item 209] Create a new Unix domain socket bound to path (or unbound if no path). */
+export function unixSocket(pid: number, path?: string): UnixSocket {
+  return new UnixSocket(path || '', pid);
+}
+
+/** [Item 210] Creden passing convenience: open two connected sockets (socketpair). */
+export function socketpair(pid1: number, pid2: number): [UnixSocket, UnixSocket] {
+  var a = new UnixSocket('@pair', pid1);
+  var b = new UnixSocket('@pair', pid2);
+  a.state = 'CONNECTED'; (a as any)._peer = b;
+  b.state = 'CONNECTED'; (b as any)._peer = a;
+  return [a, b];
+}

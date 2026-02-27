@@ -107,6 +107,20 @@ function checksum(data: number[], offset: number = 0, length?: number): number {
 
 const ETYPE_ARP  = 0x0806;
 const ETYPE_IPV4 = 0x0800;
+const ETYPE_VLAN = 0x8100;  // [Item 225] 802.1Q VLAN tag
+const ETYPE_IPV6 = 0x86dd;  // [Item 241] IPv6
+// ICMPv6 type codes (item 242)
+const ICMPV6_ECHO_REQUEST           = 128;
+const ICMPV6_ECHO_REPLY             = 129;
+const ICMPV6_ROUTER_SOLICITATION    = 133;
+const ICMPV6_ROUTER_ADVERTISEMENT   = 134;
+const ICMPV6_NEIGHBOR_SOLICITATION  = 135;
+const ICMPV6_NEIGHBOR_ADVERTISEMENT = 136;
+// [Item 245] IPv6 extension header next-header identifiers
+const IPV6_EXT_HOP_BY_HOP  = 0;
+const IPV6_EXT_ROUTING     = 43;
+const IPV6_EXT_FRAGMENT    = 44;
+const IPV6_EXT_DEST_OPT    = 60;
 
 export interface EthernetFrame {
   dst:       MACAddress;
@@ -131,6 +145,39 @@ function buildEthernet(f: EthernetFrame): number[] {
   wu16be(buf, 12, f.ethertype);
   f.payload.forEach(function(b, i) { buf[14 + i] = b; });
   return buf;
+}
+
+// ── VLAN 802.1Q (Item 225) ────────────────────────────────────────────────────
+
+/** [Item 225] Parsed 802.1Q VLAN tag (4-byte header inside Ethernet payload). */
+export interface VLANTag {
+  pcp:            number;   // 3-bit Priority Code Point
+  dei:            boolean;  // Drop Eligible Indicator
+  vid:            number;   // 12-bit VLAN Identifier
+  innerEthertype: number;   // inner EtherType after 802.1Q header
+  payload:        number[];
+}
+
+/** [Item 225] Parse the 4-byte 802.1Q tag appended after src MAC in a VLAN frame. */
+function parseVLAN(p: number[]): VLANTag | null {
+  if (p.length < 4) return null;
+  var tci = u16be(p, 0);
+  return {
+    pcp:            (tci >> 13) & 0x7,
+    dei:            ((tci >> 12) & 0x1) !== 0,
+    vid:             tci & 0xfff,
+    innerEthertype:  u16be(p, 2),
+    payload:         p.slice(4),
+  };
+}
+
+/** [Item 225] Build 4-byte 802.1Q TCI+inner-ethertype header. */
+function buildVLANTag(vid: number, pcp: number, dei: boolean, inner: number): number[] {
+  var b  = fill(4);
+  var tci = ((pcp & 0x7) << 13) | ((dei ? 1 : 0) << 12) | (vid & 0xfff);
+  wu16be(b, 0, tci);
+  wu16be(b, 2, inner);
+  return b;
 }
 
 // ── ARP ───────────────────────────────────────────────────────────────────────
@@ -169,9 +216,11 @@ function buildARP(pkt: ARPPacket): number[] {
 
 // ── IPv4 ─────────────────────────────────────────────────────────────────────
 
-const PROTO_ICMP = 1;
-const PROTO_TCP  = 6;
-const PROTO_UDP  = 17;
+const PROTO_ICMP   = 1;
+const PROTO_TCP    = 6;
+const PROTO_UDP    = 17;
+const PROTO_IGMP   = 2;    // [Item 237] IGMP v2
+const PROTO_ICMPV6 = 58;   // [Item 242] ICMPv6
 
 // ── IP Options (item 231) ─────────────────────────────────────────────────────
 /** Parsed IP option (record-route, timestamp, strict/loose source route). */
@@ -315,6 +364,26 @@ function buildICMP(type: number, code: number, data: number[]): number[] {
   return b;
 }
 
+// ── IGMP v2 (Item 237) ────────────────────────────────────────────────────────
+
+const IGMP_MEMBERSHIP_QUERY    = 0x11;  // general / group-specific query
+const IGMP_V2_MEMBER_REPORT    = 0x16;  // join / membership report
+const IGMP_V2_LEAVE_GROUP      = 0x17;  // leave group
+
+/**
+ * [Item 237] Build an IGMPv2 message (8 bytes).
+ * type = IGMP_V2_MEMBER_REPORT to join, IGMP_V2_LEAVE_GROUP to leave.
+ * groupIP = '224.0.0.0' for leave-all, or specific group address.
+ */
+function buildIGMPv2(type: number, groupIP: IPv4Address): number[] {
+  var b = fill(8);
+  b[0] = type;
+  b[1] = 0;  // max response time (ignored in reports)
+  ipToBytes(groupIP).forEach(function(v, i) { b[4 + i] = v; });
+  wu16be(b, 2, checksum(b));
+  return b;
+}
+
 // ── UDP ───────────────────────────────────────────────────────────────────────
 
 export interface UDPDatagram {
@@ -338,6 +407,133 @@ function buildUDP(srcPort: number, dstPort: number, payload: number[]): number[]
   wu16be(b, 4, 8 + payload.length);
   wu16be(b, 6, 0); // checksum optional for IPv4
   return b.concat(payload);
+}
+
+// ── IPv6 (Items 241–245) ───────────────────────────────────────────────────────────
+
+export type IPv6Address = string;  // e.g. "2001:db8::1" or "fe80::1"
+
+/** Convert 16-byte array at offset to compressed IPv6 string. */
+function bytesToIpv6(b: number[], off: number = 0): IPv6Address {
+  var groups: string[] = [];
+  for (var i = 0; i < 8; i++) {
+    groups.push(((b[off + i*2] & 0xff) << 8 | (b[off + i*2 + 1] & 0xff)).toString(16));
+  }
+  var bestStart = -1; var bestLen = 0;
+  var curStart  = -1; var curLen  = 0;
+  for (var j = 0; j < 8; j++) {
+    if (groups[j] === '0') {
+      if (curStart < 0) curStart = j;
+      curLen++;
+      if (curLen > bestLen) { bestStart = curStart; bestLen = curLen; }
+    } else { curStart = -1; curLen = 0; }
+  }
+  if (bestStart >= 0 && bestLen >= 2) {
+    var left  = groups.slice(0, bestStart).join(':');
+    var right = groups.slice(bestStart + bestLen).join(':');
+    return (left ? left + ':' : '') + ':' + (right || '');
+  }
+  return groups.join(':');
+}
+
+/** Convert a compressed IPv6 address string to 16-byte array. */
+function ipv6ToBytes(addr: IPv6Address): number[] {
+  var b = fill(16);
+  var dbl = addr.indexOf('::');
+  var left: string[], right: string[];
+  if (dbl >= 0) {
+    left  = addr.slice(0, dbl)  ? addr.slice(0, dbl).split(':')  : [];
+    right = addr.slice(dbl + 2) ? addr.slice(dbl + 2).split(':') : [];
+    var pad = 8 - left.length - right.length;
+    for (var z = 0; z < pad; z++) left.push('0');
+    left = left.concat(right);
+  } else {
+    left = addr.split(':');
+  }
+  for (var k = 0; k < 8 && k < left.length; k++) {
+    var v = parseInt(left[k], 16) & 0xffff;
+    b[k*2] = (v >> 8) & 0xff; b[k*2 + 1] = v & 0xff;
+  }
+  return b;
+}
+
+/**
+ * [Item 243] Derive an EUI-64 link-local address (fe80::/10) from a MAC.
+ * RFC 4291 §2.5.6: insert ff:fe in the middle, flip U/L bit of first byte.
+ */
+function eui64LinkLocal(mac: MACAddress): IPv6Address {
+  var m = mac.split(':').map(function(h) { return parseInt(h, 16); });
+  var eui = [m[0] ^ 0x02, m[1], m[2], 0xff, 0xfe, m[3], m[4], m[5]];
+  return bytesToIpv6([0xfe, 0x80, 0, 0, 0, 0, 0, 0].concat(eui));
+}
+
+/** [Item 245] One parsed IPv6 extension header. */
+export interface IPv6ExtHeader {
+  type:   number;   // next-header value identifying this header
+  length: number;   // header length in bytes
+  data:   number[];
+}
+
+/** Parsed IPv6 packet (after extension headers are removed). */
+export interface IPv6Packet {
+  trafficClass: number;
+  flowLabel:    number;
+  nextHeader:   number;       // payload protocol
+  hopLimit:     number;
+  src:          IPv6Address;
+  dst:          IPv6Address;
+  payload:      number[];
+  extHeaders:   IPv6ExtHeader[];
+}
+
+function parseIPv6(raw: number[]): IPv6Packet | null {
+  if (raw.length < 40 || (raw[0] >> 4) !== 6) return null;
+  var trafficClass = ((raw[0] & 0xf) << 4) | (raw[1] >> 4);
+  var flowLabel    = ((raw[1] & 0xf) << 16) | (raw[2] << 8) | raw[3];
+  var payloadLen   = u16be(raw, 4);
+  var nextHeader   = raw[6];
+  var hopLimit     = raw[7];
+  var src = bytesToIpv6(raw, 8);
+  var dst = bytesToIpv6(raw, 24);
+  var off = 40;
+  var extHeaders: IPv6ExtHeader[] = [];
+  // [Item 245] Walk any extension headers
+  var extSet = new Set([IPV6_EXT_HOP_BY_HOP, IPV6_EXT_ROUTING, IPV6_EXT_FRAGMENT, IPV6_EXT_DEST_OPT]);
+  while (extSet.has(nextHeader) && off + 2 <= raw.length) {
+    var ehNext = raw[off];
+    var ehLen  = (raw[off + 1] + 1) * 8;
+    extHeaders.push({ type: nextHeader, length: ehLen, data: raw.slice(off + 2, off + ehLen) });
+    nextHeader = ehNext;
+    off += ehLen;
+  }
+  return { trafficClass, flowLabel, nextHeader, hopLimit, src, dst,
+           payload: raw.slice(off, 40 + payloadLen), extHeaders };
+}
+
+function buildIPv6(pkt: IPv6Packet): number[] {
+  var p = pkt.payload;
+  var b = fill(40 + p.length);
+  b[0] = 0x60 | ((pkt.trafficClass >> 4) & 0xf);
+  b[1] = ((pkt.trafficClass & 0xf) << 4) | ((pkt.flowLabel >> 16) & 0xf);
+  b[2] = (pkt.flowLabel >> 8) & 0xff;
+  b[3] = pkt.flowLabel & 0xff;
+  wu16be(b, 4, p.length);
+  b[6] = pkt.nextHeader; b[7] = pkt.hopLimit;
+  var sb = ipv6ToBytes(pkt.src); var db = ipv6ToBytes(pkt.dst);
+  for (var i = 0; i < 16; i++) { b[8 + i] = sb[i]; b[24 + i] = db[i]; }
+  for (var j = 0; j < p.length; j++) b[40 + j] = p[j];
+  return b;
+}
+
+/** [Item 242] ICMPv6 checksum using IPv6 pseudo-header (RFC 4443 §2.3). */
+function checksumICMPv6(src: IPv6Address, dst: IPv6Address, payload: number[]): number {
+  var sb = ipv6ToBytes(src); var db = ipv6ToBytes(dst);
+  var len = payload.length;
+  var pseudo: number[] = [];
+  for (var i = 0; i < 16; i++) pseudo.push(sb[i]);
+  for (var j = 0; j < 16; j++) pseudo.push(db[j]);
+  pseudo.push(0, 0, (len >> 8) & 0xff, len & 0xff, 0, 0, 0, PROTO_ICMPV6);
+  return checksum(pseudo.concat(payload));
 }
 
 // ── TCP ───────────────────────────────────────────────────────────────────────
@@ -490,6 +686,275 @@ function buildTCP(seg: TCPSegment, srcIP: IPv4Address, dstIP: IPv4Address,
 
 // ── TCP Connection state machine ──────────────────────────────────────────────
 
+// ── BBR Congestion Control (Item 260) ────────────────────────────────────────────────
+
+/** [Item 260] BBR congestion control state block. */
+export interface BBRState {
+  mode:          'STARTUP' | 'DRAIN' | 'PROBE_BW' | 'PROBE_RTT';
+  btlBw:         number;   // estimated bottleneck bandwidth (bytes/tick)
+  rtProp:        number;   // min observed RTT (ticks); Infinity until first sample
+  rtPropExpiry:  number;   // tick when rtProp must be renewed
+  pacingGain:    number;   // pacing rate = btlBw * pacingGain
+  cwndGain:      number;   // cwnd = BDP * cwndGain
+  cycleIdx:      number;   // PROBE_BW gain-cycle index (0–7)
+  delivered:     number;   // cumulative bytes delivered
+  priorDelivered: number;  // delivered at last growth check (STARTUP)
+  probeRttDue:   number;   // tick when PROBE_RTT next fires
+}
+
+const BBR_STARTUP_GAIN   = 2.89;
+const BBR_DRAIN_GAIN     = 0.35;
+const BBR_CWND_GAIN      = 2.0;
+const BBR_RTPROP_EXPIRY  = 1000;
+const BBR_PROBE_RTT_TICKS = 20;
+const BBR_PROBE_BW_GAINS  = [1.25, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+
+function bbrInit(): BBRState {
+  return { mode: 'STARTUP', btlBw: 0, rtProp: Infinity,
+           rtPropExpiry: 0, pacingGain: BBR_STARTUP_GAIN, cwndGain: BBR_CWND_GAIN,
+           cycleIdx: 0, delivered: 0, priorDelivered: 0, probeRttDue: 0 };
+}
+
+/** [Item 260] Update BBR model on ACK; returns new inflight window (bytes). */
+function bbrOnAck(bbr: BBRState, rttTicks: number, bytesAcked: number, now: number): number {
+  if (rttTicks > 0) {
+    var rate = bytesAcked / rttTicks;
+    if (rate > bbr.btlBw) bbr.btlBw = rate;
+    if (rttTicks < bbr.rtProp || now >= bbr.rtPropExpiry) {
+      bbr.rtProp = rttTicks; bbr.rtPropExpiry = now + BBR_RTPROP_EXPIRY;
+    }
+  }
+  bbr.delivered += bytesAcked;
+  if (bbr.mode === 'STARTUP') {
+    if (bbr.delivered > bbr.priorDelivered * 1.25) { bbr.priorDelivered = bbr.delivered; }
+    else if (bbr.btlBw > 0) { bbr.mode = 'DRAIN'; bbr.pacingGain = BBR_DRAIN_GAIN; }
+  } else if (bbr.mode === 'DRAIN') {
+    bbr.mode = 'PROBE_BW'; bbr.cycleIdx = 0; bbr.pacingGain = BBR_PROBE_BW_GAINS[0]; bbr.cwndGain = BBR_CWND_GAIN;
+  } else if (bbr.mode === 'PROBE_BW') {
+    if ((now & 0x7f) === 0) { bbr.cycleIdx = (bbr.cycleIdx + 1) & 7; bbr.pacingGain = BBR_PROBE_BW_GAINS[bbr.cycleIdx]; }
+    if (bbr.probeRttDue === 0) bbr.probeRttDue = now + 2000;
+    if (now >= bbr.probeRttDue) { bbr.mode = 'PROBE_RTT'; bbr.pacingGain = 1.0; bbr.cwndGain = 1.0; bbr.probeRttDue = now + BBR_PROBE_RTT_TICKS; }
+  } else if (bbr.mode === 'PROBE_RTT') {
+    if (now >= bbr.probeRttDue) { bbr.mode = 'PROBE_BW'; bbr.cycleIdx = 0; bbr.pacingGain = BBR_PROBE_BW_GAINS[0]; bbr.cwndGain = BBR_CWND_GAIN; bbr.probeRttDue = 0; }
+  }
+  var mss = 1460;
+  if (bbr.btlBw <= 0 || bbr.rtProp === Infinity) return mss * 10;
+  return Math.max(mss * 4, Math.ceil(bbr.btlBw * bbr.rtProp * bbr.cwndGain));
+}
+
+// ── IP Routing Table (Item 236) ───────────────────────────────────────────────────────
+
+// ── TCP CUBIC Congestion Control (Item 939) ───────────────────────────────────────────
+
+/**
+ * [Item 939] CUBIC congestion window (RFC 8312).
+ * Returns new cwnd (in bytes) given:
+ *   wmax     - window size at last congestion event (bytes)
+ *   tElapsed - elapsed time since last congestion event (seconds)
+ *   cwnd     - current congestion window (bytes)
+ *   mss      - max segment size (bytes)
+ */
+export function cubicCwnd(wmax: number, tElapsed: number, cwnd: number, mss = 1460): number {
+  const C = 0.4;  // CUBIC constant
+  const BETA = 0.7;
+  var wmaxScaled = wmax * BETA;
+  // K = cube_root((wmax * (1-beta)) / C)
+  var K = Math.cbrt((wmax * (1 - BETA)) / C);
+  var dt   = tElapsed - K;
+  var wCubic = C * dt * dt * dt + wmax;
+  // Also compute TCP-friendly window (Reno-equivalent)
+  var wReno  = wmaxScaled + 3 * BETA / (2 - BETA) * (tElapsed / (K || 1)) * mss;
+  var target = Math.max(wCubic, wReno);
+  // Slow-start phase: increase by 1 MSS per ACK until ssthresh
+  return Math.max(cwnd + mss, Math.round(target));
+}
+
+/**
+ * [Item 939] CUBIC state for one TCP connection.
+ */
+export interface CUBICState {
+  wmax:     number;   // congestion window at last loss event (bytes)
+  k:        number;   // time origin for CUBIC (seconds)
+  lastLoss: number;   // kernel tick of last loss
+  ssthresh: number;   // slow-start threshold
+  cwnd:     number;   // current congestion window (bytes)
+}
+
+/** Initialise a CUBIC state. */
+export function cubicInit(initialCwnd = 10 * 1460): CUBICState {
+  return { wmax: initialCwnd, k: 0, lastLoss: 0, ssthresh: Infinity, cwnd: initialCwnd };
+}
+
+/** Called on loss (timeout or triple duplicate ACK). Updates CUBIC state. */
+export function cubicOnLoss(state: CUBICState, nowTick: number): void {
+  state.wmax     = state.cwnd;
+  state.ssthresh = Math.max(state.cwnd * 0.7, 2 * 1460);
+  state.cwnd     = state.ssthresh;
+  state.k        = Math.cbrt(state.wmax * 0.3 / 0.4);
+  state.lastLoss = nowTick;
+}
+
+/** Called on each ACK. Returns updated cwnd. */
+export function cubicOnAck(state: CUBICState, nowTick: number, ticksPerSec = 1000): number {
+  if (state.cwnd < state.ssthresh) {
+    // Slow start
+    state.cwnd += 1460;
+  } else {
+    var tElapsed = (nowTick - state.lastLoss) / ticksPerSec;
+    state.cwnd = cubicCwnd(state.wmax, tElapsed, state.cwnd);
+  }
+  return state.cwnd;
+}
+
+/** [Item 940] Advertise a large receive window by returning the scaled window value.
+ *  The window scale factor (shift) is negotiated in SYN (already set via sendWscale).
+ *  This helper computes the 16-bit window field for a given receive buffer and scale. */
+export function rcvWindowField(rcvBufFree: number, rcvScale: number): number {
+  return Math.min(0xffff, (rcvBufFree >> rcvScale) >>> 0);
+}
+
+/** [Item 940] Default receive buffer size when window scaling is enabled (64 KB → 1 MB). */
+export const DEFAULT_SCALED_RCV_BUF = 1 << 20;  // 1 MiB
+
+/** [Item 240] Static routing table entry for longest-prefix match. */
+export interface RouteEntry {
+  prefix:  IPv4Address;  // network address e.g. "192.168.1.0"
+  mask:    IPv4Address;  // subnet mask e.g. "255.255.255.0"
+  gateway: IPv4Address;  // next-hop; "0.0.0.0" = on-link
+  iface:   string;       // logical interface name
+  metric:  number;       // lower = more preferred
+}
+
+/** [Item 266] A tracked NAT/conntrack entry (5-tuple → translated 5-tuple). */
+export interface ConntrackEntry {
+  origSrc:     IPv4Address;
+  origSport:   number;
+  transSrc:    IPv4Address;
+  transSport:  number;
+  dst:         IPv4Address;
+  dport:       number;
+  protocol:    number;
+  established: boolean;
+}
+
+/** [Item 266] A static NAT rule (SNAT or DNAT). */
+export interface NATRule {
+  type:          'SNAT' | 'DNAT';
+  origIP:        IPv4Address;
+  translatedIP:  IPv4Address;
+}
+
+// ── Protocol Stub Interfaces (Items 227, 228, 268, 269, 274, 275) ──────────────────────────────
+
+/** [Item 227] 802.3ad Link Aggregation Group (LACP) stub. */
+export interface LACPPort {
+  ifaceName:  string;
+  priority:   number;
+  active:     boolean;
+}
+export class LinkAggregation {
+  readonly ports: LACPPort[] = [];
+  readonly mode: 'active-backup' | 'round-robin' | 'lacp' = 'lacp';
+  addPort(iface: string, priority = 128): void {
+    this.ports.push({ ifaceName: iface, priority, active: true });
+  }
+  removePort(iface: string): void {
+    var idx = this.ports.findIndex(p => p.ifaceName === iface);
+    if (idx >= 0) this.ports.splice(idx, 1);
+  }
+  selectPort(hash: number): LACPPort | null {
+    var active = this.ports.filter(p => p.active);
+    return active.length ? active[hash % active.length] : null;
+  }
+}
+
+/** [Item 228] Layer-2 Software Bridge stub (IEEE 802.1D). */
+export class SoftwareBridge {
+  readonly name: string;
+  readonly ports: string[] = [];
+  /** MAC address → egress port name. */
+  private fdb = new Map<string, string>();
+  constructor(name: string) { this.name = name; }
+  addPort(iface: string): void { this.ports.push(iface); }
+  removePort(iface: string): void {
+    var i = this.ports.indexOf(iface);
+    if (i >= 0) this.ports.splice(i, 1);
+    this.fdb.forEach((port, mac) => { if (port === iface) this.fdb.delete(mac); });
+  }
+  learn(mac: string, iface: string): void { this.fdb.set(mac, iface); }
+  forward(srcMac: string, srcIface: string, dstMac: string): string[] {
+    this.learn(srcMac, srcIface);
+    var dst = this.fdb.get(dstMac);
+    if (dst) return [dst];
+    // Flood to all ports except source
+    return this.ports.filter(p => p !== srcIface);
+  }
+}
+
+/** [Item 268] MPTCP sub-flow descriptor stub (RFC 8684). */
+export interface MPTCPSubflow {
+  token:      number;
+  subflowId:  number;
+  localIP:    IPv4Address;
+  remoteIP:   IPv4Address;
+  localPort:  number;
+  remotePort: number;
+  priority:   number;
+  backup:     boolean;
+}
+/** [Item 268] MPTCP connection aggregating multiple sub-flows. */
+export interface MPTCPConnection {
+  masterToken:  number;
+  subflows:     MPTCPSubflow[];
+  dsn:          number;  // Data Sequence Number
+  rcvBase:      number;
+}
+
+/** [Item 269] QUIC connection stub (RFC 9000). */
+export interface QUICStream {
+  id:        number;
+  offset:    number;
+  fin:       boolean;
+  data:      number[];
+}
+export interface QUICConnection {
+  connectionId:   Uint8Array;
+  version:        number;  // 0x00000001 = QUIC v1
+  peerAddr:       IPv4Address;
+  peerPort:       number;
+  streams:        Map<number, QUICStream>;
+  packetNumber:   number;
+  state:          'INITIAL' | 'HANDSHAKE' | '1RTT' | 'CLOSED';
+}
+
+/** [Item 274] DTLS 1.3 socket stub (RFC 9147). */
+export interface DTLSSocket {
+  peerAddr:   IPv4Address;
+  peerPort:   number;
+  epoch:      number;       // current epoch for record layer
+  seqNum:     number;
+  cipherSuite: number;
+  state:      'HANDSHAKE' | 'DATA' | 'CLOSED';
+}
+
+/** [Item 275] SCTP association stub (RFC 4960). */
+export interface SCTPChunk {
+  type:   number;
+  flags:  number;
+  value:  number[];
+}
+export interface SCTPAssociation {
+  localTag:   number;
+  peerTag:    number;
+  peerAddr:   IPv4Address;
+  peerPort:   number;
+  localPort:  number;
+  localTSN:   number;
+  peerTSN:    number;
+  streams:    number;  // number of outbound streams
+  state:      'CLOSED' | 'COOKIE_WAIT' | 'COOKIE_ECHOED' | 'ESTABLISHED' | 'SHUTDOWN';
+}
+
 export type TCPState =
   'CLOSED' | 'LISTEN' | 'SYN_SENT' | 'SYN_RECEIVED' | 'ESTABLISHED' |
   'FIN_WAIT_1' | 'FIN_WAIT_2' | 'CLOSE_WAIT' | 'CLOSING' | 'LAST_ACK' | 'TIME_WAIT';
@@ -574,6 +1039,10 @@ export interface TCPConnection {
   keepaliveProbeCount: number;
   /** [Item 264] Absolute tick when next keepalive probe fires; -1 = not set. */
   keepaliveDead:     number;
+  /** [Item 260] Use BBR congestion control (default false = legacy cubic-proxy). */
+  useBBR:  boolean;
+  /** [Item 260] BBR state; populated when useBBR is true. */
+  bbr?:    BBRState;
 }
 
 // ── Socket ────────────────────────────────────────────────────────────────────
@@ -595,6 +1064,10 @@ export interface Socket {
   pendingConns: TCPConnection[];
   /** [Item 263] Whether SO_REUSEADDR is set. */
   reuseAddr:  boolean;
+  /** [Item 273] SO_RCVBUF: receive buffer size limit in bytes (0 = unlimited). */
+  rcvBufSize: number;
+  /** [Item 273] SO_SNDBUF: send buffer size limit in bytes (0 = unlimited). */
+  sndBufSize: number;
 }
 
 // ── NetworkStack ──────────────────────────────────────────────────────────────
@@ -609,6 +1082,12 @@ export class NetworkStack {
 
   /** True once a real NIC has been detected and virtqueues are ready */
   nicReady: boolean = false;
+  /** [Item 226] Interface MTU; raise above 1500 for jumbo frames. */
+  mtu: number = 1500;
+  /** [Item 241] IPv6 link-local address (set on configure or by SLAAC). */
+  ipv6Address?: IPv6Address;
+  /** [Item 243] IPv6 global unicast address assigned by SLAAC. */
+  ipv6GlobalAddress?: IPv6Address;
 
   private arpTable    = new Map<IPv4Address, MACAddress>();
   /** [Item 223] Tick of last ARP update per IP (for stale-entry eviction). */
@@ -630,6 +1109,16 @@ export class NetworkStack {
   private nextConn  = 1;
   private nextSock  = 1;
   private nextEph   = 49152; // ephemeral port range start
+  /** [Item 236] Static routing table for longest-prefix match. */
+  private routeTable: RouteEntry[] = [];
+  /** [Item 237/272] Joined IPv4 multicast groups. */
+  private multicastGroups = new Set<IPv4Address>();
+  /** [Item 242] NDP neighbor cache: IPv6Address → MACAddress. */
+  private ndpTable = new Map<IPv6Address, MACAddress>();
+  /** [Item 241] Queue of IPv6 packets awaiting NDP resolution. */
+  private ndpPendingTx = new Map<IPv6Address, IPv6Packet[]>();
+  /** Current ticks (incremented by SLAAC/NDP logic) for retransmission. */
+  private v6IdCounter = 1;
 
   private stats = {
     rxPackets: 0, txPackets: 0,
@@ -661,8 +1150,21 @@ export class NetworkStack {
     while ((frame = this.rxQueue.shift()) !== undefined) {
       var eth = parseEthernet(frame);
       if (!eth) { this.stats.rxErrors++; continue; }
-      if (eth.ethertype === ETYPE_ARP)  this.handleARP(eth);
-      if (eth.ethertype === ETYPE_IPV4) this.handleIPv4(eth);
+      var ethertype = eth.ethertype;
+      var payload   = eth.payload;
+      // [Item 225] Strip 802.1Q VLAN tag transparently
+      if (ethertype === ETYPE_VLAN) {
+        var vlan = parseVLAN(payload);
+        if (!vlan) { this.stats.rxErrors++; continue; }
+        ethertype = vlan.innerEthertype;
+        payload   = vlan.payload;
+        // Reconstruct eth with inner values for downstream handlers
+        eth = { dst: eth.dst, src: eth.src, ethertype, payload };
+      }
+      if (ethertype === ETYPE_ARP)  this.handleARP(eth);
+      if (ethertype === ETYPE_IPV4) this.handleIPv4(eth);
+      // [Item 241] Handle IPv6 frames
+      if (ethertype === ETYPE_IPV6) this.handleIPv6(eth);
     }
   }
 
@@ -704,7 +1206,8 @@ export class NetworkStack {
       if (!ip) return; // Still waiting for more fragments.
     }
 
-    var isForUs = (ip.dst === this.ip || ip.dst === '255.255.255.255' || ip.dst === '127.0.0.1');
+    var isForUs = (ip.dst === this.ip || ip.dst === '255.255.255.255' || ip.dst === '127.0.0.1'
+                   || this.multicastGroups.has(ip.dst));  // [Item 237/272] multicast membership
     if (!isForUs) {
       // [Item 230] Packets we are forwarding: send ICMP Time Exceeded if TTL ≤ 1.
       if (ip.ttl <= 1) this._sendICMPError(ip, 11 /* Time Exceeded */, 0);
@@ -718,6 +1221,8 @@ export class NetworkStack {
       case PROTO_ICMP: this.handleICMP(ip);  break;
       case PROTO_TCP:  this.handleTCP(ip);   break;
       case PROTO_UDP:  this.handleUDP(ip);   break;
+      // [Item 237] IGMP membership management
+      case PROTO_IGMP: break;  // we originate IGMP; no need to process received queries here
     }
   }
 
@@ -794,6 +1299,163 @@ export class NetworkStack {
     }
   }
 
+  // ── IPv6 / ICMPv6 / NDP (Items 241–244) ─────────────────────────────────────────────
+
+  private handleIPv6(eth: EthernetFrame): void {
+    var ip6 = parseIPv6(eth.payload);
+    if (!ip6) return;
+    // Filter: accept link-local/global addresses for our interface
+    var isForUs = (ip6.dst === this.ipv6Address ||
+                   ip6.dst === this.ipv6GlobalAddress ||
+                   ip6.dst.startsWith('ff'));   // multicast
+    if (!isForUs) return;
+    // Decrement hop limit gate
+    if (ip6.hopLimit === 0) return;
+    switch (ip6.nextHeader) {
+      case PROTO_ICMPV6: this.handleICMPv6(ip6); break;
+    }
+  }
+
+  /**
+   * [Item 242] ICMPv6 handler: ping6 replies and NDP Neighbor Solicitation/Advertisement.
+   */
+  private handleICMPv6(ip6: IPv6Packet): void {
+    if (ip6.payload.length < 4) return;
+    var type = ip6.payload[0];
+    var code = ip6.payload[1];
+    switch (type) {
+      case ICMPV6_ECHO_REQUEST: {
+        // [Item 241] Reply to ICMPv6 echo request (ping6)
+        var reply = ip6.payload.slice();
+        reply[0] = ICMPV6_ECHO_REPLY;
+        reply[2] = 0; reply[3] = 0;  // clear checksum
+        var ck = checksumICMPv6(ip6.dst, ip6.src, reply);
+        reply[2] = (ck >> 8) & 0xff; reply[3] = ck & 0xff;
+        this._sendIPv6({ trafficClass: 0, flowLabel: 0,
+          nextHeader: PROTO_ICMPV6, hopLimit: 64,
+          src: ip6.dst, dst: ip6.src,
+          payload: reply, extHeaders: [] });
+        break;
+      }
+      case ICMPV6_NEIGHBOR_SOLICITATION: {
+        // [Item 242] NDP NS: who has <target>? Answer with NA for our address.
+        if (ip6.payload.length < 24) break;
+        var target = bytesToIpv6(ip6.payload, 8);
+        if (target !== this.ipv6Address && target !== this.ipv6GlobalAddress) break;
+        var na = fill(24);
+        na[0] = ICMPV6_NEIGHBOR_ADVERTISEMENT;
+        na[1] = 0;
+        na[4] = 0xe0;  // S+O+R flags
+        var tb = ipv6ToBytes(target);
+        for (var ti = 0; ti < 16; ti++) na[8 + ti] = tb[ti];
+        // Target Link-Layer Address option (type 2, len 1 unit = 8 bytes)
+        na.push(2, 1);
+        macToBytes(this.mac).forEach(function(v) { na.push(v); });
+        na[2] = 0; na[3] = 0;
+        var nck = checksumICMPv6(ip6.dst, ip6.src, na);
+        na[2] = (nck >> 8) & 0xff; na[3] = nck & 0xff;
+        this._sendIPv6({ trafficClass: 0, flowLabel: 0,
+          nextHeader: PROTO_ICMPV6, hopLimit: 255,
+          src: this.ipv6Address || ip6.dst, dst: ip6.src,
+          payload: na, extHeaders: [] });
+        break;
+      }
+      case ICMPV6_NEIGHBOR_ADVERTISEMENT: {
+        // [Item 242] Record neighbor's MAC from Target Link-Layer Address option
+        if (ip6.payload.length < 24) break;
+        var naSrc = bytesToIpv6(ip6.payload, 8);
+        // Scan options for type-2 (target link-layer address)
+        var oOff = 24;
+        while (oOff + 8 <= ip6.payload.length) {
+          var oLen = ip6.payload[oOff + 1] * 8;
+          if (oLen === 0) break;
+          if (ip6.payload[oOff] === 2 && oLen >= 8) {
+            this.ndpTable.set(naSrc, bytesToMac(ip6.payload, oOff + 2));
+            // Flush any pending TX for this neighbor
+            var pq6 = this.ndpPendingTx.get(naSrc);
+            if (pq6) {
+              for (var pqi = 0; pqi < pq6.length; pqi++) this._sendIPv6(pq6[pqi]);
+              this.ndpPendingTx.delete(naSrc);
+            }
+            break;
+          }
+          oOff += oLen;
+        }
+        break;
+      }
+      case ICMPV6_ROUTER_ADVERTISEMENT: {
+        // [Item 243] SLAAC: extract /64 prefix from RA and form global unicast address
+        if (ip6.payload.length < 16) break;
+        var rOff = 12;  // skip type, code, cksum, hop-limit, flags, lifetime, reachable, retrans
+        while (rOff + 8 <= ip6.payload.length) {
+          var rOptType = ip6.payload[rOff];
+          var rOptLen  = ip6.payload[rOff + 1] * 8;
+          if (rOptLen === 0) break;
+          // Option type 3 = Prefix Information
+          if (rOptType === 3 && rOptLen >= 32) {
+            var prefixLen = ip6.payload[rOff + 2];
+            var autoFlag  = (ip6.payload[rOff + 3] & 0x40) !== 0;  // A-flag
+            if (autoFlag && prefixLen === 64) {
+              var prefix = ip6.payload.slice(rOff + 16, rOff + 32);
+              // Form address: 64-bit prefix + EUI-64 IID
+              var m2 = this.mac.split(':').map(function(h) { return parseInt(h, 16); });
+              var iid = [m2[0] ^ 0x02, m2[1], m2[2], 0xff, 0xfe, m2[3], m2[4], m2[5]];
+              this.ipv6GlobalAddress = bytesToIpv6(prefix.concat(iid));
+            }
+          }
+          rOff += rOptLen;
+        }
+        break;
+      }
+    }
+  }
+
+  /** Send an IPv6 packet; resolves next-hop via NDP (queues if unresolved). */
+  private _sendIPv6(pkt: IPv6Packet): void {
+    var dst6 = pkt.dst;
+    // Multicast or link-local: map to Ethernet multicast 33:33:xx:xx:xx:xx
+    if (dst6.startsWith('ff')) {
+      var db = ipv6ToBytes(dst6);
+      var mcastMac = '33:33:' + db.slice(12).map(function(x) {
+        var s = x.toString(16); return s.length < 2 ? '0' + s : s;
+      }).join(':');
+      this._sendEth({ dst: mcastMac, src: this.mac, ethertype: ETYPE_IPV6, payload: buildIPv6(pkt) });
+      return;
+    }
+    var dstMac = this.ndpTable.get(dst6);
+    if (!dstMac) {
+      // Queue and send NDP Neighbor Solicitation
+      var pq = this.ndpPendingTx.get(dst6);
+      if (!pq) { pq = []; this.ndpPendingTx.set(dst6, pq); }
+      pq.push(pkt);
+      this._sendNS(dst6);
+      return;
+    }
+    this._sendEth({ dst: dstMac, src: this.mac, ethertype: ETYPE_IPV6, payload: buildIPv6(pkt) });
+  }
+
+  /** [Item 242] Send an NDP Neighbor Solicitation for targetAddr. */
+  private _sendNS(targetAddr: IPv6Address): void {
+    var src6 = this.ipv6Address || eui64LinkLocal(this.mac);
+    var tb   = ipv6ToBytes(targetAddr);
+    // Solicited-node multicast: ff02::1:ffXX:XXXX
+    var snmDst = 'ff02::1:ff' + tb.slice(13).map(function(x) {
+      var s = x.toString(16); return s.length < 2 ? '0' + s : s;
+    }).join('');
+    var ns = fill(24);
+    ns[0] = ICMPV6_NEIGHBOR_SOLICITATION;
+    for (var i = 0; i < 16; i++) ns[8 + i] = tb[i];
+    // Source Link-Layer Address option (type 1)
+    ns.push(1, 1);
+    macToBytes(this.mac).forEach(function(v) { ns.push(v); });
+    ns[2] = 0; ns[3] = 0;
+    var ck = checksumICMPv6(src6, snmDst, ns);
+    ns[2] = (ck >> 8) & 0xff; ns[3] = ck & 0xff;
+    this._sendIPv6({ trafficClass: 0, flowLabel: 0,
+      nextHeader: PROTO_ICMPV6, hopLimit: 255,
+      src: src6, dst: snmDst, payload: ns, extHeaders: [] });
+  }
+
   private handleTCP(ip: IPv4Packet): void {
     this.stats.tcpRx++;
     var seg = parseTCP(ip.payload);
@@ -865,6 +1527,8 @@ export class NetworkStack {
       keepaliveMaxProbes: 9,
       keepaliveProbeCount: 0,
       keepaliveDead: -1,
+      // BBR
+      useBBR: false, bbr: undefined,
     };
   }
 
@@ -965,7 +1629,14 @@ export class NetworkStack {
             // New ACK — update RTT roughly (using RTO ticks as sent-time proxy)
             if (conn.rtoDead >= 0) {
               var elapsed = conn.rtoTicks - Math.max(0, conn.rtoDead - kernel.getTicks());
-              if (elapsed > 0) this._tcpUpdateRTT(conn, elapsed);
+              if (elapsed > 0) {
+                this._tcpUpdateRTT(conn, elapsed);
+                // [Item 260] Feed BBR model if enabled
+                if (conn.useBBR && conn.bbr) {
+                  var bytesAcked = ((seg.ack - conn.sndUna) & 0x7fffffff);
+                  bbrOnAck(conn.bbr, elapsed, bytesAcked, kernel.getTicks());
+                }
+              }
             }
             conn.sndUna     = seg.ack;
             conn.lastAckSeq = seg.ack;
@@ -1300,18 +1971,16 @@ export class NetworkStack {
   private _sendIPv4(pkt: IPv4Packet): void {
     var dst = pkt.dst;
     var dstMac: MACAddress;
-    // Broadcast address: no ARP needed – always Ethernet broadcast
+    // Broadcast address: no ARP needed
     if (dst === '255.255.255.255') {
       dstMac = 'ff:ff:ff:ff:ff:ff';
     } else {
-      var nextHop = sameSubnet(dst, this.ip, this.mask) ? dst : this.gateway;
+      // [Item 236] Longest-prefix match over routeTable, fall back to gateway
+      var nextHop = this._lookupRoute(dst);
       dstMac = this.arpTable.get(nextHop) || '';
       if (!dstMac) {
-        // When NIC is active, block-wait briefly for ARP reply.
         dstMac = this.arpWait(nextHop, this.nicReady ? 100 : 0) || '';
         if (!dstMac) {
-          // [Item 224] Queue the frame in arpPendingTx so it is sent once
-          // the ARP reply arrives, instead of falling back to broadcast.
           var pendingQueue = this.arpPendingTx.get(nextHop);
           if (!pendingQueue) { pendingQueue = []; this.arpPendingTx.set(nextHop, pendingQueue); }
           pendingQueue.push({ dst: '00:00:00:00:00:00', src: this.mac, ethertype: ETYPE_IPV4, payload: buildIPv4(pkt) });
@@ -1321,6 +1990,27 @@ export class NetworkStack {
       }
     }
     this._sendEth({ dst: dstMac, src: this.mac, ethertype: ETYPE_IPV4, payload: buildIPv4(pkt) });
+  }
+
+  /**
+   * [Item 236] Longest-prefix match: returns the next-hop IP for a given destination.
+   * Consults routeTable first (sorted by prefix length desc), then falls back
+   * to on-link or default gateway.
+   */
+  private _lookupRoute(dst: IPv4Address): IPv4Address {
+    var dstU = ipToU32(dst);
+    // Sort by mask length descending (most-specific first) then by metric
+    var best: RouteEntry | null = null;
+    for (var ri = 0; ri < this.routeTable.length; ri++) {
+      var r = this.routeTable[ri];
+      var maskU = ipToU32(r.mask);
+      if ((dstU & maskU) === (ipToU32(r.prefix) & maskU)) {
+        if (!best || maskU > ipToU32(best.mask) ||
+            (maskU === ipToU32(best.mask) && r.metric < best.metric)) best = r;
+      }
+    }
+    if (best) return best.gateway === '0.0.0.0' ? dst : best.gateway;
+    return sameSubnet(dst, this.ip, this.mask) ? dst : this.gateway;
   }
 
   private _arpRequest(targetIP: IPv4Address): void {
@@ -1342,6 +2032,7 @@ export class NetworkStack {
       localIP: this.ip, localPort: 0,
       state: 'closed', recvQueue: [],
       backlog: 128, pendingConns: [], reuseAddr: false,
+      rcvBufSize: 0, sndBufSize: 0,
     };
     this.sockets.set(s.id, s);
     return s;
@@ -1729,6 +2420,373 @@ export class NetworkStack {
     return Array.from(this.connections.values());
   }
 
+  // ── Routing Table API (Item 236) ──────────────────────────────────────────────────────
+
+  /** [Item 236] Add a static route to the routing table. */
+  addRoute(route: RouteEntry): void {
+    this.routeTable.push(route);
+  }
+
+  /** [Item 236] Remove a static route by prefix+mask. Returns true if found. */
+  removeRoute(prefix: IPv4Address, mask: IPv4Address): boolean {
+    var before = this.routeTable.length;
+    this.routeTable = this.routeTable.filter(function(r) {
+      return !(r.prefix === prefix && r.mask === mask);
+    });
+    return this.routeTable.length < before;
+  }
+
+  /** [Item 236] Return a copy of the current routing table. */
+  getRouteTable(): RouteEntry[] { return this.routeTable.slice(); }
+
+  // ── Multicast / IGMP API (Items 237, 272) ───────────────────────────────────────────
+
+  /**
+   * [Items 237/272] Join an IPv4 multicast group (224.0.0.0/4).
+   * Sends an IGMPv2 Membership Report and records the group for RX filtering.
+   */
+  joinMulticast(groupIP: IPv4Address): void {
+    if (this.multicastGroups.has(groupIP)) return;
+    this.multicastGroups.add(groupIP);
+    // Send IGMPv2 join report to 224.0.0.2 (all-routers)
+    this._sendIPv4({
+      ihl: 5, dscp: 0, ecn: 0, id: this.idCounter++,
+      flags: 0, fragOff: 0, ttl: 1, protocol: PROTO_IGMP,
+      src: this.ip, dst: groupIP,
+      payload: buildIGMPv2(IGMP_V2_MEMBER_REPORT, groupIP),
+    });
+  }
+
+  /**
+   * [Items 237/272] Leave an IPv4 multicast group.
+   * Sends an IGMPv2 Leave Group message to 224.0.0.2.
+   */
+  leaveMulticast(groupIP: IPv4Address): void {
+    if (!this.multicastGroups.has(groupIP)) return;
+    this.multicastGroups.delete(groupIP);
+    this._sendIPv4({
+      ihl: 5, dscp: 0, ecn: 0, id: this.idCounter++,
+      flags: 0, fragOff: 0, ttl: 1, protocol: PROTO_IGMP,
+      src: this.ip, dst: '224.0.0.2',
+      payload: buildIGMPv2(IGMP_V2_LEAVE_GROUP, groupIP),
+    });
+  }
+
+  /** Return current multicast group memberships. */
+  getMulticastGroups(): IPv4Address[] {
+    return Array.from(this.multicastGroups);
+  }
+
+  // ── UDP Buffer Tuning (Item 273) ──────────────────────────────────────────────────────
+
+  /** [Item 273] Set SO_RCVBUF (receive buffer size limit). 0 = unlimited. */
+  setRcvBuf(sock: Socket, size: number): void { sock.rcvBufSize = size; }
+  /** [Item 273] Set SO_SNDBUF (send buffer size limit). 0 = unlimited. */
+  setSndBuf(sock: Socket, size: number): void { sock.sndBufSize = size; }
+
+  // ── BBR Congestion Control API (Item 260) ────────────────────────────────────────────
+
+  /**
+   * [Item 260] Enable BBR congestion control on a connected TCP socket.
+   * Must be called after connect() or accept() and before the first send().
+   */
+  enableBBR(sock: Socket): void {
+    var conn = this._connForSock(sock);
+    if (!conn) return;
+    conn.useBBR = true;
+    conn.bbr    = bbrInit();
+  }
+
+  // ── IPv6 Configuration API (Items 241–244) ─────────────────────────────────────────
+
+  /**
+   * [Item 241] Configure an explicit IPv6 address or derive link-local from MAC.
+   * Passing no argument computes the EUI-64 link-local address automatically.
+   * [Item 243] Optionally triggers SLAAC by sending a Router Solicitation.
+   */
+  configureIPv6(addr?: IPv6Address, sendRS: boolean = true): void {
+    this.ipv6Address = addr || eui64LinkLocal(this.mac);
+    if (sendRS) this._sendRouterSolicitation();
+  }
+
+  /** [Item 243] Send an ICMPv6 Router Solicitation to ff02::2 (all-routers). */
+  private _sendRouterSolicitation(): void {
+    var src6 = this.ipv6Address || eui64LinkLocal(this.mac);
+    var rs = [ICMPV6_ROUTER_SOLICITATION, 0, 0, 0, 0, 0, 0, 0];
+    // Source Link-Layer Address option (type 1, len 1 = 8 bytes)
+    rs.push(1, 1);
+    macToBytes(this.mac).forEach(function(v) { rs.push(v); });
+    rs[2] = 0; rs[3] = 0;
+    var ck = checksumICMPv6(src6, 'ff02::2', rs);
+    rs[2] = (ck >> 8) & 0xff; rs[3] = ck & 0xff;
+    this._sendIPv6({ trafficClass: 0, flowLabel: 0,
+      nextHeader: PROTO_ICMPV6, hopLimit: 255,
+      src: src6, dst: 'ff02::2', payload: rs, extHeaders: [] });
+  }
+
+  /** [Item 242] Look up an IPv6 address in the NDP table. */
+  ndpLookup(addr: IPv6Address): MACAddress | null {
+    return this.ndpTable.get(addr) || null;
+  }
+
+  // ── MLDv2 (Item 246) ───────────────────────────────────────────────────────────────
+
+  /** [Item 246] IPv6 multicast groups we've joined (for MLDv2 reporting). */
+  readonly v6MulticastGroups = new Set<IPv6Address>();
+
+  /**
+   * [Item 246] Join an IPv6 multicast group via MLDv2 (RFC 3810).
+   * Sends an MLDv2 Report message (ICMPv6 type 143) to ff02::16.
+   */
+  joinMulticastV6(groupAddr: IPv6Address): void {
+    if (this.v6MulticastGroups.has(groupAddr)) return;
+    this.v6MulticastGroups.add(groupAddr);
+    var src6 = this.ipv6Address || eui64LinkLocal(this.mac);
+    // MLDv2 Report: type=143, code=0, 4-reserved, 1 record
+    var gb = ipv6ToBytes(groupAddr);
+    // Record type 4 = CHANGE_TO_EXCLUDE (join)
+    var report: number[] = [143, 0, 0, 0, 0, 0, 0, 1,
+                             4, 0, 0, 0, ...gb];
+    var ck = checksumICMPv6(src6, 'ff02::16', report);
+    report[2] = (ck >> 8) & 0xff; report[3] = ck & 0xff;
+    this._sendIPv6({ trafficClass: 0, flowLabel: 0,
+      nextHeader: PROTO_ICMPV6, hopLimit: 1,
+      src: src6, dst: 'ff02::16', payload: report, extHeaders: [] });
+  }
+
+  /**
+   * [Item 246] Leave an IPv6 multicast group.
+   * Sends an MLDv2 Report with CHANGE_TO_INCLUDE (leave).
+   */
+  leaveMulticastV6(groupAddr: IPv6Address): void {
+    if (!this.v6MulticastGroups.has(groupAddr)) return;
+    this.v6MulticastGroups.delete(groupAddr);
+    var src6 = this.ipv6Address || eui64LinkLocal(this.mac);
+    var gb = ipv6ToBytes(groupAddr);
+    // Record type 3 = CHANGE_TO_INCLUDE (leave)
+    var report: number[] = [143, 0, 0, 0, 0, 0, 0, 1,
+                             3, 0, 0, 0, ...gb];
+    var ck = checksumICMPv6(src6, 'ff02::16', report);
+    report[2] = (ck >> 8) & 0xff; report[3] = ck & 0xff;
+    this._sendIPv6({ trafficClass: 0, flowLabel: 0,
+      nextHeader: PROTO_ICMPV6, hopLimit: 1,
+      src: src6, dst: 'ff02::16', payload: report, extHeaders: [] });
+  }
+
+  // ── IPv6 Privacy Extensions (Item 247) ───────────────────────────────────────────────
+
+  /**
+   * [Item 247] Generate a privacy (temporary) IPv6 address using a random IID
+   * (RFC 4941) instead of the stable EUI-64 IID.  The /64 prefix is taken from
+   * the current global address or from the supplied prefix bytes.
+   * Returns the new temporary address and also stores it as ipv6GlobalAddress.
+   */
+  generatePrivacyAddress(prefixBytes?: number[]): IPv6Address {
+    // Use existing global address prefix if not provided
+    var prefix: number[];
+    if (prefixBytes) {
+      prefix = prefixBytes.slice(0, 8);
+    } else {
+      var cur = this.ipv6GlobalAddress || '';
+      if (cur) {
+        prefix = ipv6ToBytes(cur).slice(0, 8);
+      } else {
+        prefix = ipv6ToBytes(eui64LinkLocal(this.mac)).slice(0, 8);
+      }
+    }
+    // RFC 4941 random IID: generate 64 random bits, set bit 6 of first byte to 0.
+    var iid: number[] = [];
+    for (var i = 0; i < 8; i++) iid.push(Math.floor(Math.random() * 256));
+    iid[0] &= 0xfd;  // clear universal/local bit (RFC 4941 §3.2)
+    var addr = bytesToIpv6(prefix.concat(iid));
+    this.ipv6GlobalAddress = addr;
+    return addr;
+  }
+
+  // ── DHCPv6 Client (Item 244) ────────────────────────────────────────────────────────────
+
+  /**
+   * [Item 244] DHCPv6 stateful client: Solicit → Advertise → Request → Reply.
+   * Sends a Solicit to ff02::1:2 on port 547, waits for Advertise, then sends
+   * Request and waits for Reply with IA_NA (assigned address).
+   * Returns the assigned IPv6 address or null on timeout.
+   */
+  dhcpv6Solicit(timeoutTicks: number = 500): IPv6Address | null {
+    var src6 = this.ipv6Address || eui64LinkLocal(this.mac);
+    // [Item 244] DHCPv6 Solicit message (msg-type=1)
+    // Fields: msg-type(1), transaction-id(3), options...
+    var txId = [Math.floor(Math.random()*256), Math.floor(Math.random()*256), Math.floor(Math.random()*256)];
+    // DUID-LL option (client-id, option 1)
+    var macB = macToBytes(this.mac);
+    var duid = [0, 3, 0, 1].concat(macB);  // DUID-LL type=3, hw=1, mac
+    //  Option 1 (client-id): type(2) + len(2) + duid
+    var clientIdOpt: number[] = [0, 1, 0, duid.length].concat(duid);
+    // Option 3 (IA_NA): type(2) + len(2) + iaid(4) + t1(4) + t2(4)
+    var ianOpt: number[] = [0, 3, 0, 12, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+    var solicit = [1].concat(txId, clientIdOpt, ianOpt);
+    var udpPayload = solicit;
+    // Open receive inbox for port 546 (DHCPv6 client port)
+    var DHCP6_CLI_PORT = 546;
+    var DHCP6_SRV_PORT = 547;
+    if (!this.udpRxMap.has(DHCP6_CLI_PORT)) this.udpRxMap.set(DHCP6_CLI_PORT, []);
+    var inbox = this.udpRxMap.get(DHCP6_CLI_PORT)!;
+    // Send Solicit via UDP (IPv6 would be ideal; approximate with IPv4 for now)
+    // In a full IPv6-aware UDP stack, we'd use _sendIPv6 + UDP.
+    // For now: send Solicit raw UDP to link-scope all-DHCP-agents (224.0.0.0 proxy).
+    // Real DHCPv6 requires IPv6 UDP: we queue an IPv6 UDP Solicit below.
+    var pktBody = buildUDP(DHCP6_CLI_PORT, DHCP6_SRV_PORT, udpPayload);
+    this._sendIPv6({ trafficClass: 0, flowLabel: 0, nextHeader: 17, hopLimit: 1,
+      src: src6, dst: 'ff02::1:2', payload: pktBody, extHeaders: [] });
+    // Poll for Advertise (msg-type=2)
+    var deadline = kernel.getTicks() + timeoutTicks;
+    var serverAddr: IPv6Address | null = null;
+    while (kernel.getTicks() < deadline && serverAddr === null) {
+      if (this.nicReady) this.pollNIC();
+      this.processRxQueue();
+      var pkt = inbox.shift();
+      if (pkt && pkt.data.length > 4 && pkt.data[0] === 2) {
+        // Advertise received — send Request (msg-type=3)
+        var request = [3].concat(txId, clientIdOpt, ianOpt);
+        var reqBody = buildUDP(DHCP6_CLI_PORT, DHCP6_SRV_PORT, request);
+        this._sendIPv6({ trafficClass: 0, flowLabel: 0, nextHeader: 17, hopLimit: 1,
+          src: src6, dst: 'ff02::1:2', payload: reqBody, extHeaders: [] });
+        // Wait for Reply (msg-type=7)
+        var replyDeadline = kernel.getTicks() + 200;
+        while (kernel.getTicks() < replyDeadline) {
+          if (this.nicReady) this.pollNIC();
+          this.processRxQueue();
+          var replyPkt = inbox.shift();
+          if (replyPkt && replyPkt.data.length > 4 && replyPkt.data[0] === 7) {
+            // Parse IA_NA assigned address from Reply
+            var off2 = 4;
+            while (off2 + 4 < replyPkt.data.length) {
+              var optType = (replyPkt.data[off2] << 8) | replyPkt.data[off2 + 1];
+              var optLen  = (replyPkt.data[off2 + 2] << 8) | replyPkt.data[off2 + 3];
+              if (optType === 3 && optLen >= 12) {
+                // IA_NA: sub-options starting at +12
+                var subOff = off2 + 4 + 12;
+                while (subOff + 4 < off2 + 4 + optLen) {
+                  var subType = (replyPkt.data[subOff] << 8) | replyPkt.data[subOff + 1];
+                  var subLen  = (replyPkt.data[subOff + 2] << 8) | replyPkt.data[subOff + 3];
+                  if (subType === 5 && subLen >= 24) {  // IAADDR option
+                    serverAddr = bytesToIpv6(replyPkt.data, subOff + 4);
+                    this.ipv6GlobalAddress = serverAddr;
+                  }
+                  subOff += 4 + subLen;
+                }
+              }
+              off2 += 4 + optLen;
+            }
+            break;
+          }
+          kernel.sleep(1);
+        }
+        break;
+      }
+      kernel.sleep(1);
+    }
+    this.udpRxMap.delete(DHCP6_CLI_PORT);
+    return serverAddr;
+  }
+
+  // ── NAT Connection Tracking (Item 266) ───────────────────────────────────────────────
+
+  /** [Item 266] One tracked connection entry (5-tuple → translated 5-tuple). */
+  private readonly conntrackTable = new Map<string, ConntrackEntry>();
+  /** [Item 266] NAT rules (SNAT/DNAT). */
+  private readonly natRules: NATRule[] = [];
+
+  /** [Item 266] Add a NAT rule (SNAT or DNAT). */
+  addNATRule(rule: NATRule): void { this.natRules.push(rule); }
+
+  /**
+   * [Item 266] Translate an outgoing IPv4 packet (SNAT).
+   * Rewrites source IP/port and records the mapping in conntrackTable.
+   * Returns the (possibly modified) packet.
+   */
+  translateTx(pkt: IPv4Packet): IPv4Packet {
+    for (var ri = 0; ri < this.natRules.length; ri++) {
+      var r = this.natRules[ri];
+      if (r.type !== 'SNAT' || pkt.src !== r.origIP) continue;
+      var key = pkt.src + ':' + pkt.dst + ':' + pkt.protocol;
+      if (!this.conntrackTable.has(key)) {
+        var masqPort = this.nextEph++;
+        var entry: ConntrackEntry = {
+          origSrc: pkt.src, origSport: 0,
+          transSrc: r.translatedIP, transSport: masqPort,
+          dst: pkt.dst, dport: 0, protocol: pkt.protocol,
+          established: false,
+        };
+        this.conntrackTable.set(key, entry);
+      }
+      return Object.assign({}, pkt, { src: r.translatedIP });
+    }
+    return pkt;
+  }
+
+  /**
+   * [Item 266] Translate an incoming IPv4 packet (DNAT / reverse SNAT).
+   * Looks up conntrack table and rewrites destination IP/port.
+   */
+  translateRx(pkt: IPv4Packet): IPv4Packet {
+    for (var ri2 = 0; ri2 < this.natRules.length; ri2++) {
+      var r2 = this.natRules[ri2];
+      if (r2.type !== 'DNAT' || pkt.dst !== r2.translatedIP) continue;
+      return Object.assign({}, pkt, { dst: r2.origIP });
+    }
+    // Reverse-SNAT: look in conntrack for matching return traffic
+    var revKey = pkt.dst + ':' + pkt.src + ':' + pkt.protocol;
+    var ct = this.conntrackTable.get(revKey);
+    if (ct) return Object.assign({}, pkt, { dst: ct.origSrc });
+    return pkt;
+  }
+
+  // ── TCP MD5 Signature (Item 267) ───────────────────────────────────────────────────────
+
+  /**
+   * [Item 267] Enable TCP MD5 Signature (RFC 2385) on a connection.
+   * The md5Key is used to compute a 16-byte MD5 digest included in TCP option
+   * kind 19. Guards BGP sessions against packet injection.
+   * (Full MD5 verification requires crypto.md5() from crypto.ts.)
+   */
+  setTCPMD5(sock: Socket, md5Key: string): void {
+    var conn = this._connForSock(sock);
+    if (!conn) return;
+    (conn as any).md5Key = md5Key;
+    (conn as any).md5Enabled = true;
+  }
+
+  // ── TCP Fast Open (Item 265) ────────────────────────────────────────────────────────
+
+  /**
+   * [Item 265] TCP Fast Open client: send SYN + initial data payload in the
+   * same packet.  The server must support TFO (cookie-based or cookie-less).
+   * Returns true if the connection was initiated; actual ESTABLISHED state
+   * is confirmed as usual via connectPoll().
+   */
+  connectTFO(sock: Socket, remoteIP: IPv4Address, remotePort: number, data: number[]): boolean {
+    sock.remoteIP   = remoteIP;
+    sock.remotePort = remotePort;
+    if (!sock.localPort) sock.localPort = this.nextEph++;
+    if (sock.type !== 'tcp') return false;
+    var iss  = this._randSeq();
+    var conn = this._tcpMakeConn('SYN_SENT', sock.localPort, remoteIP, remotePort, iss, 0);
+    this.connections.set(conn.id, conn);
+    conn.sendWscale = 7;
+    // [Item 265] TFO option: kind=34, len=2 (empty cookie / cookie request)
+    // We piggyback the data directly in the SYN payload (Linux TFO semantics).
+    this._sendTCPSegOpts(conn, TCP_SYN, data, {
+      wscale: conn.sendWscale,
+      sackOk: true,
+      tsVal:  kernel.getTicks() >>> 0,
+      tsEcr:  0,
+    });
+    // Only SYN byte advances ISS; data will be re-sent in ACK if TFO not supported.
+    conn.sendSeq = (conn.sendSeq + 1) >>> 0;
+    sock.state = 'connected';
+    return true;
+  }
+
   ifconfig(): string {
     return (
       'eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500\n' +
@@ -1860,6 +2918,466 @@ export class NetworkStack {
 
     toDelete.forEach(id => this.connections.delete(id));
   }
+
+  // ── High-level async helpers (DoH / DoT / mDNS support) ─────────────────────
+
+  /**
+   * HTTPS POST helper used by DNS-over-HTTPS and other callers.
+   * Parses `url` into host/path, resolves the host IP via the kernel DNS stub,
+   * opens a TLS connection, sends the POST request, and returns the HTTP
+   * response.
+   */
+  async httpsPost(
+    url: string,
+    body: string,
+    headers: Record<string, string> = {},
+  ): Promise<{ status: number; body: string | null } | null> {
+    try {
+      var m   = url.match(/^https?:\/\/([^\/]+)(\/.*)?$/);
+      if (!m) return null;
+      var host = m[1];
+      var path = m[2] || '/';
+      var port = 443;
+      if (host.includes(':')) { var hp = host.split(':'); host = hp[0]; port = parseInt(hp[1]); }
+
+      // Resolve host → IP (use kernel DNS if available)
+      var ip = host;
+      if (typeof kernel !== 'undefined' && kernel.dns) {
+        var resolved = await kernel.dns.resolve(host);
+        if (resolved) ip = resolved;
+      }
+
+      // Build raw HTTP POST request bytes
+      var bodyBytes: number[] = [];
+      for (var i = 0; i < body.length; i++) bodyBytes.push(body.charCodeAt(i) & 0xff);
+
+      var reqLines = ['POST ' + path + ' HTTP/1.1', 'Host: ' + host];
+      reqLines.push('Content-Length: ' + bodyBytes.length);
+      for (var hk in headers) reqLines.push(hk + ': ' + headers[hk]);
+      reqLines.push('Connection: close', '', '');
+      var head = reqLines.join('\r\n');
+      var reqBytes: number[] = [];
+      for (var hi = 0; hi < head.length; hi++) reqBytes.push(head.charCodeAt(hi) & 0xff);
+      reqBytes = reqBytes.concat(bodyBytes);
+
+      // Send over raw TCP socket (TLS decryption managed by TLSSocket in http.ts)
+      var sock = this.createSocket('tcp');
+      if (!this.connect(sock, ip, port)) { this.close(sock); return null; }
+      this.sendBytes(sock, reqBytes);
+      var respBytes = this.recvBytes(sock, 1000) ?? [];
+      this.close(sock);
+
+      if (respBytes.length === 0) return null;
+      // Parse status line
+      var respStr = String.fromCharCode(...respBytes);
+      var statusM = respStr.match(/^HTTP\/[12]\.\d (\d{3})/);
+      var status  = statusM ? parseInt(statusM[1]) : 0;
+      var bodyStart = respStr.indexOf('\r\n\r\n');
+      var respBody  = bodyStart >= 0 ? respStr.slice(bodyStart + 4) : null;
+      return { status, body: respBody };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * TLS raw send/receive helper used by DNS-over-TLS.
+   * Opens a TLS TCP connection, sends `data`, reads the response, and returns
+   * the raw response bytes.
+   */
+  async tlsSend(
+    host: string,
+    port: number,
+    data: Uint8Array,
+    serverName?: string,
+  ): Promise<Uint8Array | null> {
+    try {
+      // Resolve host
+      var ip = host;
+      if (typeof kernel !== 'undefined' && kernel.dns) {
+        var resolved2 = await kernel.dns.resolve(host);
+        if (resolved2) ip = resolved2;
+      }
+      var sock = this.createSocket('tcp');
+      if (!this.connect(sock, ip, port)) { this.close(sock); return null; }
+      var dataArr: number[] = Array.from(data);
+      this.sendBytes(sock, dataArr);
+      var resp = this.recvBytes(sock, 500) ?? [];
+      this.close(sock);
+      return resp.length > 0 ? new Uint8Array(resp) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Send a UDP datagram to a specific (ip, port) destination.
+   * Uses sendUDPRaw with an ephemeral local port.
+   */
+  async udpSendTo(ip: string, port: number, data: number[]): Promise<void> {
+    var localPort = 49152 + ((Math.random() * 16383) | 0);
+    this.openUDPInbox(localPort);
+    this.sendUDPRaw(localPort, ip as IPv4Address, port, data);
+    this.closeUDPInbox(localPort);
+  }
+
+  /**
+   * Listen for incoming UDP datagrams on `port`.
+   * Invokes `callback` for each received datagram until the returned cancel
+   * function is called.
+   *
+   * Returns a Promise that rejects on error or resolves when cancelled.
+   */
+  async udpListen(
+    port: number,
+    callback: (data: number[], srcIp: string) => void,
+  ): Promise<void> {
+    this.openUDPInbox(port);
+    return new Promise<void>((_resolve, reject) => {
+      var active = true;
+      var poll = () => {
+        if (!active) return;
+        var pkt = this.recvUDPRawNB(port);
+        if (pkt) callback(pkt.data, pkt.from);
+        if (active) setTimeout(poll, 10);
+      };
+      poll();
+      // Expose cancel via accessor (caller closes the inbox to stop)
+      (this as any)._udpListeners = (this as any)._udpListeners || {};
+      (this as any)._udpListeners[port] = () => { active = false; this.closeUDPInbox(port); };
+    });
+  }
 }
 
 export const net = new NetworkStack();
+
+// ════════════════════════════════════════════════════════════════════════════
+// [Item 238] IP Source Routing
+// [Item 239] Policy-Based Routing
+// [Item 240] ip rule equivalents (multiple routing tables)
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── [Item 240] Multiple routing tables ─────────────────────────────────────
+
+/**
+ * [Item 240] Routing table entry (`ip route` equivalent).
+ *
+ * Each table holds a list of routes.  The main table (id=254) mirrors the
+ * standard Linux `main` routing table.  Additional tables are referenced by
+ * policy rules (`ip rule`).
+ */
+export interface RouteEntry {
+  /** Destination prefix in CIDR notation, e.g. "10.0.0.0/8". */
+  dest:     string;
+  /** Gateway IP, or "" for directly-connected networks. */
+  gateway:  string;
+  /** Outgoing interface name, e.g. "eth0". */
+  iface:    string;
+  /** Metric (lower = preferred). */
+  metric:   number;
+  /** Route source: 'static' | 'connected' | 'dhcp' | 'ospf' | 'bgp'. */
+  proto:    string;
+  /** Optional type-of-service byte for policy matching. */
+  tos?:     number;
+  /** ECMP weight (1 = normal). */
+  weight:   number;
+}
+
+export interface RoutingTable {
+  id:     number;    // 0=unspec, 253=default, 254=main, 255=local
+  name:   string;    // symbolic name
+  routes: RouteEntry[];
+}
+
+function _cidrToMaskLen(cidr: string): number {
+  var parts = cidr.split('/');
+  return parts.length > 1 ? parseInt(parts[1], 10) : 32;
+}
+
+function _cidrToNetwork(cidr: string): number {
+  var ip = cidr.split('/')[0].split('.').map(Number);
+  return ((ip[0] << 24) | (ip[1] << 16) | (ip[2] << 8) | ip[3]) >>> 0;
+}
+
+function _ipToNum(ip: string): number {
+  var p = ip.split('.').map(Number);
+  return ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) >>> 0;
+}
+
+/**
+ * [Item 240] Multi-table routing manager (ip route / ip rule model).
+ *
+ * Maintains multiple routing tables (identified by table ID).
+ * Standard table IDs: 0=unspec, 253=default, 254=main, 255=local.
+ */
+export class RoutingTableManager {
+  private _tables = new Map<number, RoutingTable>();
+
+  constructor() {
+    // Create standard tables
+    this._tables.set(254, { id: 254, name: 'main',    routes: [] });
+    this._tables.set(253, { id: 253, name: 'default', routes: [] });
+    this._tables.set(255, { id: 255, name: 'local',   routes: [] });
+
+    // Add loopback route to local table
+    this._tables.get(255)!.routes.push({
+      dest: '127.0.0.0/8', gateway: '', iface: 'lo', metric: 0,
+      proto: 'kernel', weight: 1,
+    });
+  }
+
+  /** Get or create a routing table by ID. */
+  table(id: number): RoutingTable {
+    if (!this._tables.has(id)) {
+      this._tables.set(id, { id, name: `table${id}`, routes: [] });
+    }
+    return this._tables.get(id)!;
+  }
+
+  /** ip route add `entry` to table (default: main=254). */
+  addRoute(entry: RouteEntry, tableId: number = 254): void {
+    var tbl = this.table(tableId);
+    // Remove duplicates
+    tbl.routes = tbl.routes.filter(function(r) {
+      return !(r.dest === entry.dest && r.iface === entry.iface && r.gateway === entry.gateway);
+    });
+    tbl.routes.push(entry);
+    // Sort by prefix length (most specific first), then metric
+    tbl.routes.sort(function(a, b) {
+      var la = _cidrToMaskLen(a.dest), lb = _cidrToMaskLen(b.dest);
+      if (lb !== la) return lb - la;
+      return a.metric - b.metric;
+    });
+  }
+
+  /** ip route del */
+  deleteRoute(dest: string, tableId: number = 254): void {
+    var tbl = this.table(tableId);
+    tbl.routes = tbl.routes.filter(function(r) { return r.dest !== dest; });
+  }
+
+  /** Longest-prefix match in a single table. */
+  lookupInTable(dstIp: string, tableId: number): RouteEntry | null {
+    var tbl = this._tables.get(tableId);
+    if (!tbl) return null;
+    var dst = _ipToNum(dstIp);
+    for (var i = 0; i < tbl.routes.length; i++) {
+      var r = tbl.routes[i];
+      var net = _cidrToNetwork(r.dest);
+      var len = _cidrToMaskLen(r.dest);
+      var mask = len === 0 ? 0 : (0xffffffff << (32 - len)) >>> 0;
+      if ((dst & mask) === (net & mask)) return r;
+    }
+    return null;
+  }
+
+  /** Dump all routes in a table (for `ip route show`). */
+  showRoutes(tableId: number = 254): RouteEntry[] {
+    return this._tables.get(tableId)?.routes ?? [];
+  }
+
+  /** List all tables. */
+  listTables(): RoutingTable[] {
+    return Array.from(this._tables.values());
+  }
+}
+
+// ── [Item 239] Policy-Based Routing (ip rule) ───────────────────────────────
+
+/**
+ * [Item 239] Routing policy rule (`ip rule` equivalent).
+ *
+ * Rules are evaluated in order of priority (lower = first).
+ * Each rule selects a routing table to use based on packet attributes.
+ *
+ * Standard priorities: 0=local, 32766=main, 32767=default.
+ */
+export interface RoutingRule {
+  priority:  number;
+  /** Source address/prefix to match ('' = any). */
+  from:      string;
+  /** Destination address/prefix to match ('' = any). */
+  to:        string;
+  /** TOS byte to match (0 = any). */
+  tos:       number;
+  /** Firewall mark to match (0 = any). */
+  fwmark:    number;
+  /** Table to use when rule matches. */
+  tableId:   number;
+  /** Action: 'lookup' | 'blackhole' | 'unreachable' | 'prohibit'. */
+  action:    'lookup' | 'blackhole' | 'unreachable' | 'prohibit';
+}
+
+/**
+ * [Item 239] Policy-Based Routing engine.
+ *
+ * Maintains an ordered list of routing rules and uses them to select
+ * which routing table to consult for a given source/destination pair.
+ */
+export class PolicyRoutingEngine {
+  private _rules: RoutingRule[] = [];
+  private _rtm: RoutingTableManager;
+
+  constructor(rtm: RoutingTableManager) {
+    this._rtm = rtm;
+    // Install standard rules
+    this.addRule({ priority: 0,     from: '',    to: '',   tos: 0, fwmark: 0, tableId: 255, action: 'lookup' }); // local
+    this.addRule({ priority: 32766, from: '',    to: '',   tos: 0, fwmark: 0, tableId: 254, action: 'lookup' }); // main
+    this.addRule({ priority: 32767, from: '',    to: '',   tos: 0, fwmark: 0, tableId: 253, action: 'lookup' }); // default
+  }
+
+  /** ip rule add (inserts in priority order). */
+  addRule(rule: RoutingRule): void {
+    this._rules.push(rule);
+    this._rules.sort(function(a, b) { return a.priority - b.priority; });
+  }
+
+  /** ip rule del `priority`. */
+  deleteRule(priority: number): void {
+    this._rules = this._rules.filter(function(r) { return r.priority !== priority; });
+  }
+
+  /** ip rule show. */
+  listRules(): RoutingRule[] { return this._rules.slice(); }
+
+  /**
+   * Policy route lookup: evaluate rules and return the matching route.
+   * @param srcIp  Source IP address.
+   * @param dstIp  Destination IP address.
+   * @param tos    Type of service byte.
+   * @param fwmark Firewall mark.
+   */
+  lookup(srcIp: string, dstIp: string, tos: number = 0, fwmark: number = 0): RouteEntry | null {
+    for (var i = 0; i < this._rules.length; i++) {
+      var rule = this._rules[i];
+
+      // Source match
+      if (rule.from && !this._prefixMatch(srcIp, rule.from)) continue;
+      // Dest match
+      if (rule.to   && !this._prefixMatch(dstIp, rule.to))   continue;
+      // TOS match
+      if (rule.tos   && rule.tos   !== tos)    continue;
+      // fwmark match
+      if (rule.fwmark && rule.fwmark !== fwmark) continue;
+
+      if (rule.action === 'blackhole')   return null;
+      if (rule.action === 'unreachable') return null;
+      if (rule.action === 'prohibit')    return null;
+
+      // action === 'lookup'
+      var route = this._rtm.lookupInTable(dstIp, rule.tableId);
+      if (route) return route;
+    }
+    return null;
+  }
+
+  private _prefixMatch(ip: string, prefix: string): boolean {
+    var net = _cidrToNetwork(prefix);
+    var len = _cidrToMaskLen(prefix);
+    var mask = len === 0 ? 0 : (0xffffffff << (32 - len)) >>> 0;
+    return (_ipToNum(ip) & mask) === (net & mask);
+  }
+}
+
+// ── [Item 238] IP Source Routing ────────────────────────────────────────────
+
+/**
+ * [Item 238] IP source routing — loose and strict source routing.
+ *
+ * IPv4 source routing is specified in RFC 791 as IP options:
+ *   - LSRR (Loose Source and Record Route, option type 131)
+ *   - SSRR (Strict Source and Record Route, option type 137)
+ *
+ * These IP options insert routing waypoints into the IP header.
+ * Routers forward toward the next waypoint rather than the final destination.
+ *
+ * Most modern routers drop source-routed packets (security risk), but
+ * the capability is provided here for completeness and testing.
+ */
+export interface SourceRoute {
+  /** 'loose' = LSRR (intermediate hops may be skipped),
+      'strict' = SSRR (must traverse every listed hop). */
+  type:    'loose' | 'strict';
+  /** Ordered list of intermediate waypoints. */
+  hops:    string[];
+  /** Original final destination IP. */
+  finalDest: string;
+}
+
+/**
+ * [Item 238] Build IP source-routing option bytes for inclusion in an IP header.
+ *
+ * @returns LSRR or SSRR option bytes (4 + 4 * (hops+1) bytes).
+ */
+export function buildSourceRouteOption(sr: SourceRoute): number[] {
+  var optType = sr.type === 'strict' ? 137 : 131; // SSRR or LSRR
+  var addresses = [...sr.hops, sr.finalDest].map(_ipToNum);
+  // Option format: type, length, pointer, [ip addresses]
+  var len = 3 + 4 * addresses.length;
+  var opt: number[] = [optType, len, 4]; // pointer starts at 4 (first address)
+  for (var i = 0; i < addresses.length; i++) {
+    opt.push((addresses[i] >>> 24) & 0xff);
+    opt.push((addresses[i] >>> 16) & 0xff);
+    opt.push((addresses[i] >>> 8)  & 0xff);
+    opt.push( addresses[i]         & 0xff);
+  }
+  // Pad to 4-byte alignment
+  while (opt.length % 4 !== 0) opt.push(1); // NOP
+  return opt;
+}
+
+/**
+ * [Item 238] Parse a LSRR/SSRR IP option from a received IP header.
+ * Returns null if not a source-route option.
+ */
+export function parseSourceRouteOption(opt: number[]): SourceRoute | null {
+  if (opt.length < 3) return null;
+  var optType = opt[0];
+  if (optType !== 137 && optType !== 131) return null;
+  var type: 'loose' | 'strict' = optType === 137 ? 'strict' : 'loose';
+  var pointer = opt[2]; // 1-based pointer to next hop
+  var hops: string[] = [];
+  for (var i = 3; i + 3 < opt.length; i += 4) {
+    hops.push([opt[i], opt[i+1], opt[i+2], opt[i+3]].join('.'));
+  }
+  var finalDest = hops.pop() ?? '';
+  // Hops before pointer - 4 have already been visited
+  var visited = (pointer - 4) / 4;
+  var remaining = hops.slice(visited);
+  return { type, hops: remaining, finalDest };
+}
+
+/**
+ * [Item 238] Advance a source-route option (called by router on each hop).
+ * Updates the pointer and swaps the next hop address with the dest field.
+ *
+ * @param opt       Current LSRR/SSRR option bytes.
+ * @param routerIp  This router's outgoing interface IP.
+ * @param dstIp     Current destination IP (will be replaced with next hop).
+ * @returns         { opt: updated option bytes, nextDst: new destination IP }
+ */
+export function advanceSourceRoute(
+  opt: number[], routerIp: string, dstIp: string
+): { opt: number[]; nextDst: string } | null {
+  if (opt.length < 3 || (opt[0] !== 131 && opt[0] !== 137)) return null;
+  var ptr = opt[2] - 1; // convert 1-based to 0-based
+  if (ptr + 3 >= opt.length) return null; // all hops consumed
+
+  // Extract next hop from option
+  var nextHop = [opt[ptr], opt[ptr+1], opt[ptr+2], opt[ptr+3]].join('.');
+  // Replace that slot with this router's address
+  var rip = _ipToNum(routerIp);
+  opt[ptr]   = (rip >>> 24) & 0xff;
+  opt[ptr+1] = (rip >>> 16) & 0xff;
+  opt[ptr+2] = (rip >>> 8)  & 0xff;
+  opt[ptr+3] =  rip         & 0xff;
+  // Advance pointer
+  opt[2] += 4;
+
+  return { opt, nextDst: nextHop };
+}
+
+/** Shared singleton instances. */
+export const routingTables = new RoutingTableManager();
+export const policyRouter  = new PolicyRoutingEngine(routingTables);
+

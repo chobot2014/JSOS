@@ -154,3 +154,42 @@ export class SignalManager {
 }
 
 export const signalManager = new SignalManager();
+
+// ── Signal-as-Promise (Item 213) ──────────────────────────────────────────────
+
+/**
+ * [Item 213] Returns a Promise that resolves with the signal number when
+ * `pid` receives one of the signals in `sigNums`.
+ *
+ * Implementation: polls the SignalManager with a temporary handler.
+ * On bare-metal single-threaded QuickJS, this relies on cooperative scheduling
+ * (await / microtask drain) to advance time.  The signal must be delivered via
+ * signalManager.dispatch() while the event loop is running.
+ *
+ * Example:
+ *   const sig = await waitForSignal(proc.pid, SIGTERM, SIGINT);
+ *   if (sig === SIGTERM) cleanShutdown();
+ */
+export function waitForSignal(pid: number, ...sigNums: number[]): Promise<number> {
+  return new Promise<number>((resolve) => {
+    var originalHandlers: Map<number, import('./signals.js').SignalHandler> | null = null;
+
+    function cleanup() {
+      // Restore original handlers (re-install default if none were set)
+      if (originalHandlers) {
+        for (var [sig, h] of originalHandlers) {
+          signalManager.handle(pid, sig, h);
+        }
+      }
+    }
+
+    for (var sigN of sigNums) {
+      ((sig: number) => {
+        signalManager.handle(pid, sig, (_receivedSig: number) => {
+          cleanup();
+          resolve(sig);
+        });
+      })(sigN);
+    }
+  });
+}

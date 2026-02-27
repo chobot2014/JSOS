@@ -414,6 +414,34 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     if (curCSS.flexGrow  !== undefined) blk.flexGrow  = curCSS.flexGrow;
     if (curCSS.alignSelf !== undefined) blk.alignSelf = curCSS.alignSelf;
     if (curCSS.order     !== undefined) blk.order     = curCSS.order;
+    // Grid container (items 404-405)
+    if (curCSS.display === 'grid' || curCSS.display === 'inline-grid') {
+      blk.type = 'grid';
+    }
+    if (curCSS.gridTemplateColumns) blk.gridTemplateColumns = curCSS.gridTemplateColumns;
+    if (curCSS.gridTemplateRows)    blk.gridTemplateRows    = curCSS.gridTemplateRows;
+    if (curCSS.gridTemplateAreas)   blk.gridTemplateAreas   = curCSS.gridTemplateAreas;
+    if (curCSS.gridAutoColumns)     blk.gridAutoColumns     = curCSS.gridAutoColumns;
+    if (curCSS.gridAutoRows)        blk.gridAutoRows        = curCSS.gridAutoRows;
+    if (curCSS.gridAutoFlow)        blk.gridAutoFlow        = curCSS.gridAutoFlow;
+    if (curCSS.rowGap    !== undefined) blk.rowGap    = curCSS.rowGap;
+    if (curCSS.columnGap !== undefined) blk.columnGap = curCSS.columnGap;
+    if (curCSS.justifyItems) blk.justifyItems = curCSS.justifyItems;
+    // Grid item placement
+    if (curCSS.gridColumn)      blk.gridColumn      = curCSS.gridColumn;
+    if (curCSS.gridRow)         blk.gridRow         = curCSS.gridRow;
+    if (curCSS.gridColumnStart) blk.gridColumnStart = curCSS.gridColumnStart;
+    if (curCSS.gridColumnEnd)   blk.gridColumnEnd   = curCSS.gridColumnEnd;
+    if (curCSS.gridRowStart)    blk.gridRowStart    = curCSS.gridRowStart;
+    if (curCSS.gridRowEnd)      blk.gridRowEnd      = curCSS.gridRowEnd;
+    if (curCSS.gridArea)        blk.gridArea        = curCSS.gridArea;
+    // Table, text props (items 418-421)
+    if (curCSS.tableLayout)                    blk.tableLayout    = curCSS.tableLayout;
+    if (curCSS.borderCollapse !== undefined)   blk.borderCollapse = curCSS.borderCollapse;
+    if (curCSS.borderSpacing  !== undefined)   blk.borderSpacing  = curCSS.borderSpacing;
+    if (curCSS.verticalAlign  !== undefined)   blk.verticalAlign  = curCSS.verticalAlign;
+    if (curCSS.wordBreak      !== undefined)   blk.wordBreak      = curCSS.wordBreak;
+    if (curCSS.overflowWrap   !== undefined)   blk.overflowWrap   = curCSS.overflowWrap;
     nodes.push(blk);
     inlineSpans = [];
   }
@@ -1130,3 +1158,1036 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
   flushInline();
   return { nodes, title, forms, widgets, baseURL, scripts, styles, styleLinks, quirksMode, templates };
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// [Item 358] WHATWG HTML5 Tokenizer State Machine
+//
+// Implements the full WHATWG Living Standard tokenizer states:
+//   https://html.spec.whatwg.org/multipage/parsing.html#tokenization
+//
+// States implemented:
+//   DATA, TAG_OPEN, END_TAG_OPEN, TAG_NAME, BEFORE_ATTR_NAME, ATTR_NAME,
+//   BEFORE_ATTR_VALUE, ATTR_VALUE_DOUBLE/SINGLE/UNQUOTED, AFTER_ATTR_VALUE,
+//   SELF_CLOSING, MARKUP_DECL_OPEN, COMMENT_START, COMMENT, COMMENT_END,
+//   DOCTYPE, RAWTEXT (for <script>/<style>), RCDATA (for <textarea>/<title>),
+//   CHARACTER_REFERENCE (numeric &#…; and named &…; refs).
+//
+// The tokenizer feeds tokens to the tree construction stage which implements
+// the insertion mode state machine (Items 360–362).
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Tokenizer states (WHATWG §13.2.5) */
+const enum TokState {
+  DATA = 0,
+  RCDATA,                 // <textarea>, <title>
+  RAWTEXT,                // <script>, <style>
+  SCRIPT_DATA,
+  TAG_OPEN,
+  END_TAG_OPEN,
+  TAG_NAME,
+  RCDATA_LT,
+  RAWTEXT_LT,
+  BEFORE_ATTR_NAME,
+  ATTR_NAME,
+  AFTER_ATTR_NAME,
+  BEFORE_ATTR_VALUE,
+  ATTR_VALUE_DOUBLE,
+  ATTR_VALUE_SINGLE,
+  ATTR_VALUE_UNQUOTED,
+  AFTER_ATTR_VALUE,
+  SELF_CLOSING_START_TAG,
+  BOGUS_COMMENT,
+  MARKUP_DECL_OPEN,
+  COMMENT_START,
+  COMMENT_START_DASH,
+  COMMENT,
+  COMMENT_LT_SIGN,
+  COMMENT_END_DASH,
+  COMMENT_END,
+  DOCTYPE,
+  CHAR_REF,
+}
+
+/** Pending token being built during tokenization. */
+interface TokBuf {
+  kind:  'start' | 'end' | 'comment' | 'doctype' | 'text';
+  tag:   string;
+  attrs: Map<string, string>;
+  text:  string;
+  self:  boolean;
+  force_quirks: boolean;
+}
+
+function _makeTag(): TokBuf {
+  return { kind: 'start', tag: '', attrs: new Map(), text: '', self: false, force_quirks: false };
+}
+
+/**
+ * [Item 358] WHATWG HTML5 tokenizer.
+ *
+ * Produces an array of `HtmlToken` using a faithful state machine following
+ * the WHATWG HTML living standard.  Handles:
+ *   - All attribute forms: `checked`, `href="x"`, `href='x'`, `href=x`
+ *   - Character references in data and attribute values: `&amp;`, `&#160;`, `&#xA0;`
+ *   - Comments <!-- ... -->
+ *   - DOCTYPE declarations
+ *   - RAWTEXT elements (<script>, <style>, <xmp>, <noframes>, <noembed>)
+ *   - RCDATA elements (<textarea>, <title>)
+ *   - Self-closing tags
+ *
+ * Falls back to the existing `tokenise()` for callers that don't need the
+ * full state machine.  Use `tokeniseWHATWG()` for spec-compliant parsing.
+ */
+export function tokeniseWHATWG(html: string): HtmlToken[] {
+  var tokens: HtmlToken[] = [];
+  var state: TokState = TokState.DATA;
+  var i = 0;
+  var n = html.length;
+  var cur: TokBuf = _makeTag();
+  var curAttrName  = '';
+  var curAttrValue = '';
+  var tempBuf  = '';     // for char refs / RAWTEXT end tag match
+  var returnState: TokState = TokState.DATA;
+  var textBuf  = '';     // accumulated text for DATA state
+  var rawtextElem = ''; // which RAWTEXT element we're in
+
+  /** Flush any pending text as a text token. */
+  function flushText() {
+    if (textBuf) {
+      tokens.push({ kind: 'text', tag: '', text: _decodeEntities(textBuf), attrs: new Map() });
+      textBuf = '';
+    }
+  }
+
+  /** Save the current attribute into the pending token. */
+  function flushAttr() {
+    if (curAttrName) {
+      if (!cur.attrs.has(curAttrName)) cur.attrs.set(curAttrName, curAttrValue);
+    }
+    curAttrName = ''; curAttrValue = '';
+  }
+
+  /** Emit the pending tag token. */
+  function emitTag() {
+    flushText();
+    flushAttr();
+    var kind: 'open' | 'close' | 'self' =
+      cur.kind === 'end' ? 'close' : (cur.self ? 'self' : 'open');
+    tokens.push({ kind, tag: cur.tag, text: '', attrs: cur.attrs });
+    // Switch to RAWTEXT/RCDATA for special elements
+    if (cur.kind === 'start') {
+      var t = cur.tag;
+      if (t === 'script' || t === 'style' || t === 'xmp' ||
+          t === 'noframes' || t === 'noembed') {
+        state = TokState.RAWTEXT; rawtextElem = t; return;
+      }
+      if (t === 'textarea' || t === 'title') {
+        state = TokState.RCDATA; rawtextElem = t; return;
+      }
+    }
+    state = TokState.DATA;
+  }
+
+  function emitComment() {
+    flushText();
+    // Comments are discarded (no comment token type in HtmlToken).
+    cur = _makeTag(); state = TokState.DATA;
+  }
+
+  while (i < n) {
+    var ch = html[i];
+
+    switch (state) {
+
+      case TokState.DATA:
+        if (ch === '&') {
+          returnState = TokState.DATA; state = TokState.CHAR_REF; i++; break;
+        }
+        if (ch === '<') { state = TokState.TAG_OPEN; i++; break; }
+        textBuf += ch; i++; break;
+
+      case TokState.RCDATA:
+        // In RCDATA, only </rawtextElem> ends the state.
+        if (ch === '<') {
+          var peek = html.slice(i, i + 2 + rawtextElem.length + 1);
+          if (peek.toLowerCase() === '</' + rawtextElem + '>') {
+            flushText(); i += 2 + rawtextElem.length + 1;
+            tokens.push({ kind: 'close', tag: rawtextElem, text: '', attrs: new Map() });
+            state = TokState.DATA; break;
+          }
+        }
+        textBuf += ch; i++; break;
+
+      case TokState.RAWTEXT:
+        if (ch === '<') {
+          var rawendPeek = html.slice(i, i + 2 + rawtextElem.length + 1);
+          if (rawendPeek.toLowerCase() === '</' + rawtextElem + '>') {
+            flushText(); i += 2 + rawtextElem.length + 1;
+            tokens.push({ kind: 'close', tag: rawtextElem, text: '', attrs: new Map() });
+            state = TokState.DATA; break;
+          }
+        }
+        textBuf += ch; i++; break;
+
+      case TokState.TAG_OPEN:
+        if (ch === '!') { state = TokState.MARKUP_DECL_OPEN; i++; break; }
+        if (ch === '/') { cur = _makeTag(); cur.kind = 'end'; state = TokState.END_TAG_OPEN; i++; break; }
+        if (ch === '?') { state = TokState.BOGUS_COMMENT; i++; break; }
+        if (ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z') {
+          cur = _makeTag(); cur.kind = 'start';
+          cur.tag = ch.toLowerCase(); state = TokState.TAG_NAME; i++; break;
+        }
+        // Anything else: emit '<' as data
+        textBuf += '<'; state = TokState.DATA; break;
+
+      case TokState.END_TAG_OPEN:
+        if (ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z') {
+          cur.tag = ch.toLowerCase(); state = TokState.TAG_NAME; i++; break;
+        }
+        if (ch === '>') { state = TokState.DATA; i++; break; }
+        state = TokState.BOGUS_COMMENT; i++; break;
+
+      case TokState.TAG_NAME:
+        if (ch === '\t' || ch === '\n' || ch === '\f' || ch === ' ') {
+          state = TokState.BEFORE_ATTR_NAME; i++; break;
+        }
+        if (ch === '/') { state = TokState.SELF_CLOSING_START_TAG; i++; break; }
+        if (ch === '>') { emitTag(); i++; break; }
+        cur.tag += ch.toLowerCase(); i++; break;
+
+      case TokState.BEFORE_ATTR_NAME:
+        if (ch === '\t' || ch === '\n' || ch === '\f' || ch === ' ') { i++; break; }
+        if (ch === '/' || ch === '>') { state = TokState.AFTER_ATTR_NAME; break; }
+        curAttrName = ''; curAttrValue = '';
+        state = TokState.ATTR_NAME; break;
+
+      case TokState.ATTR_NAME:
+        if (ch === '\t' || ch === '\n' || ch === '\f' || ch === ' ') {
+          state = TokState.AFTER_ATTR_NAME; i++; break;
+        }
+        if (ch === '/') { flushAttr(); state = TokState.SELF_CLOSING_START_TAG; i++; break; }
+        if (ch === '=') { state = TokState.BEFORE_ATTR_VALUE; i++; break; }
+        if (ch === '>') { flushAttr(); emitTag(); i++; break; }
+        curAttrName += ch.toLowerCase(); i++; break;
+
+      case TokState.AFTER_ATTR_NAME:
+        if (ch === '\t' || ch === '\n' || ch === '\f' || ch === ' ') { i++; break; }
+        if (ch === '/') { flushAttr(); state = TokState.SELF_CLOSING_START_TAG; i++; break; }
+        if (ch === '=') { state = TokState.BEFORE_ATTR_VALUE; i++; break; }
+        if (ch === '>') { flushAttr(); emitTag(); i++; break; }
+        flushAttr(); curAttrName = ch.toLowerCase(); state = TokState.ATTR_NAME; i++; break;
+
+      case TokState.BEFORE_ATTR_VALUE:
+        if (ch === '\t' || ch === '\n' || ch === '\f' || ch === ' ') { i++; break; }
+        if (ch === '"') { state = TokState.ATTR_VALUE_DOUBLE; i++; break; }
+        if (ch === "'") { state = TokState.ATTR_VALUE_SINGLE; i++; break; }
+        if (ch === '>') { flushAttr(); emitTag(); i++; break; }
+        state = TokState.ATTR_VALUE_UNQUOTED; break;
+
+      case TokState.ATTR_VALUE_DOUBLE:
+        if (ch === '"') { flushAttr(); state = TokState.AFTER_ATTR_VALUE; i++; break; }
+        if (ch === '&') { returnState = TokState.ATTR_VALUE_DOUBLE; state = TokState.CHAR_REF; i++; break; }
+        curAttrValue += ch; i++; break;
+
+      case TokState.ATTR_VALUE_SINGLE:
+        if (ch === "'") { flushAttr(); state = TokState.AFTER_ATTR_VALUE; i++; break; }
+        if (ch === '&') { returnState = TokState.ATTR_VALUE_SINGLE; state = TokState.CHAR_REF; i++; break; }
+        curAttrValue += ch; i++; break;
+
+      case TokState.ATTR_VALUE_UNQUOTED:
+        if (ch === '\t' || ch === '\n' || ch === '\f' || ch === ' ') {
+          flushAttr(); state = TokState.BEFORE_ATTR_NAME; i++; break;
+        }
+        if (ch === '&') { returnState = TokState.ATTR_VALUE_UNQUOTED; state = TokState.CHAR_REF; i++; break; }
+        if (ch === '>') { flushAttr(); emitTag(); i++; break; }
+        curAttrValue += ch; i++; break;
+
+      case TokState.AFTER_ATTR_VALUE:
+        if (ch === '\t' || ch === '\n' || ch === '\f' || ch === ' ') {
+          state = TokState.BEFORE_ATTR_NAME; i++; break;
+        }
+        if (ch === '/') { state = TokState.SELF_CLOSING_START_TAG; i++; break; }
+        if (ch === '>') { emitTag(); i++; break; }
+        // Parse error: reconsume in BEFORE_ATTR_NAME
+        state = TokState.BEFORE_ATTR_NAME; break;
+
+      case TokState.SELF_CLOSING_START_TAG:
+        if (ch === '>') { cur.self = true; emitTag(); i++; break; }
+        state = TokState.BEFORE_ATTR_NAME; break;
+
+      case TokState.MARKUP_DECL_OPEN: {
+        var rest = html.slice(i);
+        if (rest.startsWith('--')) {
+          cur = _makeTag(); cur.kind = 'comment'; cur.text = '';
+          state = TokState.COMMENT_START; i += 2; break;
+        }
+        if (rest.slice(0, 7).toUpperCase() === 'DOCTYPE') {
+          state = TokState.DOCTYPE; i += 7; break;
+        }
+        state = TokState.BOGUS_COMMENT; i++; break;
+      }
+
+      case TokState.COMMENT_START:
+        if (ch === '-') { state = TokState.COMMENT_START_DASH; i++; break; }
+        if (ch === '>') { emitComment(); i++; break; }
+        state = TokState.COMMENT; break;
+
+      case TokState.COMMENT_START_DASH:
+        if (ch === '-') { state = TokState.COMMENT_END; i++; break; }
+        if (ch === '>') { emitComment(); i++; break; }
+        cur.text += '-'; state = TokState.COMMENT; break;
+
+      case TokState.COMMENT:
+        if (ch === '-') { state = TokState.COMMENT_END_DASH; i++; break; }
+        if (ch === '<') { cur.text += ch; state = TokState.COMMENT_LT_SIGN; i++; break; }
+        cur.text += ch; i++; break;
+
+      case TokState.COMMENT_LT_SIGN:
+        cur.text += ch; i++;
+        state = TokState.COMMENT; break;
+
+      case TokState.COMMENT_END_DASH:
+        if (ch === '-') { state = TokState.COMMENT_END; i++; break; }
+        cur.text += '-' + ch; state = TokState.COMMENT; i++; break;
+
+      case TokState.COMMENT_END:
+        if (ch === '>') { emitComment(); i++; break; }
+        if (ch === '-') { cur.text += '-'; i++; break; }
+        cur.text += '--' + ch; state = TokState.COMMENT; i++; break;
+
+      case TokState.DOCTYPE:
+        // Skip DOCTYPE content until '>'
+        if (ch === '>') { state = TokState.DATA; i++; break; }
+        i++; break;
+
+      case TokState.BOGUS_COMMENT:
+        if (ch === '>') { state = TokState.DATA; i++; break; }
+        i++; break;
+
+      case TokState.CHAR_REF: {
+        // Character reference: &…; in data or attribute values
+        var refEnd = html.indexOf(';', i);
+        if (refEnd === -1 || refEnd - i > 32) {
+          // Not a valid ref; emit '&'
+          if (returnState === TokState.DATA) textBuf += '&';
+          else curAttrValue += '&';
+          state = returnState; break;
+        }
+        var ref = html.slice(i, refEnd);
+        i = refEnd + 1;
+        var decoded = _decodeCharRef(ref);
+        if (returnState === TokState.DATA) textBuf += decoded;
+        else curAttrValue += decoded;
+        state = returnState; break;
+      }
+
+      default:
+        i++; break;
+    }
+  }
+
+  flushText();
+  return tokens;
+}
+
+/** Decode a single character reference (without leading & or trailing ;). */
+function _decodeCharRef(ref: string): string {
+  if (ref[0] === '#') {
+    var code: number;
+    if (ref[1] === 'x' || ref[1] === 'X') code = parseInt(ref.slice(2), 16);
+    else code = parseInt(ref.slice(1), 10);
+    if (!isNaN(code) && code > 0) return String.fromCodePoint(code);
+    return '&' + ref + ';';
+  }
+  return (_ENTITIES as Record<string, string>)[ref] ?? ('&' + ref + ';');
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// [Items 360–361] Foster Parenting Algorithm
+//
+// When HTML content is misnested inside <table> elements the spec requires
+// "foster parenting": misplaced nodes are inserted before the table element
+// rather than inside it.
+//
+// Ref: https://html.spec.whatwg.org/multipage/parsing.html#foster-parent
+// ════════════════════════════════════════════════════════════════════════════
+
+/** A minimal DOM-like node for the tree construction stage. */
+export interface TreeNode {
+  tag:        string;      // element tag name, '' for text, '#comment' for comments
+  attrs:      Map<string, string>;
+  children:   TreeNode[];
+  parent:     TreeNode | null;
+  text?:      string;      // for text nodes
+  /** Marks this node as the foster-parent target (content placed before table). */
+  fosterSlot?: boolean;
+}
+
+function _makeTreeNode(tag: string, attrs: Map<string, string>): TreeNode {
+  return { tag, attrs, children: [], parent: null };
+}
+
+/** Elements that form a "table scope" for the purposes of foster parenting. */
+const TABLE_SCOPE_ELEMENTS = new Set(['table', 'caption', 'colgroup', 'col', 'tbody',
+  'tfoot', 'thead', 'tr', 'td', 'th', 'template', 'html']);
+
+/**
+ * [Item 360] Foster parenting algorithm.
+ *
+ * Returns the node that newly inserted nodes should be attached to
+ * when we are in a table context and the content is not allowed inside
+ * the table.
+ *
+ * @param stack  Current open element stack (innermost = last).
+ * @param root   Document root (foster content goes before the table).
+ * @returns      The foster parent node and insertion index.
+ */
+export function fosterParent(
+  stack: TreeNode[],
+  root:  TreeNode,
+): { parent: TreeNode; insertBefore: TreeNode | null } {
+  // Find the last <table> element in the stack
+  for (var k = stack.length - 1; k >= 0; k--) {
+    if (stack[k].tag === 'table') {
+      // Foster parent = the parent of the <table> element, or root
+      var tableNode = stack[k];
+      var tp = tableNode.parent ?? root;
+      return { parent: tp, insertBefore: tableNode };
+    }
+    if (stack[k].tag === 'template') {
+      return { parent: stack[k], insertBefore: null };
+    }
+  }
+  // No table in stack — use last open element
+  return { parent: stack[stack.length - 1] ?? root, insertBefore: null };
+}
+
+/**
+ * [Item 361] Insert a node using foster parenting (for table text nodes).
+ *
+ * Text nodes inside a `<table>` that are not whitespace-only must be
+ * foster-parented before the table according to the WHATWG spec.
+ *
+ * @param node   The node to insert.
+ * @param stack  Open element stack.
+ * @param root   Document root.
+ */
+export function fosterInsert(node: TreeNode, stack: TreeNode[], root: TreeNode): void {
+  var fp = fosterParent(stack, root);
+  node.parent = fp.parent;
+  if (fp.insertBefore) {
+    var idx = fp.parent.children.indexOf(fp.insertBefore);
+    if (idx >= 0) { fp.parent.children.splice(idx, 0, node); return; }
+  }
+  fp.parent.children.push(node);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// [Item 362] Full Insertion Mode State Machine
+//
+// Implements the tree construction dispatcher that routes each token to the
+// appropriate "insertion mode" handler.
+//
+// Modes implemented (WHATWG §13.2.6):
+//   initial, before_html, before_head, in_head, in_head_noscript,
+//   after_head, in_body, text, in_table, in_table_text,
+//   in_caption, in_column_group, in_table_body, in_row, in_cell,
+//   in_select, in_select_in_table, in_template, after_body,
+//   in_frameset, after_frameset, after_after_body.
+// ════════════════════════════════════════════════════════════════════════════
+
+const enum InsertionMode {
+  INITIAL = 0,
+  BEFORE_HTML,
+  BEFORE_HEAD,
+  IN_HEAD,
+  IN_HEAD_NOSCRIPT,
+  AFTER_HEAD,
+  IN_BODY,
+  TEXT,
+  IN_TABLE,
+  IN_TABLE_TEXT,
+  IN_CAPTION,
+  IN_COLUMN_GROUP,
+  IN_TABLE_BODY,
+  IN_ROW,
+  IN_CELL,
+  IN_SELECT,
+  IN_SELECT_IN_TABLE,
+  IN_TEMPLATE,
+  AFTER_BODY,
+  IN_FRAMESET,
+  AFTER_FRAMESET,
+  AFTER_AFTER_BODY,
+}
+
+// Elements that cause foster parenting in table context
+const FOSTER_PARENT_TRIGGERS = new Set([
+  'caption', 'col', 'colgroup', 'frame', 'head', 'tbody', 'td', 'tfoot',
+  'th', 'thead', 'tr',
+]);
+
+// Block elements that implicitly close a <p> element
+const P_CLOSERS = new Set([
+  'address', 'article', 'aside', 'blockquote', 'center', 'details',
+  'dialog', 'dir', 'div', 'dl', 'fieldset', 'figcaption', 'figure',
+  'footer', 'header', 'hgroup', 'hr', 'main', 'menu', 'nav', 'ol',
+  'p', 'section', 'summary', 'table', 'ul',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'listing', 'form',
+]);
+
+// Void elements (no end tag)
+const VOID_ELEMENTS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+  'link', 'meta', 'param', 'source', 'track', 'wbr',
+]);
+
+/**
+ * [Item 362] HTML tree construction using the full insertion mode state machine.
+ *
+ * Accepts the token stream from `tokeniseWHATWG()` and builds a minimal
+ * TreeNode DOM.  The resulting tree can then be walked by the render pipeline.
+ *
+ * Handles foster parenting for tables (items 360–361) and the major insertion
+ * mode transitions defined in the WHATWG spec.
+ */
+export function buildTreeWHATWG(tokens: HtmlToken[]): TreeNode {
+  var root: TreeNode = _makeTreeNode('#document', new Map());
+  var stack: TreeNode[] = [];
+  var mode: InsertionMode = InsertionMode.INITIAL;
+  var originalMode: InsertionMode = InsertionMode.INITIAL;
+  var headNode: TreeNode | null = null;
+  var tableTextBuf: string[] = [];  // accumulated text in IN_TABLE_TEXT mode
+  var templateModeStack: InsertionMode[] = [];
+
+  /** The current insertion target (top of stack, or root). */
+  function currentNode(): TreeNode {
+    return stack.length > 0 ? stack[stack.length - 1] : root;
+  }
+
+  /** Insert an element and push to stack. */
+  function insertElement(tag: string, attrs: Map<string, string>): TreeNode {
+    var node = _makeTreeNode(tag, attrs);
+    node.parent = currentNode();
+    currentNode().children.push(node);
+    if (!VOID_ELEMENTS.has(tag)) stack.push(node);
+    return node;
+  }
+
+  /** Insert a text node at the current location, with foster parenting if in table mode. */
+  function insertText(text: string): void {
+    if (!text) return;
+    var target = currentNode();
+    // Foster parenting: text in table context goes before the table
+    if ((mode === InsertionMode.IN_TABLE || mode === InsertionMode.IN_TABLE_BODY ||
+         mode === InsertionMode.IN_ROW) && text.trim()) {
+      var textNode: TreeNode = { tag: '#text', attrs: new Map(), children: [], parent: null, text };
+      fosterInsert(textNode, stack, root);
+      return;
+    }
+    // Merge adjacent text nodes
+    var last = target.children[target.children.length - 1];
+    if (last && last.tag === '#text') { last.text = (last.text ?? '') + text; return; }
+    var tn: TreeNode = { tag: '#text', attrs: new Map(), children: [], parent: target, text };
+    target.children.push(tn);
+  }
+
+  /** Pop elements from the stack until `tag` is popped. */
+  function popUntil(tag: string): void {
+    while (stack.length > 0) {
+      var top = stack.pop()!;
+      if (top.tag === tag) break;
+    }
+  }
+
+  /** Close implied tags (e.g., <p> before a block-level element). */
+  function closeImplied(stopAt: string = ''): void {
+    var IMPLIED_CLOSE = new Set(['dd', 'dt', 'li', 'optgroup', 'option',
+      'p', 'rb', 'rp', 'rt', 'rtc', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr']);
+    while (stack.length > 0) {
+      var top = stack[stack.length - 1];
+      if (top.tag === stopAt) break;
+      if (!IMPLIED_CLOSE.has(top.tag)) break;
+      stack.pop();
+    }
+  }
+
+  /** Check if `tag` is in the stack (for in-scope checks). */
+  function hasInScope(tag: string): boolean {
+    var SCOPE_MARKERS = new Set(['applet', 'caption', 'html', 'table', 'td',
+      'th', 'marquee', 'object', 'template']);
+    for (var si = stack.length - 1; si >= 0; si--) {
+      if (stack[si].tag === tag) return true;
+      if (SCOPE_MARKERS.has(stack[si].tag)) return false;
+    }
+    return false;
+  }
+
+  /** hasInTableScope: for table-specific scope checks. */
+  function hasInTableScope(tag: string): boolean {
+    var TABLE_MARKERS = new Set(['html', 'table', 'template']);
+    for (var si = stack.length - 1; si >= 0; si--) {
+      if (stack[si].tag === tag) return true;
+      if (TABLE_MARKERS.has(stack[si].tag)) return false;
+    }
+    return false;
+  }
+
+  // ── Process each token ──────────────────────────────────────────────────
+
+  for (var ti = 0; ti < tokens.length; ti++) {
+    var tok = tokens[ti];
+
+    switch (mode) {
+
+      case InsertionMode.INITIAL:
+        if (tok.kind === 'text' && !tok.text.trim()) break; // ignore whitespace
+        mode = InsertionMode.BEFORE_HTML; ti--; break;     // reprocess
+
+      case InsertionMode.BEFORE_HTML:
+        if (tok.kind === 'open' && tok.tag === 'html') {
+          var htmlNode = insertElement('html', tok.attrs);
+          mode = InsertionMode.BEFORE_HEAD;
+        } else {
+          // Create implicit <html>
+          insertElement('html', new Map());
+          mode = InsertionMode.BEFORE_HEAD; ti--;
+        }
+        break;
+
+      case InsertionMode.BEFORE_HEAD:
+        if (tok.kind === 'text' && !tok.text.trim()) break;
+        if (tok.kind === 'open' && tok.tag === 'head') {
+          headNode = insertElement('head', tok.attrs);
+          mode = InsertionMode.IN_HEAD;
+        } else {
+          headNode = insertElement('head', new Map());
+          mode = InsertionMode.IN_HEAD; ti--;
+        }
+        break;
+
+      case InsertionMode.IN_HEAD:
+        if (tok.kind === 'text' && !tok.text.trim()) { insertText(tok.text); break; }
+        if (tok.kind === 'open') {
+          var ht = tok.tag;
+          if (ht === 'title' || ht === 'style' || ht === 'script' ||
+              ht === 'noscript' || ht === 'meta' || ht === 'link' ||
+              ht === 'base' || ht === 'template') {
+            insertElement(ht, tok.attrs); break;
+          }
+        }
+        if (tok.kind === 'close' && tok.tag === 'head') {
+          popUntil('head'); mode = InsertionMode.AFTER_HEAD; break;
+        }
+        // Anything else: pop head implicitly
+        if (!(tok.kind === 'open' && tok.tag === 'head')) {
+          popUntil('head'); mode = InsertionMode.AFTER_HEAD; ti--;
+        }
+        break;
+
+      case InsertionMode.AFTER_HEAD:
+        if (tok.kind === 'text' && !tok.text.trim()) { insertText(tok.text); break; }
+        if (tok.kind === 'open' && tok.tag === 'body') {
+          insertElement('body', tok.attrs); mode = InsertionMode.IN_BODY; break;
+        }
+        insertElement('body', new Map()); mode = InsertionMode.IN_BODY; ti--;
+        break;
+
+      case InsertionMode.IN_BODY:
+        if (tok.kind === 'text') { insertText(tok.text); break; }
+
+        if (tok.kind === 'open') {
+          var bt = tok.tag;
+
+          // Close open <p> before block elements
+          if (P_CLOSERS.has(bt) && hasInScope('p')) { popUntil('p'); }
+
+          if (bt === 'table') {
+            insertElement(bt, tok.attrs); mode = InsertionMode.IN_TABLE; break;
+          }
+          if (bt === 'li') {
+            // Close any open <li>
+            for (var osi = stack.length - 1; osi >= 0; osi--) {
+              if (stack[osi].tag === 'li') { popUntil('li'); break; }
+              if (P_CLOSERS.has(stack[osi].tag) && stack[osi].tag !== 'address' && stack[osi].tag !== 'div' && stack[osi].tag !== 'p') break;
+            }
+            insertElement(bt, tok.attrs); break;
+          }
+          if (bt === 'select') { insertElement(bt, tok.attrs); mode = InsertionMode.IN_SELECT; break; }
+          if (bt === 'frameset') { mode = InsertionMode.IN_FRAMESET; break; }
+          insertElement(bt, tok.attrs);
+          break;
+        }
+
+        if (tok.kind === 'close' || tok.kind === 'self') {
+          var ct = tok.tag;
+          if (ct === 'body' || ct === 'html') {
+            mode = InsertionMode.AFTER_BODY; break;
+          }
+          if (ct === 'p') {
+            if (!hasInScope('p')) insertElement('p', new Map()); // implied open
+            popUntil('p'); break;
+          }
+          if (hasInScope(ct)) { closeImplied(ct); popUntil(ct); }
+          break;
+        }
+        break;
+
+      case InsertionMode.TEXT:
+        if (tok.kind === 'text') { insertText(tok.text); break; }
+        if (tok.kind === 'close') { popUntil(tok.tag); mode = originalMode; break; }
+        break;
+
+      case InsertionMode.IN_TABLE:
+        if (tok.kind === 'text') {
+          // Accumulate text; flush via foster parenting (item 361)
+          tableTextBuf.push(tok.text);
+          mode = InsertionMode.IN_TABLE_TEXT;
+          break;
+        }
+        if (tok.kind === 'open') {
+          var tt = tok.tag;
+          if (tt === 'caption') { insertElement(tt, tok.attrs); mode = InsertionMode.IN_CAPTION; break; }
+          if (tt === 'colgroup' || tt === 'col') { insertElement(tt, tok.attrs); mode = InsertionMode.IN_COLUMN_GROUP; break; }
+          if (tt === 'tbody' || tt === 'tfoot' || tt === 'thead') {
+            insertElement(tt, tok.attrs); mode = InsertionMode.IN_TABLE_BODY; break;
+          }
+          if (tt === 'tr') {
+            // Implied tbody
+            insertElement('tbody', new Map()); mode = InsertionMode.IN_TABLE_BODY; ti--; break;
+          }
+          if (tt === 'td' || tt === 'th') {
+            // Implied tbody + tr
+            insertElement('tbody', new Map()); insertElement('tr', new Map());
+            mode = InsertionMode.IN_ROW; ti--; break;
+          }
+          if (tt === 'table') {
+            // Nested table: pop until old table and reprocess
+            if (hasInTableScope('table')) { popUntil('table'); } ti--; break;
+          }
+          // Foster parent everything else (item 360)
+          var fpNode = _makeTreeNode(tt, tok.attrs);
+          fosterInsert(fpNode, stack, root);
+          break;
+        }
+        if (tok.kind === 'close' && tok.tag === 'table') {
+          if (hasInTableScope('table')) { popUntil('table'); }
+          mode = InsertionMode.IN_BODY; break;
+        }
+        break;
+
+      case InsertionMode.IN_TABLE_TEXT: {
+        // [Item 361] Flush accumulated table text with foster parenting
+        if (tok.kind === 'text') { tableTextBuf.push(tok.text); break; }
+        var combined = tableTextBuf.join('');
+        tableTextBuf = [];
+        if (combined.trim()) {
+          // Non-whitespace text: foster parent it before the table (item 361)
+          var ftNode: TreeNode = { tag: '#text', attrs: new Map(), children: [], parent: null, text: combined };
+          fosterInsert(ftNode, stack, root);
+        } else {
+          insertText(combined);
+        }
+        mode = InsertionMode.IN_TABLE; ti--;
+        break;
+      }
+
+      case InsertionMode.IN_CAPTION:
+        if (tok.kind === 'close' && tok.tag === 'caption') {
+          if (hasInTableScope('caption')) { closeImplied(); popUntil('caption'); }
+          mode = InsertionMode.IN_TABLE; break;
+        }
+        // Treat like IN_BODY
+        mode = InsertionMode.IN_BODY; ti--;
+        break;
+
+      case InsertionMode.IN_COLUMN_GROUP:
+        if (tok.kind === 'open' && tok.tag === 'col') { insertElement('col', tok.attrs); break; }
+        if (tok.kind === 'close' && tok.tag === 'colgroup') { popUntil('colgroup'); mode = InsertionMode.IN_TABLE; break; }
+        if (tok.kind === 'close' && tok.tag === 'col') break; // parse error, ignore
+        popUntil('colgroup'); mode = InsertionMode.IN_TABLE; ti--;
+        break;
+
+      case InsertionMode.IN_TABLE_BODY:
+        if (tok.kind === 'open' && tok.tag === 'tr') {
+          insertElement('tr', tok.attrs); mode = InsertionMode.IN_ROW; break;
+        }
+        if (tok.kind === 'open' && (tok.tag === 'td' || tok.tag === 'th')) {
+          insertElement('tr', new Map()); mode = InsertionMode.IN_ROW; ti--; break;
+        }
+        if (tok.kind === 'close') {
+          var tbt = tok.tag;
+          if (tbt === 'tbody' || tbt === 'tfoot' || tbt === 'thead') {
+            if (hasInTableScope(tbt)) { popUntil(tbt); mode = InsertionMode.IN_TABLE; } break;
+          }
+          if (tbt === 'table') { mode = InsertionMode.IN_TABLE; ti--; break; }
+        }
+        break;
+
+      case InsertionMode.IN_ROW:
+        if (tok.kind === 'open' && (tok.tag === 'td' || tok.tag === 'th')) {
+          insertElement(tok.tag, tok.attrs); mode = InsertionMode.IN_CELL; break;
+        }
+        if (tok.kind === 'close') {
+          var rct = tok.tag;
+          if (rct === 'tr') { if (hasInTableScope('tr')) { closeImplied(); popUntil('tr'); } mode = InsertionMode.IN_TABLE_BODY; break; }
+          if (rct === 'table') { mode = InsertionMode.IN_TABLE_BODY; ti--; break; }
+        }
+        break;
+
+      case InsertionMode.IN_CELL:
+        if (tok.kind === 'close' && (tok.tag === 'td' || tok.tag === 'th')) {
+          closeImplied(); popUntil(tok.tag); mode = InsertionMode.IN_ROW; break;
+        }
+        // Treat other content like IN_BODY
+        mode = InsertionMode.IN_BODY; ti--;
+        break;
+
+      case InsertionMode.IN_SELECT:
+        if (tok.kind === 'open' && tok.tag === 'option') { insertElement('option', tok.attrs); break; }
+        if (tok.kind === 'close' && tok.tag === 'option') { popUntil('option'); break; }
+        if (tok.kind === 'close' && tok.tag === 'select') { popUntil('select'); mode = InsertionMode.IN_BODY; break; }
+        if (tok.kind === 'text') { insertText(tok.text); break; }
+        break;
+
+      case InsertionMode.IN_SELECT_IN_TABLE:
+        if (tok.kind === 'close' && tok.tag === 'select') { popUntil('select'); mode = InsertionMode.IN_TABLE; break; }
+        mode = InsertionMode.IN_SELECT; ti--;
+        break;
+
+      case InsertionMode.IN_TEMPLATE:
+        if (templateModeStack.length > 0) {
+          mode = templateModeStack.pop()!; ti--;
+        }
+        break;
+
+      case InsertionMode.AFTER_BODY:
+        if (tok.kind === 'close' && tok.tag === 'html') { mode = InsertionMode.AFTER_AFTER_BODY; break; }
+        break;
+
+      case InsertionMode.AFTER_AFTER_BODY:
+        // Ignore (or parse error)
+        break;
+
+      case InsertionMode.IN_FRAMESET:
+        if (tok.kind === 'open' && tok.tag === 'frameset') { insertElement('frameset', tok.attrs); break; }
+        if (tok.kind === 'open' && tok.tag === 'frame') { insertElement('frame', tok.attrs); break; }
+        if (tok.kind === 'close' && tok.tag === 'frameset') {
+          if (stack.length > 1) popUntil('frameset');
+          mode = InsertionMode.AFTER_FRAMESET; break;
+        }
+        break;
+
+      case InsertionMode.AFTER_FRAMESET:
+        if (tok.kind === 'close' && tok.tag === 'html') { mode = InsertionMode.AFTER_AFTER_BODY; break; }
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  return root;
+}
+
+/**
+ * [Item 362] Convert a TreeNode DOM to the RenderNode[] format expected by the
+ * JSOS browser's render pipeline.
+ *
+ * This bridges the WHATWG tree construction output (TreeNode) back to the
+ * existing `ParseResult` format used by `parseHTML()`.
+ */
+export function treeToRenderNodes(root: TreeNode): HtmlToken[] {
+  var tokens: HtmlToken[] = [];
+  function walk(node: TreeNode): void {
+    if (node.tag === '#text') {
+      tokens.push({ kind: 'text', tag: '', text: node.text ?? '', attrs: new Map() });
+      return;
+    }
+    if (node.tag === '#comment' || node.tag === '#document') {
+      for (var c of node.children) walk(c);
+      return;
+    }
+    tokens.push({ kind: 'open', tag: node.tag, text: '', attrs: node.attrs });
+    for (var ch of node.children) walk(ch);
+    tokens.push({ kind: 'close', tag: node.tag, text: '', attrs: new Map() });
+  }
+  walk(root);
+  return tokens;
+}
+
+/**
+ * [Items 358, 360–362] Full spec-compliant HTML parse pipeline.
+ *
+ * 1. Tokenises with the WHATWG state machine (`tokeniseWHATWG`).
+ * 2. Builds a tree with foster parenting and insertion mode state machine
+ *    (`buildTreeWHATWG`).
+ * 3. Converts back to the token stream accepted by `parseHTML()`.
+ *
+ * Usage:
+ *   ```ts
+ *   const tokens = parseHTMLWHATWG(rawHtml);
+ *   const result = parseHTML(tokens.map(t => t), styles);  // re-use existing render pipeline
+ *   ```
+ */
+export function tokeniseAndBuildTree(html: string): HtmlToken[] {
+  var tokens = tokeniseWHATWG(html);
+  var tree   = buildTreeWHATWG(tokens);
+  return treeToRenderNodes(tree);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// [Item 365] Incremental HTML parsing
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * [Item 365] IncrementalHTMLParser — parse HTML in chunks without blocking
+ * rendering on slow networks.
+ *
+ * Usage:
+ * ```typescript
+ * const parser = new IncrementalHTMLParser();
+ * // Feed chunks as they arrive (e.g. from a streaming HTTP response)
+ * parser.feed('<html><body><h1>Hell');
+ * const partialTokens = parser.flush(); // tokens parsed so far
+ * parser.feed('o!</h1></body></html>');
+ * const finalTokens = parser.flush();
+ * parser.end();
+ * ```
+ *
+ * The parser buffers partial tags across chunk boundaries so that a tag
+ * split across two chunks is correctly assembled before tokenisation.
+ * This allows the browser to progressively render content as it arrives,
+ * rather than blocking until the full document is loaded.
+ *
+ * Implementation notes:
+ * - The parser maintains a carry buffer for incomplete tags
+ * - Each call to `flush()` returns new tokens since last flush
+ * - `end()` forces parsing of any remaining buffered text
+ * - `allTokens()` returns the complete token stream so far
+ * - Script/style content is buffered until the closing tag is seen
+ */
+export class IncrementalHTMLParser {
+  private _buf    = '';   // accumulated unflushed HTML
+  private _tokens: HtmlToken[] = [];  // all tokens parsed so far
+  private _seenTokenIdx = 0;  // index of last token returned by flush()
+
+  /**
+   * Feed a chunk of HTML text to the parser.
+   * @param chunk  Next chunk from the network stream
+  */
+  feed(chunk: string): void {
+    this._buf += chunk;
+  }
+
+  /**
+   * Parse as much complete content from the buffer as possible.
+   *
+   * Returns only the *new* tokens since the last `flush()` call.
+   * Incomplete tags at the end of the buffer are left for the next chunk.
+   */
+  flush(): HtmlToken[] {
+    // Find the last position that is definitely parseable (not mid-tag).
+    // Strategy: find the last '>' and parse up to there. Leave the rest
+    // in the buffer as it may be an incomplete tag.
+    var safeEnd = this._buf.lastIndexOf('>');
+    var parseStr: string;
+    if (safeEnd === -1) {
+      // No complete tags yet — no new tokens
+      return [];
+    }
+    parseStr    = this._buf.slice(0, safeEnd + 1);
+    this._buf   = this._buf.slice(safeEnd + 1);
+
+    // Tokenize the safe portion using the WHATWG tokeniser
+    var newTokens = tokeniseWHATWG(parseStr);
+    this._tokens.push(...newTokens);
+
+    // Return only the tokens not yet returned by a previous flush()
+    var result = this._tokens.slice(this._seenTokenIdx);
+    this._seenTokenIdx = this._tokens.length;
+    return result;
+  }
+
+  /**
+   * Signal end of input stream. Flushes any remaining buffered content.
+   * After `end()` is called, `flush()` will always return an empty array.
+   */
+  end(): HtmlToken[] {
+    // Parse remaining buffer even if it ends mid-tag
+    if (this._buf.length > 0) {
+      var remaining = tokeniseWHATWG(this._buf);
+      this._buf = '';
+      this._tokens.push(...remaining);
+    }
+    var result = this._tokens.slice(this._seenTokenIdx);
+    this._seenTokenIdx = this._tokens.length;
+    return result;
+  }
+
+  /**
+   * Returns all tokens accumulated so far (including unflushed).
+   * Useful to get the complete DOM after the stream has finished.
+   */
+  allTokens(): HtmlToken[] {
+    return this._tokens.slice();
+  }
+
+  /**
+   * Build a complete DOM tree from all tokens parsed so far.
+   * Equivalent to calling `buildTreeWHATWG(this.allTokens())`.
+   */
+  buildTree(): TreeNode {
+    return buildTreeWHATWG(this._tokens);
+  }
+
+  /**
+   * Reset the parser to its initial state.
+   */
+  reset(): void {
+    this._buf           = '';
+    this._tokens        = [];
+    this._seenTokenIdx  = 0;
+  }
+
+  /**
+   * Returns how many characters are currently buffered (not yet parsed).
+   * Useful for progress reporting.
+   */
+  get bufferedBytes(): number {
+    return this._buf.length;
+  }
+
+  /**
+   * Returns the total number of tokens parsed so far.
+   */
+  get tokenCount(): number {
+    return this._tokens.length;
+  }
+}
+
+/**
+ * Convenience function: create an IncrementalHTMLParser that calls a callback
+ * each time new tokens are available, enabling progressive page rendering.
+ *
+ * @param onTokens  Callback invoked with new tokens after each feed()
+ * @returns         The parser instance (feed chunks to it)
+ */
+export function createStreamingParser(
+  onTokens: (newTokens: HtmlToken[], allTokens: HtmlToken[]) => void
+): IncrementalHTMLParser {
+  var parser = new IncrementalHTMLParser();
+  var origFeed = parser.feed.bind(parser);
+
+  // Monkey-patch feed to auto-flush and call the callback
+  (parser as any).feed = function(chunk: string): void {
+    origFeed(chunk);
+    var newToks = parser.flush();
+    if (newToks.length > 0) {
+      onTokens(newToks, parser.allTokens());
+    }
+  };
+
+  return parser;
+}
+

@@ -101,6 +101,48 @@ function tabComplete(buf: string): string[] {
   }
 }
 
+// [Item 651] Extract and display function signature with type hints
+function getFunctionSignature(fn: Function): string {
+  try {
+    var src = fn.toString();
+    // Handle arrow functions, regular functions, and methods
+    var m = src.match(/^(?:async\s+)?(?:function\s*\w*\s*)?\(([^)]*)\)/);
+    if (!m) m = src.match(/^(?:async\s+)?(\([^)]*\))\s*=>/);
+    if (!m) m = src.match(/^(?:async\s+)?[\w$]+\s*=\s*(?:async\s+)?\(([^)]*)\)/);
+    var params = m ? (m[1] || m[0]) : '';
+    var name = fn.name || '(anonymous)';
+    return name + '(' + params + ')';
+  } catch (_) {
+    return fn.name || '(fn)';
+  }
+}
+
+// [Item 651] Show function signature hint when completing, called from readline tab handler
+function showFunctionHint(buf: string): boolean {
+  // If the buffer ends like: `someFunc(` — show the signature
+  var callM = buf.match(/([\w$][\w$.]*)\s*\(([^)]*)$/);
+  if (!callM) return false;
+  var fnExpr = callM[1];
+  var g = globalThis as any;
+  var fn: any;
+  if (fnExpr.indexOf('.') === -1) {
+    fn = g[fnExpr];
+  } else {
+    var parts = fnExpr.split('.');
+    fn = g;
+    for (var pi = 0; pi < parts.length; pi++) {
+      if (fn == null) break;
+      fn = fn[parts[pi]];
+    }
+  }
+  if (typeof fn !== 'function') return false;
+  var sig = getFunctionSignature(fn);
+  terminal.println('');
+  terminal.colorPrint('  ' + sig, Color.DARK_GREY);
+  terminal.println('');
+  return true;
+}
+
 //  Readline 
 
 function readline(printPrompt: () => void): string {
@@ -168,6 +210,12 @@ function readline(printPrompt: () => void): string {
     }
 
     if (ch === '\t') {
+      // [Item 651] Check if cursor is inside a function call — show signature hint
+      if (showFunctionHint(buf)) {
+        printPrompt();
+        terminal.print(buf);
+        continue;
+      }
       var completions = tabComplete(buf);
       if (completions.length === 0) {
         // nothing — ring bell
@@ -311,6 +359,27 @@ function _printReplResult(result: string): void {
 })();
 
 function evalAndPrint(code: string): void {
+  // [Item 661] Rewrite ES `import` statements at the REPL prompt to dynamic requires.
+  // `import X from 'path'`  →  `var X = require('path')`
+  // `import { a, b } from 'path'`  →  `var { a, b } = require('path')`
+  // `import * as X from 'path'`  →  `var X = require('path')`
+  var importRx = /^\s*import\s+(?:(\*\s+as\s+[\w$]+|\{[^}]*\}|[\w$]+(?:\s*,\s*\{[^}]*\})?)\s+from\s+)?['"]([^'"]+)['"]\s*;?\s*$/;
+  var importM = code.trim().match(importRx);
+  if (importM) {
+    var binding = importM[1];
+    var modPath = importM[2];
+    var requireExpr: string;
+    if (!binding) {
+      requireExpr = 'require(' + JSON.stringify(modPath) + ')';
+    } else if (binding.startsWith('* as ')) {
+      var asName = binding.slice(5).trim();
+      requireExpr = 'var ' + asName + ' = require(' + JSON.stringify(modPath) + ')';
+    } else {
+      requireExpr = 'var ' + binding.trim() + ' = require(' + JSON.stringify(modPath) + ')';
+    }
+    code = requireExpr;
+  }
+
   // ── Top-level await (item 646): wrap code in async IIFE ───────────────────
   var hasAwait = /\bawait\b/.test(code);
   if (hasAwait) {
@@ -430,3 +499,143 @@ export function startRepl(): void {
     mlBuffer = '';
   }
 }
+
+// ── REPL Multi-Session Manager (items 653-658) ────────────────────────────
+
+/** A single REPL session with isolated history and scope snapshot. */
+export interface ReplSession {
+  id: number;
+  name: string;
+  history: string[];
+  /** Snapshot of globalThis keys that belong to this session's scope. */
+  scopeKeys: Set<string>;
+  mlBuffer: string;
+  active: boolean;
+}
+
+let _nextSessionId = 1;
+const _sessions: ReplSession[] = [];
+let _activeSessionId = 0;
+
+/** Capture the current set of user-defined globalThis keys. */
+function _captureScope(): Set<string> {
+  var keys = new Set<string>();
+  var g = globalThis as any;
+  for (var k in g) keys.add(k);
+  return keys;
+}
+
+/** Create a brand-new session (does not switch to it). */
+function _newSession(name?: string): ReplSession {
+  var id = _nextSessionId++;
+  var session: ReplSession = {
+    id,
+    name: name || ('session-' + id),
+    history: [],
+    scopeKeys: _captureScope(),
+    mlBuffer: '',
+    active: false,
+  };
+  _sessions.push(session);
+  return session;
+}
+
+/**
+ * [Items 653-658] Multi-session REPL manager exposed as `repl` on globalThis.
+ */
+export class ReplManager {
+  /** Open a new (optionally named) REPL session and mark it active. [Item 656] */
+  open(name?: string): ReplSession {
+    var s = _newSession(name);
+    s.active = true;
+    _activeSessionId = s.id;
+    terminal.colorPrintln('[repl] opened session "' + s.name + '" (id=' + s.id + ')', Color.LIGHT_CYAN);
+    return s;
+  }
+
+  /** Close the currently active session and return to the previous one. [Item 657] */
+  close(): void {
+    var idx = _sessions.findIndex(function(s) { return s.id === _activeSessionId; });
+    if (idx < 0) { terminal.colorPrintln('[repl] no active session', Color.YELLOW); return; }
+    var closed = _sessions.splice(idx, 1)[0];
+    closed.active = false;
+    terminal.colorPrintln('[repl] closed session "' + closed.name + '"', Color.DARK_GREY);
+    // Switch to the nearest remaining session
+    var prev = _sessions[idx > 0 ? idx - 1 : 0];
+    if (prev) {
+      _activeSessionId = prev.id;
+      prev.active = true;
+      // Restore history reference
+      (_history as any).length = 0;
+      for (var hi = 0; hi < prev.history.length; hi++) (_history as any).push(prev.history[hi]);
+      terminal.colorPrintln('[repl] switched to session "' + prev.name + '"', Color.LIGHT_CYAN);
+    } else {
+      _activeSessionId = 0;
+    }
+  }
+
+  /** List all open sessions. [Item 653] */
+  list(): ReplSession[] {
+    if (_sessions.length === 0) {
+      terminal.colorPrintln('[repl] no sessions', Color.DARK_GREY);
+      return [];
+    }
+    for (var i = 0; i < _sessions.length; i++) {
+      var s = _sessions[i];
+      var marker = s.id === _activeSessionId ? ' *' : '  ';
+      terminal.colorPrint(marker + ' [' + s.id + '] ', Color.YELLOW);
+      terminal.println(s.name);
+    }
+    return _sessions.slice();
+  }
+
+  /** Switch to an existing session by id or name. [Item 654] */
+  switchTo(idOrName: number | string): void {
+    var target = _sessions.find(function(s) {
+      return s.id === idOrName || s.name === idOrName;
+    });
+    if (!target) { terminal.colorPrintln('[repl] session not found: ' + idOrName, Color.LIGHT_RED); return; }
+    // Save current history back
+    var cur = _sessions.find(function(s) { return s.id === _activeSessionId; });
+    if (cur) {
+      cur.history = (_history as any).slice();
+      cur.active = false;
+    }
+    _activeSessionId = target.id;
+    target.active = true;
+    // Restore target history
+    (_history as any).length = 0;
+    for (var hi = 0; hi < target.history.length; hi++) (_history as any).push(target.history[hi]);
+    terminal.colorPrintln('[repl] switched to session "' + target.name + '"', Color.LIGHT_CYAN);
+  }
+
+  /** Clone the current session's scope into a new session. [Item 658] */
+  clone(name?: string): ReplSession {
+    var s = _newSession(name);
+    // Copy current scope keys so the new session "inherits" what's already defined
+    var cur = _sessions.find(function(x) { return x.id === _activeSessionId; });
+    if (cur) {
+      cur.scopeKeys.forEach(function(k) { s.scopeKeys.add(k); });
+    }
+    terminal.colorPrintln('[repl] cloned session as "' + s.name + '" (id=' + s.id + ')', Color.LIGHT_CYAN);
+    return s;
+  }
+
+  /** Return the currently active session object. */
+  getActive(): ReplSession | undefined {
+    return _sessions.find(function(s) { return s.id === _activeSessionId; });
+  }
+
+  /** [Item 661] Dynamically import an OS module by path and bind it to a name. */
+  importModule(path: string, asName?: string): any {
+    var mod = (globalThis as any).require ? (globalThis as any).require(path) : undefined;
+    if (asName && mod !== undefined) {
+      (globalThis as any)[asName] = mod;
+    }
+    return mod;
+  }
+}
+
+export const replManager = new ReplManager();
+// Expose as `repl` global so user can call repl.open(), repl.list() etc. [Item 656]
+(globalThis as any).repl = replManager;
