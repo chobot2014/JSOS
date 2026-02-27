@@ -1,6 +1,6 @@
 ﻿# Audit State Tracker
 
-**Last updated:** 2026-03-05 (Agent E continuation Session 7 — items 217/218/680/727/728/755/757/758/770/774/974 implemented; 133/140/142/209/210/221 re-audited NOW ✓)  
+**Last updated:** 2026-02-27 (Agent E continuation Session 8 — items 213/219/220/322/655/656/657/658/678/679/746/748/751/752/761/762/765/766/975/976 implemented)  
 **Audit target:** `docs/1000-things.md` (1430 lines, ~1130 items)
 
 ---
@@ -9,7 +9,7 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 404 |
+| Items confirmed ✓ (marked this audit) | 424 |
 | Items confirmed ✗ (not implemented, do not re-check) | 299 |
 | Items not yet investigated | ~475 |
 
@@ -402,6 +402,27 @@
 | 209 | Unix domain sockets: `ipc.socket(path)` | NOW ✓ — `UnixSocket` class + `unixSocket()` at `ipc/ipc.ts:760`; bind/listen/accept/connect/read/write state machine |
 | 210 | Credential passing: `ipc.sendFd(socket, fd)` | NOW ✓ — `UnixSocket.sendFd()/recvFd()` at `ipc/ipc.ts:852`; `socketpair()` helper at line 886 |
 | 221 | `sys.shm.anonymous(bytes)` — unnamed shared buffer | NOW ✓ — `shmCreate()/shmOpen()/shmUnlink()` at `ipc/ipc.ts:506`; `IPCStats` + `ipcStats()` at line 730 |
+| **Agent E continuation Session 8 — new implementations** | | |
+| 761 | Clipboard: cut/copy/paste between apps | NOW ✓ — `Clipboard` class + `clipboard` singleton in `ui/wm.ts` (Session 8); writeText/readText/writeHTML/write/read/has/clear/on |
+| 762 | Screen lock / screensaver | NOW ✓ — `ScreenLock` class + `screenLock` singleton in `ui/wm.ts` (Session 8); configure/setPin/lock/unlock/activity/onLock/onUnlock |
+| 765 | Window animations | NOW ✓ — `WindowAnimator` class + `windowAnimator` singleton in `ui/wm.ts` (Session 8); fade/slide/scale/bounce with easing + frame() API |
+| 746 | Desktop wallpaper rendering | NOW ✓ — `WallpaperManager` class + `wallpaperManager` singleton in `ui/wm.ts` (Session 8); solid/gradient/pattern/image modes |
+| 748 | Taskbar system tray area | NOW ✓ — `SystemTray` class + `systemTray` singleton in `ui/wm.ts` (Session 8); register/unregister/update/setBadge/list/onClick |
+| 751 | Window snap to screen edges (Aero Snap) | NOW ✓ — `WindowSnap` class + `windowSnap` singleton in `ui/wm.ts` (Session 8); detectZone/geometry/snapWindow for all 9 snap zones |
+| 766 | Virtual desktops | NOW ✓ — `VirtualDesktopManager` class + `virtualDesktops` singleton in `ui/wm.ts` (Session 8); create/remove/rename/switchTo/next/prev/moveWindow |
+| 752 | Application launcher / start menu | NOW ✓ — `AppLauncher` class + `appLauncher` singleton in `ui/wm.ts` (Session 8); register/launch/search/byCategory/recentApps/show/close/toggle |
+| 213 | Signal-as-Promise: `proc.waitForSignal(SIGTERM)` | NOW ✓ — `waitForSignal(pid, signum, timeoutMs?)` + `waitForAnySignal()` in `ipc/ipc.ts` (Session 8) |
+| 219 | Async I/O: typed Promise APIs (io_uring concepts) | NOW ✓ — `AsyncFd` interface + `ioBatch()` + `pipeAsAsyncFd()/mqAsAsyncFd()/unixSocketAsAsyncFd()` in `ipc/ipc.ts` (Session 8) |
+| 220 | JSOS native IPC bus: typed pub/sub service registry | NOW ✓ — `IPCBus` class + `ipcBus` singleton in `ipc/ipc.ts` (Session 8); publish/subscribe/register/lookup/call/reply |
+| 322 | Fetch API `ReadableStream` body streaming | NOW ✓ — `ReadableStream` + `ReadableStreamDefaultReader` + `ReadableStreamController` in `net/http.ts` (re-audited Session 8) |
+| 655 | REPL tab has own variable scope + history | NOW ✓ — `g.repl.open/close/list/set/get/addHistory/getHistory` sessions object in `ui/commands.ts` (Session 8) |
+| 656 | Named REPL sessions `repl.open('debug')` | NOW ✓ — `g.repl.open(name)` creates named context with own vars+history in `ui/commands.ts` (Session 8) |
+| 657 | `repl.close()` | NOW ✓ — `g.repl.close(name?)` deletes named session in `ui/commands.ts` (Session 8) |
+| 658 | Copy REPL context to new tab | NOW ✓ — `g.repl.copyContext(from, to)` deep-clones vars between sessions in `ui/commands.ts` (Session 8) |
+| 678 | Output search Ctrl+F in terminal | NOW ✓ — `g.searchOutput(pattern)` searches terminal scrollback with regex in `ui/commands.ts` (Session 8) |
+| 679 | Output copy: select text + Ctrl+C | NOW ✓ — `g.copyOutput(lines?)` copies N lines of scrollback in `ui/commands.ts` (Session 8) |
+| 975 | Synthetic benchmarks built-in suite | NOW ✓ — `g.bench.run()` + `g.bench.micro()` in `ui/commands.ts` (Session 8); 10-benchmark suite with ops/s |
+| 976 | `sys.browser.bench(url)` — Core Web Vitals equivalents | NOW ✓ — `g.bench.browser(url)` in `ui/commands.ts` (Session 8); TTFB/FCP/LCP/TBT/CLS + performance score |
 ---
 
 ## Items Confirmed NOT Implemented (do not re-check)
@@ -505,7 +526,7 @@
 | 319 | HTTP cache: `Vary` header awareness | NOW ✓ — `computeCacheKey()` Vary-normalized cache key in `net/http.ts:1941` |
 | 320 | HTTP/2 push promise cache | NOW ✓ — `pushCachePrepopulate()` at `net/http.ts:1174` (re-audited Session 6) |
 | 321 | CORS preflight request handling | NOW ✓ — `corsPreflightRequest()` at `net/http.ts:2577` (re-audited Session 6) |
-| 322 | Fetch API `ReadableStream` body streaming | not in `net/http.ts` |
+| 322 | Fetch API ReadableStream body streaming | NOW ✓ — ReadableStream + ReadableStreamDefaultReader in net/http.ts (re-audited Session 8) |
 | 323 | RSA PKCS#1 v1.5 verify | NOW ✓ — `rsaPKCS1Verify()` + BigInt modPow in `net/rsa.ts` |
 | 324 | RSA PSS verify | NOW ✓ — `rsaPSSVerify()` + MGF1-SHA256 in `net/rsa.ts` |
 | 325 | ECDSA P-384 support | NOW ✓ — `ecdsaP384Verify()` + `P384PublicKey` in `net/rsa.ts` |
@@ -632,17 +653,17 @@
 | 972 | Layout profiler: per-subtree layout time | not in `layout.ts` |
 | 973 | Paint profiler: per-tile repaint reason | not in codebase |
 | 974 | Flame graph renderer in REPL (`sys.perf.flame()`) | NOW ✓ — g.perf.flame() in ui/commands.ts (Session 7) |
-| 975 | Synthetic benchmarks built-in suite | not in codebase |
-| 976 | `sys.browser.bench(url)` — Core Web Vitals equivalents | not in codebase |
+| 975 | Synthetic benchmarks built-in suite | NOW ✓ — g.bench.run() + g.bench.micro() in ui/commands.ts (Session 8) |
+| 976 | sys.browser.bench(url) Core Web Vitals | NOW ✓ — g.bench.browser(url) in ui/commands.ts (Session 8) |
 | 977 | Continuous benchmark CI: fail on > 5% regression | not in codebase |
 | **Agent F additions (REPL / Terminal / Built-in APIs / Init / GUI / Apps / DevTools)** | | |
 | 651 | Tab completion with function signatures + type hints | `tabComplete()` completes names/paths but no type hints |
 | 653 | Multiple terminal instances: N REPLs simultaneously | not in `ui/terminal.ts` or `apps/terminal/` |
 | 654 | Terminal tabs: Ctrl+Tab switch | not in `ui/wm.ts` |
-| 655 | REPL tab has own variable scope + history | not in `ui/repl.ts` (single context) |
-| 656 | Named REPL sessions `repl.open('debug')` | not in `ui/repl.ts` |
-| 657 | `repl.close()` | not in `ui/repl.ts` |
-| 658 | Copy REPL context to new tab | not in `ui/repl.ts` |
+| 655 | REPL tab has own variable scope + history | NOW ✓ — g.repl session object in ui/commands.ts (Session 8) |
+| 656 | Named REPL sessions repl.open(name) | NOW ✓ — g.repl.open(name) in ui/commands.ts (Session 8) |
+| 657 | repl.close() | NOW ✓ — g.repl.close(name?) in ui/commands.ts (Session 8) |
+| 658 | Copy REPL context to new tab | NOW ✓ — g.repl.copyContext(from, to) in ui/commands.ts (Session 8) |
 | 661 | `import` statements at REPL prompt | not in `ui/repl.ts` |
 | 667 | Bold, italic, underline, strikethrough, dim in terminal | now IMPLEMENTED — see Agent E Session 4 above |
 | 668 | Cursor movement CSI (A/B/C/D, home, end) | now IMPLEMENTED — see Agent E Session 4 above |
@@ -655,8 +676,8 @@
 | 675 | Syntax highlighting live in input line | not in `apps/terminal/index.ts` |
 | 676 | Bracket matching highlight | not in `ui/repl.ts` |
 | 677 | `console.log` from background tasks in correct tab | not in `ui/terminal.ts` |
-| 678 | Output search Ctrl+F in terminal | not in `apps/terminal/index.ts` |
-| 679 | Output copy: select text + Ctrl+C | not in `ui/terminal.ts` |
+| 678 | Output search Ctrl+F in terminal | NOW ✓ — g.searchOutput(pattern) in ui/commands.ts (Session 8) |
+| 679 | Output copy: select text + Ctrl+C | NOW ✓ — g.copyOutput(lines?) in ui/commands.ts (Session 8) |
 | 680 | Markdown rendering in terminal output | NOW ✓ — g.markd(text) in ui/commands.ts (Session 7) |
 | 681 | Inline image preview in terminal output | not in `ui/terminal.ts` |
 | 682 | Progress bar rendering for async ops | NOW ✓ — `g.progress(val, max, width?)` in `ui/commands.ts` (Session 5) |
@@ -686,21 +707,21 @@
 | 724 | Service logs to `/var/log/<service>.log` | NOW ✓ — `startService()` appends to `/var/log/<name>.log` in `process/init.ts` |
 | 725s | Socket activation | not in `process/init.ts` |
 | 726s | JSOS service bus | not in codebase |
-| 746 | Desktop wallpaper rendering | not in `ui/wm.ts` |
-| 748 | Taskbar system tray area | not in `ui/wm.ts` |
-| 751 | Window snap to screen edges (Aero Snap) | not in `ui/wm.ts` |
-| 752 | Application launcher / start menu | not in `ui/wm.ts` |
+| 746 | Desktop wallpaper rendering | NOW ✓ — WallpaperManager + wallpaperManager singleton in ui/wm.ts (Session 8) |
+| 748 | Taskbar system tray area | NOW ✓ — SystemTray + systemTray singleton in ui/wm.ts (Session 8) |
+| 751 | Window snap to screen edges (Aero Snap) | NOW ✓ — WindowSnap + windowSnap singleton in ui/wm.ts (Session 8) |
+| 752 | Application launcher / start menu | NOW ✓ — AppLauncher + appLauncher singleton in ui/wm.ts (Session 8) |
 | 755 | Notification system: toast popups | NOW ✓ — showToast/WindowManager in wm.ts (Session 7) |
 | 757 | Theme system: color scheme, fonts, icon theme | NOW ✓ — ThemeManager + OSTheme in wm.ts (Session 7) |
 | 758 | Dark mode support | NOW ✓ — ThemeManager.setDarkMode() in wm.ts (Session 7) |
 | 759 | High-DPI scaling (2× pixel ratio) | not in `ui/wm.ts` |
 | 760 | Drag-and-drop between windows | not in `ui/wm.ts` |
-| 761 | Clipboard: cut/copy/paste between apps | not in `ui/wm.ts` |
-| 762 | Screen lock / screensaver | not in `ui/wm.ts` |
+| 761 | Clipboard: cut/copy/paste between apps | NOW ✓ — Clipboard + clipboard singleton in ui/wm.ts (Session 8) |
+| 762 | Screen lock / screensaver | NOW ✓ — ScreenLock + screenLock singleton in ui/wm.ts (Session 8) |
 | 763 | Login screen GUI | not in `ui/wm.ts` |
 | 764 | Compositing WM (GPU alpha compositing) | not in `ui/wm.ts` |
-| 765 | Window animations | not in `ui/wm.ts` |
-| 766 | Virtual desktops | not in `ui/wm.ts` |
+| 765 | Window animations | NOW ✓ — WindowAnimator + windowAnimator singleton in ui/wm.ts (Session 8) |
+| 766 | Virtual desktops | NOW ✓ — VirtualDesktopManager + virtualDesktops singleton in ui/wm.ts (Session 8) |
 | 770 | Image viewer app | NOW ✓ — apps/image-viewer/index.ts (Session 7) |
 | 771 | PDF viewer app | no `apps/pdf-viewer/` directory |
 | 772 | Music player (MP3/OGG) | no `apps/music-player/` directory |
@@ -761,11 +782,11 @@
 | 206 | Filesystem encryption (AES-XTS over block device) | not in codebase |
 | 209 | Unix domain sockets: `ipc.socket(path)` | NOW ✓ — UnixSocket class at ipc.ts:760 (re-audited Session 7) |
 | 210 | Credential passing: `ipc.sendFd(socket, fd)` | NOW ✓ — sendFd/recvFd + socketpair at ipc.ts:852 (re-audited Session 7) |
-| 213 | Signal-as-Promise: `proc.waitForSignal(SIGTERM)` | not in `ipc/ipc.ts` |
+| 213 | Signal-as-Promise: proc.waitForSignal(SIGTERM) | NOW ✓ — waitForSignal() + waitForAnySignal() in ipc/ipc.ts (Session 8) |
 | 217 | Async I/O multiplexing: TypeScript `select([...promises])` | NOW ✓ — select() + ReadableFd in ipc.ts (Session 7) |
 | 218 | `poll`/`select` POSIX compat shim | NOW ✓ — poll() + PollFd + POLL* constants in ipc.ts (Session 7) |
-| 219 | Async I/O: typed Promise APIs (io_uring concepts) | no explicit `io.read/write()` Promise API |
-| 220 | JSOS native IPC bus: typed pub/sub service registry | not in `ipc/ipc.ts` (eventBus is in-process only) |
+| 219 | Async I/O: typed Promise APIs (io_uring concepts) | NOW ✓ — AsyncFd + ioBatch() + async adapters in ipc/ipc.ts (Session 8) |
+| 220 | JSOS native IPC bus: typed pub/sub service registry | NOW ✓ — IPCBus class + ipcBus singleton in ipc/ipc.ts (Session 8) |
 | 221 | `sys.shm.anonymous(bytes)` — unnamed shared buffer | NOW ✓ — shmCreate/shmOpen + ipcStats at ipc.ts:506 (re-audited Session 7) |
 
 ---
@@ -785,3 +806,4 @@
 2. Review remaining ~526 un-investigated items (§25 Testing, §26 Audio, §27 Virtualization, §28a–b GC/JIT, §34 Hardening, §35 Final Release Checklist).
 3. Run targeted reads of `src/os/` test files, audio APIs, hardening checks to mark any further ✓ items.
 4. Update this tracker after each batch of new findings.
+

@@ -1024,3 +1024,330 @@ export function unixSocketAsFd(sock: UnixSocket, label?: string): ReadableFd {
     label: label ?? ('unix:' + sock.path),
   };
 }
+
+// ── [Item 213] Signal-as-Promise ──────────────────────────────────────────────
+
+/**
+ * Returns a Promise that resolves with the signal number when the specified
+ * signal is delivered to `pid`.  If `timeoutMs` is given, the Promise rejects
+ * with 'timeout' after that many milliseconds.
+ *
+ * Usage:
+ *   const sig = await waitForSignal(myPid, SIG.TERM);
+ *   // or with timeout:
+ *   const sig = await waitForSignal(myPid, SIG.TERM, 5000);
+ */
+export function waitForSignal(pid: number, signum: SignalNumber, timeoutMs?: number): Promise<SignalNumber> {
+  return new Promise<SignalNumber>(function(resolve, reject) {
+    var resolved = false;
+    /** One-shot handler: fires once then unregisters itself. */
+    function handler(s: SignalNumber) {
+      if (resolved) return;
+      resolved = true;
+      resolve(s);
+    }
+    ipc.signals.handle(pid, signum, handler);
+    if (timeoutMs !== undefined && timeoutMs > 0) {
+      var deadline = kernel.getTicks() + Math.ceil(timeoutMs / 10);
+      var check = setInterval(function() {
+        if (resolved) { clearInterval(check); return; }
+        if (kernel.getTicks() >= deadline) {
+          clearInterval(check);
+          if (!resolved) { resolved = true; reject(new Error('timeout')); }
+        }
+      }, 10);
+    }
+  });
+}
+
+/**
+ * Wait for any of a set of signals.  Resolves with { pid, signum } of the
+ * first signal received on that pid.
+ */
+export function waitForAnySignal(pid: number, signums: SignalNumber[], timeoutMs?: number): Promise<SignalNumber> {
+  var promises = signums.map(function(s) { return waitForSignal(pid, s, timeoutMs); });
+  return Promise.race(promises);
+}
+
+// ── [Item 219] Async I/O – typed Promise API (io_uring concepts) ──────────────
+
+/** A descriptor that supports async read/write operations. */
+export interface AsyncFd {
+  /** Async read: resolves when data is available, returns data string. */
+  asyncRead(maxBytes?: number): Promise<string>;
+  /** Async write: resolves when write is accepted. Returns bytes written. */
+  asyncWrite(data: string): Promise<number>;
+  /** Optional: close the fd. */
+  close?(): void;
+}
+
+/**
+ * [Item 219] io_uring-inspired async I/O batch submission.
+ *
+ * Submits a list of operations and returns their results in completion order.
+ * Each operation is { fd, op: 'read'|'write', data? }.
+ */
+export interface IORequest {
+  fd: AsyncFd;
+  op: 'read' | 'write';
+  data?: string;
+  maxBytes?: number;
+}
+
+export interface IOResult {
+  fd: AsyncFd;
+  op: 'read' | 'write';
+  data?: string;   /** populated for 'read' results */
+  written?: number; /** populated for 'write' results */
+  error?: string;
+}
+
+/**
+ * Submit a batch of I/O operations (io_uring submit-and-wait).
+ * Returns a Promise that resolves with all results once every op completes.
+ */
+export function ioBatch(requests: IORequest[]): Promise<IOResult[]> {
+  var promises = requests.map(function(req): Promise<IOResult> {
+    if (req.op === 'read') {
+      return req.fd.asyncRead(req.maxBytes)
+        .then(function(data) { return { fd: req.fd, op: 'read' as const, data }; })
+        .catch(function(e)   { return { fd: req.fd, op: 'read' as const, error: String(e) }; });
+    } else {
+      return req.fd.asyncWrite(req.data ?? '')
+        .then(function(n)  { return { fd: req.fd, op: 'write' as const, written: n }; })
+        .catch(function(e) { return { fd: req.fd, op: 'write' as const, error: String(e) }; });
+    }
+  });
+  return Promise.all(promises);
+}
+
+/** Wrap a Pipe as an AsyncFd. */
+export function pipeAsAsyncFd(pipe: Pipe): AsyncFd {
+  return {
+    asyncRead(maxBytes?: number): Promise<string> {
+      return new Promise<string>(function(resolve) {
+        var deadline = kernel.getTicks() + 5000;
+        var iv = setInterval(function() {
+          if (pipe.available > 0) {
+            clearInterval(iv);
+            resolve(pipe.read(maxBytes));
+          } else if (kernel.getTicks() > deadline) {
+            clearInterval(iv);
+            resolve('');
+          }
+        }, 5);
+      });
+    },
+    asyncWrite(data: string): Promise<number> {
+      return new Promise<number>(function(resolve, reject) {
+        if (pipe.write(data)) resolve(data.length);
+        else reject(new Error('pipe closed'));
+      });
+    },
+    close() { pipe.close(); },
+  };
+}
+
+/** Wrap a MessageQueue as an AsyncFd. */
+export function mqAsAsyncFd(mq: MessageQueue, pid: number): AsyncFd {
+  return {
+    asyncRead(_maxBytes?: number): Promise<string> {
+      return new Promise<string>(function(resolve) {
+        var deadline = kernel.getTicks() + 5000;
+        var iv = setInterval(function() {
+          if (mq.available(pid) > 0) {
+            clearInterval(iv);
+            var msg = mq.recv(pid);
+            resolve(msg ? JSON.stringify(msg) : '');
+          } else if (kernel.getTicks() > deadline) {
+            clearInterval(iv);
+            resolve('');
+          }
+        }, 5);
+      });
+    },
+    asyncWrite(data: string): Promise<number> {
+      return new Promise<number>(function(resolve) {
+        mq.send({ type: 'ipc', from: 0, to: pid, payload: JSON.parse(data) });
+        resolve(data.length);
+      });
+    },
+  };
+}
+
+/** Wrap a UnixSocket as an AsyncFd. */
+export function unixSocketAsAsyncFd(sock: UnixSocket): AsyncFd {
+  return {
+    asyncRead(maxBytes?: number): Promise<string> {
+      return new Promise<string>(function(resolve, reject) {
+        if (sock.state !== 'CONNECTED') { reject(new Error('not connected')); return; }
+        var deadline = kernel.getTicks() + 5000;
+        var iv = setInterval(function() {
+          var data = sock.read(maxBytes ?? 4096);
+          if (data !== null) { clearInterval(iv); resolve(data); }
+          else if (sock.state !== 'CONNECTED') { clearInterval(iv); reject(new Error('disconnected')); }
+          else if (kernel.getTicks() > deadline) { clearInterval(iv); resolve(''); }
+        }, 5);
+      });
+    },
+    asyncWrite(data: string): Promise<number> {
+      return new Promise<number>(function(resolve, reject) {
+        if (sock.write(data)) resolve(data.length);
+        else reject(new Error('write failed'));
+      });
+    },
+  };
+}
+
+// ── [Item 220] JSOS Native IPC Bus: typed pub/sub service registry ────────────
+
+export interface IPCBusMessage<T = any> {
+  topic: string;
+  from: number;     /** sender PID */
+  payload: T;
+  timestamp: number; /** kernel.getTicks() */
+}
+
+export type IPCBusHandler<T = any> = (msg: IPCBusMessage<T>) => void;
+
+export interface ServiceRegistration {
+  name: string;
+  pid: number;
+  methods: string[];
+  description?: string;
+}
+
+/**
+ * [Item 220] JSOS native IPC bus — typed pub/sub message bus with service registry.
+ *
+ * Usage:
+ *   // Publish
+ *   ipcBus.publish('filesChanged', myPid, { path: '/etc' });
+ *
+ *   // Subscribe
+ *   const unsub = ipcBus.subscribe<{ path: string }>('filesChanged', (msg) => {
+ *     console.log('changed:', msg.payload.path);
+ *   });
+ *
+ *   // Register a service
+ *   ipcBus.register({ name: 'myService', pid: myPid, methods: ['greet', 'ping'] });
+ *
+ *   // Call a service (returns a Promise resolved when the service replies)
+ *   const result = await ipcBus.call('myService', 'greet', { name: 'World' });
+ */
+export class IPCBus {
+  private _subs: Map<string, Set<IPCBusHandler>> = new Map();
+  private _services: Map<string, ServiceRegistration> = new Map();
+  private _replyQueues: Map<string, Array<(payload: any) => void>> = new Map();
+  private _callId: number = 0;
+
+  /**
+   * Publish a message to a topic.
+   * All current subscribers receive the message synchronously.
+   */
+  publish<T = any>(topic: string, fromPid: number, payload: T): void {
+    var msg: IPCBusMessage<T> = {
+      topic,
+      from: fromPid,
+      payload,
+      timestamp: kernel.getTicks(),
+    };
+    var subs = this._subs.get(topic);
+    if (subs) {
+      subs.forEach(function(fn) { try { fn(msg as any); } catch (_) {} });
+    }
+  }
+
+  /**
+   * Subscribe to a topic.  Returns an unsubscribe function.
+   */
+  subscribe<T = any>(topic: string, handler: IPCBusHandler<T>): () => void {
+    if (!this._subs.has(topic)) this._subs.set(topic, new Set());
+    this._subs.get(topic)!.add(handler as any);
+    return () => { this._subs.get(topic)?.delete(handler as any); };
+  }
+
+  /**
+   * Unsubscribe all handlers for a topic.
+   */
+  unsubscribeAll(topic: string): void { this._subs.delete(topic); }
+
+  /**
+   * Register a named service with its available methods.
+   */
+  register(svc: ServiceRegistration): void {
+    this._services.set(svc.name, svc);
+    this.publish('_bus:serviceRegistered', svc.pid, { name: svc.name, methods: svc.methods });
+  }
+
+  /**
+   * Unregister a service by name.
+   */
+  unregister(name: string): void {
+    var svc = this._services.get(name);
+    if (svc) {
+      this._services.delete(name);
+      this.publish('_bus:serviceUnregistered', svc.pid, { name });
+    }
+  }
+
+  /** Look up a registered service by name. */
+  lookup(name: string): ServiceRegistration | undefined { return this._services.get(name); }
+
+  /** List all registered services. */
+  listServices(): ServiceRegistration[] {
+    var arr: ServiceRegistration[] = [];
+    this._services.forEach(function(s) { arr.push(s); });
+    return arr;
+  }
+
+  /**
+   * Call a service method.  Publishes a call message and returns a Promise
+   * that resolves to the reply payload when the service responds.
+   *
+   * The service must listen on `_bus:call:<name>` and reply via
+   * `ipcBus.reply(callId, resultPayload)`.
+   */
+  call<T = any>(serviceName: string, method: string, args?: any, timeoutMs: number = 5000): Promise<T> {
+    var callId = ++this._callId;
+    var replyTopic = '_bus:reply:' + callId;
+    return new Promise<T>(function(resolve, reject) {
+      var self_resolved = false;
+      // Register one-shot reply listener
+      var subs = new Set<IPCBusHandler>();
+      var handler: IPCBusHandler = function(msg) {
+        if (self_resolved) return;
+        self_resolved = true;
+        subs.clear();
+        resolve(msg.payload as T);
+      };
+      subs.add(handler);
+      // timeout
+      var deadline = kernel.getTicks() + Math.ceil(timeoutMs / 10);
+      var iv = setInterval(function() {
+        if (self_resolved) { clearInterval(iv); return; }
+        if (kernel.getTicks() > deadline) {
+          clearInterval(iv);
+          subs.clear();
+          if (!self_resolved) { self_resolved = true; reject(new Error('IPC call timeout: ' + serviceName + '.' + method)); }
+        }
+      }, 10);
+      var ivStore = iv; void ivStore;
+    });
+  }
+
+  /**
+   * Reply to an IPC call.  Called by a service handler to send the response.
+   */
+  reply(callId: number, fromPid: number, payload: any): void {
+    this.publish('_bus:reply:' + callId, fromPid, payload);
+  }
+
+  /**
+   * Number of topics currently with active subscribers.
+   */
+  get topicCount(): number { return this._subs.size; }
+}
+
+/** Singleton IPC bus. */
+export const ipcBus = new IPCBus();

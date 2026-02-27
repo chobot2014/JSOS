@@ -1373,3 +1373,638 @@ export class ThemeManager {
 
 /** Singleton ThemeManager instance. */
 export const themeManager = new ThemeManager();
+
+// ── [Item 761] Clipboard ──────────────────────────────────────────────────────
+
+/**
+ * In-OS clipboard: stores text and typed data blobs.
+ */
+export class Clipboard {
+  private _text: string = '';
+  private _html: string = '';
+  private _custom: Map<string, any> = new Map();
+  private _listeners: Array<() => void> = [];
+
+  /** Write text to the clipboard. */
+  writeText(text: string): void {
+    this._text = text;
+    this._html = '';
+    this._custom.clear();
+    this._fire();
+  }
+
+  /** Read text from the clipboard. */
+  readText(): string { return this._text; }
+
+  /** Write HTML to the clipboard (also sets text). */
+  writeHTML(html: string, text?: string): void {
+    this._html = html;
+    this._text = text ?? html.replace(/<[^>]+>/g, '');
+    this._fire();
+  }
+
+  readHTML(): string { return this._html; }
+
+  /** Write arbitrary typed data. */
+  write(type: string, data: any): void {
+    this._custom.set(type, data);
+    this._fire();
+  }
+
+  read(type: string): any { return this._custom.get(type); }
+
+  has(type: string): boolean { return this._custom.has(type); }
+
+  clear(): void {
+    this._text = '';
+    this._html = '';
+    this._custom.clear();
+    this._fire();
+  }
+
+  /** Subscribe to clipboard change events. */
+  on(cb: () => void): () => void {
+    this._listeners.push(cb);
+    return () => { this._listeners = this._listeners.filter(function(l) { return l !== cb; }); };
+  }
+
+  private _fire(): void {
+    this._listeners.forEach(function(fn) { try { fn(); } catch (_) {} });
+  }
+}
+
+export const clipboard = new Clipboard();
+
+// ── [Item 762] Screen Lock / Screensaver ──────────────────────────────────────
+
+export interface ScreensaverConfig {
+  timeoutMs: number;   /** Idle ms before screensaver activates */
+  lockOnBlank: boolean;
+  message: string;
+}
+
+export class ScreenLock {
+  private _locked: boolean = false;
+  private _lastActivity: number = 0;
+  private _config: ScreensaverConfig = { timeoutMs: 300_000, lockOnBlank: true, message: 'JSOS — Press any key to unlock' };
+  private _pin: string = '';
+  private _timer: any = null;
+  private _onLock: Array<() => void> = [];
+  private _onUnlock: Array<() => void> = [];
+
+  constructor() { this._lastActivity = Date.now(); }
+
+  configure(cfg: Partial<ScreensaverConfig>): void {
+    Object.assign(this._config, cfg);
+  }
+
+  setPin(pin: string): void { this._pin = pin; }
+
+  /** Notify that user activity occurred (resets idle timer). */
+  activity(): void {
+    this._lastActivity = Date.now();
+    if (this._locked) return; // still locked until unlock()
+    this._resetTimer();
+  }
+
+  /** Lock the screen immediately. */
+  lock(): void {
+    if (this._locked) return;
+    this._locked = true;
+    if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+    this._onLock.forEach(function(fn) { try { fn(); } catch (_) {} });
+  }
+
+  /** Attempt to unlock with optional PIN. Returns true on success. */
+  unlock(pin?: string): boolean {
+    if (!this._locked) return true;
+    if (this._pin && pin !== this._pin) return false;
+    this._locked = false;
+    this._resetTimer();
+    this._onUnlock.forEach(function(fn) { try { fn(); } catch (_) {} });
+    return true;
+  }
+
+  get isLocked(): boolean { return this._locked; }
+
+  get idleMs(): number { return Date.now() - this._lastActivity; }
+
+  onLock(fn: () => void): void { this._onLock.push(fn); }
+  onUnlock(fn: () => void): void { this._onUnlock.push(fn); }
+
+  private _resetTimer(): void {
+    if (this._timer) clearTimeout(this._timer);
+    const self = this;
+    this._timer = setTimeout(function() {
+      if (self._config.lockOnBlank) self.lock();
+    }, this._config.timeoutMs);
+  }
+}
+
+export const screenLock = new ScreenLock();
+
+// ── [Item 765] Window animations ──────────────────────────────────────────────
+
+export type AnimationType = 'fade-in' | 'fade-out' | 'slide-in' | 'slide-out' | 'scale-in' | 'scale-out' | 'bounce';
+
+export interface AnimationOptions {
+  type: AnimationType;
+  durationMs?: number;  /** default 200ms */
+  easing?: 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out';
+  onComplete?: () => void;
+}
+
+export interface AnimationFrame {
+  alpha: number;   /** 0–1 */
+  scaleX: number;  /** 0–1 */
+  scaleY: number;
+  offsetX: number; /** pixels */
+  offsetY: number;
+}
+
+/** Compute a single animation frame (t = 0..1 normalised). */
+function _ease(t: number, easing: string): number {
+  switch (easing) {
+    case 'ease-in':     return t * t;
+    case 'ease-out':    return 1 - (1 - t) * (1 - t);
+    case 'ease-in-out': return t < 0.5 ? 2 * t * t : 1 - (1 - t) * (1 - t) * 2;
+    default:            return t; // linear
+  }
+}
+
+export class WindowAnimator {
+  private _active: Map<number, { opts: AnimationOptions; start: number; winId: number }> = new Map();
+  private _counter: number = 0;
+
+  /**
+   * [Item 765] Start an animation on the given windowId.
+   * Returns an animation handle (cancel with cancel(handle)).
+   */
+  start(winId: number, opts: AnimationOptions): number {
+    var id = ++this._counter;
+    this._active.set(id, { opts, start: Date.now(), winId });
+    return id;
+  }
+
+  /** Cancel a running animation. */
+  cancel(handle: number): void { this._active.delete(handle); }
+
+  /**
+   * Compute frame for a given animation handle.
+   * Call this each render tick; returns null when the animation is complete.
+   */
+  frame(handle: number): AnimationFrame | null {
+    var entry = this._active.get(handle);
+    if (!entry) return null;
+    var elapsed = Date.now() - entry.start;
+    var dur = entry.opts.durationMs ?? 200;
+    var raw = Math.min(elapsed / dur, 1);
+    var t = _ease(raw, entry.opts.easing ?? 'ease-out');
+    var f: AnimationFrame;
+    switch (entry.opts.type) {
+      case 'fade-in':    f = { alpha: t, scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 }; break;
+      case 'fade-out':   f = { alpha: 1 - t, scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 }; break;
+      case 'scale-in':   f = { alpha: t, scaleX: t, scaleY: t, offsetX: 0, offsetY: 0 }; break;
+      case 'scale-out':  f = { alpha: 1 - t, scaleX: 1 - t, scaleY: 1 - t, offsetX: 0, offsetY: 0 }; break;
+      case 'slide-in':   f = { alpha: 1, scaleX: 1, scaleY: 1, offsetX: 0, offsetY: (1 - t) * 60 }; break;
+      case 'slide-out':  f = { alpha: 1 - t, scaleX: 1, scaleY: 1, offsetX: 0, offsetY: t * 60 }; break;
+      case 'bounce': {
+        var bounce = Math.abs(Math.sin(t * Math.PI * 2.5)) * (1 - t);
+        f = { alpha: 1, scaleX: 1, scaleY: 1, offsetX: 0, offsetY: -bounce * 20 };
+        break;
+      }
+      default:  f = { alpha: 1, scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 };
+    }
+    if (raw >= 1) {
+      this._active.delete(handle);
+      if (entry.opts.onComplete) try { entry.opts.onComplete(); } catch (_) {}
+    }
+    return f;
+  }
+
+  /** Check if an animation is still running. */
+  isRunning(handle: number): boolean { return this._active.has(handle); }
+
+  /** List all active animation window IDs. */
+  activeWindows(): number[] {
+    var ids: number[] = [];
+    this._active.forEach(function(e) { ids.push(e.winId); });
+    return ids;
+  }
+}
+
+export const windowAnimator = new WindowAnimator();
+
+// ── [Item 746] Desktop Wallpaper ──────────────────────────────────────────────
+
+export type WallpaperMode = 'solid' | 'gradient' | 'pattern' | 'image';
+
+export interface WallpaperConfig {
+  mode: WallpaperMode;
+  color?: number;              /** ARGB — for solid */
+  gradientFrom?: number;
+  gradientTo?: number;
+  gradientAngle?: number;      /** degrees, default 135 */
+  pattern?: 'dots' | 'grid' | 'stripes' | 'noise';
+  patternColor?: number;
+  imageData?: number[];        /** raw ARGB pixel data */
+  imageWidth?: number;
+  imageHeight?: number;
+  imageScale?: 'stretch' | 'fit' | 'fill' | 'center' | 'tile';
+}
+
+export class WallpaperManager {
+  private _config: WallpaperConfig = { mode: 'gradient', gradientFrom: 0xFF1A1A2E, gradientTo: 0xFF16213E, gradientAngle: 135 };
+
+  /** [Item 746] Set the desktop wallpaper configuration. */
+  set(cfg: WallpaperConfig): void {
+    this._config = cfg;
+    // Mark WM dirty so it repaints the desktop background
+    if (wm) (wm as any).markDirty();
+  }
+
+  get(): WallpaperConfig { return this._config; }
+
+  /** Render wallpaper into a pixel buffer (width × height ARGB array). */
+  render(buf: Uint32Array, w: number, h: number): void {
+    var cfg = this._config;
+    if (cfg.mode === 'solid') {
+      buf.fill(cfg.color ?? 0xFF1A1A2E);
+    } else if (cfg.mode === 'gradient') {
+      var from = cfg.gradientFrom ?? 0xFF1A1A2E;
+      var to   = cfg.gradientTo   ?? 0xFF16213E;
+      var ang  = (cfg.gradientAngle ?? 135) * Math.PI / 180;
+      var cos  = Math.cos(ang); var sin = Math.sin(ang);
+      for (var y = 0; y < h; y++) {
+        for (var x = 0; x < w; x++) {
+          var t = Math.max(0, Math.min(1, (x * cos + y * sin) / (w * Math.abs(cos) + h * Math.abs(sin))));
+          var r = ((from >> 16 & 0xFF) * (1 - t) + (to >> 16 & 0xFF) * t) | 0;
+          var g = ((from >>  8 & 0xFF) * (1 - t) + (to >>  8 & 0xFF) * t) | 0;
+          var b = ((from       & 0xFF) * (1 - t) + (to       & 0xFF) * t) | 0;
+          buf[y * w + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
+        }
+      }
+    } else if (cfg.mode === 'pattern') {
+      var bg  = cfg.color        ?? 0xFF1A1A2E;
+      var pc  = cfg.patternColor ?? 0xFF2A2A4E;
+      buf.fill(bg);
+      for (var py = 0; py < h; py++) {
+        for (var px = 0; px < w; px++) {
+          var draw = false;
+          if (cfg.pattern === 'grid')    draw = (px % 32 === 0) || (py % 32 === 0);
+          else if (cfg.pattern === 'dots')  draw = (px % 24 === 12) && (py % 24 === 12);
+          else if (cfg.pattern === 'stripes') draw = ((px + py) % 32 < 4);
+          else if (cfg.pattern === 'noise')   draw = (Math.sin(px * 0.31) * Math.cos(py * 0.29) > 0.9);
+          if (draw) buf[py * w + px] = pc;
+        }
+      }
+    } else if (cfg.mode === 'image' && cfg.imageData && cfg.imageWidth && cfg.imageHeight) {
+      var iw = cfg.imageWidth, ih = cfg.imageHeight;
+      var scale = cfg.imageScale ?? 'fill';
+      for (var iy = 0; iy < h; iy++) {
+        for (var ix = 0; ix < w; ix++) {
+          var sx: number, sy: number;
+          if (scale === 'tile') { sx = ix % iw; sy = iy % ih; }
+          else if (scale === 'stretch') { sx = (ix * iw / w) | 0; sy = (iy * ih / h) | 0; }
+          else if (scale === 'center') {
+            sx = ix - (w - iw) / 2 | 0; sy = iy - (h - ih) / 2 | 0;
+            if (sx < 0 || sx >= iw || sy < 0 || sy >= ih) { buf[iy * w + ix] = cfg.color ?? 0xFF000000; continue; }
+          } else { // fill/fit fallback
+            var rr = Math.min(w / iw, h / ih); sx = (ix / rr) | 0; sy = (iy / rr) | 0;
+            if (sx >= iw || sy >= ih) { buf[iy * w + ix] = cfg.color ?? 0xFF000000; continue; }
+          }
+          buf[iy * w + ix] = cfg.imageData[sy * iw + sx] ?? 0xFF000000;
+        }
+      }
+    } else {
+      buf.fill(0xFF1A1A2E);
+    }
+  }
+}
+
+export const wallpaperManager = new WallpaperManager();
+
+// ── [Item 748] System Tray ────────────────────────────────────────────────────
+
+export interface TrayIcon {
+  id: string;
+  /** Unicode char or short ASCII label displayed in tray */
+  icon: string;
+  tooltip?: string;
+  color?: number;  /** ARGB */
+  onClick?: () => void;
+  onRightClick?: () => void;
+  badge?: string;  /** Short badge text (e.g. notification count) */
+}
+
+export class SystemTray {
+  private _icons: Map<string, TrayIcon> = new Map();
+  private _onChange: Array<() => void> = [];
+
+  /** [Item 748] Register a tray icon. */
+  register(icon: TrayIcon): void {
+    this._icons.set(icon.id, icon);
+    this._notify();
+    if (wm) (wm as any).markDirty();
+  }
+
+  /** Remove a tray icon. */
+  unregister(id: string): void {
+    this._icons.delete(id);
+    this._notify();
+    if (wm) (wm as any).markDirty();
+  }
+
+  /** Update an existing tray icon. */
+  update(id: string, updates: Partial<TrayIcon>): void {
+    var icon = this._icons.get(id);
+    if (!icon) return;
+    Object.assign(icon, updates);
+    this._notify();
+    if (wm) (wm as any).markDirty();
+  }
+
+  /** Set badge text on a tray icon (e.g. unread count). */
+  setBadge(id: string, badge: string): void { this.update(id, { badge }); }
+
+  list(): TrayIcon[] {
+    var arr: TrayIcon[] = [];
+    this._icons.forEach(function(v) { arr.push(v); });
+    return arr;
+  }
+
+  get(id: string): TrayIcon | undefined { return this._icons.get(id); }
+
+  onClick(id: string): void {
+    var icon = this._icons.get(id);
+    if (icon?.onClick) try { icon.onClick(); } catch (_) {}
+  }
+
+  onRightClick(id: string): void {
+    var icon = this._icons.get(id);
+    if (icon?.onRightClick) try { icon.onRightClick(); } catch (_) {}
+  }
+
+  onChange(fn: () => void): void { this._onChange.push(fn); }
+
+  private _notify(): void {
+    this._onChange.forEach(function(fn) { try { fn(); } catch (_) {} });
+  }
+}
+
+export const systemTray = new SystemTray();
+
+// ── [Item 751] Window Snap (Aero Snap) ────────────────────────────────────────
+
+export type SnapZone = 'left-half' | 'right-half' | 'top-half' | 'bottom-half'
+                     | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
+                     | 'maximize' | 'restore';
+
+export interface SnapGeometry { x: number; y: number; w: number; h: number; }
+
+export class WindowSnap {
+  private _taskbarHeight: number = 28;
+  private _snapThreshold: number = 20; /** pixels from edge before snap activates */
+
+  setTaskbarHeight(h: number): void { this._taskbarHeight = h; }
+  setSnapThreshold(px: number): void { this._snapThreshold = px; }
+
+  /**
+   * [Item 751] Compute snap geometry for a window being dragged to position (mouseX, mouseY).
+   * Returns null if not near a snap zone.
+   */
+  detectZone(mouseX: number, mouseY: number, screenW: number, screenH: number): SnapZone | null {
+    var th = this._snapThreshold;
+    var tb = this._taskbarHeight;
+    var usableH = screenH - tb;
+    var nearLeft  = mouseX <= th;
+    var nearRight = mouseX >= screenW - th;
+    var nearTop   = mouseY <= th;
+    var nearBot   = mouseY >= usableH - th;
+    if (nearLeft && nearTop)  return 'top-left';
+    if (nearRight && nearTop) return 'top-right';
+    if (nearLeft && nearBot)  return 'bottom-left';
+    if (nearRight && nearBot) return 'bottom-right';
+    if (nearLeft)   return 'left-half';
+    if (nearRight)  return 'right-half';
+    if (nearTop)    return 'maximize';
+    if (nearBot)    return 'bottom-half';
+    return null;
+  }
+
+  /** Compute pixel geometry for a snap zone on a given screen. */
+  geometry(zone: SnapZone, screenW: number, screenH: number): SnapGeometry {
+    var tb = this._taskbarHeight;
+    var uh = screenH - tb;
+    var hw = (screenW / 2) | 0;
+    var hh = (uh / 2) | 0;
+    switch (zone) {
+      case 'left-half':    return { x: 0,  y: 0,  w: hw,        h: uh };
+      case 'right-half':   return { x: hw, y: 0,  w: screenW - hw, h: uh };
+      case 'top-half':     return { x: 0,  y: 0,  w: screenW,   h: hh };
+      case 'bottom-half':  return { x: 0,  y: hh, w: screenW,   h: uh - hh };
+      case 'top-left':     return { x: 0,  y: 0,  w: hw,        h: hh };
+      case 'top-right':    return { x: hw, y: 0,  w: screenW - hw, h: hh };
+      case 'bottom-left':  return { x: 0,  y: hh, w: hw,        h: uh - hh };
+      case 'bottom-right': return { x: hw, y: hh, w: screenW - hw, h: uh - hh };
+      case 'maximize':     return { x: 0,  y: 0,  w: screenW,   h: uh };
+      case 'restore':      return { x: 80, y: 50, w: 640,       h: 400 };
+    }
+  }
+
+  /** Apply a snap zone to a window via the WindowManager. */
+  snapWindow(winId: number, zone: SnapZone, screenW: number, screenH: number): boolean {
+    if (!wm) return false;
+    var g = this.geometry(zone, screenW, screenH);
+    (wm as any).moveWindow(winId, g.x, g.y);
+    (wm as any).resizeWindow(winId, g.w, g.h);
+    return true;
+  }
+}
+
+export const windowSnap = new WindowSnap();
+
+// ── [Item 766] Virtual Desktops ───────────────────────────────────────────────
+
+export interface VirtualDesktop {
+  id: number;
+  name: string;
+  windows: number[];   /** window IDs on this desktop */
+}
+
+export class VirtualDesktopManager {
+  private _desktops: VirtualDesktop[] = [
+    { id: 1, name: 'Desktop 1', windows: [] },
+  ];
+  private _current: number = 1;
+  private _nextId: number = 2;
+  private _onChange: Array<() => void> = [];
+
+  /** [Item 766] Switch to virtual desktop by id. */
+  switchTo(id: number): boolean {
+    var dt = this._desktops.find(function(d) { return d.id === id; });
+    if (!dt) return false;
+    this._current = id;
+    this._onChange.forEach(function(fn) { try { fn(); } catch (_) {} });
+    if (wm) (wm as any).markDirty();
+    return true;
+  }
+
+  /** Switch to next desktop, wrapping around. */
+  next(): void {
+    var idx = this._desktops.findIndex(function(d) { return d.id === this._current; }, this);
+    var next = this._desktops[(idx + 1) % this._desktops.length];
+    this.switchTo(next.id);
+  }
+
+  /** Switch to previous desktop, wrapping around. */
+  prev(): void {
+    var idx = this._desktops.findIndex(function(d) { return d.id === this._current; }, this);
+    var prev = this._desktops[(idx - 1 + this._desktops.length) % this._desktops.length];
+    this.switchTo(prev.id);
+  }
+
+  /** Create a new virtual desktop. */
+  create(name?: string): VirtualDesktop {
+    var id = this._nextId++;
+    var dt: VirtualDesktop = { id, name: name ?? ('Desktop ' + id), windows: [] };
+    this._desktops.push(dt);
+    this._onChange.forEach(function(fn) { try { fn(); } catch (_) {} });
+    return dt;
+  }
+
+  /** Remove a desktop (moves its windows to desktop 1). */
+  remove(id: number): boolean {
+    if (id === 1) return false; // can't remove first desktop
+    var idx = this._desktops.findIndex(function(d) { return d.id === id; });
+    if (idx === -1) return false;
+    var dt = this._desktops[idx];
+    var first = this._desktops[0];
+    dt.windows.forEach(function(wid) { first.windows.push(wid); });
+    this._desktops.splice(idx, 1);
+    if (this._current === id) this._current = 1;
+    this._onChange.forEach(function(fn) { try { fn(); } catch (_) {} });
+    return true;
+  }
+
+  /** Rename a desktop. */
+  rename(id: number, name: string): void {
+    var dt = this._desktops.find(function(d) { return d.id === id; });
+    if (dt) { dt.name = name; this._onChange.forEach(function(fn) { try { fn(); } catch (_) {} }); }
+  }
+
+  /** Move a window to a specific desktop. */
+  moveWindow(winId: number, toId: number): boolean {
+    var target = this._desktops.find(function(d) { return d.id === toId; });
+    if (!target) return false;
+    this._desktops.forEach(function(d) {
+      d.windows = d.windows.filter(function(w) { return w !== winId; });
+    });
+    target.windows.push(winId);
+    return true;
+  }
+
+  /** Assign a window to the current desktop. */
+  addWindow(winId: number): void { this.moveWindow(winId, this._current); }
+
+  list(): VirtualDesktop[] { return this._desktops.slice(); }
+
+  get current(): number { return this._current; }
+
+  onChange(fn: () => void): void { this._onChange.push(fn); }
+}
+
+export const virtualDesktops = new VirtualDesktopManager();
+
+// ── [Item 752] Application Launcher / Start Menu ─────────────────────────────
+
+export interface AppEntry {
+  id: string;
+  name: string;
+  icon: string;        /** Unicode char or string */
+  category: string;
+  description?: string;
+  launch: () => void;
+}
+
+export class AppLauncher {
+  private _apps: Map<string, AppEntry> = new Map();
+  private _recent: string[] = [];      /** most recently launched app IDs */
+  private _maxRecent: number = 10;
+  private _open: boolean = false;
+  private _onChange: Array<() => void> = [];
+
+  /** [Item 752] Register an application in the launcher. */
+  register(app: AppEntry): void {
+    this._apps.set(app.id, app);
+    this._notify();
+  }
+
+  unregister(id: string): void {
+    this._apps.delete(id);
+    this._notify();
+  }
+
+  /** Launch an app by id. */
+  launch(id: string): boolean {
+    var app = this._apps.get(id);
+    if (!app) return false;
+    this._recent = [id, ...this._recent.filter(function(r) { return r !== id; })].slice(0, this._maxRecent);
+    try { app.launch(); } catch (_) {}
+    this.close();
+    return true;
+  }
+
+  /** Search apps by name or category. */
+  search(query: string): AppEntry[] {
+    var q = query.toLowerCase();
+    var results: AppEntry[] = [];
+    this._apps.forEach(function(app) {
+      if (app.name.toLowerCase().includes(q) ||
+          app.category.toLowerCase().includes(q) ||
+          (app.description && app.description.toLowerCase().includes(q))) {
+        results.push(app);
+      }
+    });
+    return results;
+  }
+
+  /** Get apps sorted by category. */
+  byCategory(): Record<string, AppEntry[]> {
+    var out: Record<string, AppEntry[]> = {};
+    this._apps.forEach(function(app) {
+      if (!out[app.category]) out[app.category] = [];
+      out[app.category].push(app);
+    });
+    return out;
+  }
+
+  /** Get recently launched apps. */
+  recentApps(): AppEntry[] {
+    return this._recent.map((id) => this._apps.get(id)).filter(Boolean) as AppEntry[];
+  }
+
+  /** Open the launcher UI. */
+  show(): void { this._open = true; this._notify(); if (wm) (wm as any).markDirty(); }
+
+  /** Close the launcher UI. */
+  close(): void { this._open = false; this._notify(); if (wm) (wm as any).markDirty(); }
+
+  toggle(): void { if (this._open) this.close(); else this.show(); }
+
+  get isOpen(): boolean { return this._open; }
+
+  list(): AppEntry[] {
+    var arr: AppEntry[] = [];
+    this._apps.forEach(function(a) { arr.push(a); });
+    return arr;
+  }
+
+  onChange(fn: () => void): void { this._onChange.push(fn); }
+
+  private _notify(): void {
+    this._onChange.forEach(function(fn) { try { fn(); } catch (_) {} });
+  }
+}
+
+export const appLauncher = new AppLauncher();
