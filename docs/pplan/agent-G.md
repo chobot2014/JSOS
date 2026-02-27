@@ -1,7 +1,23 @@
 # Agent G — IPC / Users / Security / VMM / Storage
 
-**Phase 1 agent. Read-only. Returns JSON findings.**  
-See [audit-parallel.md](audit-parallel.md) for the full protocol and return format.
+**One-shot agent. Read source files and directly mark all implemented items in `docs/1000-things.md`.**
+
+## Your Job
+
+1. Read each source file listed below.
+2. For every item in your assigned sections (§3, §5–6, §19, §33 — items 128–144, 168–221, and the users/misc sections), determine whether it is implemented.
+3. Use `multi_replace_string_in_file` to edit `docs/1000-things.md` directly — mark each implemented item with `✓` and append a short evidence note.
+4. Do **not** return JSON. Do **not** wait for a coordinator. Just implement all the markings and stop.
+
+### Mark format
+
+```
+Before: 207. [P0] IPC: anonymous pipes (pipe()) ...
+After:  207. [P0 ✓] IPC: anonymous pipes (pipe()) ... — pipe() in ipc.ts line 34
+```
+
+Only mark items you are **confident** are implemented (you found the code). Skip items you cannot confirm.  
+Items already marked `✓` — leave them alone.
 
 ---
 
@@ -90,19 +106,21 @@ src/os/storage/fat.ts      ← FAT32 implementation
 
 ---
 
-## Already Marked — Skip These
+## Already Confirmed — These Are Already Marked ✓
 
 ```
 138, 169, 170, 173, 174, 176, 180, 182, 184, 185, 186, 187, 188, 189,
 196, 207, 208, 211, 212, 214, 215
 ```
 
----
+These are already done in `docs/1000-things.md`. Skip them.
 
-## Notes from Prior Work
+## Prior Research Notes (Use as Starting Points)
 
 - **Item 169** (VFS mount/unmount): `mountVFS/unmountVFS` in `fs/filesystem.ts` ✓
 - **Item 170** (FDTable per process): `FDTable.clone()` in `core/fdtable.ts` ✓
 - **Item 184** (devfs `/dev`): `DevFS` + `DevFSMount` in `fs/dev.ts` ✓
-- **Item 181** (tmpfs): listed in config/proc but **no `TmpFS` class found**. Do NOT mark.
-- **Item 160** (real-time `proc.setScheduler()`): NOT exposed as syscall. Do NOT mark.
+- **Item 181** (tmpfs): no `TmpFS` class found — do NOT mark.
+- **Item 160** (real-time `proc.setScheduler()`): NOT exposed as syscall — do NOT mark.
+
+Now read the unconfirmed items and mark everything else that you find implemented.

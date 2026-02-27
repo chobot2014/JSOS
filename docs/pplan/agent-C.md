@@ -1,7 +1,23 @@
 # Agent C — Network Stack (TCP / UDP / IP / ARP / ICMP)
 
-**Phase 1 agent. Read-only. Returns JSON findings.**  
-See [audit-parallel.md](audit-parallel.md) for the full protocol and return format.
+**One-shot agent. Read source files and directly mark all implemented items in `docs/1000-things.md`.**
+
+## Your Job
+
+1. Read each source file listed below.
+2. For every item in your assigned sections (§7.1–7.4a, §28e — items 222–275, 922–942), determine whether it is implemented.
+3. Use `multi_replace_string_in_file` to edit `docs/1000-things.md` directly — mark each implemented item with `✓` and append a short evidence note.
+4. Do **not** return JSON. Do **not** wait for a coordinator. Just implement all the markings and stop.
+
+### Mark format
+
+```
+Before: 249. [P0] TCP: three-way handshake (SYN/SYN-ACK/ACK) ...
+After:  249. [P0 ✓] TCP: three-way handshake (SYN/SYN-ACK/ACK) ... — handleTCP() in net.ts line 512
+```
+
+Only mark items you are **confident** are implemented (you found the code). Skip items you cannot confirm.  
+Items already marked `✓` — leave them alone.
 
 ---
 
@@ -69,17 +85,17 @@ in this one file.
 
 ---
 
-## Already Marked — Skip These
+## Already Confirmed — These Are Already Marked ✓
 
 ```
 232, 234, 235, 249, 250, 251, 252, 253, 254, 261
 ```
 
----
+These are already done in `docs/1000-things.md`. Skip them.
 
-## Notes from Prior Work
+## Prior Research Notes (Use as Starting Points)
 
-- **ARP TTL/cache** (items 222–224): Prior check found simple `Map`, no TTL. Confirm.
-- **IP fragmentation** (items 229–230): NOT found in `handleIPv4()`. Very likely absent.
-- **Item 232** (ICMP echo): already `✓`.
-- **Items 249–254, 261**: already `✓`.
+- **ARP cache** (items 222–224): Prior check found simple `Map`, no TTL. Do not mark TTL expiry unless you find it.
+- **IP fragmentation** (items 229–230): NOT found in `handleIPv4()` — likely absent.
+
+Now read the unconfirmed items and mark everything else that you find implemented.

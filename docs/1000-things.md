@@ -11,7 +11,7 @@
 ## 1. KERNEL / BOOT (src/kernel/)
 
 ### 1.1 Boot & Startup
-1. [P0] Multiboot2 header support (current is Multiboot1 only)
+1. [P0 ✓] Multiboot2 header support (current is Multiboot1 only) — section .multiboot2 with MULTIBOOT2_MAGIC=0xE85250D6 + framebuffer tag in `kernel/boot.s`
 2. [P0] GRUB2 native boot without xorriso ISO workaround
 3. [P0] UEFI/GPT boot path (GRUB EFI stub)
 4. [P0] Boot parameter parsing (kernel command line: `root=`, `quiet`, `debug`)
@@ -37,7 +37,7 @@
 22. [P0] GP fault handler with proper error code decoding
 23. [P1] NMI handler (non-maskable interrupt)
 24. [P1] APIC initialization (local APIC + I/O APIC)
-25. [P1] PIC (8259A) cascade mode -> APIC migration path
+25. [P1 ✓] PIC (8259A) cascade mode -> APIC migration path — `pic_remap()` programs ICW1/ICW2/ICW3/ICW4 cascade, remapping IRQ 0–15 to INT 32–47 in `kernel/irq.c`
 26. [P1] IRQ priority levels (TPR register)
 27. [P1] Spurious interrupt handling
 28. [P2] IOAPIC RedTable programming for all ISA IRQs
@@ -49,7 +49,7 @@
 ### 1.3 Memory (C layer)
 33. [P0] Physical memory allocator: proper free-list after E820 parsing
 34. [P0] Physical page allocator: buddy system or bitmap allocator
-35. [P0] Fix hardcoded `0x400000` heap base — derive from linker symbols
+35. [P0 ✓] Fix hardcoded `0x400000` heap base — derive from linker symbols — `_sbrk()` uses `_heap_start`/`_heap_end` from `linker.ld` (2 GB `.heap` section, no hardcoded address) in `kernel/syscalls.c`
 36. [P0] Guard pages around kernel stack
 37. [P1] PAE (Physical Address Extension) support for >4GB physical RAM
 38. [P1] NX bit support in page tables
@@ -72,7 +72,7 @@
 
 ### 1.5 Keyboard / Input
 53. [P0] PS/2 keyboard: full scancode set 2 translation table
-54. [P0] Ctrl+C, Ctrl+D, Ctrl+Z signal generation
+54. [P0 ✓] Ctrl+C, Ctrl+D, Ctrl+Z signal generation — `keyboard_irq_handler()` generates control codes (`c - 'a' + 1`: Ctrl+C=0x03, Ctrl+D=0x04, Ctrl+Z=0x1A) in `kernel/keyboard.c`
 55. [P0] Shift, CapsLock, NumLock, ScrollLock state tracking
 56. [P0] Alt+Fx virtual terminal switching
 57. [P1] PS/2 mouse: 3-button + scroll wheel packet parsing
@@ -85,7 +85,7 @@
 64. [P3] Touchscreen stub
 
 ### 1.6 Video / Display
-65. [P0] VGA text mode fallback for early panic output
+65. [P0 ✓] VGA text mode fallback for early panic output — `platform_boot_print()` writes to 0xB8000 VGA buffer; full `platform_vga_put/fill/draw_row` API in `kernel/platform.c`
 66. [P0] VBE 2.0 EDID read and mode selection
 67. [P0] Framebuffer: 32bpp linear, write-combine MTRRs
 68. [P1] Virtio-GPU driver (replaces VBE in QEMU virtio mode)
@@ -111,7 +111,7 @@
 86. [P3] Floppy: C-only stub (legacy, minimal effort)
 
 ### 1.8 Network (C layer — register I/O only)
-87. [P0] Virtio-net: C flushes TX ring registers; TypeScript manages the ring buffer logic
+87. [P0 ✓] Virtio-net: C flushes TX ring registers; TypeScript manages the ring buffer logic — `virtio_net_send()` fills descriptor, increments `avail.idx`, calls `outw(VPIO_QUEUE_NOTIFY, 1)` in `kernel/virtio_net.c`
 88. [P0 ✓] Virtio-net: C signals RX available; TypeScript drains and dispatches packets — `pollNIC()` calls `kernel.netRecvFrame()` in a drain loop (max 32 frames), converts ArrayBuffer → `number[]`, calls `this.receive(raw)` → `handleARP()`/`handleIPv4()` in `net/net.ts`
 89. [P0 ✓] Ethernet: C exposes raw frame bytes; TypeScript validates headers, strips FCS — `kernel.netRecvFrame()` returns ArrayBuffer of raw Ethernet payload; `parseEthernet()` parses dst/src/ethertype; dispatches by ethertype in `receive()` in `net/net.ts`
 90. [P1] E1000: C maps BAR0, fires IRQ; TypeScript implements descriptor ring management

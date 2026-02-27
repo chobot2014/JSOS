@@ -9,7 +9,7 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 21 |
+| Items confirmed ✓ (marked this audit) | 45 |
 | Items confirmed ✗ (not implemented, do not re-check) | 20 |
 | Items not yet investigated | ~1089 |
 
@@ -58,6 +58,12 @@
 | 850 | JIT: integer type specialization | `TypeSpeculator.allIntegerLike()` in `process/qjs-jit.ts:173` |
 | 857 | JIT: 3-tier compilation | Tier-0/1/2 documented in `process/jit-os.ts:8` |
 | 863 | JIT: deopt bails to interpreter | `deopt()` in `process/qjs-jit.ts:682`; `MAX_DEOPTS=3` |
+| 1 | Multiboot2 header support | section `.multiboot2` with `MULTIBOOT2_MAGIC=0xE85250D6` in `kernel/boot.s` |
+| 25 | PIC (8259A) cascade mode | `pic_remap()` ICW1/ICW2/ICW3/ICW4 at IRQ offsets 32/40 in `kernel/irq.c` |
+| 35 | Fix hardcoded 0x400000 heap base | `_sbrk()` uses `_heap_start`/`_heap_end` linker symbols in `kernel/syscalls.c` / `linker.ld` |
+| 54 | Ctrl+C, Ctrl+D, Ctrl+Z control codes | `kb_ctrl` generates `c-'a'+1` codes in `keyboard_irq_handler()` in `kernel/keyboard.c` |
+| 65 | VGA text mode fallback for early output | `platform_boot_print()` + `platform_vga_*` API in `kernel/platform.c` |
+| 87 | Virtio-net: C flushes TX ring registers | `virtio_net_send()` with `outw(VPIO_QUEUE_NOTIFY, 1)` in `kernel/virtio_net.c` |
 
 ---
 

@@ -1,7 +1,23 @@
 # Agent E3 — Browser Layout / Rendering / Forms / Navigation / Performance
 
-**Phase 1 agent. Read-only. Returns JSON findings.**  
-See [audit-parallel.md](audit-parallel.md) for the full protocol and return format.
+**One-shot agent. Read source files and directly mark all implemented items in `docs/1000-things.md`.**
+
+## Your Job
+
+1. Read each source file listed below.
+2. For every item in your assigned sections (§11–12, §15–16, §28c–h — items 441–496, 593–641, 891–977), determine whether it is implemented.
+3. Use `multi_replace_string_in_file` to edit `docs/1000-things.md` directly — mark each implemented item with `✓` and append a short evidence note.
+4. Do **not** return JSON. Do **not** wait for a coordinator. Just implement all the markings and stop.
+
+### Mark format
+
+```
+Before: 442. [P0] Layout: block formatting context (BFC) ...
+After:  442. [P0 ✓] Layout: block formatting context (BFC) ... — BFC class in layout.ts line 88
+```
+
+Only mark items you are **confident** are implemented (you found the code). Skip items you cannot confirm.  
+Items already marked `✓` — leave them alone.
 
 ---
 
@@ -94,7 +110,7 @@ src/os/apps/browser/cache.ts     ← image cache, resource cache, HTTP cache
 
 ---
 
-## Already Marked — Skip These
+## Already Confirmed — These Are Already Marked ✓
 
 ```
 442, 444, 445, 446, 447, 450, 451, 453, 454, 456, 475, 488,
@@ -105,3 +121,5 @@ src/os/apps/browser/cache.ts     ← image cache, resource cache, HTTP cache
 943, 944, 945, 946, 953, 954, 955, 956, 957, 958, 959,
 962, 963, 964, 966, 967, 968, 971
 ```
+
+These are already done in `docs/1000-things.md`. Skip them. Focus on the gaps.

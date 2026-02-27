@@ -1,7 +1,23 @@
 # Agent D — DNS / TLS / HTTP / Crypto
 
-**Phase 1 agent. Read-only. Returns JSON findings.**  
-See [audit-parallel.md](audit-parallel.md) for the full protocol and return format.
+**One-shot agent. Read source files and directly mark all implemented items in `docs/1000-things.md`.**
+
+## Your Job
+
+1. Read each source file listed below.
+2. For every item in your assigned sections (§7.6–8 — items 276–348), determine whether it is implemented.
+3. Use `multi_replace_string_in_file` to edit `docs/1000-things.md` directly — mark each implemented item with `✓` and append a short evidence note.
+4. Do **not** return JSON. Do **not** wait for a coordinator. Just implement all the markings and stop.
+
+### Mark format
+
+```
+Before: 289. [P0] TLS: SNI extension in ClientHello ...
+After:  289. [P0 ✓] TLS: SNI extension in ClientHello ... — EXT_SNI=0x0000 in tls.ts line 46
+```
+
+Only mark items you are **confident** are implemented (you found the code). Skip items you cannot confirm.  
+Items already marked `✓` — leave them alone.
 
 ---
 
@@ -70,18 +86,20 @@ src/os/net/deflate.ts
 
 ---
 
-## Already Marked — Skip These
+## Already Confirmed — These Are Already Marked ✓
 
 ```
 276, 277, 278, 279, 281, 282, 289, 301, 302, 303, 304, 305, 306, 317, 326
 ```
 
----
+These are already done in `docs/1000-things.md`. Skip them.
 
-## Notes from Prior Work
+## Prior Research Notes (Use as Starting Points)
 
 - **Item 289** (TLS SNI): `EXT_SNI=0x0000` at `tls.ts` line 46; builder at lines 288–296.
 - **Item 306** (HTTP TE vs CE precedence): `parseHttpResponse()` checks TE first, confirmed.
 - **Item 326** (AES-GCM null on tag fail): `gcmDecrypt()` lines 352–367 in `crypto.ts`.
-- **Items 288/290–292** (session resumption, cert chain, trust store, revocation): NOT found.
-- **Items 323–325, 327** (RSA, ECDSA, ChaCha20): NOT found in `crypto.ts`.
+- **Items 288/290–292** (session resumption, cert chain, trust store, revocation): NOT found — do not mark.
+- **Items 323–325, 327** (RSA, ECDSA, ChaCha20): NOT found in `crypto.ts` — do not mark.
+
+Now read the unconfirmed items and mark everything else that you find implemented.

@@ -1,7 +1,23 @@
 # Agent E1 — Browser JS Runtime / DOM API
 
-**Phase 1 agent. Read-only. Returns JSON findings.**  
-See [audit-parallel.md](audit-parallel.md) for the full protocol and return format.
+**One-shot agent. Read source files and directly mark all implemented items in `docs/1000-things.md`.**
+
+## Your Job
+
+1. Read each source file listed below.
+2. For every item in your assigned sections (§13–14 — items 497–592), determine whether it is implemented.
+3. Use `multi_replace_string_in_file` to edit `docs/1000-things.md` directly — mark each implemented item with `✓` and append a short evidence note.
+4. Do **not** return JSON. Do **not** wait for a coordinator. Just implement all the markings and stop.
+
+### Mark format
+
+```
+Before: 510. [P0] Browser: window.location.href ...
+After:  510. [P0 ✓] Browser: window.location.href ... — LocationObject in jsruntime.ts line 234
+```
+
+Only mark items you are **confident** are implemented (you found the code). Skip items you cannot confirm.  
+Items already marked `✓` — leave them alone.
 
 ---
 
@@ -78,12 +94,9 @@ src/os/apps/browser/cache.ts       ← localStorage, sessionStorage, Cache API
 
 ---
 
-## Already Marked — Skip These
+## Already Confirmed
 
-Sections §13–14 have many already-`✓` items. Read `1000-things.md` lines 570–645
-first to identify the exact gaps before searching source files.
-
----
+Sections §13–14 already have many `✓` items in `docs/1000-things.md`. Read lines 570–645 of that file first to identify the gaps, then search source files for those specific items.
 
 ## Tips
 

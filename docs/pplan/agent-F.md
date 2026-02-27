@@ -1,7 +1,23 @@
 # Agent F — REPL / Terminal / Built-in APIs / Init / UI
 
-**Phase 1 agent. Read-only. Returns JSON findings.**  
-See [audit-parallel.md](audit-parallel.md) for the full protocol and return format.
+**One-shot agent. Read source files and directly mark all implemented items in `docs/1000-things.md`.**
+
+## Your Job
+
+1. Read each source file listed below.
+2. For every item in your assigned sections (§17–24 — items 642–802), determine whether it is implemented.
+3. Use `multi_replace_string_in_file` to edit `docs/1000-things.md` directly — mark each implemented item with `✓` and append a short evidence note.
+4. Do **not** return JSON. Do **not** wait for a coordinator. Just implement all the markings and stop.
+
+### Mark format
+
+```
+Before: 650. [P0] Terminal: ANSI SGR bold/dim/italic ...
+After:  650. [P0 ✓] Terminal: ANSI SGR bold/dim/italic ... — SGR codes in terminal.ts line 112
+```
+
+Only mark items you are **confident** are implemented (you found the code). Skip items you cannot confirm.  
+Items already marked `✓` — leave them alone.
 
 ---
 
@@ -103,7 +119,6 @@ src/os/process/init.ts    ← init/supervisor
 
 ---
 
-## Already Marked — Skip These
+## Already Confirmed
 
-Read `1000-things.md` for sections §17–24 first to see exact current state.
-Known previously-marked ranges: 642–665, 688–715 (check for gaps).
+Read `docs/1000-things.md` sections §17–24 first (lines ~645–815) to see which items already have `✓`. Known previously-marked ranges include 642–665 and 688–715. Focus your effort on the gaps.

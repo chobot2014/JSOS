@@ -1,7 +1,23 @@
 # Agent E2 — Browser HTML Parser / CSS Engine
 
-**Phase 1 agent. Read-only. Returns JSON findings.**  
-See [audit-parallel.md](audit-parallel.md) for the full protocol and return format.
+**One-shot agent. Read source files and directly mark all implemented items in `docs/1000-things.md`.**
+
+## Your Job
+
+1. Read each source file listed below.
+2. For every item in your assigned sections (§9–10 — items 349–440), determine whether it is implemented.
+3. Use `multi_replace_string_in_file` to edit `docs/1000-things.md` directly — mark each implemented item with `✓` and append a short evidence note.
+4. Do **not** return JSON. Do **not** wait for a coordinator. Just implement all the markings and stop.
+
+### Mark format
+
+```
+Before: 360. [P1] HTML: void elements (br, img, hr, input, meta, link) ...
+After:  360. [P1 ✓] HTML: void elements (br, img, hr, input, meta, link) ... — VOID_ELEMENTS set in html.ts line 18
+```
+
+Only mark items you are **confident** are implemented (you found the code). Skip items you cannot confirm.  
+Items already marked `✓` — leave them alone.
 
 ---
 
@@ -70,7 +86,7 @@ src/os/apps/browser/stylesheet.ts   ← may not exist; check
 
 ---
 
-## Already Marked — Skip These
+## Already Confirmed — These Are Already Marked ✓
 
 ```
 350, 351, 352, 353, 354, 355, 356, 359, 364, 366,
@@ -81,7 +97,7 @@ src/os/apps/browser/stylesheet.ts   ← may not exist; check
 413, 417, 431, 435, 440
 ```
 
----
+These are already done in `docs/1000-things.md`. Skip them. Focus on unconfirmed items in §9–10.
 
 ## Tips
 
