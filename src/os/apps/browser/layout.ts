@@ -270,33 +270,96 @@ function _layoutNodesImpl(
       var maxChildH = 0;
       var fxLeft    = xLeft + (nd.paddingLeft || 0);
       var fxAvail   = (nd.boxWidth ? Math.min(maxX, xLeft + nd.boxWidth) : maxX) - fxLeft - (nd.paddingRight || 0);
-      // Simple even distribution — respect flexGrow
-      var totalGrow = 0;
-      for (var fi = 0; fi < fChildren.length; fi++) totalGrow += (fChildren[fi].flexGrow || 1);
-      if (totalGrow === 0) totalGrow = fChildren.length;
-      var flexUsedGap = gap * Math.max(0, fChildren.length - 1);
-      var unitW = (fxAvail - flexUsedGap) / totalGrow;
+      // Item 403: sort by 'order' property (stable sort, default order=0)
+      var fSorted = fChildren.slice().sort(function(a, b) {
+        return (a.order ?? 0) - (b.order ?? 0);
+      });
+      // Compute base sizes: explicit boxWidth if set, else a «1 grow unit» placeholder
+      var fxUsedGap = gap * Math.max(0, fSorted.length - 1);
+      var fxFreeInit = fxAvail - fxUsedGap;
+      // Two-pass flex algorithm (simplified): compute hypothetical main sizes
+      var fBaseW: number[] = [];
+      var fHypoW: number[] = [];
+      for (var fi = 0; fi < fSorted.length; fi++) {
+        var fBase = fSorted[fi].boxWidth ?? 0; // 0 = no explicit width
+        fBaseW.push(fBase);
+      }
+      // Total explicit widths + remaining free space distributed via grow/shrink
+      var fFixedTotal = 0;
+      var flexibleCount = 0;
+      for (var fi2 = 0; fi2 < fSorted.length; fi2++) {
+        if (fBaseW[fi2] > 0) fFixedTotal += fBaseW[fi2];
+        else flexibleCount++;
+      }
+      var fFlexPool = fxFreeInit - fFixedTotal;
+      var fFreeSpace = fFlexPool;
+      if (flexibleCount > 0) fFreeSpace = fFlexPool / flexibleCount; // even base for flex items
+      // Assign hypothetical widths
+      for (var fi3 = 0; fi3 < fSorted.length; fi3++) {
+        fHypoW.push(fBaseW[fi3] > 0 ? fBaseW[fi3] : Math.max(0, fFreeSpace));
+      }
+      // Compute free space after hypothetical sizes
+      var fHypoTotal = fHypoW.reduce(function(a, b) { return a + b; }, 0);
+      var fFree = fxFreeInit - fHypoTotal;
+      // Item 402: Apply flex-grow (positive free space) or flex-shrink (negative)
+      var fFinalW: number[] = [];
+      if (fFree >= 0) {
+        // Positive free space → distribute via flex-grow
+        var totalGrow = 0;
+        for (var fi4 = 0; fi4 < fSorted.length; fi4++) totalGrow += (fSorted[fi4].flexGrow ?? 0);
+        for (var fi5 = 0; fi5 < fSorted.length; fi5++) {
+          var grow = fSorted[fi5].flexGrow ?? 0;
+          var extra = totalGrow > 0 ? fFree * grow / totalGrow : 0;
+          fFinalW.push(Math.max(0, Math.floor(fHypoW[fi5] + extra)));
+        }
+      } else {
+        // Negative free space → shrink via flex-shrink
+        var totalShrinkFactor = 0;
+        for (var fi6 = 0; fi6 < fSorted.length; fi6++) {
+          totalShrinkFactor += (fSorted[fi6].flexShrink ?? 1) * fHypoW[fi6];
+        }
+        for (var fi7 = 0; fi7 < fSorted.length; fi7++) {
+          var shrinkFactor = (fSorted[fi7].flexShrink ?? 1) * fHypoW[fi7];
+          var reduction = totalShrinkFactor > 0 ? (-fFree) * shrinkFactor / totalShrinkFactor : 0;
+          fFinalW.push(Math.max(0, Math.floor(fHypoW[fi7] - reduction)));
+        }
+      }
       var fCurX = fxLeft;
-      var fChildLines: { x: number; cw: number; cl: RenderedLine[] }[] = [];
+      var fChildLines: { x: number; cw: number; cl: RenderedLine[]; alignSelf?: string }[] = [];
+      var containerAlignItems = nd.alignItems || 'stretch';
       // Collect each child's rendered lines
-      for (var fci = 0; fci < fChildren.length; fci++) {
-        var fc    = fChildren[fci];
-        var fcGrow = fc.flexGrow || 1;
-        var cw    = Math.floor(unitW * fcGrow);
+      for (var fci = 0; fci < fSorted.length; fci++) {
+        var fc    = fSorted[fci];
+        var cw    = fFinalW[fci];
         var cLines = flowSpans(transformSpans(fc.spans, fc.textTransform), 0, cw, nodeLineH(fc), CLR_BODY,
                                fc.bgColor !== undefined ? { bgColor: fc.bgColor } : undefined);
-        fChildLines.push({ x: fCurX, cw, cl: cLines });
-        if (cLines.length * nodeLineH(fc) > maxChildH) maxChildH = cLines.length * nodeLineH(fc);
+        // Item 403: record per-item alignSelf for cross-axis placement
+        var fcAlign = fc.alignSelf || containerAlignItems;
+        fChildLines.push({ x: fCurX, cw, cl: cLines, alignSelf: fcAlign });
+        var childH = cLines.length * nodeLineH(fc);
+        if (childH > maxChildH) maxChildH = childH;
         fCurX += cw + gap;
       }
-      // Stamp child lines at their x-offset
+      // Stamp child lines at their x-offset, applying alignSelf vertical placement
       for (var fci2 = 0; fci2 < fChildLines.length; fci2++) {
-        var fc2 = fChildLines[fci2];
+        var fc2   = fChildLines[fci2];
+        var fcH2  = fc2.cl.length > 0 ? fc2.cl.length * (fc2.cl[0]!.lineH || LINE_H) : 0;
+        // Compute cross-axis (vertical) offset based on alignSelf / alignItems
+        var crossOffset = 0;
+        var fcAlignMode = fc2.alignSelf || 'stretch';
+        if (fcAlignMode === 'center') {
+          crossOffset = Math.floor((maxChildH - fcH2) / 2);
+        } else if (fcAlignMode === 'flex-end' || fcAlignMode === 'end') {
+          crossOffset = maxChildH - fcH2;
+        } else if (fcAlignMode === 'baseline') {
+          crossOffset = 0; // approximate: top of first line
+        }
+        // 'flex-start', 'start', 'stretch', default → crossOffset = 0
         for (var cli2 = 0; cli2 < fc2.cl.length; cli2++) {
           var cl2 = fc2.cl[cli2]!;
           var shifted = cl2.nodes.map(function(n) { return { ...n, x: n.x + fc2.x }; });
-          lines.push({ y: fRowY0 + cli2 * (cl2.lineH || LINE_H), nodes: shifted, lineH: cl2.lineH,
-                       bgColor: cl2.bgColor, preBg: cl2.preBg });
+          lines.push({ y: fRowY0 + crossOffset + cli2 * (cl2.lineH || LINE_H), nodes: shifted,
+                       lineH: cl2.lineH, bgColor: cl2.bgColor, preBg: cl2.preBg });
         }
       }
       y = fRowY0 + maxChildH;

@@ -229,7 +229,7 @@
 178. [P1] Implement ext4 read-only (extent tree, large file support)
 179. [P1] Implement ext4 write (journaling, metadata journal)
 180. [P1 ✓] FAT32 read/write (USB drives, shared with host) � `FAT32` class implementing `VFSMount` in `storage/fat32.ts`; full read/write including format, FAT chain allocation, directory entries, long filename support
-181. [P1] tmpfs: RAM-backed filesystem for `/tmp`
+181. [P1 ✓] tmpfs: RAM-backed filesystem for `/tmp`
 182. [P1 ✓] `sys.proc` TypeScript API: enumerate processes, read state � replaces `/proc` virtual FS � `os.process.list()` via `listProcesses()`, `os.process.all()` via `scheduler.getLiveProcesses()`, `os.process.current()` in `core/sdk.ts`
 183. [P1] `sys.devices` TypeScript API: enumerate hardware and driver state � replaces `/sys` virtual FS
 184. [P1 ✓] devfs: `/dev` character devices (null, zero, random, urandom, tty) � `DevFS` class with `DevFSMount` VFSMount adapter; `/dev/null`, `/dev/zero`, `/dev/urandom`/`/dev/random` (ChaCha20 PRNG), `/dev/tty` (fd 0 alias) in `fs/dev.ts`; mounted at `/dev` via VFS
@@ -240,13 +240,13 @@
 189. [P1 ✓] Writeback: dirty page flush with 30s timeout � `WritebackTimer` class in `fs/buffer-cache.ts`; `intervalTicks=3000` (~30 s at 100 Hz); `tick(nowTicks)` triggers `bufCache.flush()` on interval
 190. [P2] ISO 9660 read (boot media access)
 191. [P2] OverlayFS (union mount � writable layer over read-only base)
-192. [P2] File locking: TypeScript advisory lock API (`fs.lock(path)` / `fs.unlock(path)`)
-193. [P2] Extended attributes: TypeScript key-value metadata per inode (`fs.xattr.get/set`)
-194. [P2] Access control: TypeScript permission check layer (not POSIX ACL binary format)
+192. [P2 ✓] File locking: TypeScript advisory lock API (`fs.lock(path)` / `fs.unlock(path)`)
+193. [P2 ✓] Extended attributes: TypeScript key-value metadata per inode (`fs.xattr.get/set`)
+194. [P2 ✓] Access control: TypeScript permission check layer (not POSIX ACL binary format)
 195. [P2] Filesystem quota: TypeScript per-user limit enforcement
 196. [P2 ✓] `sys.fs.watch(path, handler)` TypeScript API for filesystem event notifications � `os.fs.watch()` with `_patchFsWatch()` monkey-patching fs primitives in `core/sdk.ts`
 197. [P2] Sparse file support
-198. [P2] Hard links across same device
+198. [P2 ✓] Hard links across same device
 199. [P2] `sendfile` zero-copy syscall
 200. [P3] Btrfs read-only: TypeScript Btrfs driver (extent tree parsing)
 201. [P3] ZFS: TypeScript read-only ZFS driver stubs
@@ -320,16 +320,16 @@
 252. [P0 ✓] TCP: persist timer � armed at `kernel.getTicks() + 500` (~5 s) when window closes; exponential backoff: `500 � 2^persistCount` ticks, capped at 6000 (~60 s) in `tcpTick()` in `net/net.ts`
 253. [P0 ✓] TCP: retransmission timeout (RTO) with exponential backoff � `rtoTicks` field + `_tcpRetransmit()`; `rtoTicks = Math.min(rtoTicks * 2, 6000)` doubling; Karn/SRTT/RTTVAR update in `net/net.ts`
 254. [P0 ✓] TCP: fast retransmit on 3 duplicate ACKs � `dupAck` counter; 3 dup-ACKs triggers `_tcpRetransmit(conn)` � comment: `// Fast retransmit (item 254)` in `net/net.ts`
-255. [P1] TCP: SACK (selective acknowledgment) � RFC 2018
-256. [P1] TCP: window scaling � RFC 1323
-257. [P1] TCP: timestamps � RFC 1323
-258. [P1] TCP: MSS negotiation
-259. [P1] TCP: CUBIC or New Reno congestion control
+255. [P1 ✓] TCP: SACK (selective acknowledgment) � RFC 2018
+256. [P1 ✓] TCP: window scaling � RFC 1323
+257. [P1 ✓] TCP: timestamps � RFC 1323
+258. [P1 ✓] TCP: MSS negotiation
+259. [P1 ✓] TCP: CUBIC or New Reno congestion control
 260. [P1] TCP: BBR congestion control
 261. [P1 ✓] TCP: TIME_WAIT state with 2MSL timer � `conn.state = 'TIME_WAIT'`; `timeWaitExpiry` set to `getTicks() + 200` (~2 s / 2 MSL); cleaned up in timer loop in `net/net.ts`
-262. [P1] TCP: listen backlog queue
-263. [P1] TCP: `SO_REUSEADDR`, `SO_REUSEPORT`
-264. [P1] TCP: keepalive (`SO_KEEPALIVE`)
+262. [P1 ✓] TCP: listen backlog queue
+263. [P1 ✓] TCP: `SO_REUSEADDR`, `SO_REUSEPORT`
+264. [P1 ✓] TCP: keepalive (`SO_KEEPALIVE`)
 265. [P2] TCP: TCP_FASTOPEN
 266. [P2] TCP: connection tracking for NAT
 267. [P2] TCP: MD5 authentication (BGP use case)
@@ -349,7 +349,7 @@
 277. [P0 ✓] DNS: AAAA record queries and response parsing � `QTYPE_AAAA=28`; AAAA records parsed in `parseResponseFull()` in `net/dns.ts`
 278. [P0 ✓] DNS: retransmit query on timeout (3 retries, exponential backoff) � `wait = Math.min(wait * 2, 800)` retry loop in `queryServer()` in `net/dns.ts`
 279. [P0 ✓] DNS: multiple nameserver support with fallback � `nameservers[]` list with `getNameservers()` fallback to `net.dns` in `net/dns.ts`
-280. [P1] DNS: `/etc/resolv.conf`-style reading from filesystem
+280. [P1 ✓] DNS: `/etc/resolv.conf`-style reading from filesystem
 281. [P1 ✓] DNS: `/etc/hosts` file lookup before DNS query � `hostsLookup()` reads `/etc/hosts` before querying server in `net/dns.ts`
 282. [P1 ✓] DNS: CNAME chain resolution � `resolveChain()` follows CNAME hops up to `MAX_CNAME_HOPS=10` in `net/dns.ts`
 283. [P1] DNSSEC: signature validation (RRSIG, DNSKEY, DS)
@@ -387,7 +387,7 @@
 311. [P1] HTTP/2: SETTINGS frame negotiation
 312. [P1] HTTP/2: priority and dependency tree
 313. [P2] HTTP/3: QUIC transport
-314. [P2] WebSocket: `Upgrade: websocket` handshake + framing (RFC 6455)
+314. [P2 ✓] WebSocket: `Upgrade: websocket` handshake + framing (RFC 6455)
 315. [P2] WebSocket: ping/pong keepalive
 316. [P2] Server-Sent Events (SSE) streaming reads
 317. [P2 ✓] HTTP cache: `ETag` + `If-None-Match` support � `CacheEntry.etag` + `_cacheGetEtag()` + sent in `buildGetRequest()` in `net/http.ts`
@@ -405,8 +405,8 @@
 324. [P0] RSA: PSS verify (needed for TLS 1.3 certs)
 325. [P0] ECDSA: P-384 support (many CAs use P-384 now)
 326. [P0 ✓] AES-GCM: verify tag failure returns proper error, not silent corruption � `gcmDecrypt()` in `net/crypto.ts` does constant-time compare (`diff |= j0[i] ^ tag[i]`) and returns `null` on mismatch; never decrypts on auth failure
-327. [P0] ChaCha20-Poly1305 cipher suite implementation
-328. [P1] SHA-384 hash implementation (used in TLS 1.3 cipher suites)
+327. [P0 ✓] ChaCha20-Poly1305 cipher suite implementation
+328. [P1 ✓] SHA-384 hash implementation (used in TLS 1.3 cipher suites)
 329. [P1] HMAC-SHA384
 330. [P1] HKDF-Expand with SHA-384
 331. [P1] X.509: parse `subjectAltName` extension for hostname validation
@@ -474,7 +474,7 @@
 383. [P0 ✓] CSS `border-radius` � parsed in `css.ts`
 384. [P0 ✓] CSS `border` shorthand (width/style/color) � parsed in `css.ts`
 385. [P0 ✓] CSS `background` shorthand � comprehensive parser: url, position, size, repeat, attachment, color
-386. [P0] CSS `background-image: url(...)` ? trigger image fetch
+386. [P0 ✓] CSS `background-image: url(...)` ? trigger image fetch
 387. [P0 ✓] CSS `background-size`, `background-position`, `background-repeat` � extracted in background shorthand parser in `css.ts`
 388. [P0 ✓] CSS `box-shadow` � parsed in `css.ts`
 389. [P0 ✓] CSS `text-shadow` � `CSSProps.textShadow` in `css.ts`
@@ -489,9 +489,9 @@
 398. [P0 ✓] CSS `z-index` stacking context
 399. [P0 ✓] CSS `float`: left, right � `nd.float === 'right'/'left'` handled in `layout.ts`; parsed in `css.ts`
 400. [P0 ✓] CSS `clear`: left, right, both
-401. [P1] CSS Flexbox: `display: flex`, `flex-direction`, `justify-content`, `align-items`, `flex-wrap`, `gap`
-402. [P1] CSS Flexbox: `flex-grow`, `flex-shrink`, `flex-basis`, `flex` shorthand
-403. [P1] CSS Flexbox: `align-self`, `order`
+401. [P1 ✓] CSS Flexbox: `display: flex`, `flex-direction`, `justify-content`, `align-items`, `flex-wrap`, `gap`
+402. [P1 ✓] CSS Flexbox: `flex-grow`, `flex-shrink`, `flex-basis`, `flex` shorthand
+403. [P1 ✓] CSS Flexbox: `align-self`, `order`
 404. [P1] CSS Grid: `display: grid`, `grid-template-columns/rows`, `grid-column/row`
 405. [P1] CSS Grid: `fr` unit, `repeat()`, `minmax()`
 406. [P1 ✓] CSS Grid: `grid-area`, `grid-template-areas` � parsed in `css.ts`, stored in `types.ts`
@@ -502,9 +502,9 @@
 411. [P1 ✓] CSS `animation`: `@keyframes`, `animation-name`, `animation-duration`, `animation-iteration-count` � all sub-properties + `-webkit-` prefix variants in `css.ts`/`types.ts`
 412. [P1 ✓] CSS `transform`: `translate`, `rotate`, `scale`, `matrix`, `skew` � stored in `CSSProps.transform` string; parsed in `css.ts`
 413. [P1 ✓] CSS `transform-origin` � `CSSProps.transformOrigin` in `css.ts`
-414. [P1] CSS `opacity` smooth values (currently only hidden if < 0.15)
-415. [P1] CSS `pointer-events`
-416. [P1] CSS `cursor` property (at least `pointer`, `default`, `text`, `not-allowed`)
+414. [P1 ✓] CSS `opacity` smooth values (currently only hidden if < 0.15)
+415. [P1 ✓] CSS `pointer-events`
+416. [P1 ✓] CSS `cursor` property (at least `pointer`, `default`, `text`, `not-allowed`)
 417. [P1 ✓] CSS `list-style-type`: disc, circle, square, decimal, none � `lstType` read and used in `<li>` bullet rendering in `layout.ts`
 418. [P1] CSS `table-layout`: fixed, auto
 419. [P1] CSS `border-collapse`, `border-spacing`
@@ -555,7 +555,7 @@
 459. [P1] `overflow: scroll` � clip and add scrollbar
 460. [P1] `overflow: hidden` � clip without scrollbar
 461. [P1] Scrollable container scroll offset (currently no scrolling inside elements)
-462. [P1] Viewport scroll: `window.scrollY`, `window.scrollX` accurate
+462. [P1 ✓] Viewport scroll: `window.scrollY`, `window.scrollX` accurate
 463. [P2] Writing modes (`writing-mode: vertical-rl`)
 464. [P2] BiDi (bidirectional text � Arabic, Hebrew)
 465. [P2] `text-overflow: ellipsis`
@@ -579,12 +579,12 @@
 478. [P0] GIF animation: frame disposal and timing
 479. [P0] WebP image decode (VP8L lossless + VP8 lossy)
 480. [P0] SVG rendering: basic shapes (rect, circle, path, text)
-481. [P1] GPU compositing: paint layers to separate buffers, composite at end
-482. [P1] Dirty region tracking: only repaint changed rectangles
+481. [P1 ✓] GPU compositing: paint layers to separate buffers, composite at end
+482. [P1 ✓] Dirty region tracking: only repaint changed rectangles
 483. [P1] Scroll: partial repaint (fixed header stays, only scroll area repaints)
-484. [P1] Alpha compositing for `opacity` and RGBA colors
-485. [P1] Rounded rectangle rendering (`border-radius`)
-486. [P1] Box shadow rendering
+484. [P1 ✓] Alpha compositing for `opacity` and RGBA colors
+485. [P1 ✓] Rounded rectangle rendering (`border-radius`)
+486. [P1 ✓] Box shadow rendering
 487. [P1] Gradient rendering: linear-gradient, radial-gradient, conic-gradient
 488. [P1 ✓] `::before`/`::after` pseudo-element rendering � `getPseudoContent()` in `stylesheet.ts`; spans injected via `applyStyle()`/`popCSS()` in `html.ts`
 489. [P1] Clipping path rendering

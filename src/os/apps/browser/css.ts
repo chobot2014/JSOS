@@ -823,10 +823,10 @@ export function parseInlineStyle(style: string): CSSProps {
       case 'speak':                      break; // aural CSS
       // ── Modern/experimental no-ops ────────────────────────────────────────
       case 'content-visibility':         break; // rendering optimization
-      case 'contain':                    break; // containment hint
       case 'contain-intrinsic-size':     break;
       case 'contain-intrinsic-width':    break;
       case 'contain-intrinsic-height':   break;
+      // Note: 'contain', 'mix-blend-mode', 'backdrop-filter' handled below with real logic
       case 'text-wrap':                  break; // text-wrap: balance/pretty
       case 'text-wrap-mode':             break;
       case 'text-wrap-style':            break;
@@ -875,10 +875,7 @@ export function parseInlineStyle(style: string): CSSProps {
       case '-webkit-text-stroke-width':  break;
       case '-webkit-text-stroke-color':  break;
       case '-webkit-text-fill-color':    break;
-      case 'mix-blend-mode':             break;
       case 'background-blend-mode':      break;
-      case 'backdrop-filter':            break;
-      case '-webkit-backdrop-filter':    break;
       case 'mask': case 'mask-image': case 'mask-size': case 'mask-repeat':
       case 'mask-position': case 'mask-composite': case 'mask-mode': break;
       case 'clip':                       break; // legacy clip rect()

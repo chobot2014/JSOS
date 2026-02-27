@@ -233,9 +233,57 @@ function hostsLookup(hostname: string): string | null {
 /** Configured nameservers — primary + fallbacks.  Updated by DHCP. */
 var nameservers: string[] = [];
 
-/** Effective nameserver list: user-set list or fall back to net.dns. */
+/** [Item 280] Whether we've already tried to read /etc/resolv.conf. */
+var _resolvConfLoaded = false;
+
+/**
+ * [Item 280] Parse /etc/resolv.conf and return the nameserver list.
+ * Lines of the form "nameserver <ip>" are extracted.
+ * Also honours "domain" and "search" directives (stored but not used for resolution yet).
+ */
+function _loadResolvConf(): string[] {
+  try {
+    var fsModule: any = null;
+    // Obtain the filesystem API if available
+    if (typeof kernel !== 'undefined' && (kernel as any).getModule) {
+      fsModule = (kernel as any).getModule('fs');
+    }
+    if (!fsModule && typeof (globalThis as any).fs !== 'undefined') {
+      fsModule = (globalThis as any).fs;
+    }
+    if (!fsModule) return [];
+
+    var content: string = fsModule.readFile('/etc/resolv.conf');
+    if (!content) return [];
+
+    var servers: string[] = [];
+    var lines = content.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (line.indexOf('nameserver') === 0) {
+        var parts = line.split(/\s+/);
+        if (parts.length >= 2 && parts[1]) {
+          servers.push(parts[1]);
+        }
+      }
+    }
+    return servers;
+  } catch (e) { /* resolv.conf not available */ }
+  return [];
+}
+
+/** Effective nameserver list: user-set → /etc/resolv.conf → net.dns fallback. */
 function getNameservers(): string[] {
   if (nameservers.length > 0) return nameservers;
+  // [Item 280] Lazily read /etc/resolv.conf on first use
+  if (!_resolvConfLoaded) {
+    _resolvConfLoaded = true;
+    var fromConf = _loadResolvConf();
+    if (fromConf.length > 0) {
+      nameservers = fromConf;
+      return nameservers;
+    }
+  }
   return [net.dns];
 }
 

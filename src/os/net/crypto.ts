@@ -3,11 +3,14 @@
  *
  * Pure TypeScript implementations of:
  *   SHA-256, HMAC-SHA-256, HKDF
+ *   SHA-384, SHA-512, HMAC-SHA-384          [Item 328]
  *   AES-128 block cipher, AES-128-GCM authenticated encryption
+ *   ChaCha20 stream cipher, Poly1305 MAC    [Item 327]
+ *   ChaCha20-Poly1305 AEAD (RFC 7539)       [Item 327]
  *   X25519 (Curve25519) Diffie-Hellman
  *
  * All algorithms are self-contained and run on bare metal under QuickJS.
- * BigInt is used for X25519 field arithmetic and GHASH (GCM).
+ * BigInt is used for X25519 field arithmetic, GHASH (GCM), and SHA-512 words.
  */
 
 import { strToBytes } from './net.js';
@@ -532,4 +535,279 @@ export function xorBytes(a: number[], b: number[]): number[] {
 export function byteToHex(b: number): string {
   var s = (b & 0xff).toString(16);
   return s.length < 2 ? '0' + s : s;
+}
+
+// ────────────────────────────────────────────────────── SHA-384 ──────────────
+// [Item 328] SHA-384 is SHA-512 truncated to 384 bits with different IV.
+// Uses BigInt for 64-bit word arithmetic (supported in QuickJS).
+
+const SHA512_K: bigint[] = [
+  0x428a2f98d728ae22n, 0x7137449123ef65cdn, 0xb5c0fbcfec4d3b2fn, 0xe9b5dba58189dbbcn,
+  0x3956c25bf348b538n, 0x59f111f1b605d019n, 0x923f82a4af194f9bn, 0xab1c5ed5da6d8118n,
+  0xd807aa98a3030242n, 0x12835b0145706fben, 0x243185be4ee4b28cn, 0x550c7dc3d5ffb4e2n,
+  0x72be5d74f27b896fn, 0x80deb1fe3b1696b1n, 0x9bdc06a725c71235n, 0xc19bf174cf692694n,
+  0xe49b69c19ef14ad2n, 0xefbe4786384f25e3n, 0x0fc19dc68b8cd5b5n, 0x240ca1cc77ac9c65n,
+  0x2de92c6f592b0275n, 0x4a7484aa6ea6e483n, 0x5cb0a9dcbd41fbd4n, 0x76f988da831153b5n,
+  0x983e5152ee66dfabn, 0xa831c66d2db43210n, 0xb00327c898fb213fn, 0xbf597fc7beef0ee4n,
+  0xc6e00bf33da88fc2n, 0xd5a79147930aa725n, 0x06ca6351e003826fn, 0x142929670a0e6e70n,
+  0x27b70a8546d22ffcn, 0x2e1b21385c26c926n, 0x4d2c6dfc5ac42aedn, 0x53380d139d95b3dfn,
+  0x650a73548baf63den, 0x766a0abb3c77b2a8n, 0x81c2c92e47edaee6n, 0x92722c851482353bn,
+  0xa2bfe8a14cf10364n, 0xa81a664bbc423001n, 0xc24b8b70d0f89791n, 0xc76c51a30654be30n,
+  0xd192e819d6ef5218n, 0xd69906245565a910n, 0xf40e35855771202an, 0x106aa07032bbd1b8n,
+  0x19a4c116b8d2d0c8n, 0x1e376c085141ab53n, 0x2748774cdf8eeb99n, 0x34b0bcb5e19b48a8n,
+  0x391c0cb3c5c95a63n, 0x4ed8aa4ae3418acbn, 0x5b9cca4f7763e373n, 0x682e6ff3d6b2b8a3n,
+  0x748f82ee5defb2fcn, 0x78a5636f43172f60n, 0x84c87814a1f0ab72n, 0x8cc702081a6439ecn,
+  0x90befffa23631e28n, 0xa4506cebde82bde9n, 0xbef9a3f7b2c67915n, 0xc67178f2e372532bn,
+  0xca273eceea26619cn, 0xd186b8c721c0c207n, 0xeada7dd6cde0eb1en, 0xf57d4f7fee6ed178n,
+  0x06f067aa72176fban, 0x0a637dc5a2c898a6n, 0x113f9804bef90daen, 0x1b710b35131c471bn,
+  0x28db77f523047d84n, 0x32caab7b40c72493n, 0x3c9ebe0a15c9bebcn, 0x431d67c49c100d4cn,
+  0x4cc5d4becb3e42b6n, 0x597f299cfc657e2an, 0x5fcb6fab3ad6faecn, 0x6c44198c4a475817n,
+];
+
+const MASK64 = 0xffffffffffffffffn;
+
+function rotr64(x: bigint, n: bigint): bigint {
+  return ((x >> n) | (x << (64n - n))) & MASK64;
+}
+
+function sha512Block(H: bigint[], W: bigint[]): void {
+  for (var i = 16; i < 80; i++) {
+    var s0 = (rotr64(W[i-15], 1n) ^ rotr64(W[i-15], 8n) ^ (W[i-15] >> 7n)) & MASK64;
+    var s1 = (rotr64(W[i-2], 19n) ^ rotr64(W[i-2], 61n) ^ (W[i-2] >> 6n)) & MASK64;
+    W[i] = (W[i-16] + s0 + W[i-7] + s1) & MASK64;
+  }
+  var a = H[0], b = H[1], c = H[2], d = H[3];
+  var e = H[4], f = H[5], g = H[6], h = H[7];
+  for (var i = 0; i < 80; i++) {
+    var S1   = (rotr64(e, 14n) ^ rotr64(e, 18n) ^ rotr64(e, 41n)) & MASK64;
+    var ch   = ((e & f) ^ (~e & g)) & MASK64;
+    var t1   = (h + S1 + ch + SHA512_K[i] + W[i]) & MASK64;
+    var S0   = (rotr64(a, 28n) ^ rotr64(a, 34n) ^ rotr64(a, 39n)) & MASK64;
+    var maj  = ((a & b) ^ (a & c) ^ (b & c)) & MASK64;
+    var t2   = (S0 + maj) & MASK64;
+    h = g; g = f; f = e;
+    e = (d + t1) & MASK64;
+    d = c; c = b; b = a;
+    a = (t1 + t2) & MASK64;
+  }
+  H[0] = (H[0] + a) & MASK64; H[1] = (H[1] + b) & MASK64;
+  H[2] = (H[2] + c) & MASK64; H[3] = (H[3] + d) & MASK64;
+  H[4] = (H[4] + e) & MASK64; H[5] = (H[5] + f) & MASK64;
+  H[6] = (H[6] + g) & MASK64; H[7] = (H[7] + h) & MASK64;
+}
+
+function sha512Core(data: number[], iv: bigint[]): number[] {
+  var msg = data.slice();
+  var bitLenHi = Math.floor(data.length / 0x20000000); // high bits
+  var bitLenLo = (data.length * 8) >>> 0;
+  msg.push(0x80);
+  while ((msg.length % 128) !== 112) msg.push(0);
+  // 128-bit big-endian bit length
+  for (var i = 7; i >= 0; i--) msg.push(0, 0, 0, 0); // high 64 bits (always 0 for sane messages)
+  msg.push((bitLenHi >>> 24) & 0xff, (bitLenHi >>> 16) & 0xff,
+           (bitLenHi >>>  8) & 0xff,  bitLenHi         & 0xff,
+           (bitLenLo >>> 24) & 0xff, (bitLenLo >>> 16) & 0xff,
+           (bitLenLo >>>  8) & 0xff,  bitLenLo         & 0xff);
+  var H = iv.slice();
+  for (var off = 0; off < msg.length; off += 128) {
+    var W: bigint[] = new Array(80);
+    for (var j = 0; j < 16; j++) {
+      var base = off + j * 8;
+      W[j] = (BigInt(msg[base])   << 56n) | (BigInt(msg[base+1]) << 48n) |
+             (BigInt(msg[base+2]) << 40n) | (BigInt(msg[base+3]) << 32n) |
+             (BigInt(msg[base+4]) << 24n) | (BigInt(msg[base+5]) << 16n) |
+             (BigInt(msg[base+6]) <<  8n) |  BigInt(msg[base+7]);
+    }
+    sha512Block(H, W);
+  }
+  // Encode output
+  var out: number[] = [];
+  for (var i = 0; i < H.length; i++) {
+    var w = H[i];
+    out.push(Number((w >> 56n) & 0xffn), Number((w >> 48n) & 0xffn),
+             Number((w >> 40n) & 0xffn), Number((w >> 32n) & 0xffn),
+             Number((w >> 24n) & 0xffn), Number((w >> 16n) & 0xffn),
+             Number((w >>  8n) & 0xffn), Number( w         & 0xffn));
+  }
+  return out;
+}
+
+/** [Item 328] SHA-384: SHA-512 with different IV, output truncated to 48 bytes. */
+export function sha384(data: number[]): number[] {
+  var iv384: bigint[] = [
+    0xcbbb9d5dc1059ed8n, 0x629a292a367cd507n, 0x9159015a3070dd17n, 0x152fecd8f70e5939n,
+    0x67332667ffc00b31n, 0x8eb44a8768581511n, 0xdb0c2e0d64f98fa7n, 0x47b5481dbefa4fa4n,
+  ];
+  return sha512Core(data, iv384).slice(0, 48);
+}
+
+/** SHA-512 hash. */
+export function sha512(data: number[]): number[] {
+  var iv512: bigint[] = [
+    0x6a09e667f3bcc908n, 0xbb67ae8584caa73bn, 0x3c6ef372fe94f82bn, 0xa54ff53a5f1d36f1n,
+    0x510e527fade682d1n, 0x9b05688c2b3e6c1fn, 0x1f83d9abfb41bd6bn, 0x5be0cd19137e2179n,
+  ];
+  return sha512Core(data, iv512);
+}
+
+/** HMAC-SHA-384 */
+export function hmacSha384(key: number[], data: number[]): number[] {
+  var k = key.length > 128 ? sha384(key) : key.slice();
+  while (k.length < 128) k.push(0);
+  var opad: number[] = [], ipad: number[] = [];
+  for (var i = 0; i < 128; i++) { opad.push(k[i] ^ 0x5c); ipad.push(k[i] ^ 0x36); }
+  return sha384(opad.concat(sha384(ipad.concat(data))));
+}
+
+// ─────────────────────────────────────────── ChaCha20-Poly1305 ───────────────
+// [Item 327] ChaCha20 stream cipher + Poly1305 MAC (RFC 7539 / RFC 8439).
+
+/** ChaCha20 quarter round (in-place). */
+function quarterRound(s: number[], a: number, b: number, c: number, d: number): void {
+  s[a] = (s[a] + s[b]) >>> 0; s[d] = Math.imul(s[d] ^ s[a], 1) >>> 0; // rotr32 not inline
+  s[d] = (s[d] << 16 | s[d] >>> 16) >>> 0;
+  s[c] = (s[c] + s[d]) >>> 0; s[b] = (s[b] ^ s[c]) >>> 0;
+  s[b] = (s[b] << 12 | s[b] >>> 20) >>> 0;
+  s[a] = (s[a] + s[b]) >>> 0; s[d] = (s[d] ^ s[a]) >>> 0;
+  s[d] = (s[d] <<  8 | s[d] >>> 24) >>> 0;
+  s[c] = (s[c] + s[d]) >>> 0; s[b] = (s[b] ^ s[c]) >>> 0;
+  s[b] = (s[b] <<  7 | s[b] >>> 25) >>> 0;
+}
+
+/** Generate a 64-byte ChaCha20 keystream block for the given state. */
+function chacha20Block(state: number[]): number[] {
+  var s = state.slice();
+  for (var i = 0; i < 10; i++) {
+    quarterRound(s, 0, 4,  8, 12);
+    quarterRound(s, 1, 5,  9, 13);
+    quarterRound(s, 2, 6, 10, 14);
+    quarterRound(s, 3, 7, 11, 15);
+    quarterRound(s, 0, 5, 10, 15);
+    quarterRound(s, 1, 6, 11, 12);
+    quarterRound(s, 2, 7,  8, 13);
+    quarterRound(s, 3, 4,  9, 14);
+  }
+  for (var i = 0; i < 16; i++) s[i] = (s[i] + state[i]) >>> 0;
+  // Serialize state to bytes (little-endian 32-bit words)
+  var out: number[] = new Array(64);
+  for (var i = 0; i < 16; i++) {
+    out[i*4]   =  s[i]        & 0xff;
+    out[i*4+1] = (s[i] >>  8) & 0xff;
+    out[i*4+2] = (s[i] >> 16) & 0xff;
+    out[i*4+3] = (s[i] >> 24) & 0xff;
+  }
+  return out;
+}
+
+/** Read a little-endian 32-bit word from an array. */
+function le32(b: number[], i: number): number {
+  return ((b[i] | (b[i+1] << 8) | (b[i+2] << 16) | (b[i+3] << 24)) >>> 0);
+}
+
+/**
+ * [Item 327] ChaCha20 stream cipher (RFC 7539 §2.4).
+ * @param key    32-byte key
+ * @param nonce  12-byte nonce
+ * @param ctr    Initial counter (0 for encryption, 1 for payload after Poly1305 key-gen)
+ * @param data   Plaintext or ciphertext bytes
+ */
+export function chacha20(key: number[], nonce: number[], ctr: number, data: number[]): number[] {
+  // Build initial state
+  var state = [
+    0x61707865, 0x3320646e, 0x79622d32, 0x6b206574, // "expand 32-byte k"
+    le32(key, 0), le32(key, 4), le32(key,  8), le32(key, 12),
+    le32(key,16), le32(key,20), le32(key, 24), le32(key, 28),
+    ctr >>> 0,
+    le32(nonce, 0), le32(nonce, 4), le32(nonce, 8),
+  ];
+  var out: number[] = new Array(data.length);
+  for (var i = 0; i < data.length; i += 64) {
+    var block = chacha20Block(state);
+    var blockLen = Math.min(64, data.length - i);
+    for (var j = 0; j < blockLen; j++) out[i + j] = data[i + j] ^ block[j];
+    state[12] = (state[12] + 1) >>> 0;
+  }
+  return out;
+}
+
+// ── Poly1305 ─────────────────────────────────────────────────────────────────
+
+/** Clamp the Poly1305 r value per RFC 7539 §2.5.1. */
+function poly1305Clamp(r: number[]): void {
+  r[3]  &= 0x0f; r[7]  &= 0x0f; r[11] &= 0x0f; r[15] &= 0x0f;
+  r[4]  &= 0xfc; r[8]  &= 0xfc; r[12] &= 0xfc;
+}
+
+/**
+ * [Item 327] Poly1305 MAC (RFC 7539 §2.5).
+ * @param key  32-byte one-time key
+ * @param msg  Message bytes
+ * @returns    16-byte tag
+ */
+export function poly1305Mac(key: number[], msg: number[]): number[] {
+  var rBytes = key.slice(0, 16);
+  poly1305Clamp(rBytes);
+  var r = BigInt('0x' + rBytes.slice().reverse().map(function(b: number) {
+    return (b & 0xff).toString(16).padStart(2, '0');
+  }).join(''));
+  var s = BigInt('0x' + key.slice(16, 32).reverse().map(function(b: number) {
+    return (b & 0xff).toString(16).padStart(2, '0');
+  }).join(''));
+  var P = (1n << 130n) - 5n;
+  var acc = 0n;
+  for (var i = 0; i < msg.length; i += 16) {
+    var chunk = msg.slice(i, i + 16);
+    while (chunk.length < 16) chunk.push(0);
+    var n = BigInt('0x' + chunk.slice().reverse().map(function(b: number) {
+      return (b & 0xff).toString(16).padStart(2, '0');
+    }).join('')) + (1n << BigInt(chunk.length * 8 <= 128 ? chunk.length * 8 : 128));
+    acc = ((acc + n) * r) % P;
+  }
+  acc = (acc + s) & ((1n << 128n) - 1n);
+  // Encode 16 bytes little-endian
+  var tag: number[] = [];
+  for (var i = 0; i < 16; i++) { tag.push(Number(acc & 0xffn)); acc >>= 8n; }
+  return tag;
+}
+
+/**
+ * [Item 327] ChaCha20-Poly1305 AEAD encryption (RFC 7539 §2.8).
+ * @param key      32-byte key
+ * @param iv       12-byte nonce
+ * @param aad      Additional authenticated data
+ * @param plain    Plaintext
+ * @returns        { ciphertext, tag } where tag is 16 bytes
+ */
+export function chacha20poly1305Encrypt(
+  key: number[], iv: number[], aad: number[], plain: number[]
+): { ciphertext: number[]; tag: number[] } {
+  // Generate one-time Poly1305 key (first block, counter=0)
+  var poly1305Key = chacha20(key, iv, 0, new Array(32).fill(0));
+  // Encrypt with counter starting at 1
+  var ciphertext  = chacha20(key, iv, 1, plain);
+  // Construct Poly1305 message: aad || pad || ciphertext || pad || len(aad) || len(ciphertext)
+  function padTo16(b: number[]): number[] { var p = b.slice(); while (p.length % 16 !== 0) p.push(0); return p; }
+  function le64(n: number): number[] { return [n&0xff,(n>>8)&0xff,(n>>16)&0xff,(n>>24)&0xff,0,0,0,0]; }
+  var macData = padTo16(aad).concat(padTo16(ciphertext), le64(aad.length), le64(ciphertext.length));
+  var tag = poly1305Mac(poly1305Key, macData);
+  return { ciphertext, tag };
+}
+
+/**
+ * [Item 327] ChaCha20-Poly1305 AEAD decryption (RFC 7539 §2.8).
+ * Returns decrypted plaintext or null if authentication fails.
+ */
+export function chacha20poly1305Decrypt(
+  key: number[], iv: number[], aad: number[], ciphertext: number[], tag: number[]
+): number[] | null {
+  var poly1305Key = chacha20(key, iv, 0, new Array(32).fill(0));
+  function padTo16(b: number[]): number[] { var p = b.slice(); while (p.length % 16 !== 0) p.push(0); return p; }
+  function le64(n: number): number[] { return [n&0xff,(n>>8)&0xff,(n>>16)&0xff,(n>>24)&0xff,0,0,0,0]; }
+  var macData = padTo16(aad).concat(padTo16(ciphertext), le64(aad.length), le64(ciphertext.length));
+  var expectedTag = poly1305Mac(poly1305Key, macData);
+  // Constant-time tag comparison
+  var ok = 0;
+  for (var i = 0; i < 16; i++) ok |= (expectedTag[i] ^ (tag[i] || 0));
+  if (ok !== 0) return null; // Authentication failed
+  return chacha20(key, iv, 1, ciphertext);
 }

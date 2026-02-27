@@ -65,6 +65,10 @@ export interface FileEntry {
   permissions: string;
   /** Set when type === 'symlink' — target path of the symbolic link. */
   linkTarget?: string;
+  /** [Item 198] Hard link count (number of directory entries pointing to this inode). */
+  nlink: number;
+  /** [Item 193] Extended attributes (user.* namespace etc.). */
+  xattr?: Record<string, string>;
 }
 
 export interface DirectoryEntry {
@@ -74,6 +78,8 @@ export interface DirectoryEntry {
   created: number;
   modified: number;
   permissions: string;
+  /** [Item 193] Extended attributes on directories. */
+  xattr?: Record<string, string>;
 }
 
 function isDir(entry: FileEntry | DirectoryEntry): entry is DirectoryEntry {
@@ -94,6 +100,87 @@ export const O_NONBLOCK = 0x0800;
 export const O_TRUNC    = 0x0200;
 export const O_CREAT    = 0x0040;
 
+// ── File lock constants (item 192) ───────────────────────────────────────────
+export const LOCK_SH = 1;  // Shared (read) lock
+export const LOCK_EX = 2;  // Exclusive (write) lock
+export const LOCK_NB = 4;  // Non-blocking flag
+export const LOCK_UN = 8;  // Unlock
+
+// ── [Item 181] TmpFS: RAM-backed volatile filesystem ─────────────────────────
+
+/**
+ * [Item 181] TmpFS — a RAM-backed volatile filesystem mounted at /tmp.
+ * Files are stored in an in-memory Map and are lost on reboot.
+ * Implements VFSMount for read operations; write operations are exposed
+ * as dedicated methods and also wired into FileSystem.writeFile/mkdir.
+ */
+export class TmpFS implements VFSMount {
+  /** Path → content for regular files. */
+  readonly _files = new Map<string, string>();
+  /** Set of directory paths. */
+  readonly _dirs  = new Set<string>();
+
+  constructor() {
+    this._dirs.add('/');
+    this._dirs.add('/tmp');
+  }
+
+  read(path: string): string | null {
+    return this._files.get(path) ?? null;
+  }
+
+  list(path: string): Array<{ name: string; type: FileType; size: number }> {
+    var norm = path === '/' ? '' : path;
+    var result: Array<{ name: string; type: FileType; size: number }> = [];
+    var seen = new Set<string>();
+    // Files directly under path
+    for (var [p, content] of this._files) {
+      if (!p.startsWith(norm + '/')) continue;
+      var rest = p.slice(norm.length + 1);
+      if (rest.indexOf('/') !== -1) continue; // deeper level
+      if (!seen.has(rest)) { seen.add(rest); result.push({ name: rest, type: 'file', size: content.length }); }
+    }
+    // Subdirectories
+    for (var d of this._dirs) {
+      if (d === path || d === '/') continue;
+      if (!d.startsWith(norm + '/')) continue;
+      var drest = d.slice(norm.length + 1);
+      if (drest.indexOf('/') !== -1) continue;
+      if (!seen.has(drest)) { seen.add(drest); result.push({ name: drest, type: 'directory', size: 0 }); }
+    }
+    return result;
+  }
+
+  exists(path: string): boolean {
+    return this._files.has(path) || this._dirs.has(path);
+  }
+
+  isDirectory(path: string): boolean {
+    return this._dirs.has(path);
+  }
+
+  /** Write a file into the tmpfs. Creates any missing parent directories. */
+  writeFile(path: string, content: string): void {
+    this._files.set(path, content);
+    // Ensure parent directories exist
+    var parts = path.split('/');
+    for (var i = 1; i < parts.length - 1; i++) {
+      var dir = parts.slice(0, i + 1).join('/');
+      this._dirs.add(dir);
+    }
+  }
+
+  /** Delete a file from the tmpfs. */
+  deleteFile(path: string): void {
+    this._files.delete(path);
+  }
+
+  /** Create a directory in the tmpfs. */
+  mkdir(path: string): void {
+    this._dirs.add(path);
+  }
+}
+
 export interface FdEntry {
   fd:       number;
   path:     string;
@@ -112,6 +199,10 @@ export class FileSystem {
   private mounts  = new Map<string, VFSMount>(); // mountpoint -> handler
   private fds     = new Map<number, FdEntry>();   // fd table (item 173)
   private nextFd  = 3;   // 0/1/2 reserved for stdin/stdout/stderr
+  /** [Item 181] The RAM-backed TmpFS instance mounted at /tmp. */
+  readonly tmpfs  = new TmpFS();
+  /** [Item 192] File lock table: path → { fd, type } lock holder. */
+  private _fileLocks = new Map<string, Array<{ fd: number; type: number }>>();
 
   /** Mount a virtual filesystem at a path prefix (e.g. '/proc'). */
   mountVFS(mountpoint: string, vfs: VFSMount): void {
@@ -148,6 +239,8 @@ export class FileSystem {
     };
 
     this.initializeDefaultFS();
+    // [Item 181] Mount TmpFS at /tmp for RAM-backed volatile storage
+    this.mountVFS('/tmp', this.tmpfs);
   }
 
   private initializeDefaultFS(): void {
@@ -604,6 +697,7 @@ export class FileSystem {
       created: existing ? (existing as FileEntry).created || now : now,
       modified: now,
       permissions: existing ? (existing as FileEntry).permissions : _filePerms(), // umask (item 932)
+      nlink: existing ? (existing as FileEntry).nlink || 1 : 1,
     };
 
     parent.children.set(fileName, file);
@@ -754,6 +848,7 @@ export class FileSystem {
       created: now, modified: now,
       permissions: 'lrwxrwxrwx',
       linkTarget: target,
+      nlink: 1,
     };
     parent.children.set(name, entry);
     return true;
@@ -924,6 +1019,126 @@ export class FileSystem {
     var e = this.navigate(resolvedPath);
     if (!e || isDir(e)) return 0;
     return (e as FileEntry).content.length;
+  }
+
+  // ── [Item 192] File Locking (flock) ─────────────────────────────────────────
+
+  /**
+   * Apply or remove an advisory lock on the file at `path`.
+   * @param fd    File descriptor (for lock ownership tracking)
+   * @param op    LOCK_SH | LOCK_EX | LOCK_UN  (optionally OR'd with LOCK_NB)
+   * @returns true on success; false if lock is held by another fd and LOCK_NB set
+   */
+  flock(fd: number, op: number): boolean {
+    var fde = this.fds.get(fd);
+    if (!fde) return false;
+    var path = fde.path;
+    var lockType = op & ~LOCK_NB; // strip the non-blocking flag
+    if (lockType === LOCK_UN) {
+      // Remove all locks held by this fd on this path
+      var locks = this._fileLocks.get(path);
+      if (locks) {
+        var remaining = locks.filter(function(l) { return l.fd !== fd; });
+        if (remaining.length === 0) this._fileLocks.delete(path);
+        else this._fileLocks.set(path, remaining);
+      }
+      return true;
+    }
+    // Check for conflicting locks
+    var existing = this._fileLocks.get(path) || [];
+    for (var i = 0; i < existing.length; i++) {
+      if (existing[i].fd === fd) continue; // same fd: upgrade OK
+      // Exclusive lock conflicts with any holder; shared locks conflict only with exclusive
+      if (lockType === LOCK_EX || existing[i].type === LOCK_EX) {
+        if (op & LOCK_NB) return false; // would block
+        // In JSOS single-threaded mode, blocking would deadlock; just fail silently
+        return false;
+      }
+    }
+    // Replace any existing lock by this fd, then add new
+    var updated = existing.filter(function(l) { return l.fd !== fd; });
+    updated.push({ fd, type: lockType });
+    this._fileLocks.set(path, updated);
+    return true;
+  }
+
+  // ── [Item 193] Extended Attributes (xattr) ───────────────────────────────────
+
+  /** Set an extended attribute on a file or directory. */
+  setxattr(path: string, name: string, value: string): boolean {
+    var entry = this.navigate(path);
+    if (!entry) return false;
+    if (!entry.xattr) entry.xattr = {};
+    entry.xattr[name] = value;
+    return true;
+  }
+
+  /** Get an extended attribute value.  Returns null if not set. */
+  getxattr(path: string, name: string): string | null {
+    var entry = this.navigate(path);
+    if (!entry || !entry.xattr) return null;
+    return Object.prototype.hasOwnProperty.call(entry.xattr, name) ? entry.xattr[name] : null;
+  }
+
+  /** List the names of all extended attributes on a file or directory. */
+  listxattr(path: string): string[] {
+    var entry = this.navigate(path);
+    if (!entry || !entry.xattr) return [];
+    return Object.keys(entry.xattr);
+  }
+
+  /** Remove an extended attribute.  Returns true if it existed. */
+  removexattr(path: string, name: string): boolean {
+    var entry = this.navigate(path);
+    if (!entry || !entry.xattr) return false;
+    if (!Object.prototype.hasOwnProperty.call(entry.xattr, name)) return false;
+    delete entry.xattr[name];
+    return true;
+  }
+
+  // ── [Item 198] Hard Links ─────────────────────────────────────────────────────
+
+  /**
+   * Create a hard link: make `linkPath` point to the same FileEntry as `targetPath`.
+   * Both paths must be in the same filesystem (not across VFS mounts).
+   * Returns false if target doesn't exist, is a directory, or linkPath already exists.
+   */
+  link(targetPath: string, linkPath: string): boolean {
+    var resolvedTarget = this.resolvePath(targetPath);
+    var resolvedLink   = this.resolvePath(linkPath);
+    var targetEntry = this.navigate(resolvedTarget);
+    if (!targetEntry || isDir(targetEntry)) return false;
+
+    var linkParts  = resolvedLink.split('/').filter(function(p) { return p.length > 0; });
+    var linkName   = linkParts[linkParts.length - 1];
+    var linkDir    = '/' + linkParts.slice(0, -1).join('/');
+    var parentDir  = this.navigate(linkDir);
+    if (!parentDir || !isDir(parentDir)) return false;
+    if ((parentDir as DirectoryEntry).children.has(linkName)) return false;
+
+    // Share the same FileEntry object (true hard-link semantics)
+    (parentDir as DirectoryEntry).children.set(linkName, targetEntry as FileEntry);
+    (targetEntry as FileEntry).nlink = ((targetEntry as FileEntry).nlink || 1) + 1;
+    return true;
+  }
+
+  /**
+   * Unlink (remove) a path.  If the underlying FileEntry's nlink drops to 0,
+   * its content is effectively freed.  Returns false if path doesn't exist or is a dir.
+   */
+  unlink(path: string): boolean {
+    var resolved = this.resolvePath(path);
+    var parts    = resolved.split('/').filter(function(p) { return p.length > 0; });
+    if (parts.length === 0) return false;
+    var name   = parts[parts.length - 1];
+    var dirPath = '/' + parts.slice(0, -1).join('/');
+    var parent  = this.navigate(dirPath) || this.root;
+    if (!isDir(parent)) return false;
+    var entry = (parent as DirectoryEntry).children.get(name);
+    if (!entry || isDir(entry)) return false;
+    (entry as FileEntry).nlink = Math.max(0, ((entry as FileEntry).nlink || 1) - 1);
+    (parent as DirectoryEntry).children.delete(name);
+    return true;
   }
 }
 

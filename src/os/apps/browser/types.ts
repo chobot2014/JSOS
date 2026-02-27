@@ -84,6 +84,7 @@ export interface RenderNode {
   gap?:            number;
   // Flex child
   flexGrow?:    number;
+  flexShrink?:  number;
   order?:       number;
   alignSelf?:   string;
   // Clear floats (item 400)

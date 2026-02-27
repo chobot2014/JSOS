@@ -349,6 +349,9 @@ const TCP_PSH = 0x08;
 const TCP_ACK = 0x10;
 const TCP_URG = 0x20;
 
+/** [Item 255] A SACK block describing a received-but-not-yet-acknowledged range. */
+export interface SACKBlock { left: number; right: number; }
+
 export interface TCPSegment {
   srcPort: number;
   dstPort: number;
@@ -358,13 +361,24 @@ export interface TCPSegment {
   window:  number;
   urgent:  number;
   payload: number[];
+  // ── Parsed TCP options ─────────────────────────────────────────────────
+  /** [Item 256] Window scale factor received in SYN/SYN-ACK (0 = not negotiated). */
+  wscale?:    number;
+  /** [Item 257] TCP timestamp value (TSval) from the peer. */
+  tsVal?:     number;
+  /** [Item 257] TCP timestamp echo reply (TSecr) from the peer. */
+  tsEcr?:     number;
+  /** [Item 255] SACK blocks received in this segment. */
+  sackBlocks?: SACKBlock[];
+  /** True if peer sent SACK-permitted option in SYN. */
+  sackOk?:    boolean;
 }
 
 function parseTCP(raw: number[]): TCPSegment | null {
   if (raw.length < 20) return null;
   var dataOff = ((raw[12] >> 4) & 0xf) * 4;
   if (raw.length < dataOff) return null;
-  return {
+  var seg: TCPSegment = {
     srcPort: u16be(raw, 0),
     dstPort: u16be(raw, 2),
     seq:     u32be(raw, 4),
@@ -374,18 +388,95 @@ function parseTCP(raw: number[]): TCPSegment | null {
     urgent:  u16be(raw, 18),
     payload: raw.slice(dataOff),
   };
+  // ── Parse TCP options (bytes 20..dataOff-1) ─────────────────────────────
+  var i = 20;
+  while (i < dataOff) {
+    var kind = raw[i];
+    if (kind === 0) break;           // EOL
+    if (kind === 1) { i++; continue; } // NOP
+    if (i + 1 >= dataOff) break;
+    var optLen = raw[i + 1];
+    if (optLen < 2 || i + optLen > dataOff) break;
+    switch (kind) {
+      case 2: // MSS (not stored on segment, just parsed)
+        break;
+      case 3: // [Item 256] Window Scale
+        seg.wscale = raw[i + 2] & 0xff;
+        break;
+      case 4: // [Item 255] SACK-Permitted
+        seg.sackOk = true;
+        break;
+      case 5: // [Item 255] SACK blocks
+        var sacks: SACKBlock[] = [];
+        for (var si = i + 2; si + 7 < i + optLen; si += 8)
+          sacks.push({ left: u32be(raw, si), right: u32be(raw, si + 4) });
+        if (sacks.length > 0) seg.sackBlocks = sacks;
+        break;
+      case 8: // [Item 257] Timestamps
+        if (optLen === 10) {
+          seg.tsVal = u32be(raw, i + 2);
+          seg.tsEcr = u32be(raw, i + 6);
+        }
+        break;
+    }
+    i += optLen;
+  }
+  return seg;
 }
-function buildTCP(seg: TCPSegment, srcIP: IPv4Address, dstIP: IPv4Address): number[] {
-  var h = fill(20);
+/** Options to include in a TCP segment being built. */
+interface BuildTCPOpts {
+  wscale?:     number;   // [Item 256] window scale; sent only in SYN
+  sackOk?:     boolean;  // [Item 255] SACK-permitted; sent only in SYN
+  tsVal?:      number;   // [Item 257] TSval
+  tsEcr?:      number;   // [Item 257] TSecr
+  sackBlocks?: SACKBlock[]; // [Item 255] SACK blocks in ACK
+}
+function push32be(arr: number[], v: number): void {
+  arr.push((v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff);
+}
+function buildTCP(seg: TCPSegment, srcIP: IPv4Address, dstIP: IPv4Address,
+                  opts?: BuildTCPOpts): number[] {
+  // Build options blob
+  var optBytes: number[] = [];
+  if (opts) {
+    if (opts.wscale !== undefined) {
+      // Window Scale: kind=3, len=3, shift + NOP padding
+      optBytes.push(3, 3, opts.wscale & 0xff, 1 /*NOP*/);
+    }
+    if (opts.sackOk) {
+      // SACK-Permitted: kind=4, len=2 + 2 NOPs for alignment
+      optBytes.push(4, 2, 1, 1);
+    }
+    if (opts.tsVal !== undefined) {
+      // Timestamps: 2 NOPs + kind=8, len=10
+      optBytes.push(1, 1, 8, 10);
+      push32be(optBytes, opts.tsVal >>> 0);
+      push32be(optBytes, (opts.tsEcr !== undefined ? opts.tsEcr : 0) >>> 0);
+    }
+    if (opts.sackBlocks && opts.sackBlocks.length > 0) {
+      var sb = opts.sackBlocks.slice(0, 4); // max 4 SACK blocks
+      var sackLen = 2 + sb.length * 8;
+      optBytes.push(1, 1, 5, sackLen);
+      for (var si2 = 0; si2 < sb.length; si2++) {
+        push32be(optBytes, sb[si2].left >>> 0);
+        push32be(optBytes, sb[si2].right >>> 0);
+      }
+    }
+    // Pad to 4-byte boundary
+    while (optBytes.length % 4 !== 0) optBytes.push(0);
+  }
+  var headerLen = 20 + optBytes.length;
+  var h = fill(headerLen);
   wu16be(h, 0,  seg.srcPort);
   wu16be(h, 2,  seg.dstPort);
   wu32be(h, 4,  seg.seq);
   wu32be(h, 8,  seg.ack);
-  wu8(h, 12, 0x50); // data offset = 5 words
+  wu8(h, 12, ((headerLen >> 2) & 0xf) << 4); // data offset
   wu8(h, 13, seg.flags);
   wu16be(h, 14, seg.window);
   wu16be(h, 16, 0);
   wu16be(h, 18, seg.urgent);
+  for (var oi = 0; oi < optBytes.length; oi++) h[20 + oi] = optBytes[oi];
   var data = h.concat(seg.payload);
   // TCP pseudo-header checksum
   var pseudo = ipToBytes(srcIP).concat(
@@ -453,6 +544,36 @@ export interface TCPConnection {
   // ── TIME_WAIT ────────────────────────────────────────────────────────────────
   /** Absolute tick when TIME_WAIT expires; -1 = not in TIME_WAIT. */
   timeWaitDead: number;
+
+  // ── TCP options negotiated during handshake ─────────────────────────────────
+  /** [Item 256] Our send window scale shift (0 = not enabled). */
+  sendWscale:   number;
+  /** [Item 256] Peer's receive window scale shift (0 = not enabled). */
+  recvWscale:   number;
+  /** [Item 255] True if SACK was negotiated with peer. */
+  sackEnabled:  boolean;
+  /** [Item 255] Outstanding SACK blocks to report to peer. */
+  sackQueue:    SACKBlock[];
+  /** [Item 257] True if TCP timestamps were negotiated. */
+  tsEnabled:    boolean;
+  /** [Item 257] Our last sent TSval (ticks at send time). */
+  tsLastSent:   number;
+  /** [Item 257] Peer's last TSval (echo back as TSecr). */
+  tsEcr:        number;
+
+  // ── TCP Keepalive ───────────────────────────────────────────────────────────
+  /** [Item 264] True if keepalive probes are enabled on this connection. */
+  keepalive:         boolean;
+  /** [Item 264] Idle ticks before first keepalive probe (default 7500 ≈ 75 s). */
+  keepaliveIdle:     number;
+  /** [Item 264] Ticks between keepalive probes (default 750 ≈ 7.5 s). */
+  keepaliveInterval: number;
+  /** [Item 264] Max unanswered probes before aborting (default 9). */
+  keepaliveMaxProbes: number;
+  /** [Item 264] Current probe count. */
+  keepaliveProbeCount: number;
+  /** [Item 264] Absolute tick when next keepalive probe fires; -1 = not set. */
+  keepaliveDead:     number;
 }
 
 // ── Socket ────────────────────────────────────────────────────────────────────
@@ -468,6 +589,12 @@ export interface Socket {
   remotePort?: number;
   state:      'closed' | 'bound' | 'listening' | 'connected';
   recvQueue:  string[]; // received data segments
+  /** [Item 262] Maximum pending connections in accept queue (default 128). */
+  backlog:    number;
+  /** [Item 262] Queue of fully-established connections awaiting accept(). */
+  pendingConns: TCPConnection[];
+  /** [Item 263] Whether SO_REUSEADDR is set. */
+  reuseAddr:  boolean;
 }
 
 // ── NetworkStack ──────────────────────────────────────────────────────────────
@@ -727,16 +854,50 @@ export class NetworkStack {
       dupAcks: 0, lastAckSeq: iss,
       persistDead: -1, persistCount: 0,
       timeWaitDead: -1,
+      // TCP options
+      sendWscale: 0, recvWscale: 0,
+      sackEnabled: false, sackQueue: [],
+      tsEnabled: false, tsLastSent: 0, tsEcr: 0,
+      // Keepalive
+      keepalive: false,
+      keepaliveIdle: 7500,
+      keepaliveInterval: 750,
+      keepaliveMaxProbes: 9,
+      keepaliveProbeCount: 0,
+      keepaliveDead: -1,
     };
   }
 
   private _tcpAccept(listener: Socket, ip: IPv4Packet, seg: TCPSegment): void {
+    // [Item 262] Enforce backlog limit
+    if (listener.pendingConns.length >= listener.backlog) return;
+
     var iss = this._randSeq();
     var conn = this._tcpMakeConn('SYN_RECEIVED', seg.dstPort, ip.src, seg.srcPort, iss, (seg.seq + 1) >>> 0);
+
+    // [Item 255-257] Negotiate TCP options from the incoming SYN
+    var synOpts: BuildTCPOpts = {};
+    if (seg.sackOk) {
+      conn.sackEnabled = true;
+      synOpts.sackOk = true;
+    }
+    if (seg.wscale !== undefined) {
+      conn.recvWscale = seg.wscale;
+      conn.sendWscale = 7; // advertise our window scale shift
+      synOpts.wscale  = conn.sendWscale;
+    }
+    if (seg.tsVal !== undefined) {
+      conn.tsEnabled  = true;
+      conn.tsEcr      = seg.tsVal;
+      synOpts.tsVal   = kernel.getTicks() >>> 0;
+      synOpts.tsEcr   = seg.tsVal;
+    }
+
     this.connections.set(conn.id, conn);
-    this._sendTCPSeg(conn, TCP_SYN | TCP_ACK, []);
+    this._sendTCPSegOpts(conn, TCP_SYN | TCP_ACK, [], synOpts);
     conn.sendSeq = (conn.sendSeq + 1) >>> 0;
     conn.sndUna  = conn.sendSeq;  // SYN consumed
+    listener.pendingConns.push(conn);
   }
 
   /** Update smoothed RTT (Jacobson/Karels algorithm, ticks units). */
@@ -891,7 +1052,15 @@ export class NetworkStack {
           conn.lastAckSeq = seg.ack;
           conn.window     = seg.window;
           conn.state      = 'ESTABLISHED';
-          // Honour remote MSS option if present (simplified: use 1460 default)
+          // [Item 255-257] Capture options from SYN-ACK
+          if (seg.sackOk)  conn.sackEnabled = true;
+          if (seg.wscale !== undefined) {
+            conn.recvWscale = seg.wscale;
+          }
+          if (seg.tsVal !== undefined) {
+            conn.tsEnabled = true;
+            conn.tsEcr     = seg.tsVal;
+          }
           this._sendTCPSeg(conn, TCP_ACK, []);
           this._tcpClearRetransmit(conn); // SYN acked
         }
@@ -934,12 +1103,31 @@ export class NetworkStack {
   }
 
   private _sendTCPSeg(conn: TCPConnection, flags: number, payload: number[]): void {
+    this._sendTCPSegOpts(conn, flags, payload);
+  }
+
+  private _sendTCPSegOpts(conn: TCPConnection, flags: number, payload: number[],
+                          extraOpts?: BuildTCPOpts): void {
     var seq = conn.sendSeq;
+    var opts: BuildTCPOpts | undefined;
+    // [Item 257] Include timestamps if negotiated
+    if (conn.tsEnabled || extraOpts) {
+      opts = extraOpts ? Object.assign({}, extraOpts) : {};
+      if (conn.tsEnabled && opts.tsVal === undefined) {
+        opts.tsVal = kernel.getTicks() >>> 0;
+        opts.tsEcr = conn.tsEcr;
+      }
+    }
+    // [Item 255] Include pending SACK blocks in ACKs
+    if (conn.sackEnabled && conn.sackQueue.length > 0 && (flags & TCP_ACK)) {
+      if (!opts) opts = {};
+      opts.sackBlocks = conn.sackQueue.slice(0, 4);
+    }
     var raw = buildTCP({
       srcPort: conn.localPort, dstPort: conn.remotePort,
       seq, ack: conn.recvSeq,
       flags, window: 65535, urgent: 0, payload,
-    }, conn.localIP, conn.remoteIP);
+    }, conn.localIP, conn.remoteIP, opts);
     this._sendIPv4({
       ihl: 5, dscp: 0, ecn: 0, id: this.idCounter++,
       flags: 2, fragOff: 0, ttl: 64, protocol: PROTO_TCP,
@@ -1153,26 +1341,54 @@ export class NetworkStack {
       id: this.nextSock++, type,
       localIP: this.ip, localPort: 0,
       state: 'closed', recvQueue: [],
+      backlog: 128, pendingConns: [], reuseAddr: false,
     };
     this.sockets.set(s.id, s);
     return s;
   }
 
   bind(sock: Socket, port: number, ip?: IPv4Address): boolean {
-    // [Item 270] EADDRINUSE: reject if port is already bound.
-    if (sock.type === 'udp' && this.udpRxMap.has(port)) return false;
-    if (sock.type === 'tcp' && this.listeners.has(port)) return false;
+    // [Item 270] EADDRINUSE: reject if port is already bound (unless SO_REUSEADDR).
+    if (!sock.reuseAddr) {
+      if (sock.type === 'udp' && this.udpRxMap.has(port)) return false;
+      if (sock.type === 'tcp' && this.listeners.has(port)) return false;
+    }
     sock.localPort = port;
     if (ip) sock.localIP = ip;
     sock.state = 'bound';
     return true;
   }
 
-  listen(sock: Socket): boolean {
+  /** [Item 262] Start listening with a backlog queue limit. */
+  listen(sock: Socket, backlog: number = 128): boolean {
     if (sock.state !== 'bound') return false;
+    sock.backlog = backlog;
     sock.state = 'listening';
     this.listeners.set(sock.localPort, sock);
     return true;
+  }
+
+  /** [Item 263] Set SO_REUSEADDR: allow rebinding a port already in TIME_WAIT. */
+  setReuseAddr(sock: Socket, enable: boolean): void {
+    sock.reuseAddr = enable;
+  }
+
+  /**
+   * [Item 264] Enable/configure TCP keepalive on a socket's connection.
+   * @param idle     Idle ticks before first probe (default 7500 ≈ 75 s at 100 Hz)
+   * @param interval Ticks between probes (default 750)
+   * @param maxProbes Max unanswered probes before aborting connection (default 9)
+   */
+  setKeepAlive(sock: Socket, enable: boolean, idle: number = 7500,
+               interval: number = 750, maxProbes: number = 9): void {
+    var conn = this._connForSock(sock);
+    if (conn) {
+      conn.keepalive           = enable;
+      conn.keepaliveIdle       = idle;
+      conn.keepaliveInterval   = interval;
+      conn.keepaliveMaxProbes  = maxProbes;
+      conn.keepaliveDead       = enable ? kernel.getTicks() + idle : -1;
+    }
   }
 
   connect(sock: Socket, remoteIP: IPv4Address, remotePort: number): boolean {
@@ -1183,7 +1399,15 @@ export class NetworkStack {
       var iss = this._randSeq();
       var conn = this._tcpMakeConn('SYN_SENT', sock.localPort, remoteIP, remotePort, iss, 0);
       this.connections.set(conn.id, conn);
-      this._sendTCPSeg(conn, TCP_SYN, []);
+      // [Item 255-257] Advertise SACK, window scale, and timestamps in the SYN.
+      // Options are only activated after the peer echoes them in SYN-ACK.
+      conn.sendWscale = 7;
+      this._sendTCPSegOpts(conn, TCP_SYN, [], {
+        wscale: conn.sendWscale,
+        sackOk: true,
+        tsVal: kernel.getTicks() >>> 0,
+        tsEcr: 0,
+      });
       conn.sendSeq = (conn.sendSeq + 1) >>> 0;
       if (this.nicReady) {
         // Block-poll NIC until ESTABLISHED or timeout (200 ticks ≈ 2 s)
@@ -1601,6 +1825,36 @@ export class NetworkStack {
         conn.persistCount++;
         var delay = Math.min(500 * Math.pow(2, conn.persistCount), 6000);
         conn.persistDead = now + delay;
+      }
+
+      // ── [Item 264] TCP Keepalive ───────────────────────────────────────────
+      if (conn.keepalive && conn.state === 'ESTABLISHED' &&
+          conn.keepaliveDead >= 0 && now >= conn.keepaliveDead) {
+        // Send a keepalive probe: empty ACK with seq = sndUna - 1
+        var kaRaw = buildTCP({
+          srcPort: conn.localPort,
+          dstPort: conn.remotePort,
+          seq:     (conn.sndUna - 1) >>> 0,
+          ack:     conn.recvSeq,
+          flags:   TCP_ACK,
+          window:  65535,
+          urgent:  0,
+          payload: [],
+        }, conn.localIP, conn.remoteIP);
+        this._sendIPv4({
+          ihl: 5, dscp: 0, ecn: 0, id: this.idCounter++, flags: 2, fragOff: 0,
+          ttl: 64, protocol: PROTO_TCP, src: conn.localIP, dst: conn.remoteIP,
+          payload: kaRaw,
+        });
+        this.stats.tcpTx++;
+        conn.keepaliveProbeCount++;
+        if (conn.keepaliveProbeCount >= conn.keepaliveMaxProbes) {
+          // [Item 264] Max probes exhausted: abort connection
+          conn.state = 'CLOSED';
+          toDelete.push(conn.id);
+        } else {
+          conn.keepaliveDead = now + conn.keepaliveInterval;
+        }
       }
     });
 
