@@ -598,6 +598,133 @@ export class Terminal {
     if (this._cursorVisible && this._viewOffset === 0) kernel.vgaShowCursor();
   }
 
+  // ── Dynamic dimensions (Item 674: terminal resize / reflow) ─────────────────
+  private _dynCols: number = 0;  // 0 = use VGA_W constant
+  private _dynRows: number = 0;  // 0 = use VGA_H constant
+
+  /** Current logical column count (VGA_W or resized value). */
+  get cols(): number { return this._dynCols > 0 ? this._dynCols : VGA_W; }
+  /** Current logical row count (VGA_H or resized value). */
+  get rows(): number { return this._dynRows > 0 ? this._dynRows : VGA_H; }
+
+  /**
+   * [Item 674] Resize the terminal to `cols` × `rows` and reflow the
+   * scrollback buffer to the new width.
+   *
+   * - Rows narrower than the new width are left unchanged (padded on paint).
+   * - Rows wider than the new width are word-wrapped at the nearest space, or
+   *   hard-split at col boundary if no space is found.
+   * - After reflow the visible screen is redrawn from the bottom of the
+   *   scrollback buffer.
+   */
+  resize(cols: number, rows: number): void {
+    if (cols < 10) cols = 10;
+    if (rows < 3)  rows = 3;
+    var oldCols = this.cols;
+    var oldRows = this.rows;
+    if (cols === oldCols && rows === oldRows) return;
+
+    this._dynCols = cols;
+    this._dynRows = rows;
+
+    // Rebuild scrollback: re-wrap every existing row to the new column width.
+    var reflowed: Row[] = [];
+    var allRows: Row[] = [];
+
+    // Collect all scrollback rows in chronological order
+    for (var i = 0; i < this._sbCount; i++) {
+      var idx = (this._sbWrite - this._sbCount + i + SCROLLBACK) % SCROLLBACK;
+      allRows.push(this._sb[idx]);
+    }
+    // Append current screen rows
+    for (var si = 0; si < this._screen.length; si++) {
+      allRows.push(this._screen[si]);
+    }
+
+    for (var ri = 0; ri < allRows.length; ri++) {
+      var row = allRows[ri];
+      var cells: number[] = [];
+      // Trim trailing spaces
+      var lastNonSpace = 0;
+      for (var ci = 0; ci < row.length; ci++) {
+        if ((row[ci] & 0xff) !== 0x20) lastNonSpace = ci + 1;
+      }
+      for (var ci = 0; ci < lastNonSpace; ci++) cells.push(row[ci]);
+
+      if (cells.length === 0) {
+        // Blank row — keep one blank row
+        reflowed.push(this._makeBlankRow(cols));
+        continue;
+      }
+      // Split into cols-wide chunks
+      var pos = 0;
+      while (pos < cells.length) {
+        var chunk = cells.slice(pos, pos + cols);
+        var nr = new Uint16Array(cols);
+        for (var k = 0; k < cols; k++) {
+          nr[k] = k < chunk.length ? chunk[k] : ((this._color << 8) | 0x20);
+        }
+        reflowed.push(nr);
+        pos += cols;
+      }
+    }
+
+    // Rebuild scrollback from reflowed rows (keep most recent SCROLLBACK lines)
+    this._sb     = [];
+    this._sbWrite = 0;
+    this._sbCount = 0;
+    var start = Math.max(0, reflowed.length - SCROLLBACK);
+    for (var ri2 = start; ri2 < reflowed.length; ri2++) {
+      this._sb[this._sbWrite] = reflowed[ri2];
+      this._sbWrite = (this._sbWrite + 1) % SCROLLBACK;
+      if (this._sbCount < SCROLLBACK) this._sbCount++;
+    }
+
+    // Rebuild visible screen: last `rows` reflowed rows (or blank if fewer)
+    this._screen = [];
+    var screenStart = Math.max(0, reflowed.length - rows);
+    for (var ri3 = screenStart; ri3 < reflowed.length; ri3++) {
+      this._screen.push(reflowed[ri3]);
+    }
+    while (this._screen.length < rows) this._screen.unshift(this._makeBlankRow(cols));
+
+    // Reset cursor to bottom-left
+    this._row = Math.min(this._screen.length - 1, rows - 1);
+    this._col = 0;
+
+    // Reinitialise link layer to new dimensions
+    this._screenLinks = [];
+    for (var li = 0; li < rows; li++) {
+      var lr: (string|null)[] = [];
+      for (var lj = 0; lj < cols; lj++) lr.push(null);
+      this._screenLinks.push(lr);
+    }
+
+    // Force a full VGA repaint
+    this._repaintAll();
+    this._viewOffset = 0;
+  }
+
+  private _makeBlankRow(cols: number): Row {
+    var r = new Uint16Array(cols);
+    var cell = ((this._color & 0xFF) << 8) | 0x20;
+    for (var i = 0; i < cols; i++) r[i] = cell;
+    return r;
+  }
+
+  private _repaintAll(): void {
+    var rows = this.rows;
+    var cols = this.cols;
+    for (var r = 0; r < rows; r++) {
+      var row = this._screen[r];
+      if (!row) { for (var c = 0; c < cols; c++) kernel.vgaWriteCell(c, r, 0x20, 0x07); continue; }
+      for (var c = 0; c < cols; c++) {
+        var cell = row[c] ?? ((0x07 << 8) | 0x20);
+        kernel.vgaWriteCell(c, r, cell & 0xff, (cell >> 8) & 0xff);
+      }
+    }
+  }
+
   /** [Item 673] Return the hyperlink URL at a given screen cell, or '' if none. */
   getLinkAt(row: number, col: number): string {
     if (row < 0 || row >= VGA_H || col < 0 || col >= VGA_W) return '';

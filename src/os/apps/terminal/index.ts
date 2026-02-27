@@ -353,3 +353,110 @@ export class TerminalApp implements App {
 }
 
 export const terminalApp = new TerminalApp();
+
+// ── Terminal Tabs (Item 654) ──────────────────────────────────────────────────
+
+/** A lightweight record for one terminal tab. */
+interface TerminalTab {
+  id: number;
+  title: string;
+  inputBuf: string;
+  history: string[];
+  historyPos: number;
+}
+
+/**
+ * [Item 654] TerminalTabManager — manages multiple independent terminal
+ * tabs.  Ctrl+T opens a new tab, Ctrl+W closes the active tab, and
+ * Ctrl+Tab / Ctrl+Shift+Tab cycle through open tabs.
+ *
+ * Each tab gets its own input buffer and command history so switching back
+ * and forth does not clobber the user's work-in-progress.
+ */
+export class TerminalTabManager {
+  private _tabs: TerminalTab[] = [];
+  private _activeId: number    = 0;
+  private _nextId: number      = 1;
+
+  constructor() { this._newTab(); }       // always starts with one tab
+
+  /** Number of open tabs. */
+  get count(): number { return this._tabs.length; }
+
+  /** ID of the currently active tab. */
+  get activeId(): number { return this._activeId; }
+
+  /** Open a fresh tab and make it active. */
+  openTab(): TerminalTab {
+    var tab = this._newTab();
+    return tab;
+  }
+
+  /** Close the tab with `id`.  Switches to the previous tab when possible.
+   *  Ignored when only one tab is open. */
+  closeTab(id: number): void {
+    if (this._tabs.length <= 1) return;
+    var idx = this._tabs.findIndex(function(t) { return t.id === id; });
+    if (idx === -1) return;
+    this._tabs.splice(idx, 1);
+    if (this._activeId === id) {
+      var nextIdx = Math.max(0, idx - 1);
+      this._activeId = this._tabs[nextIdx].id;
+    }
+  }
+
+  /** Activate the next tab (wraps around). */
+  nextTab(): TerminalTab {
+    var idx = this._tabs.findIndex((t) => t.id === this._activeId);
+    var nextIdx = (idx + 1) % this._tabs.length;
+    this._activeId = this._tabs[nextIdx].id;
+    return this._tabs[nextIdx];
+  }
+
+  /** Activate the previous tab (wraps around). */
+  prevTab(): TerminalTab {
+    var idx = this._tabs.findIndex((t) => t.id === this._activeId);
+    var prevIdx = (idx - 1 + this._tabs.length) % this._tabs.length;
+    this._activeId = this._tabs[prevIdx].id;
+    return this._tabs[prevIdx];
+  }
+
+  /** Return the active tab record. */
+  activeTab(): TerminalTab {
+    return this._tabs.find((t) => t.id === this._activeId)!;
+  }
+
+  /** Return a shallow copy of all tab records (for rendering a tab bar). */
+  listTabs(): TerminalTab[] { return this._tabs.slice(); }
+
+  /** Rename a tab. */
+  renameTab(id: number, title: string): void {
+    var tab = this._tabs.find(function(t) { return t.id === id; });
+    if (tab) tab.title = title;
+  }
+
+  /** Handle a key event; returns `true` when the key was consumed. */
+  handleKey(key: string, ctrlKey: boolean): boolean {
+    if (!ctrlKey) return false;
+    if (key === 't' || key === 'T') { this.openTab();  return true; }
+    if (key === 'w' || key === 'W') { this.closeTab(this._activeId); return true; }
+    if (key === 'Tab')              { this.nextTab();  return true; }
+    return false;
+  }
+
+  private _newTab(): TerminalTab {
+    var tab: TerminalTab = {
+      id: this._nextId++,
+      title: 'Terminal ' + this._tabs.length,
+      inputBuf: '',
+      history: [],
+      historyPos: -1,
+    };
+    this._tabs.push(tab);
+    this._activeId = tab.id;
+    return tab;
+  }
+}
+
+export const terminalTabManager = new TerminalTabManager();
+

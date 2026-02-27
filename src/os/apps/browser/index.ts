@@ -2025,3 +2025,73 @@ export class BrowserApp implements App {
 }
 
 export const browserApp = new BrowserApp();
+
+// ── Paint & DOM-write optimizations ──────────────────────────────────────────
+
+/** [Item 961] DOMWriteDebouncer — collect DOM mutations issued during the
+ *  current synchronous JS turn and batch-flush them before the next paint.
+ *  Avoids forced reflows when multiple writes happen close together (e.g.
+ *  during rapid `input` events). */
+export class DOMWriteDebouncer {
+  private _writes: Array<() => void> = [];
+  private _scheduled = false;
+
+  /** Queue a DOM write callback. */
+  write(fn: () => void): void {
+    this._writes.push(fn);
+    if (!this._scheduled) {
+      this._scheduled = true;
+      // Defer to after the current microtask queue drains
+      Promise.resolve().then(() => this._flush());
+    }
+  }
+
+  /** Flush all pending writes immediately (called before paint). */
+  flush(): void { this._flush(); }
+
+  private _flush(): void {
+    this._scheduled = false;
+    var ws = this._writes.splice(0);
+    for (var i = 0; i < ws.length; i++) ws[i]();
+  }
+
+  /** Return true when writes are queued. */
+  get pending(): boolean { return this._writes.length > 0; }
+}
+
+/** [Item 973] PaintProfiler — records per-region repaint reasons and durations
+ *  so hot repaint areas can be identified.  Enabled only when
+ *  `paintProfiler.enabled` is set to `true`. */
+export class PaintProfiler {
+  enabled = false;
+  private _records: Array<{ x: number; y: number; w: number; h: number; reason: string; ms: number }> = [];
+  private _starts: Map<string, number> = new Map();
+
+  /** Call before repainting a region. */
+  startRepaint(key: string, _x: number, _y: number, _w: number, _h: number): void {
+    if (!this.enabled) return;
+    this._starts.set(key, Date.now());
+  }
+
+  /** Call after repainting; `reason` is a short string (e.g. `'text-change'`). */
+  endRepaint(key: string, x: number, y: number, w: number, h: number, reason: string): void {
+    if (!this.enabled) return;
+    var s = this._starts.get(key);
+    if (s === undefined) return;
+    var ms = Date.now() - s;
+    this._starts.delete(key);
+    this._records.push({ x, y, w, h, reason, ms });
+    // Keep last 256 records to avoid unbounded growth
+    if (this._records.length > 256) this._records.shift();
+  }
+
+  /** Return all recorded repaint events, newest last. */
+  report(): typeof this._records { return this._records.slice(); }
+
+  /** Clear all recorded data. */
+  reset(): void { this._records = []; this._starts.clear(); }
+}
+
+export const domWriteDebouncer = new DOMWriteDebouncer();
+export const paintProfiler     = new PaintProfiler();
+

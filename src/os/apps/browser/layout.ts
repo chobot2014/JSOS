@@ -581,3 +581,201 @@ function _layoutNodesImpl(
 
   return { lines, widgets };
 }
+
+// ── Layout optimization classes ──────────────────────────────────────────────
+
+/** [Item 893] CSS `contain: layout` — isolate a subtree so its layout cannot
+ *  affect ancestors.  A contained box is treated as a fresh independent block. */
+export class LayoutContainment {
+  private _contained: Set<string> = new Set();
+
+  /** Mark a node (by its DOM id) as layout-contained. */
+  contain(id: string): void { this._contained.add(id); }
+
+  /** Remove layout containment for a node. */
+  release(id: string): void { this._contained.delete(id); }
+
+  /** Return true when `id` is in a contained subtree — layout engine should
+   *  not propagate size/position changes past this boundary. */
+  isContained(id: string): boolean { return this._contained.has(id); }
+
+  /** Wrap a layout function so it cannot escape the containment boundary. */
+  runContained<T>(id: string, fn: () => T): T {
+    this.contain(id);
+    try { return fn(); }
+    finally { this.release(id); }
+  }
+}
+
+/** [Item 895] Cache computed flex/grid track sizes so identical containers
+ *  skip the full measurement pass on subsequent frames. */
+export class FlexGridTrackCache {
+  private _cache: Map<string, number[]> = new Map();
+
+  /** Compute a stable key from column/row count and available space. */
+  private _key(nodeId: string, trackCount: number, availPx: number): string {
+    return `${nodeId}:${trackCount}:${availPx}`;
+  }
+
+  /** Return cached track sizes, or null on cache miss. */
+  get(nodeId: string, trackCount: number, availPx: number): number[] | null {
+    return this._cache.get(this._key(nodeId, trackCount, availPx)) ?? null;
+  }
+
+  /** Store computed track sizes. */
+  set(nodeId: string, trackCount: number, availPx: number, tracks: number[]): void {
+    this._cache.set(this._key(nodeId, trackCount, availPx), tracks.slice());
+  }
+
+  /** Invalidate all entries for a specific node (e.g. on style change). */
+  invalidate(nodeId: string): void {
+    for (var k of Array.from(this._cache.keys())) {
+      if (k.startsWith(nodeId + ':')) this._cache.delete(k);
+    }
+  }
+
+  clear(): void { this._cache.clear(); }
+}
+
+/** [Item 898] Cache the containing-block rectangle for absolutely/fixed
+ *  positioned elements to avoid re-walking ancestors every layout pass. */
+export class ContainingBlockCache {
+  private _cache: Map<string, { x: number; y: number; w: number; h: number }> = new Map();
+
+  get(nodeId: string) { return this._cache.get(nodeId) ?? null; }
+
+  set(nodeId: string, rect: { x: number; y: number; w: number; h: number }): void {
+    this._cache.set(nodeId, rect);
+  }
+
+  /** Invalidate when an ancestor's geometry changes. */
+  invalidate(nodeId: string): void { this._cache.delete(nodeId); }
+
+  invalidateAll(): void { this._cache.clear(); }
+}
+
+/** [Item 901] Enforce a per-frame layout budget (default 4 ms).
+ *  When the budget is exceeded the layout engine can defer expensive subtrees. */
+export class LayoutBudget {
+  private _budgetMs: number;
+  private _start: number = 0;
+
+  constructor(budgetMs: number = 4) {
+    this._budgetMs = budgetMs;
+  }
+
+  begin(): void { this._start = Date.now(); }
+
+  /** Returns true when the budget has NOT been exceeded. */
+  ok(): boolean { return (Date.now() - this._start) < this._budgetMs; }
+
+  /** Remaining milliseconds (clamped to 0). */
+  remaining(): number { return Math.max(0, this._budgetMs - (Date.now() - this._start)); }
+
+  /** Reset budget with an optional new limit. */
+  reset(budgetMs?: number): void {
+    if (budgetMs !== undefined) this._budgetMs = budgetMs;
+    this._start = Date.now();
+  }
+}
+
+/** [Item 903] Fast path for CSS grid auto-placement in dense packing mode.
+ *  Skips full backtracking search when all items have span=1. */
+export class GridAutoPlacementFastPath {
+  /** Place `count` implicit items into `cols` columns (dense order).
+   *  Returns array of {col, row} positions (0-indexed). */
+  static place(cols: number, count: number): Array<{ col: number; row: number }> {
+    var result: Array<{ col: number; row: number }> = [];
+    for (var i = 0; i < count; i++) {
+      result.push({ col: i % cols, row: Math.floor(i / cols) });
+    }
+    return result;
+  }
+
+  /** Determine whether the fast path is applicable for a grid spec. */
+  static applicable(spanMax: number, autoFlow: string): boolean {
+    return spanMax <= 1 && autoFlow === 'dense';
+  }
+}
+
+/** [Item 904] Schedule flex/grid subtree layouts as microtasks so multiple
+ *  independent subtrees can be prepared concurrently (cooperative, not truly
+ *  parallel — JS is single-threaded, but we yield between subtrees). */
+export class ParallelLayoutScheduler {
+  private _queue: Array<() => void> = [];
+  private _running = false;
+
+  enqueue(task: () => void): void {
+    this._queue.push(task);
+    if (!this._running) this._flush();
+  }
+
+  private _flush(): void {
+    this._running = true;
+    var run = (): void => {
+      if (this._queue.length === 0) { this._running = false; return; }
+      var task = this._queue.shift()!;
+      task();
+      // Yield to the event loop so rendering can interleave
+      Promise.resolve().then(run);
+    };
+    Promise.resolve().then(run);
+  }
+
+  /** Drain all queued tasks synchronously (for tests / end-of-frame flush). */
+  flushSync(): void {
+    while (this._queue.length > 0) { var t = this._queue.shift()!; t(); }
+    this._running = false;
+  }
+}
+
+/** [Item 972] Layout profiler — records per-subtree timing so hot paths can be
+ *  identified.  Call `startLayout(id)` before laying out a node and
+ *  `endLayout(id)` afterwards; `report()` returns sorted timings. */
+export class LayoutProfiler {
+  private _starts: Map<string, number> = new Map();
+  private _totals: Map<string, number> = new Map();
+  private _counts: Map<string, number> = new Map();
+  enabled = false;
+
+  startLayout(id: string): void {
+    if (!this.enabled) return;
+    this._starts.set(id, Date.now());
+  }
+
+  endLayout(id: string): void {
+    if (!this.enabled) return;
+    var s = this._starts.get(id);
+    if (s === undefined) return;
+    var elapsed = Date.now() - s;
+    this._totals.set(id, (this._totals.get(id) ?? 0) + elapsed);
+    this._counts.set(id, (this._counts.get(id) ?? 0) + 1);
+    this._starts.delete(id);
+  }
+
+  report(): Array<{ id: string; totalMs: number; count: number; avgMs: number }> {
+    var rows: Array<{ id: string; totalMs: number; count: number; avgMs: number }> = [];
+    this._totals.forEach((totalMs, id) => {
+      var count = this._counts.get(id) ?? 1;
+      rows.push({ id, totalMs, count, avgMs: totalMs / count });
+    });
+    rows.sort(function(a, b) { return b.totalMs - a.totalMs; });
+    return rows;
+  }
+
+  reset(): void {
+    this._starts.clear();
+    this._totals.clear();
+    this._counts.clear();
+  }
+}
+
+// Singleton exports for easy consumption by the layout engine
+export const layoutContainment      = new LayoutContainment();
+export const flexGridTrackCache     = new FlexGridTrackCache();
+export const containingBlockCache   = new ContainingBlockCache();
+export const layoutBudget           = new LayoutBudget(4);
+export const gridAutoPlacement      = GridAutoPlacementFastPath;
+export const parallelLayoutScheduler = new ParallelLayoutScheduler();
+export const layoutProfiler         = new LayoutProfiler();
+

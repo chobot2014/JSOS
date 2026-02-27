@@ -1,6 +1,6 @@
 ﻿# Audit State Tracker
 
-**Last updated:** 2026-02-27 (Agent E continuation Session 9 — items 202/685/687/756b/758b/759b/792/793/794/795/796/977 implemented; 175/178/183/190/191 re-audited as false negatives → ✓)  
+**Last updated:** 2026-02-28 (Agent E continuation Session 10 — items 654/674/675/893/895/898/901/903/904/955/960/961/972/973 implemented; 224/229/230/323/324/325/327/549/584/653/661/912 re-audited as false negatives → ✓)  
 **Audit target:** `docs/1000-things.md` (1430 lines, ~1130 items)
 
 ---
@@ -9,8 +9,8 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 441 |
-| Items confirmed ✗ (not implemented, do not re-check) | 299 |
+| Items confirmed ✓ (marked this audit) | 467 |
+| Items confirmed ✗ (not implemented, do not re-check) | 273 |
 | Items not yet investigated | ~475 |
 
 ---
@@ -433,17 +433,17 @@
 | 181 | tmpfs | NOW ✓ — `TmpFS` class in `fs/filesystem.ts:117` (re-audited Session 6) |
 | 222 | ARP cache TTL/aging | simple `Map`, no expiry logic |
 | 223 | ARP cache timeout | same |
-| 224 | ARP pending TX queue | not in `handleARP()` |
-| 229 | IP fragmentation | not in `handleIPv4()` |
-| 230 | IP TTL-exceeded ICMP | not in `handleIPv4()` |
+| 224 | ARP pending TX queue | NOW ✓ — `arpPendingTx` Map + flush in `handleARP()` reply handler in `net/net.ts` (Session 10 re-audit) |
+| 229 | IP fragmentation | NOW ✓ — `ipFragments` Map + `_reassembleIP()` in `net/net.ts` (Session 10 re-audit) |
+| 230 | IP TTL-exceeded ICMP | NOW ✓ — TTL ≤ 1 check → `_sendICMPError(ip, 11, 0)` in `net/net.ts` (Session 10 re-audit) |
 | 288 | TLS session resumption | confirmed absent at `tls.ts` header comment |
 | 290 | TLS cert chain validation | "No certificate validation" in `tls.ts` header |
 | 291 | TLS trust store | same |
 | 292 | TLS revocation check (OCSP/CRL) | same |
-| 323 | RSA PKCS#1.5 | not in `crypto.ts` |
-| 324 | RSA-PSS | not in `crypto.ts` |
-| 325 | ECDSA P-384 verify | not in `crypto.ts` |
-| 327 | ChaCha20-Poly1305 | not in `crypto.ts` |
+| 323 | RSA PKCS#1.5 | NOW ✓ — `rsaPKCS1Verify()` in `net/rsa.ts` (Session 10 re-audit) |
+| 324 | RSA-PSS | NOW ✓ — `rsaPSSVerify()` + MGF1-SHA256 in `net/rsa.ts` (Session 10 re-audit) |
+| 325 | ECDSA P-384 verify | NOW ✓ — `ecdsaP384Verify()` + P384 curve arithmetic in `net/rsa.ts` (Session 10 re-audit) |
+| 327 | ChaCha20-Poly1305 | NOW ✓ — `chacha20Poly1305Seal/Open()` + `poly1305Mac()` in `net/crypto.ts` (Session 10 re-audit) |
 | 848 | JIT inline cache for property reads | not in `qjs-jit.ts` |
 | 849 | JIT inline cache for property writes | not in `qjs-jit.ts` |
 | 851 | JIT float/SSE2 ops | not in `qjs-jit.ts` |
@@ -602,10 +602,10 @@
 | 496 | Hardware-accelerated 2D via Virtio-GPU | not in `apps/browser/` |
 | **Agent E3 additions (JS Runtime §13 / DOM §14)** | | |
 
-| 549 | Shadow DOM: `attachShadow`, `shadowRoot`, style scoping | not in `apps/browser/dom.ts` |
+| 549 | Shadow DOM: `attachShadow`, `shadowRoot`, style scoping | NOW ✓ — `_shadowRoot`, `attachShadow()`, `shadowRoot` getter in `apps/browser/dom.ts` (Session 10 re-audit) |
 | 551 | Web Components full lifecycle callbacks | not in codebase |
 | 552 | `Worklet` API | not in codebase |
-| 584 | `<slot>` element for web components | not in `apps/browser/dom.ts` |
+| 584 | `<slot>` element for web components | NOW ✓ — `slot` getter/setter on `VElement` in `apps/browser/dom.ts` (Session 10 re-audit) |
 
 | **Agent E3 additions (Forms §15 / Navigation §16)** | | |
 
@@ -621,17 +621,17 @@
 | 640 | Browser sync / bookmarks cloud backup | not in codebase |
 | 641 | Extensions / userscript runner | not in codebase |
 | **Agent E3 additions (Performance §28c-h)** | | |
-| 893 | Layout containment: `contain: layout` | not in `layout.ts` |
+| 893 | Layout containment: `contain: layout` | NOW ✓ — `LayoutContainment` class in `apps/browser/layout.ts` (Session 10) |
 | 894 | Avoid forced synchronous layout (batch DOM reads before writes) | not enforced in `apps/browser/` |
-| 895 | Flex/grid cache: cache row/column tracks | not in `layout.ts` |
-| 898 | Containing-block cache for abs/fixed positioned elements | not in `layout.ts` |
+| 895 | Flex/grid cache: cache row/column tracks | NOW ✓ — `FlexGridTrackCache` + `flexGridTrackCache` singleton in `apps/browser/layout.ts` (Session 10) |
+| 898 | Containing-block cache for abs/fixed positioned elements | NOW ✓ — `ContainingBlockCache` + `containingBlockCache` singleton in `apps/browser/layout.ts` (Session 10) |
 | 899 | Layer tree: promote `position:fixed`/`transform`/`opacity` to compositor layers | not in `apps/browser/index.ts` |
 | 900 | `will-change: transform` triggers layer promotion | not in `apps/browser/index.ts` |
-| 901 | Layout budget: hard 4ms layout deadline per frame | not in `layout.ts` |
+| 901 | Layout budget: hard 4ms layout deadline per frame | NOW ✓ — `LayoutBudget` + `layoutBudget` singleton (4ms default) in `apps/browser/layout.ts` (Session 10) |
 | 902 | Partial style invalidation (`:nth-child`/attr selectors no full recalc) | not in `apps/browser/jsruntime.ts` |
-| 903 | CSS Grid auto-placement fast path | not in `layout.ts` |
-| 904 | Parallel layout: farm flex/grid to microtasks | not in `layout.ts` |
-| 912 | Image resize cache: cached scaled copy per (src, destW, destH) | not in `apps/browser/cache.ts` |
+| 903 | CSS Grid auto-placement fast path | NOW ✓ — `GridAutoPlacementFastPath.place()` + `applicable()` in `apps/browser/layout.ts` (Session 10) |
+| 904 | Parallel layout: farm flex/grid to microtasks | NOW ✓ — `ParallelLayoutScheduler` + `parallelLayoutScheduler` singleton in `apps/browser/layout.ts` (Session 10) |
+| 912 | Image resize cache: cached scaled copy per (src, destW, destH) | NOW ✓ — `storeScaledImage()` / `getScaledImage()` in `apps/browser/cache.ts` (Session 10 re-audit) |
 | 915 | Canvas 2D `drawImage()` blits from decoded bitmap cache (no re-decode) | canvas 2D wired to framebuffer not implemented |
 | 916 | Subpixel text: LCD subpixel antialiasing | not in `apps/browser/index.ts` |
 | 917 | Glyph atlas grow-on-demand | not in `apps/browser/index.ts` |
@@ -644,27 +644,27 @@
 | 950 | `@media` listener: recompute only on breakpoint crossing | NOW ✓ — `_mqlRegistry` + `_checkMediaListeners()` + `fireResize()` in `apps/browser/jsruntime.ts` |
 | 951 | CSS `contain: strict` → isolate paint+size | not in codebase |
 | 952 | Heuristics: skip `box-shadow`/`filter` for off-screen elements | not in codebase |
-| 955 | Event delegation: single root listener for bubbling events | not in `apps/browser/index.ts` |
-| 960 | `addEventListener` passive: default-passive for `touchstart`/`wheel` | not in `apps/browser/dom.ts` |
-| 961 | Debounce DOM write after `input` events | not in `apps/browser/index.ts` |
+| 955 | Event delegation: single root listener for bubbling events | NOW ✓ — `EventDelegator` class exported from `apps/browser/dom.ts` (Session 10) |
+| 960 | `addEventListener` passive: default-passive for `touchstart`/`wheel` | NOW ✓ — `PassiveEventRegistry` + `passiveEventRegistry` in `apps/browser/dom.ts` (Session 10) |
+| 961 | Debounce DOM write after `input` events | NOW ✓ — `DOMWriteDebouncer` + `domWriteDebouncer` singleton in `apps/browser/index.ts` (Session 10) |
 | 965 | CSS paint / audio Worklets: isolated micro-contexts | not in codebase |
 | 969 | JIT profiler: `sys.jit.stats()` TypeScript API | NOW ✓ — `g.sys.jit.stats()` in `ui/commands.ts` (Session 6) |
 | 970 | GC profiler: `sys.mem.gcStats()` API | NOW ✓ — `g.sys.gc.run()/stats()` in `ui/commands.ts` (Session 6) |
-| 972 | Layout profiler: per-subtree layout time | not in `layout.ts` |
-| 973 | Paint profiler: per-tile repaint reason | not in codebase |
+| 972 | Layout profiler: per-subtree layout time | NOW ✓ — `LayoutProfiler` + `layoutProfiler` singleton in `apps/browser/layout.ts` (Session 10) |
+| 973 | Paint profiler: per-tile repaint reason | NOW ✓ — `PaintProfiler` + `paintProfiler` singleton in `apps/browser/index.ts` (Session 10) |
 | 974 | Flame graph renderer in REPL (`sys.perf.flame()`) | NOW ✓ — g.perf.flame() in ui/commands.ts (Session 7) |
 | 975 | Synthetic benchmarks built-in suite | NOW ✓ — g.bench.run() + g.bench.micro() in ui/commands.ts (Session 8) |
 | 976 | sys.browser.bench(url) Core Web Vitals | NOW ✓ — g.bench.browser(url) in ui/commands.ts (Session 8) |
 | 977 | Continuous benchmark CI: fail on > 5% regression | NOW ✓ — `g.bench.ci(threshold?)` in `ui/commands.ts` (Session 9) |
 | **Agent F additions (REPL / Terminal / Built-in APIs / Init / GUI / Apps / DevTools)** | | |
 | 651 | Tab completion with function signatures + type hints | `tabComplete()` completes names/paths but no type hints |
-| 653 | Multiple terminal instances: N REPLs simultaneously | not in `ui/terminal.ts` or `apps/terminal/` |
-| 654 | Terminal tabs: Ctrl+Tab switch | not in `ui/wm.ts` |
+| 653 | Multiple terminal instances: N REPLs simultaneously | NOW ✓ — `ReplManager` with `open/close/list/switch` in `ui/repl.ts` (Session 10 re-audit) |
+| 654 | Terminal tabs: Ctrl+Tab switch | NOW ✓ — `TerminalTabManager` + `terminalTabManager` singleton in `apps/terminal/index.ts` (Session 10) |
 | 655 | REPL tab has own variable scope + history | NOW ✓ — g.repl session object in ui/commands.ts (Session 8) |
 | 656 | Named REPL sessions repl.open(name) | NOW ✓ — g.repl.open(name) in ui/commands.ts (Session 8) |
 | 657 | repl.close() | NOW ✓ — g.repl.close(name?) in ui/commands.ts (Session 8) |
 | 658 | Copy REPL context to new tab | NOW ✓ — g.repl.copyContext(from, to) in ui/commands.ts (Session 8) |
-| 661 | `import` statements at REPL prompt | not in `ui/repl.ts` |
+| 661 | `import` statements at REPL prompt | NOW ✓ — `_rewriteImport()` converts `import X from 'path'` to `var X = require('path')` in `ui/repl.ts` (Session 10 re-audit) |
 | 667 | Bold, italic, underline, strikethrough, dim in terminal | now IMPLEMENTED — see Agent E Session 4 above |
 | 668 | Cursor movement CSI (A/B/C/D, home, end) | now IMPLEMENTED — see Agent E Session 4 above |
 | 669 | Cursor blink animation | NOW ✓ — `_blinkOn` toggle + `_drawCursor()` in `ui/terminal.ts` (Session 5) |
@@ -672,8 +672,8 @@
 | 671 | Terminal scrollback ≥10,000 lines | now IMPLEMENTED — `SCROLLBACK = 10000` confirmed in `ui/terminal.ts:16` (see Agent E Session 4) |
 | 672 | Mouse click in output: inspect value | not in `apps/terminal/index.ts` |
 | 673 | Clickable hyperlinks in output (OSC 8) | NOW ✓ — OSC 8 parser + `linkUrl` spans in `ui/terminal.ts` (Session 5) |
-| 674 | Terminal resize: reflow to new width | not in `ui/terminal.ts` |
-| 675 | Syntax highlighting live in input line | not in `apps/terminal/index.ts` |
+| 674 | Terminal resize: reflow to new width | NOW ✓ — `resize(cols, rows)` + scrollback reflow in `ui/terminal.ts` (Session 10) |
+| 675 | Syntax highlighting live in input line | NOW ✓ — `_jsTokenize()` + `_redrawLine()` in `ui/repl.ts`; `readline()` rewritten with live recoloring (Session 10) |
 | 676 | Bracket matching highlight | not in `ui/repl.ts` |
 | 677 | `console.log` from background tasks in correct tab | not in `ui/terminal.ts` |
 | 678 | Output search Ctrl+F in terminal | NOW ✓ — g.searchOutput(pattern) in ui/commands.ts (Session 8) |

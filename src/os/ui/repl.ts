@@ -143,7 +143,67 @@ function showFunctionHint(buf: string): boolean {
   return true;
 }
 
-//  Readline 
+//  Readline
+
+// [Item 675] JS token coloriser for live syntax highlighting in the input line.
+var _JS_KEYWORDS = new Set([
+  'var','let','const','function','return','if','else','while','for','do',
+  'break','continue','new','delete','typeof','instanceof','in','of','class',
+  'extends','import','export','default','try','catch','finally','throw',
+  'async','await','switch','case','null','true','false','undefined','void',
+  'this','super','yield','get','set','static',
+]);
+
+/** [Item 675] Tokenize JS input into {text, color} pairs for live highlighting. */
+function _jsTokenize(code: string): Array<{ text: string; color: number }> {
+  var tokens: Array<{ text: string; color: number }> = [];
+  var i = 0;
+  while (i < code.length) {
+    var c = code[i];
+    // Line comment
+    if (c === '/' && code[i + 1] === '/') {
+      var end = code.indexOf('\n', i); if (end === -1) end = code.length;
+      tokens.push({ text: code.slice(i, end), color: Color.DARK_GREY }); i = end; continue;
+    }
+    // Block comment
+    if (c === '/' && code[i + 1] === '*') {
+      var end2 = code.indexOf('*/', i + 2); if (end2 === -1) end2 = code.length - 2;
+      tokens.push({ text: code.slice(i, end2 + 2), color: Color.DARK_GREY }); i = end2 + 2; continue;
+    }
+    // String
+    if (c === '"' || c === "'" || c === '`') {
+      var q = c; var j = i + 1;
+      while (j < code.length && code[j] !== q) { if (code[j] === '\\') j++; j++; }
+      tokens.push({ text: code.slice(i, j + 1), color: Color.LIGHT_GREEN }); i = j + 1; continue;
+    }
+    // Number
+    if ((c >= '0' && c <= '9') || (c === '.' && i + 1 < code.length && code[i + 1] >= '0' && code[i + 1] <= '9')) {
+      var jn = i;
+      while (jn < code.length && /[\d.xXbBoOeE_]/.test(code[jn])) jn++;
+      tokens.push({ text: code.slice(i, jn), color: Color.LIGHT_CYAN }); i = jn; continue;
+    }
+    // Identifier or keyword
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '_' || c === '$') {
+      var ji = i;
+      while (ji < code.length && /[\w$]/.test(code[ji])) ji++;
+      var word = code.slice(i, ji);
+      tokens.push({ text: word, color: _JS_KEYWORDS.has(word) ? Color.YELLOW : Color.WHITE });
+      i = ji; continue;
+    }
+    // Brackets
+    var opColor = '()[]{}'.indexOf(c) !== -1 ? Color.WHITE :
+                  '=!<>'.indexOf(c)   !== -1 ? Color.LIGHT_CYAN : Color.LIGHT_GREY;
+    tokens.push({ text: c, color: opColor }); i++;
+  }
+  return tokens;
+}
+
+/** [Item 675] Erase `oldLen` terminal chars then reprint `newBuf` with syntax highlight colors. */
+function _redrawLine(oldLen: number, newBuf: string): void {
+  for (var i = 0; i < oldLen; i++) terminal.print('\b \b');
+  var tokens = _jsTokenize(newBuf);
+  for (var ti = 0; ti < tokens.length; ti++) terminal.colorPrint(tokens[ti].text, tokens[ti].color);
+}
 
 function readline(printPrompt: () => void): string {
   printPrompt();
@@ -166,20 +226,14 @@ function readline(printPrompt: () => void): string {
         if (histIdx === -1) { savedBuf = buf; histIdx = _history.length - 1; }
         else if (histIdx > 0) { histIdx--; }
         else { continue; }
-        for (var i = 0; i < buf.length; i++) terminal.print('\b \b');
-        buf = _history[histIdx];
-        terminal.print(buf);
+        var _ob1 = buf.length; buf = _history[histIdx];
+        _redrawLine(_ob1, buf);  // [Item 675] syntax-highlighted history entry
       } else if (key.ext === 0x81) {
         if (histIdx === -1) continue;
-        for (var i = 0; i < buf.length; i++) terminal.print('\b \b');
-        if (histIdx < _history.length - 1) {
-          histIdx++;
-          buf = _history[histIdx];
-        } else {
-          histIdx = -1;
-          buf = savedBuf;
-        }
-        terminal.print(buf);
+        var _ob2 = buf.length;
+        if (histIdx < _history.length - 1) { histIdx++; buf = _history[histIdx]; }
+        else { histIdx = -1; buf = savedBuf; }
+        _redrawLine(_ob2, buf);  // [Item 675]
       }
       continue;
     }
@@ -190,30 +244,31 @@ function readline(printPrompt: () => void): string {
     if (ch === '\n' || ch === '\r') { terminal.putchar('\n'); return buf; }
 
     if (ch === '\b' || ch === '\x7f') {
-      if (buf.length > 0) { buf = buf.slice(0, -1); terminal.print('\b \b'); histIdx = -1; }
+      if (buf.length > 0) {
+        var _ob3 = buf.length; buf = buf.slice(0, -1);
+        _redrawLine(_ob3, buf);  // [Item 675] recolourise after backspace
+        histIdx = -1;
+      }
       continue;
     }
 
     if (ch === '\x03') { terminal.println('^C'); return ''; }
 
     if (ch === '\x15') {
-      for (var i = 0; i < buf.length; i++) terminal.print('\b \b');
-      buf = ''; histIdx = -1;
+      _redrawLine(buf.length, ''); buf = ''; histIdx = -1;  // [Item 675]
       continue;
     }
 
     if (ch === '\x0c') {
-      terminal.clear();
-      printPrompt();
-      terminal.print(buf);
+      terminal.clear(); printPrompt();
+      _redrawLine(0, buf);  // [Item 675] reprint with colours after Ctrl+L
       continue;
     }
 
     if (ch === '\t') {
       // [Item 651] Check if cursor is inside a function call — show signature hint
       if (showFunctionHint(buf)) {
-        printPrompt();
-        terminal.print(buf);
+        printPrompt(); _redrawLine(0, buf);  // [Item 675]
         continue;
       }
       var completions = tabComplete(buf);
@@ -226,8 +281,8 @@ function readline(printPrompt: () => void): string {
         var m = buf.match(/[\w$][\w$.]*$/);
         var partial = m ? m[0] : '';
         var suffix = full.slice(partial.length);
-        buf += suffix;
-        terminal.print(suffix);
+        var _ob4 = buf.length; buf += suffix;
+        _redrawLine(_ob4, buf);  // [Item 675] recolourise with suffix
         histIdx = -1;
       } else {
         // Show all candidates (sorted, 4 per row)
@@ -240,17 +295,20 @@ function readline(printPrompt: () => void): string {
           if ((ci + 1) % cols === 0) terminal.println('');
         }
         if (completions.length % cols !== 0) terminal.println('');
-        printPrompt();
-        terminal.print(buf);
+        printPrompt(); _redrawLine(0, buf);  // [Item 675]
       }
       continue;
     }
 
-    if (ch >= ' ') { buf += ch; terminal.print(ch); histIdx = -1; }
+    if (ch >= ' ') {
+      var _ob5 = buf.length; buf += ch;
+      _redrawLine(_ob5, buf);  // [Item 675] live syntax highlighting on every char
+      histIdx = -1;
+    }
   }
 }
 
-//  Bracket depth counter (automatic multiline) 
+
 
 function isIncomplete(code: string): boolean {
   var depth = 0;

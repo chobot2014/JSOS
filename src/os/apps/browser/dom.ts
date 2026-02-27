@@ -2166,3 +2166,83 @@ export function buildDOM(html: string): VDocument {
 
   return doc;
 }
+
+// ── Event performance optimizations ──────────────────────────────────────────
+
+/** [Item 955] EventDelegator — attach a single listener to a root element and
+ *  route events to handlers registered for CSS selectors.  Much cheaper than
+ *  one listener per leaf node. */
+export class EventDelegator {
+  private _root: VElement;
+  private _handlers: Array<{ selector: string; handler: (evt: VEvent, target: VElement) => void }> = [];
+
+  constructor(root: VElement) { this._root = root; }
+
+  /** Register `handler` for all elements under the root matching `selector`. */
+  on(selector: string, handler: (evt: VEvent, target: VElement) => void): this {
+    this._handlers.push({ selector, handler });
+    return this;
+  }
+
+  /** Dispatch an event through the delegator.  Walk the event path from
+   *  `target` upward to the root; the first matching selector wins. */
+  dispatch(evt: VEvent, target: VElement): void {
+    var node: VElement | null = target;
+    while (node && node !== (this._root.parentNode as VElement | null)) {
+      var n = node;
+      for (var i = 0; i < this._handlers.length; i++) {
+        var entry = this._handlers[i];
+        if (this._root.querySelectorAll(entry.selector).indexOf(n) !== -1) {
+          entry.handler(evt, n);
+          if ((evt as any)._stopProp) return;
+        }
+      }
+      node = n.parentNode instanceof VElement ? n.parentNode : null;
+    }
+  }
+
+  /** Remove all delegated handlers. */
+  off(): void { this._handlers = []; }
+}
+
+/** [Item 960] PassiveEventRegistry — track whether each event listener was
+ *  registered with the `passive` option.  Passive listeners may not call
+ *  `preventDefault()`.  This lets the engine skip cancelability checks and
+ *  start scrolling/painting without waiting for the listener to return. */
+export class PassiveEventRegistry {
+  /** Map of listener function → is-passive flag. */
+  private _map: Map<Function, boolean> = new Map();
+
+  /** Register a listener with its passive flag. */
+  register(listener: Function, passive: boolean): void {
+    this._map.set(listener, passive);
+  }
+
+  /** Unregister a listener. */
+  unregister(listener: Function): void { this._map.delete(listener); }
+
+  /** Return true if `listener` is passive (i.e. may not call preventDefault). */
+  isPassive(listener: Function): boolean {
+    return this._map.get(listener) ?? false;
+  }
+
+  /** Invoke `listener` with `evt`, enforcing the passive contract. */
+  invoke(listener: Function, evt: VEvent): void {
+    var passive = this.isPassive(listener);
+    if (passive) {
+      // Stub out preventDefault so the listener cannot cancel the event
+      var origPreventDefault = (evt as any).preventDefault;
+      (evt as any).preventDefault = function() {
+        // no-op — passive listener may not cancel
+      };
+      try { listener(evt); }
+      finally { (evt as any).preventDefault = origPreventDefault; }
+    } else {
+      listener(evt);
+    }
+  }
+}
+
+/** Shared passive event registry used by VElement.addEventListener when the
+ *  `passive` option is specified. */
+export const passiveEventRegistry = new PassiveEventRegistry();
