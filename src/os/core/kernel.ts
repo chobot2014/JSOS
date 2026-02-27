@@ -512,6 +512,15 @@ export interface KernelAPI {
    */
   scheduleIdle(fn: () => void): void;
 
+  // ─ Hardware RNG (item 348) ───────────────────────────────────────────────
+  /**
+   * Read one 32-bit hardware-random word via the RDRAND CPU instruction.
+   * Retries up to 10 times (Intel recommendation); falls back to a TSC-derived
+   * value if RDRAND is unavailable or exhausted.
+   * @returns Unsigned 32-bit integer in range [0, 2^32 − 1].
+   */
+  rdrand(): number;
+
   //  Constants 
   colors: KernelColors;
   KEY_UP: number;    KEY_DOWN: number;   KEY_LEFT: number;  KEY_RIGHT: number;

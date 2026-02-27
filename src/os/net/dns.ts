@@ -403,6 +403,279 @@ function resolveChain(hostname: string, qtype: number, servers: string[]): strin
   return null;  // exceeded MAX_CNAME_HOPS
 }
 
+// ── Full recursive resolver (Item 287) ───────────────────────────────────────
+
+/** DNS NS record type number. */
+const QTYPE_NS = 2;
+
+/**
+ * Well-known IPv4 addresses of the IANA root nameservers (A root – E root).
+ * These are the hardcoded bootstrap anchors for iterative resolution.
+ * Source: https://www.iana.org/domains/root/servers (public domain).
+ */
+const ROOT_NAMESERVERS: string[] = [
+  '198.41.0.4',    // a.root-servers.net
+  '199.9.14.201',  // b.root-servers.net
+  '192.33.4.12',   // c.root-servers.net
+  '199.7.91.13',   // d.root-servers.net
+  '192.203.230.10', // e.root-servers.net
+  '192.5.5.241',   // f.root-servers.net
+  '192.112.36.4',  // g.root-servers.net
+  '198.97.190.53', // h.root-servers.net
+  '192.36.148.17', // i.root-servers.net
+  '192.58.128.30', // j.root-servers.net
+];
+
+/** A parsed NS record extracted from the authority section. */
+interface NSRecord {
+  name:  string;  // zone name this NS is authoritative for
+  ns:    string;  // nameserver hostname
+  ttl:   number;
+}
+
+/**
+ * A DNS response with all four sections parsed.
+ * Used internally by the iterative resolver.
+ */
+interface FullDNSResponse {
+  id:         number;
+  isAuth:     boolean;   // AA bit set
+  rcode:      number;    // 0=NOERROR, 3=NXDOMAIN
+  answers:    DnsRecord[];
+  authority:  NSRecord[];
+  /** Glue A records from additional section: hostname → IPv4 */
+  glue:       Map<string, string>;
+}
+
+/** Build a DNS query packet with RD=0 (iterative/non-recursive mode). */
+function buildQueryIterative(id: number, hostname: string, qtype: number): number[] {
+  var pkt: number[] = [];
+  pkt.push((id >> 8) & 0xff, id & 0xff);  // ID
+  pkt.push(0x00, 0x00);  // Flags: QR=0, RD=0 (iterative)
+  pkt.push(0x00, 0x01);  // QDCOUNT = 1
+  pkt.push(0x00, 0x00, 0x00, 0x00, 0x00, 0x00); // ANCOUNT NSCOUNT ARCOUNT
+  pkt = pkt.concat(encodeName(hostname));
+  pkt.push((qtype >> 8) & 0xff, qtype & 0xff);
+  pkt.push(0x00, QCLASS_IN);
+  return pkt;
+}
+
+/**
+ * Parse a full DNS response including authority and additional sections.
+ * Returns null on protocol error.
+ */
+function parseFullResponse(data: number[], queryID: number): FullDNSResponse | null {
+  if (data.length < 12) return null;
+  var id = ((data[0] & 0xff) << 8) | (data[1] & 0xff);
+  if (id !== queryID) return null;
+  var flags  = ((data[2] & 0xff) << 8) | (data[3] & 0xff);
+  if (!((flags >> 15) & 1)) return null;  // not a response
+  var isAuth = !!((flags >> 10) & 1);
+  var rcode  = flags & 0xf;
+
+  var qdcount = ((data[4]  & 0xff) << 8) | (data[5]  & 0xff);
+  var ancount = ((data[6]  & 0xff) << 8) | (data[7]  & 0xff);
+  var nscount = ((data[8]  & 0xff) << 8) | (data[9]  & 0xff);
+  var arcount = ((data[10] & 0xff) << 8) | (data[11] & 0xff);
+
+  var off = 12;
+
+  /** Skip a question entry. */
+  function skipQ(): void {
+    var n = decodeName(data, off); off = n.end; off += 4;
+  }
+
+  /** Read one RR, advancing `off`.  Returns [ name, type, ttl, rdataBytes ] or null. */
+  function readRR(): { name: string; type: number; ttl: number; rdata: number[] } | null {
+    if (off + 10 > data.length) return null;
+    var rn   = decodeName(data, off); off = rn.end;
+    var rtype = ((data[off]   & 0xff) << 8) | (data[off+1] & 0xff); off += 2;
+    off += 2; // class
+    var rttl  = (((data[off]   & 0xff) * 0x1000000) |
+                 ((data[off+1] & 0xff) << 16) |
+                 ((data[off+2] & 0xff) << 8)  |
+                  (data[off+3] & 0xff)) >>> 0; off += 4;
+    var rdlen = ((data[off] & 0xff) << 8) | (data[off+1] & 0xff); off += 2;
+    var rdata = data.slice(off, off + rdlen); off += rdlen;
+    return { name: rn.name, type: rtype, ttl: rttl, rdata };
+  }
+
+  for (var q = 0; q < qdcount; q++) skipQ();
+
+  var answers: DnsRecord[]   = [];
+  var authority: NSRecord[]  = [];
+  var glue = new Map<string, string>();
+
+  function rrToDnsRecord(rr: { name: string; type: number; ttl: number; rdata: number[] }): DnsRecord | null {
+    if (rr.type === QTYPE_A && rr.rdata.length === 4) {
+      return { type: 'A', name: rr.name, ttl: rr.ttl,
+               value: rr.rdata.slice(0,4).map(b => (b&0xff).toString()).join('.') };
+    }
+    if (rr.type === QTYPE_AAAA && rr.rdata.length === 16) {
+      var groups: string[] = [];
+      for (var g = 0; g < 16; g += 2) groups.push(((rr.rdata[g]&0xff)<<8|(rr.rdata[g+1]&0xff)).toString(16).padStart(4,'0'));
+      return { type: 'AAAA', name: rr.name, ttl: rr.ttl, value: groups.join(':') };
+    }
+    if (rr.type === QTYPE_CNAME) {
+      var cn = decodeName(rr.rdata, 0);
+      return { type: 'CNAME', name: rr.name, ttl: rr.ttl, value: cn.name };
+    }
+    return null;
+  }
+
+  for (var ai = 0; ai < ancount; ai++) {
+    var rr = readRR(); if (!rr) break;
+    var rec = rrToDnsRecord(rr); if (rec) answers.push(rec);
+  }
+  for (var ni = 0; ni < nscount; ni++) {
+    var rr2 = readRR(); if (!rr2) break;
+    if (rr2.type === QTYPE_NS) {
+      var nsName = decodeName(rr2.rdata, 0);
+      authority.push({ name: rr2.name, ns: nsName.name, ttl: rr2.ttl });
+    }
+  }
+  for (var ri = 0; ri < arcount; ri++) {
+    var rr3 = readRR(); if (!rr3) break;
+    if (rr3.type === QTYPE_A && rr3.rdata.length === 4) {
+      var glueIp = rr3.rdata.slice(0,4).map(b => (b&0xff).toString()).join('.');
+      glue.set(rr3.name.toLowerCase(), glueIp);
+    }
+  }
+
+  return { id, isAuth, rcode, answers, authority, glue };
+}
+
+/**
+ * Send an iterative (RD=0) DNS query to a specific server and parse the full
+ * response including authority and additional sections.  Returns null on failure.
+ */
+function queryServerIterative(
+    server: string, hostname: string, qtype: number): FullDNSResponse | null {
+  var srcPort = 53100 + (kernel.getTicks() & 0xfff);
+  var queryID = ((kernel.getTicks() & 0x7fff) | 0x8000) & 0xffff;
+  net.openUDPInbox(srcPort);
+  try {
+    var query = buildQueryIterative(queryID, hostname, qtype);
+    for (var attempt = 0; attempt < 2; attempt++) {
+      net.sendUDPRaw(srcPort, server, DNS_PORT, query);
+      var resp = net.recvUDPRaw(srcPort, DNS_TIMEOUT_TICKS);
+      if (resp) {
+        var parsed = parseFullResponse(resp.data, queryID);
+        if (parsed) return parsed;
+      }
+    }
+  } finally {
+    net.closeUDPInbox(srcPort);
+  }
+  return null;
+}
+
+/**
+ * [Item 287] Full iterative DNS resolver (root-to-leaf delegation walk).
+ *
+ * Unlike `dnsResolve()` which sends a single query with RD=1 to a configured
+ * nameserver, this function starts from the root nameservers and walks down
+ * the delegation chain until it reaches an authoritative answer.
+ *
+ * Algorithm (RFC 1034 §5.3.3):
+ *  1. Start with the IANA root nameserver IPs.
+ *  2. Send a non-recursive (RD=0) query for {hostname, A/AAAA}.
+ *  3a. If response has AA=1 and answer records → return the IP.
+ *  3b. If response has authority NS records → resolve each NS hostname
+ *      (using glue A records from the additional section if available),
+ *      set the new nameserver list, and go to step 2.
+ *  3c. If NXDOMAIN → return null.
+ *  After MAX_RECURSIVE_DEPTH iterations, give up.
+ *
+ * @param hostname  Fully-qualified domain name to resolve.
+ * @param qtype     QTYPE_A (1) or QTYPE_AAAA (28).
+ * @returns         IP address string, or null on failure.
+ */
+export function dnsResolveRecursive(hostname: string, qtype: number = QTYPE_A): string | null {
+  var _isIP4 = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
+  if (_isIP4) return hostname;
+  if (hostname.endsWith('.')) hostname = hostname.slice(0, -1);
+
+  // Check hosts file and TTL cache first
+  var hostsIp = hostsLookup(hostname);
+  if (hostsIp) return hostsIp;
+  var type: 'A' | 'AAAA' = qtype === QTYPE_AAAA ? 'AAAA' : 'A';
+  var cached = cacheGet(type, hostname);
+  if (cached) return cached;
+  if (negCacheGet(type, hostname)) return null;
+
+  var MAX_DEPTH = 20;
+  var currentServers = ROOT_NAMESERVERS.slice();
+
+  for (var depth = 0; depth < MAX_DEPTH; depth++) {
+    var resp: FullDNSResponse | null = null;
+
+    // Try each server in the current list
+    for (var si = 0; si < currentServers.length; si++) {
+      resp = queryServerIterative(currentServers[si], hostname, qtype);
+      if (resp) break;
+    }
+    if (!resp) return null;
+
+    // NXDOMAIN from an authoritative server
+    if (resp.rcode === 3 && resp.isAuth) {
+      negCachePut(type, hostname);
+      return null;
+    }
+
+    // Authoritative answer with at least one A/AAAA record
+    if (resp.isAuth && resp.answers.length > 0) {
+      for (var ai = 0; ai < resp.answers.length; ai++) {
+        var ans = resp.answers[ai];
+        if (ans.type === type && ans.name.toLowerCase() === hostname.toLowerCase()) {
+          cachePut(type, hostname, ans.value, ans.ttl);
+          return ans.value;
+        }
+      }
+      // CNAME in authoritative answer — follow it
+      for (var ci = 0; ci < resp.answers.length; ci++) {
+        var cans = resp.answers[ci];
+        if (cans.type === 'CNAME' && cans.name.toLowerCase() === hostname.toLowerCase()) {
+          var target = dnsResolveRecursive(cans.value, qtype);
+          return target;
+        }
+      }
+      return null;
+    }
+
+    // Referral: authority section has NS records → follow delegation
+    if (resp.authority.length > 0) {
+      // Filter to NS entries that are sub-delegations (name is a suffix of our query)
+      var nsIps: string[] = [];
+      for (var ni = 0; ni < resp.authority.length; ni++) {
+        var nsRec = resp.authority[ni];
+        // Use glue from additional if present
+        var nsLower = nsRec.ns.toLowerCase();
+        var glueIp  = resp.glue.get(nsLower);
+        if (glueIp) {
+          nsIps.push(glueIp);
+          continue;
+        }
+        // No glue — resolve NS hostname using the current configured nameservers
+        var nsIp = resolveChain(nsRec.ns, QTYPE_A, getNameservers());
+        if (nsIp) nsIps.push(nsIp);
+      }
+      if (nsIps.length > 0) {
+        currentServers = nsIps;
+        continue;
+      }
+      // Could not resolve any NS → fall back to configured resolvers
+      return resolveChain(hostname, qtype, getNameservers());
+    }
+
+    // Non-authoritative answer without delegation — try again with configured NS
+    break;
+  }
+
+  // Fall back to the stub resolver if the recursive chase failed
+  return resolveChain(hostname, qtype, getNameservers());
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 const _IP4_LITERAL = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;

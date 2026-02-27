@@ -2532,6 +2532,31 @@ static JSValue js_uptime_us(JSContext *c, JSValueConst _t,
     return JS_NewFloat64(c, (double)timer_uptime_us());
 }
 
+/* kernel.rdrand() → one 32-bit hardware random word via RDRAND CPU instruction (item 348)
+ * Returns a Uint32.  Falls back to TSC-derived value if RDRAND is not available or fails. */
+static JSValue js_rdrand(JSContext *c, JSValueConst _t,
+                         int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    uint32_t val = 0;
+    if (cpuid_features.rdrand) {
+        /* RDRAND: retry up to 10 times if CF=0 (hardware entropy pool exhausted) */
+        int ok = 0, i;
+        for (i = 0; i < 10 && !ok; i++) {
+            __asm__ volatile (
+                "rdrand %0\n"
+                "setc   %b1\n"
+                : "=r"(val), "=q"(ok)
+                :
+                : "cc"
+            );
+        }
+        if (!ok) val = (uint32_t)timer_uptime_us(); /* TSC fallback */
+    } else {
+        val = (uint32_t)timer_uptime_us(); /* no RDRAND – TSC fallback */
+    }
+    return JS_NewUint32(c, val);
+}
+
 /* kernel.reserveRegion(base, size) → mark MMIO region used (item 40) */
 static JSValue js_reserve_region(JSContext *c, JSValueConst _t,
                                   int argc, JSValueConst *argv) {
@@ -3186,6 +3211,8 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("fpuAllocState",       0, js_fpu_alloc_state),
     JS_CFUNC_DEF("fpuSave",             1, js_fpu_save),
     JS_CFUNC_DEF("fpuRestore",          1, js_fpu_restore),
+    /* Hardware RDRAND instruction (item 348) */
+    JS_CFUNC_DEF("rdrand",              0, js_rdrand),
 };
 
 /*  Initialization  */
