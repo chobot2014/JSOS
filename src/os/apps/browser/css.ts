@@ -405,6 +405,9 @@ export function parseInlineStyle(style: string): CSSProps {
       }
       case 'background': {
         // background shorthand — color, url, position [/ size], repeat, attachment
+        // 0. Detect gradient functions (item 487): linear/radial/conic-gradient(...)
+        var gradM = val.match(/((?:repeating-)?(?:linear|radial|conic)-gradient\s*\([^)]*(?:\([^)]*\)[^)]*)*\))/i);
+        if (gradM) { p.backgroundImage = gradM[1]; }
         // 1. Extract url(...)
         var urlM = val.match(/url\(\s*['"]?([^'")\s]+)['"]?\s*\)/i);
         if (urlM) p.backgroundImage = 'url(' + urlM[1] + ')';

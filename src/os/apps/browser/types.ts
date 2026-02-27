@@ -45,6 +45,7 @@ export interface RenderNode {
   widget?:      WidgetBlueprint;
   textAlign?:   'left' | 'center' | 'right' | 'justify';
   bgColor?:     number;    // CSS background-color (ARGB)
+  bgGradient?:  string;    // CSS gradient string: linear/radial/conic-gradient(...) (item 487)
   float?:       'left' | 'right';
   marginTop?:   number;    // px — extra space before block
   marginBottom?: number;   // px — extra space after block
@@ -149,7 +150,8 @@ export interface RenderedLine {
   quoteBg?:  boolean;
   quoteBar?: boolean;
   hrLine?:   boolean;
-  bgColor?:  number;   // custom background from CSS
+  bgColor?:    number;   // custom background from CSS
+  bgGradient?: string;   // CSS gradient string (item 487): linear/radial/conic-gradient(...)
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────

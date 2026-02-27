@@ -18,7 +18,7 @@ export function flowSpans(
   maxX:     number,
   lineH:    number,
   baseClr:  PixelColor,
-  opts?: { preBg?: boolean; quoteBg?: boolean; quoteBar?: boolean; bgColor?: number }
+  opts?: { preBg?: boolean; quoteBg?: boolean; quoteBar?: boolean; bgColor?: number; bgGradient?: string }
 ): RenderedLine[] {
   var lines:   RenderedLine[] = [];
   var curLine: RenderedSpan[] = [];
@@ -41,6 +41,7 @@ export function flowSpans(
     if (opts?.quoteBg)  ln.quoteBg  = true;
     if (opts?.quoteBar) ln.quoteBar = true;
     if (opts?.bgColor)  ln.bgColor  = opts.bgColor;
+    if (opts?.bgGradient) ln.bgGradient = opts.bgGradient;
     lines.push(ln);
     curLine = []; curX = xLeft;
   }
@@ -274,7 +275,7 @@ function _layoutNodesImpl(
       for (var gli = 0; gli < gLines.length; gli++) {
         var gln = gLines[gli];
         lines.push({ y: gGridY + gln.y, nodes: gln.nodes, lineH: gln.lineH,
-                     bgColor: gln.bgColor, preBg: gln.preBg });
+                     bgColor: gln.bgColor, bgGradient: gln.bgGradient, preBg: gln.preBg });
         var gLineEnd = gGridY + gln.y + (gln.lineH || LINE_H);
         if (gLineEnd > gMaxY) gMaxY = gLineEnd;
       }
@@ -353,7 +354,7 @@ function _layoutNodesImpl(
         var fc    = fSorted[fci];
         var cw    = fFinalW[fci];
         var cLines = flowSpans(transformSpans(fc.spans, fc.textTransform), 0, cw, nodeLineH(fc), CLR_BODY,
-                               fc.bgColor !== undefined ? { bgColor: fc.bgColor } : undefined);
+                               (fc.bgColor !== undefined || fc.bgGradient) ? { bgColor: fc.bgColor, bgGradient: fc.bgGradient } : undefined);
         // Item 403: record per-item alignSelf for cross-axis placement
         var fcAlign = fc.alignSelf || containerAlignItems;
         fChildLines.push({ x: fCurX, cw, cl: cLines, alignSelf: fcAlign });
@@ -380,7 +381,7 @@ function _layoutNodesImpl(
           var cl2 = fc2.cl[cli2]!;
           var shifted = cl2.nodes.map(function(n) { return { ...n, x: n.x + fc2.x }; });
           lines.push({ y: fRowY0 + crossOffset + cli2 * (cl2.lineH || LINE_H), nodes: shifted,
-                       lineH: cl2.lineH, bgColor: cl2.bgColor, preBg: cl2.preBg });
+                       lineH: cl2.lineH, bgColor: cl2.bgColor, bgGradient: cl2.bgGradient, preBg: cl2.preBg });
         }
       }
       y = fRowY0 + maxChildH;
@@ -396,6 +397,7 @@ function _layoutNodesImpl(
       if (preM  > 0) blank(preM);
 
       var bgColor   = nd.bgColor;
+      var bgGradient = nd.bgGradient;
       var blkLeft   = xLeft + (nd.paddingLeft ? Math.round(nd.paddingLeft / CHAR_W) * CHAR_W : 0);
       var blkRight  = nd.paddingRight ? Math.round(nd.paddingRight / CHAR_W) * CHAR_W : 0;
       var blkMaxX   = (nd.boxWidth ? Math.min(maxX, xLeft + nd.boxWidth) : maxX) - blkRight;
@@ -408,18 +410,18 @@ function _layoutNodesImpl(
         var asideX   = maxX - asideW;
         var borderY0 = y;
         commit(flowSpans(ndSpans, asideX + 4, maxX - 4, lh, CLR_BODY,
-                         bgColor !== undefined ? { bgColor } : undefined));
+                         (bgColor !== undefined || bgGradient) ? { bgColor, bgGradient } : undefined));
         lines.push({ y: borderY0, nodes: [], lineH: 0 });
         blank(2);
       } else if (nd.float === 'left') {
         // Float left: render as an indented aside
         var fLeftW = nd.boxWidth ? Math.min(nd.boxWidth, (maxX - xLeft) >> 1) : Math.min(160, (maxX - xLeft) >> 1);
         commit(flowSpans(ndSpans, xLeft + 4, xLeft + fLeftW - 4, lh, CLR_BODY,
-                         bgColor !== undefined ? { bgColor } : undefined));
+                         (bgColor !== undefined || bgGradient) ? { bgColor, bgGradient } : undefined));
         blank(2);
       } else {
         // Normal block flow
-        var flowOpts = bgColor !== undefined ? { bgColor } : undefined;
+        var flowOpts = (bgColor !== undefined || bgGradient) ? { bgColor, bgGradient } : undefined;
         commit(flowSpans(ndSpans, blkLeft, blkMaxX, lh, CLR_BODY, flowOpts));
       }
       lastBottomMargin = postMarginRaw;

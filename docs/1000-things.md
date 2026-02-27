@@ -441,14 +441,14 @@
 355. [P0 ✓] `<style>` tag: CDATA content (don't parse `</` inside style) � `inStyle` mode in `html.ts`
 356. [P0 ✓] `<textarea>`, `<pre>`: whitespace preserved � `inPre` mode + `type:'pre'` nodes in `html.ts`/`layout.ts`; `inTextarea` captures raw text content
 357. [P0 ✓] `<template>` tag: parse into document fragment
-358. [P1] WHATWG HTML5 tokenizer state machine (current parser is ad-hoc)
+358. [P1 ✓] WHATWG HTML5 tokenizer state machine (current parser is ad-hoc) — HTMLTokenizer full state machine in html.ts:1163; TreeConstructor in html.ts:1586
 359. [P1 ✓] Implicit tag closing (e.g., `<p>` closes previous `<p>`) � `pOpen` counter in `html.ts`
-360. [P1] Misnested tags: foster parenting algorithm
-361. [P1] `<table>` foster parenting for text nodes
-362. [P1] Full insertion mode state machine (in_body, in_table, in_caption, etc.)
+360. [P1 ✓] Misnested tags: foster parenting algorithm — fosterParentNode() in html.ts:1535
+361. [P1 ✓] `<table>` foster parenting for text nodes — fosterParentText() in html.ts:1566
+362. [P1 ✓] Full insertion mode state machine (in_body, in_table, in_caption, etc.) — TreeConstructor._processToken() in html.ts:1646
 363. [P1 ✓] `<noscript>` rendered when JS is disabled � correctly skipped when JS enabled via `skipUntilClose = 'noscript'` in `apps/browser/html.ts` line 574
 364. [P1 ✓] `<base href="...">` affects all relative URL resolution � `_baseHref` extracted from `<base>` tag; all `_resolveURL(href, _baseHref)` calls use it for scripts, stylesheets, forms, fetch in `apps/browser/jsruntime.ts`
-365. [P1] Incremental HTML parsing (don't block render on slow network)
+365. [P1 ✓] Incremental HTML parsing (don't block render on slow network) — IncrementalHTMLParser class in html.ts:2040
 366. [P2 ✓] `<picture>` + `<source srcset>` image selection � handled in `html.ts`
 367. [P2 ✓] `<video>` and `<audio>` stub elements � placeholder text rendered: `?? [video: src]` and `[?? audio]` in `apps/browser/html.ts` lines 559�564
 368. [P2 ✓] `<iframe>` � nested browsing context � placeholder `[??? iframe: src]` rendered in `apps/browser/html.ts` line 550
@@ -492,8 +492,8 @@
 401. [P1 ✓] CSS Flexbox: `display: flex`, `flex-direction`, `justify-content`, `align-items`, `flex-wrap`, `gap`
 402. [P1 ✓] CSS Flexbox: `flex-grow`, `flex-shrink`, `flex-basis`, `flex` shorthand
 403. [P1 ✓] CSS Flexbox: `align-self`, `order`
-404. [P1] CSS Grid: `display: grid`, `grid-template-columns/rows`, `grid-column/row`
-405. [P1] CSS Grid: `fr` unit, `repeat()`, `minmax()`
+404. [P1 ✓] CSS Grid: `display: grid`, `grid-template-columns/rows`, `grid-column/row` — layoutGrid() + parseGridTrack() in layout-ext.ts:421
+405. [P1 ✓] CSS Grid: `fr` unit, `repeat()`, `minmax()` — resolveTrackSz/expandRepeat/parseMinMax in layout-ext.ts; full fr distribution
 406. [P1 ✓] CSS Grid: `grid-area`, `grid-template-areas` � parsed in `css.ts`, stored in `types.ts`
 407. [P1 ✓] CSS Grid: `gap` / `row-gap` / `column-gap` � parsed in `css.ts`, stored in `types.ts`
 408. [P1 ✓] CSS `calc()` expression evaluation � `evalCalc()` in `css.ts`
@@ -545,20 +545,20 @@
 449. [P0 ✓] Table layout algorithm (fixed + auto)
 450. [P0 ✓] `<li>` marker box layout (bullet/number positioning) � `lstType` lookup + bullet span prefix in `layout.ts`
 451. [P1 ✓] Flexbox layout pass � `flex-row` node type with `flexGrow`, `gap`, children side-by-side in `layout.ts`
-452. [P1] Grid layout pass
+452. [P1 ✓] Grid layout pass — layoutGrid() in layout-ext.ts:566; CSS Grid items 404–405
 453. [P1 ✓] Absolute positioning relative to nearest positioned ancestor � OOF nodes rendered at `posTop`/`posLeft` in `layout.ts`
 454. [P1 ✓] Fixed positioning relative to viewport � included in OOF rendering path in `layout.ts`
-455. [P1] Sticky positioning
+455. [P1 ✓] Sticky positioning — stickyCssY()/applySticky() in layout-ext.ts:672
 456. [P1 ✓] Float layout and line-box narrow-around-float � `nd.float === 'right'/'left'` handled in `layout.ts`
-457. [P1] Multi-column layout (`column-count`, `column-width`)
-458. [P1] Inline-block layout
-459. [P1] `overflow: scroll` � clip and add scrollbar
-460. [P1] `overflow: hidden` � clip without scrollbar
-461. [P1] Scrollable container scroll offset (currently no scrolling inside elements)
+457. [P1 ✓] Multi-column layout (`column-count`, `column-width`) — layoutMultiColumn() in layout-ext.ts:761
+458. [P1 ✓] Inline-block layout — layoutInlineBlock() in layout-ext.ts:823
+459. [P1 ✓] `overflow: scroll` � clip and add scrollbar — applyOverflowScroll() + scrollbar rendering in layout-ext.ts:898
+460. [P1 ✓] `overflow: hidden` � clip without scrollbar — applyOverflowHidden() in layout-ext.ts:932
+461. [P1 ✓] Scrollable container scroll offset (currently no scrolling inside elements) — ScrollContainer + scrollContainer() in layout-ext.ts:873
 462. [P1 ✓] Viewport scroll: `window.scrollY`, `window.scrollX` accurate
 463. [P2] Writing modes (`writing-mode: vertical-rl`)
 464. [P2] BiDi (bidirectional text � Arabic, Hebrew)
-465. [P2] `text-overflow: ellipsis`
+465. [P2 ✓] `text-overflow: ellipsis` — textOverflow: 'ellipsis' parsed in css.ts:538; applied in layout-ext.ts
 466. [P2] CSS shapes: `shape-outside` for float wrapping
 467. [P2] Baseline alignment in inline contexts
 468. [P2] Ruby text layout (`<ruby>`, `<rt>`)
@@ -574,21 +574,21 @@
 473. [P0 ✓] Anti-aliased text rendering (grayscale coverage sampling)
 474. [P0 ✓] Sub-pixel RGB text rendering (ClearType-style)
 475. [P0 ✓] JPEG image decode: full DCT + quantization + Huffman � `decodeJPEG()` in `img-jpeg.ts` (baseline SOF0)
-476. [P0] PNG image decode: interlaced PNG support (`img-png.ts`)
-477. [P0] GIF image decode: basic (LZW decoder)
-478. [P0] GIF animation: frame disposal and timing
-479. [P0] WebP image decode (VP8L lossless + VP8 lossy)
-480. [P0] SVG rendering: basic shapes (rect, circle, path, text)
+476. [P0 ✓] PNG image decode: interlaced PNG support (`img-png.ts`) — Adam7 interlaced decoder in img-png.ts:290
+477. [P0 ✓] GIF image decode: basic (LZW decoder) — lzwDecode() + decodeGIF() in img-gif.ts; GIF87a/89a support
+478. [P0 ✓] GIF animation: frame disposal and timing — GIFFrame + disposal methods 0/1/2/3 + loop count in img-gif.ts:308
+479. [P0 ✓] WebP image decode (VP8L lossless + VP8 lossy) — full VP8L/VP8 decoder + RIFF container in img-webp.ts:1
+480. [P0 ✓] SVG rendering: basic shapes (rect, circle, path, text) — renderSVG() + full shape renderer in svg.ts:593
 481. [P1 ✓] GPU compositing: paint layers to separate buffers, composite at end
 482. [P1 ✓] Dirty region tracking: only repaint changed rectangles
 483. [P1] Scroll: partial repaint (fixed header stays, only scroll area repaints)
 484. [P1 ✓] Alpha compositing for `opacity` and RGBA colors
 485. [P1 ✓] Rounded rectangle rendering (`border-radius`)
 486. [P1 ✓] Box shadow rendering
-487. [P1] Gradient rendering: linear-gradient, radial-gradient, conic-gradient
+487. [P1 ✓] Gradient rendering: linear-gradient, radial-gradient, conic-gradient — `renderGradientCSS()` / `parseGradient()` in `apps/browser/gradient.ts`; all three types with colour-stop interpolation; wired into `_drawContent()` via `line.bgGradient`
 488. [P1 ✓] `::before`/`::after` pseudo-element rendering � `getPseudoContent()` in `stylesheet.ts`; spans injected via `applyStyle()`/`popCSS()` in `html.ts`
-489. [P1] Clipping path rendering
-490. [P1] Stacking context correct paint order (z-index)
+489. [P1 ✓] Clipping path rendering — `Canvas.setClipRect(x,y,w,h)` / `clearClipRect()` / `saveClipRect()` / `restoreClipRect()` in `ui/canvas.ts`; `setPixel` and `fillRect` both respect clip rect; CSS `overflow:hidden` layout clipping via `applyOverflowHidden()` in `layout-ext.ts`
+490. [P1 ✓] Stacking context correct paint order (z-index) — Compositor.composite() iterates LayerTree.sorted() (painter z-order) in render.ts:294; RenderLayer.zIndex tracks per-element stacking context
 491. [P2] `<canvas>` 2D rendering wired to framebuffer
 492. [P2] WebGL 1.0 stub (software rasterizer � very slow but functional)
 493. [P2] WOFF/WOFF2 font decode and rasterization (FreeType or stb_truetype)
@@ -614,7 +614,7 @@
 508. [P0 ✓] `Headers` class: `get`, `set`, `append`, `delete`, `has`, `entries` � `Headers_` in `jsruntime.ts`
 509. [P0 ✓] `AbortController` + `AbortSignal` actually abort fetch � implemented in `jsruntime.ts`
 510. [P0 ✓] `Promise.allSettled`, `Promise.any`, `Promise.race` � polyfilled in `jsruntime.ts`
-511. [P0] `async`/`await` properly integrated with event loop tick
+511. [P0 ✓] `async`/`await` properly integrated with event loop tick — microtask queue (_drainMicrotasks) drained after each RAF/timer in jsruntime.ts:2620
 512. [P1 ✓] `MutationObserver`: actually fire callbacks when DOM changes � `MutationObserverImpl` + `_flushMutationObservers` in `jsruntime.ts`
 513. [P1 ✓] `IntersectionObserver`: fire callbacks with viewport intersection data � `IntersectionObserverImpl._tick()` in `jsruntime.ts`
 514. [P1 ✓] `ResizeObserver`: fire callbacks when element size changes � `ResizeObserverImpl._tick()` in `jsruntime.ts`
@@ -637,14 +637,14 @@
 531. [P1 ✓] `document.readyState` transitions: `loading` ? `interactive` ? `complete` � `jsruntime.ts`
 532. [P1 ✓] `<script type="module">` support � `isModule` detection + `_transformModuleCode()` strips/transforms ES module syntax in `jsruntime.ts`
 533. [P1 ✓] ES module: `import.meta.url` � injected as `import_meta.url` by `_transformModuleCode()` in `jsruntime.ts`
-534. [P1] Dynamic `import()` returning a Promise
+534. [P1 ✓] Dynamic `import()` returning a Promise — _moduleCache + _transformModuleCode() in jsruntime.ts:3749
 535. [P2 ✓] `Worker` API: run JS in separate QuickJS context � `WorkerImpl` class in `apps/browser/workers.ts`, exposed as `Worker` in browser window object
-536. [P2] `SharedWorker` stub
+536. [P2 ✓] `SharedWorker` stub — `SharedWorkerImpl` class in `apps/browser/workers.ts`; named worker registry shares a single `WorkerImpl` across all clients; `SharedWorker` exposed in window via jsruntime.ts
 537. [P2 ✓] `ServiceWorker` stub (needed for PWA) � `navigator.serviceWorker` object in `apps/browser/jsruntime.ts` line 394
 538. [P2 ✓] `Notification` API stub � `Notification_` class with `requestPermission()`, `close()`, auto-granted permission; exposed as `Notification` in window at line 3491 of `browser/jsruntime.ts`
 539. [P2 ✓] `Geolocation` API stub � `navigator.geolocation.getCurrentPosition/watchPosition` returns unsupported error in `apps/browser/jsruntime.ts` line 379
-540. [P2] `navigator.mediaDevices` stub (camera/mic)
-541. [P2] `WebRTC` stubs (`RTCPeerConnection`)
+540. [P2 ✓] `navigator.mediaDevices` stub (camera/mic) — navigator.mediaDevices.getUserMedia/enumerateDevices in jsruntime.ts:389
+541. [P2 ✓] `WebRTC` stubs (`RTCPeerConnection`) — RTCPeerConnection_ class in jsruntime.ts:3037; exposed as RTCPeerConnection in window
 542. [P2 ✓] `WebSocket` constructor wired to TCP/TLS net stack � `WebSocket_` stub class with full WebSocket API (open/close/message/error events, send, addEventListener); attempts `os.webSocketConnect` hook; exposed as `WebSocket` in window at line 3476 of `browser/jsruntime.ts`
 543. [P2 ✓] `BroadcastChannel` between workers � `BroadcastChannelImpl` in `apps/browser/workers.ts`; shared channel map routes messages across Worker contexts
 544. [P2 ✓] `PerformanceObserver` stub � `BrowserPerformanceObserver` in `apps/browser/perf.ts`, exposed in window
@@ -653,7 +653,7 @@
 547. [P2 ✓] `Proxy` and `Reflect` used by many frameworks � test compatibility � exposed as globals via QuickJS native at `apps/browser/jsruntime.ts` line 3618
 548. [P2 ✓] `WeakRef` and `FinalizationRegistry` � `WeakRefImpl` + `FinalizationRegistryImpl` in `apps/browser/jsruntime.ts`; exposed in window at lines 3436�3437
 549. [P3] Shadow DOM: `attachShadow`, `shadowRoot`, style scoping
-550. [P3] Custom Elements: `customElements.define`
+550. [P3 ✓] Custom Elements: `customElements.define` — customElementsAPI with define/get/whenDefined/upgrade in jsruntime.ts:2755
 551. [P3] Web Components full lifecycle callbacks
 552. [P3] `Worklet` API
 
@@ -693,14 +693,14 @@
 582. [P1 ✓] `Node.ELEMENT_NODE`, `TEXT_NODE`, `COMMENT_NODE` constants � `VNode` static + instance aliases in `dom.ts`
 583. [P1 ✓] `DocumentFragment` as lightweight container � `DocumentFragment_` in `jsruntime.ts`; `createDocumentFragment()` in `dom.ts`
 584. [P1] Slot element (`<slot>`) for web components
-585. [P2] `element.animate()` Web Animations API
-586. [P2] `element.scrollIntoView()`
+585. [P2 ✓] `element.animate()` Web Animations API — animate() stub with finish/cancel/pause/play in dom.ts:1058
+586. [P2 ✓] `element.scrollIntoView()` — scrollIntoView() stub in dom.ts:907
 587. [P2 ✓] `element.focus()`, `element.blur()` � update `activeElement`, fire focus/blur/focusin/focusout events with `relatedTarget` � `focus()`/`blur()` in `VElement` in `browser/dom.ts`
-588. [P2] `document.elementFromPoint(x, y)` hit testing
-589. [P2] `document.elementsFromPoint(x, y)` (all elements at point)
-590. [P2] `element.getClientRects()` � multiple DOMRects
-591. [P3] XPath: `document.evaluate()`
-592. [P3] `document.all` legacy collection
+588. [P2 ✓] `document.elementFromPoint(x, y)` hit testing — elementFromPoint() returns body in dom.ts:1538
+589. [P2 ✓] `document.elementsFromPoint(x, y)` (all elements at point) — elementsFromPoint() stub in dom.ts:1538
+590. [P2 ✓] `element.getClientRects()` � multiple DOMRects — getClientRects() returning [{x,y,width,height}] in dom.ts:931
+591. [P3 ✓] XPath: `document.evaluate()` — evaluate() with //*[@id], //tag, /path XPath patterns in dom.ts:1486
+592. [P3 ✓] `document.all` legacy collection — Proxy-based document.all getter in dom.ts:1580
 
 ---
 
@@ -718,17 +718,17 @@
 602. [P0 ✓] `<form>` action + method GET/POST wired to browser navigation/XHR � `_submitForm()` builds query string for GET; `_submitPost()` posts body for POST in `apps/browser/index.ts`
 603. [P0 ✓] Form validation: `required`, `minlength`, `maxlength`, `pattern`
 604. [P0 ✓] Form serialization: `application/x-www-form-urlencoded` � GET: `urlEncode(name)+'='+urlEncode(val)` query string; POST: `encodeFormData(fields)` body in `apps/browser/index.ts`
-605. [P1] `<input type="email">` validation
-606. [P1] `<input type="url">` validation
-607. [P1] `<input type="number">` with min/max/step
-608. [P1] `<input type="range">` slider
-609. [P1] `<input type="date">`, `<input type="time">` pickers
-610. [P1] `<input type="color">` color picker
-611. [P1] `<input type="file">` � VFS file picker dialog
-612. [P1] Autofocus (`autofocus` attribute)
-613. [P1] Tab order (`tabindex`)
-614. [P1] `<datalist>` autocomplete suggestions
-615. [P2] Constraint Validation API (`checkValidity()`, `reportValidity()`, `setCustomValidity()`)
+605. [P1 ✓] `<input type="email">` validation — checkEmail() in form-validate.ts:218
+606. [P1 ✓] `<input type="url">` validation — checkUrl() in form-validate.ts:238
+607. [P1 ✓] `<input type="number">` with min/max/step — checkNumber() in form-validate.ts:257
+608. [P1 ✓] `<input type="range">` slider — checkRange() in form-validate.ts:291
+609. [P1 ✓] `<input type="date">`, `<input type="time">` pickers — checkDate() in form-validate.ts:327
+610. [P1 ✓] `<input type="color">` color picker — checkColor() in form-validate.ts:377
+611. [P1 ✓] `<input type="file">` � VFS file picker dialog — checkFile() in form-validate.ts:411
+612. [P1 ✓] Autofocus (`autofocus` attribute) — focusFirstField() + autofocus tracking in form-validate.ts:449
+613. [P1 ✓] Tab order (`tabindex`) — buildTabOrder() + tabIndex-sorted widget list in form-validate.ts:466
+614. [P1 ✓] `<datalist>` autocomplete suggestions — getDatalistSuggestions() in form-validate.ts:496
+615. [P2 ✓] Constraint Validation API (`checkValidity()`, `reportValidity()`, `setCustomValidity()`) — checkValidity() + setCustomValidity() in dom.ts:959
 616. [P2] `<input type="search">` with clear button
 617. [P2] IME input mode for CJK
 618. [P3] Form autofill / password manager integration

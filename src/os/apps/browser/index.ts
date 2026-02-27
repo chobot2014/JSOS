@@ -44,6 +44,7 @@ import { layoutNodes }  from './layout.js';
 import { aboutJsosHTML, errorHTML, jsonViewerHTML } from './pages.js';
 import { createPageJS, type PageJS } from './jsruntime.js';
 import { flushAllCaches } from './cache.js';
+import { renderGradientCSS } from './gradient.js';
 
 // ── TabState — per-tab browseable snapshot ────────────────────────────────────
 
@@ -595,6 +596,9 @@ export class BrowserApp implements App {
       }
       if (line.bgColor) {
         canvas.fillRect(0, absY - 1, w, line.lineH + 1, line.bgColor);
+      }
+      if (line.bgGradient) {
+        renderGradientCSS(canvas, 0, absY - 1, w, line.lineH + 1, line.bgGradient);
       }
       if (line.quoteBg) {
         canvas.fillRect(0, absY - 1, w, line.lineH + 1, CLR_QUOTE_BG);

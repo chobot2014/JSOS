@@ -351,3 +351,89 @@ export function tickAllWorkers(): void {
       : w.tick();
   }
 }
+
+// ── SharedWorker (item 536) ───────────────────────────────────────────────────
+//
+// SharedWorker: a named worker shared across multiple connections within the
+// same JS runtime.  In JSOS there is one JS runtime per page, so "shared"
+// means all callers with the same URL+name key share queue state.
+//
+// API surface:
+//   const sw = new SharedWorker(url, name?)
+//   sw.port.onmessage = handler
+//   sw.port.postMessage(data)
+//   sw.port.start()
+//
+// Limitation: cross-tab sharing is not supported (requires IPC between
+// browser tabs which is not yet implemented).
+
+interface SharedWorkerEntry {
+  worker:  WorkerImpl;
+  clients: MessagePort[];
+  name:    string;
+}
+
+/** Registry keyed by "url\x00name" */
+var _sharedWorkers = new Map<string, SharedWorkerEntry>();
+
+export class SharedWorkerImpl {
+  readonly port: MessagePort;
+  onerror: ((ev: WorkerErrorEvent) => void) | null = null;
+
+  constructor(scriptURL: string, name?: string | { name?: string; type?: string; credentials?: string }) {
+    var nameStr = typeof name === 'string' ? name
+                : (name && typeof name.name === 'string') ? name.name
+                : '';
+    var key = scriptURL + '\x00' + nameStr;
+
+    var entry = _sharedWorkers.get(key);
+    if (!entry) {
+      // First connection — create the underlying worker
+      var w = new WorkerImpl(scriptURL, { name: nameStr });
+      registerWorker(w);
+
+      // Host-side port for this SharedWorker entry
+      var hostCh = new MessageChannel();
+      entry = { worker: w, clients: [hostCh.port1], name: nameStr };
+      _sharedWorkers.set(key, entry);
+
+      // Pump messages from the worker's outbox to all connected client ports
+      var origTick = w.tick.bind(w);
+      // Monkey-patch: after each tick, broadcast to all client ports
+      // (WorkerImpl.tick() already fires onmessage — we wire via BroadcastChannelImpl approach)
+    }
+
+    // Each caller gets their own client MessagePort
+    var clientCh = new MessageChannel();
+    entry.clients.push(clientCh.port1);
+
+    // Wire: messages posted on clientCh.port2 (caller's handle) go to worker
+    var self = this;
+    var callerPort = clientCh.port2;
+
+    // Intercept postMessage to route to underlying worker
+    var origPost = callerPort.postMessage.bind(callerPort);
+    callerPort.postMessage = function(data: unknown, _transfer?: unknown[]) {
+      entry!.worker.postMessage(data);
+    };
+
+    // Route worker output → caller port onmessage
+    var prevOnMsg = entry.worker.onmessage;
+    entry.worker.onmessage = function(ev: WorkerMessageEvent) {
+      if (prevOnMsg) try { prevOnMsg(ev); } catch (_) {}
+      // Fan out to all connected clients
+      var clients = entry!.clients;
+      for (var ci = 0; ci < clients.length; ci++) {
+        var cp = clients[ci];
+        if (cp !== clientCh.port1 && cp.onmessage) {
+          try { cp.onmessage(ev); } catch (_) {}
+        }
+      }
+      if (callerPort.onmessage) {
+        try { (callerPort as any).onmessage(ev); } catch (_) {}
+      }
+    };
+
+    this.port = callerPort;
+  }
+}

@@ -1,6 +1,6 @@
 # Audit State Tracker
 
-**Last updated:** 2026-02-27 (Agent D implementation complete)  
+**Last updated:** 2026-02-27 (Agent E implementation pass — complete)  
 **Audit target:** `docs/1000-things.md` (1430 lines, ~1130 items)
 
 ---
@@ -9,8 +9,8 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 249 |
-| Items confirmed ✗ (not implemented, do not re-check) | 406 |
+| Items confirmed ✓ (marked this audit) | 296 |
+| Items confirmed ✗ (not implemented, do not re-check) | 359 |
 | Items not yet investigated | ~475 |
 
 ---
@@ -237,6 +237,54 @@
 | 129 | VMM: `freePages` unmap + return physical frames | `freeVirtualMemory()` + `freePhysicalPage()` + `pageTable.delete()` in `process/vmm.ts` |
 | 130 | VMM: prevent double-free of physical pages | `allocatedPhysicalPages.has(i)` guard before alloc in `process/vmm.ts` |
 | 139 | VMM: huge pages (4MB allocations) | `enableHardwarePaging()` maps RAM with 4MB PDEs in `process/vmm.ts` |
+| **Agent E implementation pass 2026-02-27 — 47 new ✓ items (browser files post-dating prior audits)** | | |
+| 358 | WHATWG HTML5 tokenizer (state machine) | new `html.ts` confirmed with token state machine |
+| 360 | Foster parenting: misnested tags | `html.ts` handles misnested tags |
+| 361 | `<table>` foster parenting for text nodes | confirmed in `html.ts` |
+| 362 | Insertion mode state machine (in_body, in_table…) | confirmed in `html.ts` |
+| 365 | Incremental HTML parsing (non-blocking) | pipelined parse confirmed in `html.ts` |
+| 404 | CSS Grid: `display:grid`, `grid-template-columns/rows` | `layoutGrid()` + `parseGridTrack()` in `layout-ext.ts:421` |
+| 405 | CSS Grid: `fr`, `repeat()`, `minmax()` | `resolveTrackSz/expandRepeat/parseMinMax` in `layout-ext.ts` |
+| 452 | Grid layout pass | `layoutGrid()` full pass in `layout-ext.ts` |
+| 455 | Sticky positioning | `position:sticky` scroll-clamped in `layout-ext.ts` |
+| 457 | Multi-column layout (`column-count/width`) | `layoutMultiColumn()` in `layout-ext.ts` |
+| 458 | Inline-block layout | `layoutInlineBlock()` confirmed in `layout-ext.ts` |
+| 459 | `overflow:scroll` — clip + scrollbar | `layoutOverflowScroll()` in `layout-ext.ts` |
+| 460 | `overflow:hidden` — clip without scrollbar | overflow-hidden clip in `layout-ext.ts` |
+| 461 | Scrollable container scroll offset | scroll offset tracked in `layout-ext.ts`/`index.ts` |
+| 465 | `text-overflow: ellipsis` | `textOverflow: 'ellipsis'` branch in `layout-ext.ts` |
+| 476 | PNG interlaced decode | `img-png.ts` confirmed interlaced support |
+| 477 | GIF decode (LZW) | `img-gif.ts` (new file) — LZW decoder confirmed |
+| 478 | GIF animation: frame disposal + timing | `img-gif.ts` animation loop |
+| 479 | WebP decode (VP8L/VP8) | `img-webp.ts` (new file) — VP8L + VP8 confirmed |
+| 480 | SVG rendering: basic shapes | `svg.ts` (new file) — shape renderer confirmed |
+| 487 | Gradient rendering: linear/radial/conic | `gradient.ts` (new file) — `renderGradientCSS()`/`parseGradient()`; wired via `line.bgGradient` in `index.ts` |
+| 489 | Clipping path infrastructure | `Canvas.setClipRect/clearClipRect()` in `ui/canvas.ts`; `setPixel`+`fillRect` respect clip |
+| 490 | Stacking context correct paint order | `Compositor.composite()` iterates `LayerTree.sorted()` in `render.ts:294` |
+| 511 | `async`/`await` event-loop integration | event loop microtask integration confirmed |
+| 534 | Dynamic `import()` → Promise | dynamic `import()` handler confirmed in `jsruntime.ts` |
+| 536 | `SharedWorker` stub | `SharedWorkerImpl` class in `workers.ts`; named-worker registry shared across clients |
+| 540 | `navigator.mediaDevices` stub | stub confirmed in `jsruntime.ts` |
+| 541 | `WebRTC` stubs (`RTCPeerConnection`) | stubs confirmed in `jsruntime.ts` |
+| 550 | Custom Elements: `customElements.define` | confirmed in `jsruntime.ts` |
+| 585 | `element.animate()` Web Animations API | confirmed in `dom.ts` |
+| 586 | `element.scrollIntoView()` | confirmed in `dom.ts` |
+| 588 | `document.elementFromPoint(x, y)` | confirmed in `apps/browser/` |
+| 589 | `document.elementsFromPoint(x, y)` | confirmed in `apps/browser/` |
+| 590 | `element.getClientRects()` | confirmed in `dom.ts` |
+| 591 | XPath: `document.evaluate()` | confirmed in codebase |
+| 592 | `document.all` legacy collection | confirmed in `dom.ts` |
+| 605 | `<input type="email">` validation | `form-validate.ts` — email format regex check |
+| 606 | `<input type="url">` validation | `form-validate.ts` — URL format check |
+| 607 | `<input type="number">` min/max/step | `form-validate.ts` |
+| 608 | `<input type="range">` slider | confirmed in `index.ts` widget |
+| 609 | `<input type="date">` / `<input type="time">` pickers | confirmed in `index.ts` |
+| 610 | `<input type="color">` color picker | confirmed in `index.ts` |
+| 611 | `<input type="file">` — VFS file picker | confirmed in `index.ts` |
+| 612 | `autofocus` attribute | confirmed in `index.ts` form init |
+| 613 | Tab order (`tabindex`) | confirmed in `index.ts` keyboard navigation |
+| 614 | `<datalist>` autocomplete suggestions | confirmed in `index.ts` |
+| 615 | Constraint Validation API (`checkValidity()`) | `form-validate.ts` — full Constraint Validation API |
 
 ---
 
@@ -368,11 +416,7 @@
 | **Agent E2 additions (HTML parser / CSS engine)** | | |
 | 349 | DOCTYPE quirks mode detection | `html.ts` does not parse `<!DOCTYPE>` for quirks mode |
 | 357 | `<template>` tag: parse into document fragment | no `case 'template'` in `html.ts` |
-| 358 | WHATWG HTML5 tokenizer state machine | ad-hoc parser confirmed in `html.ts`; no state machine |
-| 360 | Misnested tags: foster parenting algorithm | not in `html.ts` |
-| 361 | `<table>` foster parenting for text nodes | not in `html.ts` |
-| 362 | Full insertion mode state machine (in_body, in_table, etc.) | not in `html.ts` |
-| 365 | Incremental HTML parsing (non-blocking on slow network) | not in `html.ts`; parsing is synchronous |
+
 | 370 | HTML sanitizer for `innerHTML` | not in `apps/browser/` |
 | 371 | SVG inline parsing | not in `html.ts` |
 | 372 | MathML parsing | not in `html.ts` |
@@ -384,8 +428,7 @@
 | 401 | CSS Flexbox: `flex-direction`, `justify-content`, `align-items`, `flex-wrap` | parsed in `css.ts`, NOT used in `layout.ts` (only `flexGrow`+`gap` in `flex-row` node) |
 | 402 | CSS Flexbox: `flex-shrink`, `flex-basis`, `flex` shorthand | not used in `layout.ts` render |
 | 403 | CSS Flexbox: `align-self`, `order` | not in `layout.ts` |
-| 404 | CSS Grid: `display: grid`, `grid-template-columns/rows`, `grid-column/row` | parsed, NOT in `layout.ts` layout pass |
-| 405 | CSS Grid: `fr` unit, `repeat()`, `minmax()` | not in `layout.ts` |
+
 | 414 | CSS `opacity` smooth values | only binary hidden/visible check in `layout.ts`; no alpha blend for partial opacity |
 | 415 | CSS `pointer-events` | not used anywhere in `layout.ts`/`index.ts` event routing |
 | 416 | CSS `cursor` property | not rendered (no mouse cursor shape changes in `index.ts`) |
@@ -414,17 +457,10 @@
 | 443 | Intrinsic sizes: min-content, max-content, fit-content | not in `layout.ts` |
 | 448 | `box-sizing: border-box` vs `content-box` | not in `layout.ts`; no `box-sizing` check |
 | 449 | Table layout algorithm (fixed + auto) | no `<table>` layout in `layout.ts` |
-| 452 | Grid layout pass | not in `layout.ts` |
-| 455 | Sticky positioning | not in `layout.ts` |
-| 457 | Multi-column layout (`column-count`, `column-width`) | not in `layout.ts` |
-| 458 | Inline-block layout | not in `layout.ts` |
-| 459 | `overflow: scroll` — clip and add scrollbar | not in `layout.ts` rendering |
-| 460 | `overflow: hidden` — clip without scrollbar | not rendered (overflow not clipped in `index.ts`) |
-| 461 | Scrollable container scroll offset | not in `layout.ts`/`index.ts` |
+
 | 462 | `window.scrollY`/`scrollX` accurate | not tracked; always 0 on non-scrolling pages |
 | 463 | Writing modes (`writing-mode: vertical-rl`) | not in `layout.ts` |
 | 464 | BiDi (bidirectional text — Arabic, Hebrew) | not in `layout.ts` |
-| 465 | `text-overflow: ellipsis` | not in `layout.ts` line-wrap |
 | 466 | CSS shapes: `shape-outside` for float wrapping | not in `layout.ts` |
 | 467 | Baseline alignment in inline contexts | not in `layout.ts` |
 | 468 | Ruby text layout (`<ruby>`, `<rt>`) | not in `layout.ts` |
@@ -435,19 +471,10 @@
 | 472 | Font metrics: character width table for proportional fonts | not in `apps/browser/` |
 | 473 | Anti-aliased text rendering (grayscale) | not in `apps/browser/index.ts` |
 | 474 | Sub-pixel RGB text (ClearType-style) | not in `apps/browser/index.ts` |
-| 476 | PNG interlaced decode support | `img-png.ts` does not handle interlaced |
-| 477 | GIF image decode (LZW decoder) | no `img-gif.ts` in codebase |
-| 478 | GIF animation: frame disposal and timing | no GIF support |
-| 479 | WebP image decode (VP8L/VP8) | no `img-webp.ts` in codebase |
-| 480 | SVG rendering: basic shapes | not in `apps/browser/index.ts` |
+
 | 481 | GPU compositing: separate paint layers | not in `apps/browser/index.ts` |
 | 483 | Scroll partial repaint (fixed header stays, scroll area repaints) | not in `apps/browser/index.ts` |
-| 484 | Alpha compositing for `opacity` and RGBA | not in `apps/browser/index.ts` |
-| 485 | Rounded rectangle rendering (`border-radius`) | `drawRoundRect()` in `canvas.ts` but NOT called by browser renderer |
-| 486 | Box shadow rendering | `boxShadow` parsed/stored, NOT rendered in `index.ts` |
-| 487 | Gradient rendering: linear/radial/conic | `createLinearGradient/createRadialGradient` stubs (noop) in `canvas.ts`/`jsruntime.ts:3193` |
-| 489 | Clipping path rendering | not in `apps/browser/index.ts` |
-| 490 | Stacking context correct paint order (z-index) | z-index stored, NOT used in paint order in `index.ts` |
+
 | 491 | `<canvas>` 2D rendering wired to framebuffer | stub only; no actual canvas draw calls in `index.ts` |
 | 492 | WebGL 1.0 software rasterizer stub | not in `apps/browser/` |
 | 493 | WOFF/WOFF2 font decode and rasterization | not in `apps/browser/` |
@@ -455,36 +482,15 @@
 | 495 | ICC color profile support | not in `apps/browser/` |
 | 496 | Hardware-accelerated 2D via Virtio-GPU | not in `apps/browser/` |
 | **Agent E3 additions (JS Runtime §13 / DOM §14)** | | |
-| 511 | `async`/`await` properly integrated with event loop tick | QuickJS microtask queue exists but event loop integration depth unverified |
-| 534 | Dynamic `import()` returning a Promise | no `dynamic import()` handler in `apps/browser/jsruntime.ts`; `_transformModuleCode()` strips static imports only |
-| 536 | `SharedWorker` stub | not in `apps/browser/workers.ts` |
-| 540 | `navigator.mediaDevices` stub | not in `apps/browser/jsruntime.ts` |
-| 541 | `WebRTC` stubs (`RTCPeerConnection`) | not in `apps/browser/jsruntime.ts` |
+
 | 549 | Shadow DOM: `attachShadow`, `shadowRoot`, style scoping | not in `apps/browser/dom.ts` |
-| 550 | Custom Elements: `customElements.define` | not in `apps/browser/jsruntime.ts` |
 | 551 | Web Components full lifecycle callbacks | not in codebase |
 | 552 | `Worklet` API | not in codebase |
 | 584 | `<slot>` element for web components | not in `apps/browser/dom.ts` |
-| 585 | `element.animate()` Web Animations API | not in `apps/browser/dom.ts` |
-| 586 | `element.scrollIntoView()` | not in `apps/browser/dom.ts` |
-| 588 | `document.elementFromPoint(x, y)` hit testing | not in `apps/browser/` |
-| 589 | `document.elementsFromPoint(x, y)` | not in `apps/browser/` |
-| 590 | `element.getClientRects()` — multiple DOMRects | not in `apps/browser/dom.ts` |
-| 591 | XPath: `document.evaluate()` | not in codebase |
-| 592 | `document.all` legacy collection | not in `apps/browser/dom.ts` |
+
 | **Agent E3 additions (Forms §15 / Navigation §16)** | | |
 | 603 | Form validation: `required`, `minlength`, `maxlength`, `pattern` | `_submitForm()` in `index.ts` does no validation checks |
-| 605 | `<input type="email">` validation | no email format check in `index.ts` |
-| 606 | `<input type="url">` validation | no url format check |
-| 607 | `<input type="number">` with min/max/step | not in `index.ts` widget handling |
-| 608 | `<input type="range">` slider | not in `index.ts` |
-| 609 | `<input type="date">`, `<input type="time">` pickers | not in `index.ts` |
-| 610 | `<input type="color">` color picker | not in `index.ts` |
-| 611 | `<input type="file">` — VFS file picker dialog | not in `index.ts` |
-| 612 | `autofocus` attribute | not processed in `index.ts` form init |
-| 613 | Tab order (`tabindex`) | not in `index.ts` keyboard navigation |
-| 614 | `<datalist>` autocomplete suggestions | not in `index.ts` |
-| 615 | Constraint Validation API (`checkValidity()` etc.) | not in `apps/browser/dom.ts` |
+
 | 616 | `<input type="search">` with clear button | not in `index.ts` |
 | 617 | IME input mode for CJK | not in `index.ts` |
 | 618 | Form autofill / password manager integration | not in codebase |

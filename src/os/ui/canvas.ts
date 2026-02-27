@@ -289,6 +289,9 @@ export class Canvas {
   /** True when this canvas wraps an external BSS buffer (no heap alloc, flip is NOP). */
   private _external: boolean;
 
+  /** Clipping rectangle — pixels outside are not drawn.  null = no clip (full canvas). */
+  private _clip: { x1: number; y1: number; x2: number; y2: number } | null = null;
+
   constructor(width: number, height: number, fb_x: number | ArrayBuffer = 0, fb_y = 0, is_screen = false) {
     this.width      = width;
     this.height     = height;
@@ -324,6 +327,10 @@ export class Canvas {
 
   setPixel(x: number, y: number, color: PixelColor): void {
     if (x < 0 || x >= this.width || y < 0 || y >= this.height) return;
+    if (this._clip) {
+      var c2 = this._clip;
+      if (x < c2.x1 || x >= c2.x2 || y < c2.y1 || y >= c2.y2) return;
+    }
     this._buf[y * this.width + x] = Canvas._bgra(color);
   }
 
@@ -335,6 +342,41 @@ export class Canvas {
     var g = (bgra >>>  8) & 0xFF;
     var b = (bgra >>>  0) & 0xFF;
     return (a << 24) | (r << 16) | (g << 8) | b;
+  }
+
+  // ── Clipping (item 489) ───────────────────────────────────────────────────
+
+  /**
+   * Set a rectangular clipping region.  Subsequent drawing operations are
+   * silently clipped to [x, y, x+w, y+h].  Nested clips intersect with the
+   * current clip (most-restrictive wins).
+   */
+  setClipRect(x: number, y: number, w: number, h: number): void {
+    var nx1 = Math.max(0, x);
+    var ny1 = Math.max(0, y);
+    var nx2 = Math.min(this.width,  x + w);
+    var ny2 = Math.min(this.height, y + h);
+    if (this._clip) {
+      // Intersect with existing clip
+      nx1 = Math.max(nx1, this._clip.x1);
+      ny1 = Math.max(ny1, this._clip.y1);
+      nx2 = Math.min(nx2, this._clip.x2);
+      ny2 = Math.min(ny2, this._clip.y2);
+    }
+    this._clip = { x1: nx1, y1: ny1, x2: nx2, y2: ny2 };
+  }
+
+  /** Remove the clipping region; drawing operations cover the full canvas again. */
+  clearClipRect(): void { this._clip = null; }
+
+  /** Save and return the current clip (or null).  Pair with restoreClipRect(). */
+  saveClipRect(): { x1: number; y1: number; x2: number; y2: number } | null {
+    return this._clip ? { ...this._clip } : null;
+  }
+
+  /** Restore a previously saved clip rect (pass the value from saveClipRect()). */
+  restoreClipRect(saved: { x1: number; y1: number; x2: number; y2: number } | null): void {
+    this._clip = saved;
   }
 
   // ── Drawing primitives ────────────────────────────────────────────────
@@ -355,8 +397,15 @@ export class Canvas {
     var y1 = Math.max(y, 0);
     var x2 = Math.min(x + w, this.width);
     var y2 = Math.min(y + h, this.height);
+    // Apply clip rect if active (item 489)
+    if (this._clip) {
+      x1 = Math.max(x1, this._clip.x1);
+      y1 = Math.max(y1, this._clip.y1);
+      x2 = Math.min(x2, this._clip.x2);
+      y2 = Math.min(y2, this._clip.y2);
+    }
     var rowW = x2 - x1;
-    if (rowW <= 0) return;
+    if (rowW <= 0 || y2 <= y1) return;
     // JIT fast-path: direct physical-memory rectangle fill
     if (_ensureJIT()) {
       var fb = this.bufPhysAddr();

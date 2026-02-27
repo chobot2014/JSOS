@@ -20,7 +20,7 @@ import {
   buildDOM, serializeDOM, _serializeEl, _walk, _matchSel,
 } from './dom.js';
 import { BrowserPerformance, BrowserPerformanceObserver } from './perf.js';
-import { WorkerImpl, MessageChannel, BroadcastChannelImpl, tickAllWorkers } from './workers.js';
+import { WorkerImpl, SharedWorkerImpl, MessageChannel, BroadcastChannelImpl, tickAllWorkers } from './workers.js';
 import { cookieJar } from '../../net/http.js';
 import { getCachedStyle, setCachedStyle, bumpStyleGeneration, currentStyleGeneration } from './cache.js';
 
@@ -3373,6 +3373,7 @@ export function createPageJS(
     ResizeObserver:       ResizeObserverImpl,
     PerformanceObserver:  BrowserPerformanceObserver,
     Worker:               WorkerImpl,
+    SharedWorker:         SharedWorkerImpl,
     MessageChannel,
     BroadcastChannel:     BroadcastChannelImpl,
     DOMParser,

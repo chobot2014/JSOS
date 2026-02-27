@@ -3,6 +3,7 @@ import type {
   WidgetBlueprint, WidgetKind, FormState, CSSProps, ScriptRecord,
 } from './types.js';
 import { parseInlineStyle } from './css.js';
+import { isGradient } from './gradient.js';
 import { type CSSRule, computeElementStyle, getPseudoContent } from './stylesheet.js';
 
 // ── HTML5 Named Entity Table (items 350–351) ──────────────────────────────────
@@ -374,6 +375,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     }
     var blk: RenderNode = { type: 'block', spans: merged };
     if (curCSS.bgColor   !== undefined) blk.bgColor     = curCSS.bgColor;
+    if (curCSS.backgroundImage && isGradient(curCSS.backgroundImage)) blk.bgGradient = curCSS.backgroundImage;
     if (curCSS.float && curCSS.float !== 'none') blk.float = curCSS.float;
     if (curCSS.marginTop)               blk.marginTop   = curCSS.marginTop;
     if (curCSS.marginBottom)            blk.marginBottom = curCSS.marginBottom;

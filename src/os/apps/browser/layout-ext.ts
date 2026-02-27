@@ -661,6 +661,7 @@ export function layoutGrid(
         nodes:  ln.nodes.map(function(n) { return { ...n, x: n.x + xOff }; }),
         lineH:  ln.lineH,
         bgColor: ln.bgColor,
+        bgGradient: ln.bgGradient,
         preBg:  ln.preBg,
       });
     }
@@ -808,6 +809,7 @@ export function layoutMultiColumn(
         y:      rowY,
         lineH:  ln.lineH,
         bgColor: ln.bgColor,
+        bgGradient: ln.bgGradient,
         preBg:  ln.preBg,
         nodes:  ln.nodes.map(function(sp) {
           return { ...sp, x: sp.x + xOffset };
@@ -1004,6 +1006,7 @@ function _clipLines(
       y:      visRow * LINE_H,
       lineH:  ln.lineH,
       bgColor: ln.bgColor,
+      bgGradient: ln.bgGradient,
       preBg:  ln.preBg,
       nodes:  clippedNodes.map(function(n) { return { ...n, x: n.x - xOffset }; }),
     });
