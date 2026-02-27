@@ -52,6 +52,14 @@ uint32_t rtc_unix_time(void);
 uint64_t timer_gettime_ns(void);   /* nanoseconds since boot                  */
 uint64_t timer_uptime_us(void);    /* microseconds since boot                 */
 
+/* NTP wall-clock (item 51)
+ * timer_set_wall_clock() stores a Unix epoch seconds value supplied by the
+ * NTP client (TypeScript).  timer_get_wall_clock() returns the stored value
+ * plus elapsed seconds since it was set so subsequent calls advance.
+ * Returns rtc_unix_time() if no NTP sync has occurred.                       */
+void     timer_set_wall_clock(uint32_t unix_epoch_seconds);
+uint32_t timer_get_wall_clock(void);
+
 /* Deferred-preemption counter — incremented by IRQ0, reset by js_sched_tick() */
 extern volatile uint32_t _preempt_counter;
 

@@ -9,9 +9,9 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 152 |
+| Items confirmed ✓ (marked this audit) | 156 |
 | Items confirmed ✗ (not implemented, do not re-check) | 23 |
-| Items not yet investigated | ~1005 |
+| Items not yet investigated | ~1001 |
 
 ---
 
@@ -176,6 +176,10 @@
 | 15 | Boot timeout countdown | `set timeout=3` in `iso/grub.cfg`; GRUB counts down 3 s before boot |
 | 16 | GRUB menu multiple entries | 4 entries in `iso/grub.cfg`: standard, selftest, debug, safe-mode |
 | 17 | PXE/netboot support | `pxe_init/is_netboot/get_info/tftp_get()` cmdline+BIOS scan for PXENV+/!PXE; PXE grub entry template in `kernel/pxe.h/c` |
+| 2 | GRUB2 boot without xorriso | `scripts/build-iso-noXorriso.sh`: `grub-mkimage -O i386-pc-eltorito` + `genisoimage`; called from `build.sh` |
+| 3 | UEFI/GPT boot path | `scripts/build-uefi-image.sh`: BOOTX64.EFI+BOOTIA32.EFI via grub-mkimage; FAT32 ESP+GPT disk; `iso/grub-uefi.cfg` |
+| 29 | MSI for PCI devices | `pci_find_msi_cap()`/`pci_enable_msi()` with 32/64-bit address+data in `kernel/pci.c` (same as item 95) |
+| 51 | NTP synchronization (TypeScript) | `ntp.sync()` SNTPv4 + fallback IPs; `kernel.setWallClock/getWallClock()` + `timer_set/get_wall_clock()` in `kernel/timer.c`; `src/os/net/ntp.ts` |
 
 ---
 

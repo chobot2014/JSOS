@@ -2403,6 +2403,24 @@ static JSValue js_rtc_read(JSContext *c, JSValueConst _t,
     return o;
 }
 
+/* kernel.setWallClock(unixSeconds) — NTP sync: store wall-clock epoch (item 51) */
+static JSValue js_set_wall_clock(JSContext *c, JSValueConst _t,
+                                  int ac, JSValueConst *av) {
+    (void)_t;
+    if (ac < 1) return JS_UNDEFINED;
+    uint32_t epoch;
+    if (JS_ToUint32(c, &epoch, av[0])) return JS_UNDEFINED;
+    timer_set_wall_clock(epoch);
+    return JS_UNDEFINED;
+}
+
+/* kernel.getWallClock() → Unix seconds (NTP-adjusted or RTC fallback) (item 51) */
+static JSValue js_get_wall_clock(JSContext *c, JSValueConst _t,
+                                  int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewUint32(c, timer_get_wall_clock());
+}
+
 /* kernel.allocPage() → physical address of a 4 KB page, 0 on OOM (item 33) */
 static JSValue js_alloc_page(JSContext *c, JSValueConst _t,
                               int _ac, JSValueConst *_av) {
@@ -3038,6 +3056,8 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     /* New subsystem bindings (items 8, 4, 33, 34, 46, 50, 104, 105, 106, 118-127) */
     JS_CFUNC_DEF("tscHz",         0, js_tsc_hz),
     JS_CFUNC_DEF("rtcRead",       0, js_rtc_read),
+    JS_CFUNC_DEF("setWallClock",  1, js_set_wall_clock),   /* item 51 NTP */
+    JS_CFUNC_DEF("getWallClock",  0, js_get_wall_clock),   /* item 51 NTP */
     JS_CFUNC_DEF("allocPage",     0, js_alloc_page),
     JS_CFUNC_DEF("freePage",      1, js_free_page),
     JS_CFUNC_DEF("pagesFree",     0, js_pages_free),

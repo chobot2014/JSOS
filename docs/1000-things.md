@@ -12,8 +12,8 @@
 
 ### 1.1 Boot & Startup
 1. [P0 ✓] Multiboot2 header support (current is Multiboot1 only) — section .multiboot2 with MULTIBOOT2_MAGIC=0xE85250D6 + framebuffer tag in `kernel/boot.s`
-2. [P0] GRUB2 native boot without xorriso ISO workaround
-3. [P0] UEFI/GPT boot path (GRUB EFI stub)
+2. [P0 ✓] GRUB2 native boot without xorriso ISO workaround — `scripts/build-iso-noXorriso.sh` uses `grub-mkimage -O i386-pc-eltorito` to produce the El Torito `core.img`, then `genisoimage`/`mkisofs` with `-b` El Torito flags to create ISO 9660 without xorriso; `build.sh` invokes it automatically after the primary xorriso path; requires `grub-pc-bin` + `genisoimage`
+3. [P0 ✓] UEFI/GPT boot path (GRUB EFI stub) — `scripts/build-uefi-image.sh` uses `grub-mkimage -O x86_64-efi` → `BOOTX64.EFI` and `-O i386-efi` → `BOOTIA32.EFI` (32-bit UEFI); creates 32 MB FAT32 ESP via `mkdosfs`/`mcopy`; writes GPT disk image via `parted` + `dd`; `iso/grub-uefi.cfg` configures EFI GRUB with `gfxpayload=keep` (EFI GOP); Dockerfile adds `grub-efi-amd64-bin grub-efi-ia32-bin dosfstools parted ovmf`; kernel handles UEFI via MB2 EFI-mmap tags (item 12) + `secboot_is_uefi()` (item 13)
 4. [P0 ✓] Boot parameter parsing (kernel command line: `root=`, `quiet`, `debug`) — `cmdline_parse(mb2_info_addr)` walks MB2 type-1 tag, tokenises key=value pairs; `cmdline_get(key)` / `cmdline_has(key)` / `cmdline_raw()` in `kernel/cmdline.c`/`cmdline.h`
 5. [P0 ✓] Proper stack canary setup before entering C — `rdtsc` XOR `0xDEAD600D` seeds `__stack_chk_guard`; `__stack_chk_fail` logs to COM1 + halts in `kernel/crt0.s`
 6. [P1 ✓] FPU/SSE state initialization (`FNINIT`, `FXSAVE` area) — `fninit` called in `kernel/crt0.s` before entering C
@@ -41,7 +41,7 @@
 26. [P1 ✓] IRQ priority levels (TPR register) — `irq_set_tpr(class)` reads LAPIC base from IA32_APIC_BASE MSR (0x1B), writes class×16 to LAPIC+0x80; `irq_get_tpr()` reads it back; `kernel.irqSetTpr()` JS binding in `kernel/irq.c`
 27. [P1 ✓] Spurious interrupt handling — `irq_handler_dispatch()` reads master PIC ISR (OCW3 0x0B) for IRQ7 and slave ISR for IRQ15; silently returns without EOI if spurious in `kernel/irq.c`
 28. [P2 ✓] IOAPIC RedTable programming for all ISA IRQs — `ioapic_init(mmio_base)` routes ISA IRQs 0-15 to vectors 32-47 (all masked initially); `ioapic_route_irq(irq, vector, dest)` writes REDTBL_LO/HI; `ioapic_mask/unmask_irq()` clear/set mask bit in `kernel/apic.c`
-29. [P2] MSI (Message Signaled Interrupts) for PCI devices
+29. [P2 ✓] MSI (Message Signaled Interrupts) for PCI devices — `pci_find_msi_cap(dev, &cap)` walks capability list for ID 0x05; `pci_enable_msi(dev, msg_addr, msg_data)` writes 32-bit message address, detects 64-bit cap (ctrl bit 7) to choose data offset, sets Enable bit and clears multi-message bits in `kernel/pci.c`/`pci.h`
 30. [P2 ✓] x2APIC support — `apic_x2_supported()` checks CPUID ECX bit 21; `apic_x2_enable()` ORs bit 10 into IA32_APIC_BASE MSR; `apic_x2_eoi()` WRMSR 0x80B; all via rdmsr/wrmsr in `kernel/apic.c`
 31. [P3 ✓] SMP: inter-processor interrupts (IPI) — `apic_send_ipi(dest, vector)` writes ICR_HI then ICR_LO and spins on delivery status; `apic_send_ipi_allexself()` broadcast; `apic_send_init_ipi()`/`apic_send_startup_ipi(dest, page)` for AP bringup in `kernel/apic.c`
 32. [P3 ✓] SIMD exception handler (SSE/AVX faults) — `exception_dispatch()` reads MXCSR via `stmxcsr` for vector 19 (#XM); decodes sticky bits IE/DE/ZE/OE/UE/PE; prints decoded flags + MXCSR value to COM1 in `kernel/irq.c`
@@ -67,7 +67,7 @@
 48. [P1 ✓] `clock_gettime` with nanosecond resolution via TSC — `timer_gettime_ns()` multiplies TSC ticks by calibrated `_tsc_hz` with PIT fallback; `timer_uptime_us()` for microsecond granularity; `kernel.getTimeNs()`/`kernel.uptimeUs()` JS bindings in `kernel/timer.c`
 49. [P1 ✓] APIC timer for per-CPU preemption — `apic_timer_calibrate()` uses `timer_sleep_ms(10)` PIT window to measure ticks/ms; `apic_timer_start_periodic(ms)` sets LVT_TIMER periodic mode with calibrated ICR; `apic_timer_stop()` clears ICR in `kernel/apic.c`
 50. [P2 ✓] RTC (CMOS) read for wall-clock time at boot — `rtc_read()` polls CMOS regs 0x00–0x09 with update-in-progress guard; BCD→binary decode; `rtc_unix_time()` returns epoch seconds; `kernel.rtcRead()` JS binding in `kernel/timer.c`
-51. [P2] NTP synchronization via network (TypeScript)
+51. [P2 ✓] NTP synchronization via network (TypeScript) — `ntp.sync()` resolves `pool.ntp.org` via DNS then falls back to Google NTP IPs; sends 48-byte SNTPv4 request (byte0=0x23), parses Transmit Timestamp (bytes 40-43), converts NTP→Unix epoch (−2208988800s); calls `kernel.setWallClock(epoch)`; `ntp.startPeriodicSync(s)` schedules setTimeout re-sync; `ntp.now()` / `ntp.nowISO()` return current time; `kernel.setWallClock/getWallClock()` C bindings + `timer_set/get_wall_clock()` in `kernel/timer.c`; `src/os/net/ntp.ts`
 52. [P3 ✓] ACPI PM timer fallback — `_parse_fadt()` reads PM_TMR_BLK from raw FADT byte offset 76; reads flags byte 112 bit 8 for 24/32-bit mode; `acpi_pm_timer_read()` reads I/O port, masks to 24-bit if needed; `kernel.acpiPmTimer()` JS binding in `kernel/acpi.c`
 
 ### 1.5 Keyboard / Input

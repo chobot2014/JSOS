@@ -226,3 +226,22 @@ uint64_t timer_uptime_us(void) {
     }
     return (uint64_t)timer_ticks * 1000ULL;
 }
+
+/* ── NTP wall-clock store (item 51) ────────────────────────────────────── */
+/* _wall_clock_epoch: Unix seconds at the moment NTP sync last ran            */
+/* _wall_clock_ticks: PIT tick count at the moment of the NTP sync            */
+static uint32_t _wall_clock_epoch = 0;   /* 0 = not yet NTP-synced           */
+static uint32_t _wall_clock_ticks = 0;
+
+void timer_set_wall_clock(uint32_t unix_epoch_seconds) {
+    _wall_clock_epoch = unix_epoch_seconds;
+    _wall_clock_ticks = timer_ticks;   /* snapshot current PIT tick count     */
+}
+
+uint32_t timer_get_wall_clock(void) {
+    if (_wall_clock_epoch == 0u)
+        return rtc_unix_time();   /* no NTP sync yet — use CMOS RTC           */
+    /* Advance by elapsed ticks since last sync (TIMER_HZ ticks = 1 second)  */
+    uint32_t elapsed_s = (timer_ticks - _wall_clock_ticks) / TIMER_HZ;
+    return _wall_clock_epoch + elapsed_s;
+}

@@ -7,6 +7,15 @@ RUN apt-get update && apt-get install -y \
     xorriso \
     grub-pc-bin \
     grub-common \
+    # Item 2: genisoimage/mkisofs for xorriso-free ISO path
+    genisoimage \
+    # Item 3: UEFI/GPT boot — EFI GRUB modules + ESP tooling
+    grub-efi-amd64-bin \
+    grub-efi-ia32-bin \
+    ovmf \
+    dosfstools \
+    parted \
+    # mtools already present; ensure full suite
     mtools \
     wget \
     curl \
