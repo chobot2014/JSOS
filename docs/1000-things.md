@@ -453,8 +453,8 @@
 367. [P2 ✓] `<video>` and `<audio>` stub elements � placeholder text rendered: `?? [video: src]` and `[?? audio]` in `apps/browser/html.ts` lines 559�564
 368. [P2 ✓] `<iframe>` � nested browsing context � placeholder `[??? iframe: src]` rendered in `apps/browser/html.ts` line 550
 369. [P2 ✓] `<canvas>` element rendering (wire to canvas 2D context) � placeholder `[canvas WxH]` in `apps/browser/html.ts` line 569
-370. [P2] HTML sanitizer for `innerHTML` assignment
-371. [P3] SVG inline parsing
+370. [P2 ✓] HTML sanitizer for `innerHTML` assignment
+371. [P3 ✓] SVG inline parsing
 372. [P3] MathML parsing
 
 ---
@@ -506,10 +506,10 @@
 415. [P1 ✓] CSS `pointer-events`
 416. [P1 ✓] CSS `cursor` property (at least `pointer`, `default`, `text`, `not-allowed`)
 417. [P1 ✓] CSS `list-style-type`: disc, circle, square, decimal, none � `lstType` read and used in `<li>` bullet rendering in `layout.ts`
-418. [P1] CSS `table-layout`: fixed, auto
-419. [P1] CSS `border-collapse`, `border-spacing`
-420. [P1] CSS `vertical-align`
-421. [P1] CSS `word-break`, `overflow-wrap`
+418. [P1 ✓] CSS `table-layout`: fixed, auto
+419. [P1 ✓] CSS `border-collapse`, `border-spacing`
+420. [P1 ✓] CSS `vertical-align`
+421. [P1 ✓] CSS `word-break`, `overflow-wrap`
 422. [P2] CSS `clip-path`
 423. [P2] CSS `filter`: blur, brightness, contrast, grayscale, hue-rotate
 424. [P2] CSS `backdrop-filter`
@@ -746,7 +746,7 @@
 625. [P1 ✓] Multiple tabs � each with independent DOM, JS context, history � `_tabs: TabState[]`, `_saveTab()`/`_loadTab()` in `browser/index.ts`
 626. [P1 ✓] Tab create, close, switch � `_newTabAction()` (Ctrl+T), `_closeTabAction()` (Ctrl+W), `_switchTabAction()` (Ctrl+Tab) in `browser/index.ts`
 627. [P1 ✓] Tab title from `<title>` element � `setTitle` callback sets `_pageTitle` at line 1400 in `browser/index.ts`
-628. [P1] Tab favicon from `<link rel="icon">`
+628. [P1 ✓] Tab favicon from `<link rel="icon">`
 629. [P1 ✓] New tab page (local start page) � `_newTabAction()` opens `about:blank`; initial tab loads `about:jsos` via `aboutJsosHTML()` in `browser/index.ts`
 630. [P1 ✓] Bookmarks: add, open � `_addBookmark()` (Ctrl+D), `_bookmarksHTML()` with links at `about:bookmarks` in `browser/index.ts` (remove not yet implemented)
 631. [P1] Bookmark folder organization

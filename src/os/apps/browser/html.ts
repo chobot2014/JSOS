@@ -1,10 +1,11 @@
 import type {
   HtmlToken, ParseResult, RenderNode, InlineSpan, BlockType,
-  WidgetBlueprint, WidgetKind, FormState, CSSProps, ScriptRecord,
+  WidgetBlueprint, WidgetKind, FormState, CSSProps, ScriptRecord, DecodedImage,
 } from './types.js';
 import { parseInlineStyle } from './css.js';
 import { isGradient } from './gradient.js';
 import { type CSSRule, computeElementStyle, getPseudoContent } from './stylesheet.js';
+import { renderSVG } from './svg.js';
 
 // ── HTML5 Named Entity Table (items 350–351) ──────────────────────────────────
 // ISO 8859-1, HTML 4 + common HTML5 named character references.
@@ -187,6 +188,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
   var styles:  string[]          = [];
   var styleLinks: string[]       = [];
   var baseURL  = '';
+  var favicon  = '';   // href from <link rel="icon"> (item 628)
 
   // ── DOCTYPE quirks mode detection (item 349) ───────────────────────────────
   // Standards mode requires a valid HTML5 DOCTYPE: <!DOCTYPE html>.
@@ -210,6 +212,12 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
   var inStyle      = false;
   var inStyleBuf   = '';
   var skipUntilClose = '';  // skip all content until this close tag (iframe, video, etc.)
+  // ── SVG inline tracking (item 371) ───────────────────────────────────────
+  var inSVG      = false;
+  var svgDepth   = 0;
+  var svgBuf     = '';
+  var svgWidth   = 300;
+  var svgHeight  = 150;
   var bold      = 0;
   var italic    = 0;
   var codeInl   = 0;
@@ -376,6 +384,11 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     var blk: RenderNode = { type: 'block', spans: merged };
     if (curCSS.bgColor   !== undefined) blk.bgColor     = curCSS.bgColor;
     if (curCSS.backgroundImage && isGradient(curCSS.backgroundImage)) blk.bgGradient = curCSS.backgroundImage;
+    // CSS background-image url() — extract URL for deferred image fetch (item 386)
+    if (curCSS.backgroundImage && !isGradient(curCSS.backgroundImage)) {
+      var _bgUrlM = curCSS.backgroundImage.match(/url\(\s*['"]?([^'")\s]+)['"]?\s*\)/);
+      if (_bgUrlM && _bgUrlM[1]) blk.bgImage = _bgUrlM[1];
+    }
     if (curCSS.float && curCSS.float !== 'none') blk.float = curCSS.float;
     if (curCSS.marginTop)               blk.marginTop   = curCSS.marginTop;
     if (curCSS.marginBottom)            blk.marginBottom = curCSS.marginBottom;
@@ -444,6 +457,9 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     if (curCSS.verticalAlign  !== undefined)   blk.verticalAlign  = curCSS.verticalAlign;
     if (curCSS.wordBreak      !== undefined)   blk.wordBreak      = curCSS.wordBreak;
     if (curCSS.overflowWrap   !== undefined)   blk.overflowWrap   = curCSS.overflowWrap;
+    // Cursor / pointer-events (items 415, 416)
+    if (curCSS.cursor        !== undefined)   blk.cursor        = curCSS.cursor;
+    if (curCSS.pointerEvents !== undefined)   blk.pointerEvents = curCSS.pointerEvents;
     nodes.push(blk);
     inlineSpans = [];
   }
@@ -516,6 +532,54 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
       continue;
     }
     if (skipUntilClose) { if (tok.kind === 'close' && tok.tag === skipUntilClose) skipUntilClose = ''; continue; }
+
+    // ── SVG inline rendering (item 371) ────────────────────────────────────
+    // Collect all tokens inside <svg>…</svg>, re-serialize, and render via renderSVG().
+    if (inSVG) {
+      if (tok.kind === 'close' && tok.tag === 'svg') {
+        svgDepth--;
+        svgBuf += '</svg>';
+        if (svgDepth === 0) {
+          inSVG = false;
+          var _svgDecoded: DecodedImage | null = null;
+          try { _svgDecoded = renderSVG(svgBuf, svgWidth || 300, svgHeight || 150); } catch (_e) {}
+          if (_svgDecoded) {
+            var _svgBP: WidgetBlueprint = {
+              kind: 'img', name: '', value: '', checked: false, disabled: false, readonly: false, formIdx: curFormIdx,
+              imgSrc: 'svg:inline', imgNatW: _svgDecoded.w, imgNatH: _svgDecoded.h,
+              preloadedImage: _svgDecoded,
+            };
+            pushWidget(_svgBP);
+          }
+        }
+      } else if (tok.kind === 'open') {
+        if (tok.tag === 'svg') svgDepth++;
+        var _svgOpen = '<' + tok.tag;
+        tok.attrs.forEach(function(v, k) { _svgOpen += ' ' + k + '="' + v.replace(/"/g, '&quot;') + '"'; });
+        svgBuf += _svgOpen + '>';
+      } else if (tok.kind === 'self') {
+        var _svgSelf = '<' + tok.tag;
+        tok.attrs.forEach(function(v, k) { _svgSelf += ' ' + k + '="' + v.replace(/"/g, '&quot;') + '"'; });
+        svgBuf += _svgSelf + '/>';
+      } else if (tok.kind === 'close') {
+        svgBuf += '</' + tok.tag + '>';
+      } else if (tok.kind === 'text') {
+        svgBuf += tok.text;
+      }
+      continue;
+    }
+    // Detect opening <svg> tag and start inline SVG collection
+    if (tok.kind === 'open' && tok.tag === 'svg') {
+      flushInline();
+      inSVG     = true;
+      svgDepth  = 1;
+      svgWidth  = parseInt(tok.attrs.get('width')  || '300', 10) || 300;
+      svgHeight = parseInt(tok.attrs.get('height') || '150', 10) || 150;
+      svgBuf    = '<svg';
+      tok.attrs.forEach(function(v, k) { svgBuf += ' ' + k + '="' + v.replace(/"/g, '&quot;') + '"'; });
+      svgBuf   += '>';
+      continue;
+    }
 
     // ── <template> element (item 357) ─────────────────────────────────────
     // Content inside <template> is parsed into a detached document fragment
@@ -605,6 +669,11 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
           if (lRel === 'stylesheet') {
             var lHref = tok.attrs.get('href') || '';
             if (lHref) styleLinks.push(lHref);
+          }
+          // Favicon from <link rel="icon"> or <link rel="shortcut icon"> (item 628)
+          if ((lRel === 'icon' || lRel === 'shortcut icon') && !favicon) {
+            var iconHref = tok.attrs.get('href') || '';
+            if (iconHref) favicon = iconHref;
           }
           break;
         }
@@ -1158,7 +1227,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
   }
 
   flushInline();
-  return { nodes, title, forms, widgets, baseURL, scripts, styles, styleLinks, quirksMode, templates };
+  return { nodes, title, forms, widgets, baseURL, scripts, styles, styleLinks, quirksMode, templates, favicon };
 }
 
 // ════════════════════════════════════════════════════════════════════════════

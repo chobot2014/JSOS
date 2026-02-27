@@ -68,6 +68,13 @@ interface TabState {
   jsStartMs:     number;
   pageSource:    string;
   pageBaseURL:   string;
+  // Favicon (item 628)
+  favicon?:      string;
+  faviconData?:  Uint32Array | null;
+  faviconW?:     number;
+  faviconH?:     number;
+  // Background image map: URL → decoded pixels (item 386)
+  bgImageMap:    Map<string, DecodedImage | null>;
 }
 
 // ── BrowserApp ────────────────────────────────────────────────────────────────
@@ -109,6 +116,8 @@ export class BrowserApp implements App {
   // Image cache: maps src URL → decoded image (null = fetch failed / unsupported)
   private _imgCache    = new Map<string, DecodedImage | null>();
   private _imgsFetching = false;
+  // Background-image cache: URL → decoded (item 386)
+  private _bgImageMap  = new Map<string, DecodedImage | null>();
 
   // Find in page
   private _findMode  = false;
@@ -137,6 +146,7 @@ export class BrowserApp implements App {
       loading: false, status: '', hoverHref: '', forms: [],
       focusedWidget: -1, imgCache: new Map(), imgsFetching: false,
       pageJS: null, jsStartMs: 0, pageSource: '', pageBaseURL: '',
+      bgImageMap: new Map(),
     };
   }
 
@@ -153,6 +163,11 @@ export class BrowserApp implements App {
       imgCache: this._imgCache, imgsFetching: this._imgsFetching,
       pageJS: this._pageJS, jsStartMs: this._jsStartMs,
       pageSource: this._pageSource, pageBaseURL: this._pageBaseURL,
+      favicon: this._tabs[this._curTab]?.favicon,
+      faviconData: this._tabs[this._curTab]?.faviconData,
+      faviconW: this._tabs[this._curTab]?.faviconW,
+      faviconH: this._tabs[this._curTab]?.faviconH,
+      bgImageMap: this._bgImageMap,
     };
   }
 
@@ -168,6 +183,7 @@ export class BrowserApp implements App {
     this._imgCache = t.imgCache; this._imgsFetching = t.imgsFetching;
     this._pageJS = t.pageJS; this._jsStartMs = t.jsStartMs;
     this._pageSource = t.pageSource; this._pageBaseURL = t.pageBaseURL;
+    this._bgImageMap = t.bgImageMap ?? new Map();
   }
 
   private _newTabAction(url = 'about:blank'): void {
@@ -431,13 +447,19 @@ export class BrowserApp implements App {
       }
     }
 
-    // Hover
+    // Hover — update hoverHref and set CSS cursor (items 415/416)
     if (event.y >= contentY0 && event.y < contentY1) {
       var cy2  = event.y - contentY0 + this._scrollY;
       var newH = this._hitTestLink(event.x, cy2);
-      if (newH !== this._hoverHref) { this._hoverHref = newH; this._dirty = true; }
+      if (newH !== this._hoverHref) {
+        this._hoverHref = newH;
+        os.setCursor(newH ? 'pointer' : 'default');
+        this._dirty = true;
+      }
     } else if (this._hoverHref) {
-      this._hoverHref = ''; this._dirty = true;
+      this._hoverHref = '';
+      os.setCursor('default');
+      this._dirty = true;
     }
   }
 
@@ -499,7 +521,24 @@ export class BrowserApp implements App {
       var maxCh   = Math.max(1, Math.floor((tabW - 20) / CHAR_W));
       var display = label.length > maxCh ? label.slice(0, maxCh - 1) + '\u2026' : label;
       var txtClr  = isAct ? CLR_BTN_TXT : CLR_STATUS_TXT;
-      canvas.drawText(tx + 4, 7, display, txtClr);
+
+      // Draw favicon (item 628): 8×8 scaled icon before label text
+      var labelX = tx + 4;
+      if (t.faviconData && t.faviconW && t.faviconH) {
+        var fSz = 8;
+        for (var _fr = 0; _fr < fSz; _fr++) {
+          for (var _fc = 0; _fc < fSz; _fc++) {
+            var _fsr = Math.floor(_fr * t.faviconH / fSz);
+            var _fsc = Math.floor(_fc * t.faviconW / fSz);
+            var _fpx = t.faviconData[_fsr * t.faviconW + _fsc] ?? 0;
+            if (_fpx >>> 24 > 0) canvas.setPixel(tx + 4 + _fc, 5 + _fr, _fpx);
+          }
+        }
+        labelX = tx + 4 + fSz + 3;
+        maxCh  = Math.max(1, Math.floor((tabW - 20 - fSz - 3) / CHAR_W));
+        display = label.length > maxCh ? label.slice(0, maxCh - 1) + '\u2026' : label;
+      }
+      canvas.drawText(labelX, 7, display, txtClr);
 
       // Close button (×)
       var clsX = tx + tabW - 14;
@@ -599,6 +638,21 @@ export class BrowserApp implements App {
       }
       if (line.bgGradient) {
         renderGradientCSS(canvas, 0, absY - 1, w, line.lineH + 1, line.bgGradient);
+      }
+      // CSS background-image url() tile (item 386)
+      if (line.bgImageUrl) {
+        var _bgDec = this._bgImageMap.get(line.bgImageUrl);
+        if (_bgDec && _bgDec.data) {
+          var _bw = _bgDec.w, _bh = _bgDec.h;
+          for (var _br = 0; _br < line.lineH + 1; _br++) {
+            var _bsr = _br % _bh;
+            for (var _bc = 0; _bc < w; _bc++) {
+              var _bsc = _bc % _bw;
+              var _bpx = _bgDec.data[_bsr * _bw + _bsc];
+              if (_bpx !== undefined && (_bpx >>> 24) > 0) canvas.setPixel(_bc, absY - 1 + _br, _bpx);
+            }
+          }
+        }
       }
       if (line.quoteBg) {
         canvas.fillRect(0, absY - 1, w, line.lineH + 1, CLR_QUOTE_BG);
@@ -1028,6 +1082,7 @@ export class BrowserApp implements App {
   private _fetchImages(): void {
     this._imgsFetching = true;
     var pendingCount   = 0;
+    var self           = this;  // captured for async callbacks
 
     for (var wi = 0; wi < this._widgets.length; wi++) {
       var wp = this._widgets[wi];
@@ -1110,6 +1165,38 @@ export class BrowserApp implements App {
         });
       })(wp, resolved, src);
     }
+
+    // ── Also fetch CSS background-image url() sources (item 386) ──────────────
+    var bgUrlSet = new Set<string>();
+    for (var _bgi = 0; _bgi < this._pageLines.length; _bgi++) {
+      var _bgUrl = this._pageLines[_bgi].bgImageUrl;
+      if (_bgUrl && !this._bgImageMap.has(_bgUrl)) bgUrlSet.add(_bgUrl);
+    }
+    bgUrlSet.forEach(function(rawBgUrl) {
+      var resolvedBg = self._resolveHref(rawBgUrl);
+      pendingCount++;
+      (function(bgSrc: string) {
+        os.fetchAsync(resolvedBg, function(resp: FetchResponse | null) {
+          var bgDec: DecodedImage | null = null;
+          if (resp && resp.status === 200) {
+            var _bb = resp.body || [];
+            var _b0 = _bb[0] ?? 0, _b1 = _bb[1] ?? 0;
+            if (_b0 === 0x89 && _b1 === 0x50) {
+              try { bgDec = decodePNG(new Uint8Array(_bb)); } catch (_e) {}
+            } else if (_b0 === 0xFF && _b1 === 0xD8) {
+              try { bgDec = decodeJPEG(new Uint8Array(_bb)); } catch (_e) {}
+            } else {
+              bgDec = decodeBMP(_bb);
+            }
+          }
+          self._bgImageMap.set(bgSrc, bgDec);
+          pendingCount--;
+          if (pendingCount === 0) { self._imgsFetching = false; }
+          self._dirty = true;
+        });
+      })(rawBgUrl);
+    });
+
     this._imgsFetching = pendingCount > 0;
   }
 
@@ -1384,6 +1471,33 @@ export class BrowserApp implements App {
     if (this._pageJS) { this._pageJS.dispose(); this._pageJS = null; }
     this._layoutPage(r.nodes as any, r.widgets as any, r.title || fallbackTitle || url, url);
 
+    // ── Favicon: fetch <link rel="icon"> image and store on current tab (item 628) ──
+    if (r.favicon) {
+      var _faviconUrl = this._resolveHref(r.favicon);
+      var _self_fav   = this;
+      var _favTabIdx  = this._curTab;
+      os.fetchAsync(_faviconUrl, function(resp: FetchResponse | null) {
+        if (resp && resp.status === 200) {
+          var _bytes: number[] = resp.body || [];
+          var _favDecoded: DecodedImage | null = null;
+          if (_bytes.length > 8 && _bytes[0] === 0x89 && _bytes[1] === 0x50) {
+            try { _favDecoded = decodePNG(new Uint8Array(_bytes)); } catch (_e) {}
+          }
+          if (!_favDecoded) _favDecoded = decodeBMP(_bytes);
+          if (_favDecoded && _favDecoded.data) {
+            var _favTab = _self_fav._tabs[_favTabIdx];
+            if (_favTab) {
+              _favTab.faviconData = _favDecoded.data;
+              _favTab.faviconW    = _favDecoded.w;
+              _favTab.faviconH    = _favDecoded.h;
+              _favTab.favicon     = _faviconUrl;
+              _self_fav._dirty    = true;
+            }
+          }
+        }
+      });
+    }
+
     // ── External stylesheets: fetch async, re-render when ready ───────────────
     if (r.styleLinks.length > 0) {
       var self = this;
@@ -1492,7 +1606,9 @@ export class BrowserApp implements App {
     if (this._findMode && this._findQuery) this._doFind();
 
     var hasImages = this._widgets.some(wg => wg.kind === 'img' && !wg.imgLoaded);
-    if (hasImages) this._fetchImages();
+    // Also check for background images that need fetching (item 386)
+    var hasBgImages = this._pageLines.some(ln => ln.bgImageUrl != null && !this._bgImageMap.has(ln.bgImageUrl));
+    if (hasImages || hasBgImages) this._fetchImages();
 
     this._dirty = true;
   }

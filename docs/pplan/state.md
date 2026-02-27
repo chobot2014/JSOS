@@ -9,8 +9,8 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 296 |
-| Items confirmed ✗ (not implemented, do not re-check) | 359 |
+| Items confirmed ✓ (marked this audit) | 340 |
+| Items confirmed ✗ (not implemented, do not re-check) | 315 |
 | Items not yet investigated | ~475 |
 
 ---
@@ -285,6 +285,53 @@
 | 613 | Tab order (`tabindex`) | confirmed in `index.ts` keyboard navigation |
 | 614 | `<datalist>` autocomplete suggestions | confirmed in `index.ts` |
 | 615 | Constraint Validation API (`checkValidity()`) | `form-validate.ts` — full Constraint Validation API |
+| **Agent E audit pass 2026-02-27 (round 2) — 16 more ✓ items (found in layout-ext.ts / html.ts / jsruntime.ts)** | | |
+| 349 | DOCTYPE quirks mode | `/<!DOCTYPE\s+html/i` check in `html.ts:194`; `quirksMode` flag threaded through parse |
+| 357 | `<template>` tag document fragment | `inTemplate`/`templateNodes`/`templates` map in `html.ts:197-201` |
+| 386 | CSS `background-image: url()` fetch | url() bg-image stored on `RenderNode.bgImage`; `_fetchImages()` collects + fetches in `index.ts` |
+| 394 | CSS `white-space` | `applyWhiteSpaceTransform()` + `whiteSpaceNoWrap()` in `layout-ext.ts:36/61` |
+| 395 | CSS `overflow` clipping | `clipLinesToHeight()` / `clipLinesToWidth()` in `layout-ext.ts:76/90` |
+| 398 | CSS `z-index` stacking context | `groupByZIndex()` in `layout-ext.ts:401` feeds Compositor LayerTree |
+| 400 | CSS `clear` | `FloatRegistry.clearY()` in `layout-ext.ts:132` |
+| 401 | CSS Flexbox: align-items, flex-direction | full flex-row layout with `alignItems` + `flexDirection` in `layout.ts:289` |
+| 402 | CSS Flexbox: flex-grow, flex-shrink, flex-basis | two-pass flex algorithm with grow/shrink factor in `layout.ts:312-367` |
+| 403 | CSS Flexbox: align-self, order | crossOffset calculation + stable sort by `order` in `layout.ts:353-388` |
+| 414 | CSS `opacity` smooth values | `blendOpacity()` alpha-applies line content in `index.ts`; `blk.opacity` threaded from `html.ts` |
+| 441 | BFC — full spec | `layoutBFC()` in `layout-ext.ts:262` — isolated float context |
+| 443 | Intrinsic sizes | `measureMinContent/MaxContent/fitContent()` in `layout-ext.ts:203-243` |
+| 448 | `box-sizing` | `resolveBoxDimensions()` subtracts padding when `boxSizing === 'border-box'` in `layout-ext.ts:164` |
+| 449 | Table layout algorithm | `layoutTable()` two-pass auto/fixed in `layout-ext.ts:299` |
+| 462 | `window.scrollY`/`scrollX` | `_scrollY` tracked in `index.ts:97`; exposed via `cb.getScrollY()` in `jsruntime.ts:3447` |
+| **Agent E audit pass 2026-02-27 (round 3) — 19 more ✓ items (render.ts / vmm.ts / fs / form-validate.ts discovered)** | | |
+| 131 | Stack growth (guard-page fault handler) | `allocateStack()` + guard-page slide in `process/vmm.ts` |
+| 132 | Ring-0/3 page table split | `_currentRing` + `isValidAccess()` enforces user flag in `process/vmm.ts` |
+| 168 | initramfs CPIO parse | `parseCpioArchive()` + `loadInitramfs()` in `fs/initramfs.ts` |
+| 177 | ext2 read-only FS | `Ext2FS` class (direct+single+double indirect) in `fs/ext2.ts` |
+| 192 | File locking API | `fs.lock/unlock(path)` advisory locks in `fs/filesystem.ts` |
+| 193 | Extended attributes (xattr) | `fs.xattr.get/set` per-inode KV in `fs/filesystem.ts` |
+| 194 | TS access control layer | permission check layer in `fs/filesystem.ts` |
+| 198 | Hard links | hard-link support in `fs/filesystem.ts` |
+| 481 | GPU compositing (layer buffers) | `Compositor` + `LayerTree` paint to separate buffers in `render.ts` |
+| 603 | Form validation | `validateForm()` in `form-validate.ts`; required/minlength/pattern/email/url/number |
+| 624 | Hard reload (Ctrl+Shift+R) | `flushAllCaches()` + reload in `index.ts` |
+| 892 | Style recalc dirty-mark | `markStyleDirty(key)` + `flushStyleDirty()` batch in `cache.ts` |
+| 907 | Tile-based renderer | `TileDirtyBits` + `TileRenderer` skip-clean-tiles in `render.ts` |
+| 908 | Compositor thread (transform + opacity) | `Compositor` + `AnimationCompositor` bypass layout/paint in `render.ts` |
+| 909 | Painter's algorithm (z-index sort) | `LayerTree` insertion-sort; re-sort on mutation only in `render.ts` |
+| 910 | Text atlas | `TextAtlas` pre-rasterizes ASCII 0x20-0x9F; `blitChar()` in `render.ts` |
+| 913 | CSS bg-color solid-fill fast path | `Compositor.solidFillLayer()` in `render.ts` |
+| 914 | Border/shadow cache | `BorderShadowCache` pre-rasterizes per (w,h,bw,color) in `render.ts` |
+| 919 | Opacity layer blend | `Compositor._alphaBlend()` full ARGB blend with opacity in `render.ts` |
+| **Agent E implementation pass (browser features) — 9 more ✓ items (dom.ts / html.ts / layout.ts / layout-ext.ts / index.ts)** | | |
+| 370 | HTML sanitizer for `innerHTML` | `sanitizeHTML()` in `apps/browser/dom.ts` strips script/style/on*/javascript: |
+| 371 | SVG inline parsing | SVG token collection + `renderSVG()` call + img widget with `preloadedImage` in `apps/browser/html.ts` |
+| 415 | CSS `pointer-events` | `pointerEvents` propagated to RenderNode in `html.ts`; field in `types.ts` |
+| 416 | CSS `cursor` property | `cursor` in RenderNode; `os.setCursor('pointer'/'default')` in `index.ts` hover handler |
+| 418 | CSS `table-layout`: fixed, auto | `var layout = tableNode.tableLayout ?? 'auto'` + branching in `layout-ext.ts layoutTable()` |
+| 419 | CSS `border-collapse`, `border-spacing` | `collapsed`/`borderW` from `tableNode.borderCollapse`/`borderSpacing` in `layout-ext.ts` |
+| 420 | CSS `vertical-align` | `vOff` computed from `ccl.vAlign` (middle/bottom/top) in `layout-ext.ts` table cell stamping |
+| 421 | CSS `word-break`, `overflow-wrap` | `_breakAll` flag + char-level splitting in `apps/browser/layout.ts flowSpans()` |
+| 628 | Tab favicon from `<link rel="icon">` | `<link rel="icon">` parsed in `html.ts`; favicon fetch+decode+tab icon display in `index.ts` |
 
 ---
 
@@ -414,28 +461,14 @@
 | 347 | Post-quantum Dilithium3 signatures | not in codebase |
 | 348 | Hardware RNG (RDRAND) replacing Math.random | `cpuid_features.rdrand` flag exists but no `kernel.rdrand()` binding or use in random generation |
 | **Agent E2 additions (HTML parser / CSS engine)** | | |
-| 349 | DOCTYPE quirks mode detection | `html.ts` does not parse `<!DOCTYPE>` for quirks mode |
-| 357 | `<template>` tag: parse into document fragment | no `case 'template'` in `html.ts` |
 
-| 370 | HTML sanitizer for `innerHTML` | not in `apps/browser/` |
-| 371 | SVG inline parsing | not in `html.ts` |
+
 | 372 | MathML parsing | not in `html.ts` |
-| 386 | CSS `background-image: url()` → trigger image fetch | parsed in `css.ts:438` but no fetch triggered in `index.ts`/`jsruntime.ts` |
-| 394 | CSS `white-space`: normal/nowrap/pre/pre-wrap | parsed in `css.ts`, stored on node, NOT used in `layout.ts` rendering |
-| 395 | CSS `overflow`: visible/hidden/scroll/auto | parsed in `css.ts`, stored, NOT used in `layout.ts`/`index.ts` rendering |
-| 398 | CSS `z-index` stacking context | parsed in `css.ts`, stored, NOT used in `layout.ts` or `index.ts` render order |
-| 400 | CSS `clear`: left, right, both | not in `layout.ts` |
-| 401 | CSS Flexbox: `flex-direction`, `justify-content`, `align-items`, `flex-wrap` | parsed in `css.ts`, NOT used in `layout.ts` (only `flexGrow`+`gap` in `flex-row` node) |
-| 402 | CSS Flexbox: `flex-shrink`, `flex-basis`, `flex` shorthand | not used in `layout.ts` render |
-| 403 | CSS Flexbox: `align-self`, `order` | not in `layout.ts` |
 
-| 414 | CSS `opacity` smooth values | only binary hidden/visible check in `layout.ts`; no alpha blend for partial opacity |
-| 415 | CSS `pointer-events` | not used anywhere in `layout.ts`/`index.ts` event routing |
-| 416 | CSS `cursor` property | not rendered (no mouse cursor shape changes in `index.ts`) |
-| 418 | CSS `table-layout`: fixed, auto | not in `layout.ts` |
-| 419 | CSS `border-collapse`, `border-spacing` | not in `layout.ts` |
-| 420 | CSS `vertical-align` | not in `layout.ts` |
-| 421 | CSS `word-break`, `overflow-wrap` | not in `layout.ts` |
+
+
+
+| 422 | CSS `clip-path` | not in `layout.ts`/`index.ts` |
 | 422 | CSS `clip-path` | not in `layout.ts`/`index.ts` |
 | 423 | CSS `filter`: blur/brightness/contrast | not in `index.ts` renderer |
 | 424 | CSS `backdrop-filter` | not in `index.ts` renderer |
@@ -453,12 +486,9 @@
 | 438 | CSS `@container` queries | not in `jsruntime.ts` CSS walker |
 | 439 | CSS subgrid | not in `layout.ts` |
 | **Agent E3 additions (Layout Engine §11)** | | |
-| 441 | Block formatting context (BFC) — full spec | simplified / partial in `layout.ts` |
-| 443 | Intrinsic sizes: min-content, max-content, fit-content | not in `layout.ts` |
-| 448 | `box-sizing: border-box` vs `content-box` | not in `layout.ts`; no `box-sizing` check |
-| 449 | Table layout algorithm (fixed + auto) | no `<table>` layout in `layout.ts` |
 
-| 462 | `window.scrollY`/`scrollX` accurate | not tracked; always 0 on non-scrolling pages |
+
+
 | 463 | Writing modes (`writing-mode: vertical-rl`) | not in `layout.ts` |
 | 464 | BiDi (bidirectional text — Arabic, Hebrew) | not in `layout.ts` |
 | 466 | CSS shapes: `shape-outside` for float wrapping | not in `layout.ts` |
@@ -472,7 +502,6 @@
 | 473 | Anti-aliased text rendering (grayscale) | not in `apps/browser/index.ts` |
 | 474 | Sub-pixel RGB text (ClearType-style) | not in `apps/browser/index.ts` |
 
-| 481 | GPU compositing: separate paint layers | not in `apps/browser/index.ts` |
 | 483 | Scroll partial repaint (fixed header stays, scroll area repaints) | not in `apps/browser/index.ts` |
 
 | 491 | `<canvas>` 2D rendering wired to framebuffer | stub only; no actual canvas draw calls in `index.ts` |
@@ -489,13 +518,10 @@
 | 584 | `<slot>` element for web components | not in `apps/browser/dom.ts` |
 
 | **Agent E3 additions (Forms §15 / Navigation §16)** | | |
-| 603 | Form validation: `required`, `minlength`, `maxlength`, `pattern` | `_submitForm()` in `index.ts` does no validation checks |
 
 | 616 | `<input type="search">` with clear button | not in `index.ts` |
 | 617 | IME input mode for CJK | not in `index.ts` |
 | 618 | Form autofill / password manager integration | not in codebase |
-| 624 | Hard reload — clear cache for current page (Ctrl+Shift+R) | not in `browser/index.ts` |
-| 628 | Tab favicon from `<link rel="icon">` | only letter-icon placeholder; no `<link rel="icon">` fetch |
 | 631 | Bookmark folder organization | not in `browser/index.ts` |
 | 632 | Address bar autocomplete from history + bookmarks | not in `browser/index.ts` |
 | 634 | Reader mode (strip ads/nav, clean article rendering) | not in `browser/index.ts` |
@@ -505,7 +531,6 @@
 | 640 | Browser sync / bookmarks cloud backup | not in codebase |
 | 641 | Extensions / userscript runner | not in codebase |
 | **Agent E3 additions (Performance §28c-h)** | | |
-| 892 | Style recalc: dirty-mark only elements whose computed style changes | no per-element style dirty tracking; full recompute each frame |
 | 893 | Layout containment: `contain: layout` | not in `layout.ts` |
 | 894 | Avoid forced synchronous layout (batch DOM reads before writes) | not enforced in `apps/browser/` |
 | 895 | Flex/grid cache: cache row/column tracks | not in `layout.ts` |
@@ -516,18 +541,11 @@
 | 902 | Partial style invalidation (`:nth-child`/attr selectors no full recalc) | not in `apps/browser/jsruntime.ts` |
 | 903 | CSS Grid auto-placement fast path | not in `layout.ts` |
 | 904 | Parallel layout: farm flex/grid to microtasks | not in `layout.ts` |
-| 907 | Tile-based renderer: 64×64px tiles, skip clean tiles | not in `apps/browser/index.ts` |
-| 908 | Compositor: separate `transform`/`opacity` animation from layout+paint | not in `apps/browser/index.ts` |
-| 909 | Painter's algorithm: sort render list by z-index once | not in `apps/browser/index.ts` |
-| 910 | Text atlas: pre-rasterize ASCII glyphs to single bitmap | not in `apps/browser/index.ts` |
 | 912 | Image resize cache: cached scaled copy per (src, destW, destH) | not in `apps/browser/cache.ts` |
-| 913 | CSS `background-color` fast path: solid fill rect | not as specific optimization in `apps/browser/index.ts` |
-| 914 | Border/shadow cache: pre-rasterize borders + `box-shadow` | not in codebase |
 | 915 | Canvas 2D `drawImage()` blits from decoded bitmap cache (no re-decode) | canvas 2D wired to framebuffer not implemented |
 | 916 | Subpixel text: LCD subpixel antialiasing | not in `apps/browser/index.ts` |
 | 917 | Glyph atlas grow-on-demand | not in `apps/browser/index.ts` |
 | 918 | CSS `clip-path` acceleration: pre-clip layer bitmap | not in codebase |
-| 919 | Opacity layer: flatten composited layer before blending | not in `apps/browser/index.ts` |
 | 920 | Virtio-GPU: hardware-accelerated blit via virtio 2D resource commands | not in `apps/browser/` |
 | 921 | WebGL stub: `gl.drawArrays()` → software framebuffer rasteriser | not in `apps/browser/` |
 | 947 | CSS `transition`/`animation`: compositor-side at 60fps | not in `apps/browser/index.ts` |
@@ -645,8 +663,6 @@
 | 801 | Browser source maps support | not in `apps/browser/` |
 | 802 | Hot module replacement for OS development | not in codebase |
 | **Agent G additions (VMM / Filesystem / IPC)** | | |
-| 131 | Stack growth: handle guard page fault by extending stack | `handlePageFault()` marks present=true but no stack extension logic in `process/vmm.ts` |
-| 132 | Kernel vs userspace page table split (ring 0 vs ring 3) | `user` flag in PTE but not checked in `isValidAccess()` in `process/vmm.ts` |
 | 133 | Copy-on-write (COW) for forked processes | not in `process/vmm.ts` or `process/process.ts` |
 | 134 | Memory-mapped files (`mmap` with file backing) | `mmapFile()` allocates anonymous memory only; no file data loaded in `process/vmm.ts` |
 | 135 | Demand paging: page fault loads from disk lazily | `handlePageFault()` just marks present=true; no disk read in `process/vmm.ts` |
@@ -657,21 +673,15 @@
 | 142 | `madvise(MADV_WILLNEED)` prefetch hint | not in `process/vmm.ts` |
 | 143 | Transparent huge pages (THP) | not in `process/vmm.ts` |
 | 144 | ZRAM compressed swap | not in codebase |
-| 168 | initramfs: embed initial filesystem image in ISO | not in build scripts or boot sequence |
 | 175 | `sys.devices.ioctl(path, cmd, arg)` TypeScript dispatch | not in `fs/filesystem.ts` |
-| 177 | ext2 read (no journal) | not in codebase |
 | 178 | ext4 read-only (extent tree, large file support) | not in codebase |
 | 179 | ext4 write (journaling, metadata journal) | not in codebase |
 | 183 | `sys.devices` TypeScript API: enumerate hardware | not in codebase |
 | 186 | Block device layer: request queue, elevator I/O scheduler | not in codebase |
 | 190 | ISO 9660 read (boot media access) | not in codebase |
 | 191 | OverlayFS (union mount) | not in codebase |
-| 192 | File locking: TypeScript advisory lock API | not in `fs/filesystem.ts` |
-| 193 | Extended attributes (xattr) TypeScript API | not in `fs/filesystem.ts` |
-| 194 | Access control: TypeScript permission check layer | not in `fs/filesystem.ts` |
 | 195 | Filesystem quota: TypeScript per-user limit enforcement | not in `fs/filesystem.ts` |
 | 197 | Sparse file support | not in `fs/filesystem.ts` |
-| 198 | Hard links across same device | not in `fs/filesystem.ts` |
 | 199 | `sendfile` zero-copy syscall | not in codebase |
 | 200 | Btrfs read-only TypeScript driver | not in codebase |
 | 201 | ZFS read-only TypeScript driver stubs | not in codebase |

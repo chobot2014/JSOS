@@ -10,6 +10,36 @@
 
 import { bumpStyleGeneration } from './cache.js';
 
+// ── HTML Sanitizer (item 370) ─────────────────────────────────────────────────
+/**
+ * Strip dangerous content from an HTML string before injecting via innerHTML.
+ * Removes: <script>, <style> elements; on* event-handler attributes;
+ *          javascript: href/src/action/xlink:href values.
+ *
+ * This is a defence-in-depth measure — JSOS already controls the JS sandbox,
+ * but third-party content placed via innerHTML should not be able to inject
+ * additional script execution or exfiltrate data.
+ *
+ * Item 370.
+ */
+export function sanitizeHTML(html: string): string {
+  // 1. Remove entire <script>…</script> and <style>…</style> blocks (case-insensitive, greedy)
+  var s = html
+    .replace(/<script[\s\S]*?<\/script\s*>/gi, '')
+    .replace(/<style[\s\S]*?<\/style\s*>/gi, '');
+
+  // 2. Strip on* event-handler attributes from all tags
+  //    Matches: onclick="...", onhover='...', onerror (unquoted), etc.
+  s = s.replace(/(<[^>]+?)\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*)/gi,
+                function(_m: string, p1: string) { return p1; });
+
+  // 3. Neutralise javascript: URIs in href, src, action, xlink:href
+  s = s.replace(/((?:href|src|action|xlink:href)\s*=\s*)(['"])\s*javascript:[^'"]*\2/gi,
+                function(_m: string, attr: string, q: string) { return attr + q + 'about:blank' + q; });
+
+  return s;
+}
+
 // ── Events ────────────────────────────────────────────────────────────────────
 
 export class VEvent {
@@ -640,7 +670,8 @@ export class VElement extends VNode {
     var removedNodes = this.childNodes.slice();
     this.childNodes = [];
     if (html) {
-      var frag = _parseFragment(html, this.ownerDocument);
+      // Sanitize before parsing to strip scripts/event-handlers (item 370)
+      var frag = _parseFragment(sanitizeHTML(html), this.ownerDocument);
       for (var c of frag) { c.parentNode = this; c.ownerDocument = this.ownerDocument; }
       this.childNodes = frag;
     }

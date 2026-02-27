@@ -18,11 +18,14 @@ export function flowSpans(
   maxX:     number,
   lineH:    number,
   baseClr:  PixelColor,
-  opts?: { preBg?: boolean; quoteBg?: boolean; quoteBar?: boolean; bgColor?: number; bgGradient?: string }
+  opts?: { preBg?: boolean; quoteBg?: boolean; quoteBar?: boolean; bgColor?: number; bgGradient?: string;
+           bgImageUrl?: string; wordBreak?: string; overflowWrap?: string }
 ): RenderedLine[] {
   var lines:   RenderedLine[] = [];
   var curLine: RenderedSpan[] = [];
   var curX = xLeft;
+  // word-break: break-all splits at every character boundary (item 421)
+  var _breakAll = opts?.wordBreak === 'break-all';
 
   function spanColor(sp: InlineSpan): PixelColor {
     if (sp.color !== undefined) return sp.color;
@@ -37,11 +40,12 @@ export function flowSpans(
 
   function commitLine(): void {
     var ln: RenderedLine = { y: 0, nodes: curLine, lineH };
-    if (opts?.preBg)    ln.preBg    = true;
-    if (opts?.quoteBg)  ln.quoteBg  = true;
-    if (opts?.quoteBar) ln.quoteBar = true;
-    if (opts?.bgColor)  ln.bgColor  = opts.bgColor;
+    if (opts?.preBg)      ln.preBg      = true;
+    if (opts?.quoteBg)    ln.quoteBg    = true;
+    if (opts?.quoteBar)   ln.quoteBar   = true;
+    if (opts?.bgColor)    ln.bgColor    = opts.bgColor;
     if (opts?.bgGradient) ln.bgGradient = opts.bgGradient;
+    if (opts?.bgImageUrl) ln.bgImageUrl = opts.bgImageUrl;
     lines.push(ln);
     curLine = []; curX = xLeft;
   }
@@ -84,11 +88,23 @@ export function flowSpans(
       if (pi > 0) { commitLine(); }
       var part = parts[pi];
       if (!part) continue;
-      var words = part.split(' ');
-      for (var wi = 0; wi < words.length; wi++) {
-        var word = words[wi];
-        if (!word) { if (curX > xLeft) curX += CHAR_W; continue; }
-        addWord(word, sp);
+      if (_breakAll) {
+        // word-break: break-all — treat each char as its own unit (item 421)
+        var chars = part.split('');
+        for (var ci = 0; ci < chars.length; ci++) {
+          if (chars[ci] === ' ') {
+            if (curX > xLeft) curX += CHAR_W * (sp.fontScale || 1);
+          } else {
+            addWord(chars[ci]!, sp);
+          }
+        }
+      } else {
+        var words = part.split(' ');
+        for (var wi = 0; wi < words.length; wi++) {
+          var word = words[wi];
+          if (!word) { if (curX > xLeft) curX += CHAR_W; continue; }
+          addWord(word, sp);
+        }
       }
     }
   }
@@ -404,25 +420,34 @@ function _layoutNodesImpl(
       var lh        = nodeLineH(nd);
       var ndSpans   = transformSpans(nd.spans, nd.textTransform);
 
+      // Build flow opts including bgImage (item 386) and word-break (item 421)
+      function makeFlowOpts(): typeof undefined | { bgColor?: number; bgGradient?: string; bgImageUrl?: string; wordBreak?: string; overflowWrap?: string } {
+        var o: { bgColor?: number; bgGradient?: string; bgImageUrl?: string; wordBreak?: string; overflowWrap?: string } = {};
+        var any = false;
+        if (bgColor !== undefined)  { o.bgColor = bgColor; any = true; }
+        if (bgGradient)             { o.bgGradient = bgGradient; any = true; }
+        if (nd.bgImage)             { o.bgImageUrl = nd.bgImage; any = true; }
+        if (nd.wordBreak)           { o.wordBreak = nd.wordBreak; any = true; }
+        if (nd.overflowWrap)        { o.overflowWrap = nd.overflowWrap; any = true; }
+        return any ? o : undefined;
+      }
+
       if (nd.float === 'right') {
         // Float right: render as a visually boxed right-side block
         var asideW   = nd.boxWidth ? Math.min(nd.boxWidth, maxX - xLeft) : Math.min(maxX - xLeft, 200);
         var asideX   = maxX - asideW;
         var borderY0 = y;
-        commit(flowSpans(ndSpans, asideX + 4, maxX - 4, lh, CLR_BODY,
-                         (bgColor !== undefined || bgGradient) ? { bgColor, bgGradient } : undefined));
+        commit(flowSpans(ndSpans, asideX + 4, maxX - 4, lh, CLR_BODY, makeFlowOpts()));
         lines.push({ y: borderY0, nodes: [], lineH: 0 });
         blank(2);
       } else if (nd.float === 'left') {
         // Float left: render as an indented aside
         var fLeftW = nd.boxWidth ? Math.min(nd.boxWidth, (maxX - xLeft) >> 1) : Math.min(160, (maxX - xLeft) >> 1);
-        commit(flowSpans(ndSpans, xLeft + 4, xLeft + fLeftW - 4, lh, CLR_BODY,
-                         (bgColor !== undefined || bgGradient) ? { bgColor, bgGradient } : undefined));
+        commit(flowSpans(ndSpans, xLeft + 4, xLeft + fLeftW - 4, lh, CLR_BODY, makeFlowOpts()));
         blank(2);
       } else {
         // Normal block flow
-        var flowOpts = (bgColor !== undefined || bgGradient) ? { bgColor, bgGradient } : undefined;
-        commit(flowSpans(ndSpans, blkLeft, blkMaxX, lh, CLR_BODY, flowOpts));
+        commit(flowSpans(ndSpans, blkLeft, blkMaxX, lh, CLR_BODY, makeFlowOpts()));
       }
       lastBottomMargin = postMarginRaw;
       continue;
@@ -494,8 +519,8 @@ function _layoutNodesImpl(
         curChecked: bp.checked || false,
         curSelIdx:  bp.selIdx  || 0,
         cursorPos:  (bp.value || '').length,
-        imgData:    null,
-        imgLoaded:  false,
+        imgData:    bp.preloadedImage?.data ?? null,
+        imgLoaded:  bp.preloadedImage != null,
       };
       widgets.push(pw);
 

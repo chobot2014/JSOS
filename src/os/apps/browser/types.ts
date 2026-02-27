@@ -46,6 +46,7 @@ export interface RenderNode {
   textAlign?:   'left' | 'center' | 'right' | 'justify';
   bgColor?:     number;    // CSS background-color (ARGB)
   bgGradient?:  string;    // CSS gradient string: linear/radial/conic-gradient(...) (item 487)
+  bgImage?:     string;    // CSS background-image url(...) extracted URL (item 386)
   float?:       'left' | 'right';
   marginTop?:   number;    // px — extra space before block
   marginBottom?: number;   // px — extra space after block
@@ -123,6 +124,9 @@ export interface RenderNode {
   gridRowStart?:        string;
   gridRowEnd?:          string;
   gridArea?:            string;
+  // Cursor / interaction (items 415, 416)
+  cursor?:        string;              // CSS cursor value: auto, pointer, text, crosshair, move,…
+  pointerEvents?: 'auto' | 'none';    // CSS pointer-events: none disables mouse events on element
 }
 
 // ── Rendered output ───────────────────────────────────────────────────────────
@@ -152,6 +156,7 @@ export interface RenderedLine {
   hrLine?:   boolean;
   bgColor?:    number;   // custom background from CSS
   bgGradient?: string;   // CSS gradient string (item 487): linear/radial/conic-gradient(...)
+  bgImageUrl?:  string;   // CSS background-image url() resolved URL (item 386)
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -192,6 +197,8 @@ export interface WidgetBlueprint {
   inputMax?:   string;      // max value (for number/date inputs)
   inputType?:  string;      // original input type attr (email, url, number, tel)
   placeholder?: string;     // hint text shown when empty
+  /** Pre-decoded image for SVG inline (item 371): bypasses network fetch. */
+  preloadedImage?: DecodedImage | null;
 }
 
 /** A widget after layout — knows its position in page space. */
@@ -257,6 +264,8 @@ export interface ParseResult {
   quirksMode?: boolean;
   /** Named template fragments from <template> elements (item 357). Key = template id. */
   templates?: Map<string, RenderNode[]>;
+  /** Href from first <link rel="icon"> or <link rel="shortcut icon"> (item 628). */
+  favicon?: string;
 }
 
 // ── CSS ───────────────────────────────────────────────────────────────────────

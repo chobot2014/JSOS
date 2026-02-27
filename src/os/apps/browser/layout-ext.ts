@@ -304,7 +304,9 @@ export function layoutTable(
   var rows     = (tableNode.children ?? []).filter(function(c) { return c.type === 'table-row'; });
   var layout   = tableNode.tableLayout ?? 'auto';
   var cellPad  = 4; // px padding inside each cell
-  var borderW  = tableNode.borderWidth ?? 1;
+  // border-collapse: collapse → no gap between cells; border-spacing → explicit gap (items 418/419)
+  var collapsed    = tableNode.borderCollapse === 'collapse';
+  var borderW      = collapsed ? 0 : (tableNode.borderSpacing ?? tableNode.borderWidth ?? 1);
   var tableW   = tableNode.boxWidth ? Math.min(tableNode.boxWidth, contentW) : contentW;
 
   if (rows.length === 0) return [];
@@ -350,7 +352,7 @@ export function layoutTable(
     var row      = rows[ri3];
     var rowCells2 = (row.children ?? []).filter(function(c) { return c.type === 'table-cell'; });
     var rowMaxH  = 0;
-    var rowCellLines: { x: number; w: number; lines: RenderedLine[] }[] = [];
+    var rowCellLines: { x: number; w: number; lines: RenderedLine[]; vAlign: string }[] = [];
 
     var cellX = tableX + borderW;
     for (var ci4 = 0; ci4 < colCount; ci4++) {
@@ -364,20 +366,29 @@ export function layoutTable(
       var cellH   = cellLines.length * LINE_H + cellPad * 2;
       if (cellH > rowMaxH) rowMaxH = cellH;
 
-      rowCellLines.push({ x: cellX, w: cw, lines: cellLines });
+      rowCellLines.push({ x: cellX, w: cw, lines: cellLines, vAlign: cell.verticalAlign || 'top' });
       cellX += cw + borderW;
     }
 
-    // Stamp all cell lines at correct Y
+    // Stamp all cell lines at correct Y, applying vertical-align offset (item 420)
     for (var cci = 0; cci < rowCellLines.length; cci++) {
       var ccl = rowCellLines[cci];
+      var cellContentH = ccl.lines.length * LINE_H;
+      var vOff = 0;
+      if (ccl.vAlign === 'middle' || ccl.vAlign === 'center') {
+        vOff = Math.max(0, Math.floor((rowMaxH - cellPad * 2 - cellContentH) / 2));
+      } else if (ccl.vAlign === 'bottom') {
+        vOff = Math.max(0, rowMaxH - cellPad * 2 - cellContentH);
+      }
       for (var li = 0; li < ccl.lines.length; li++) {
         var ln   = ccl.lines[li];
-        var realY = tableY + cellPad + li * LINE_H;
+        var realY = tableY + cellPad + vOff + li * LINE_H;
         allLines.push({ ...ln, y: realY });
       }
       // Bottom border line for cell (horizontal rule across cell width)
-      allLines.push({ y: tableY + rowMaxH - borderW, nodes: [], lineH: borderW, hrLine: true });
+      if (borderW > 0) {
+        allLines.push({ y: tableY + rowMaxH - borderW, nodes: [], lineH: borderW, hrLine: true });
+      }
     }
 
     tableY += rowMaxH;
