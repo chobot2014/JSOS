@@ -19,7 +19,7 @@ export function flowSpans(
   lineH:    number,
   baseClr:  PixelColor,
   opts?: { preBg?: boolean; quoteBg?: boolean; quoteBar?: boolean; bgColor?: number; bgGradient?: string;
-           bgImageUrl?: string; wordBreak?: string; overflowWrap?: string }
+           bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean }
 ): RenderedLine[] {
   var lines:   RenderedLine[] = [];
   var curLine: RenderedSpan[] = [];
@@ -111,6 +111,31 @@ export function flowSpans(
     }
   }
   if (curLine.length > 0) commitLine();
+
+  // text-overflow: ellipsis (item 465) — keep only first line, append "..."
+  if (opts?.ellipsis && lines.length > 1) {
+    var firstLine = lines[0]!;
+    var maxChars  = Math.max(1, Math.floor((maxX - xLeft) / CHAR_W));
+    // Truncate all spans on the first line to fit + "..."
+    var totalChars = 0;
+    var clippedNodes: RenderedSpan[] = [];
+    for (var ei = 0; ei < firstLine.nodes.length; ei++) {
+      var en = firstLine.nodes[ei]!;
+      var remaining = maxChars - 3 - totalChars; // reserve 3 for "..."
+      if (remaining <= 0) break;
+      var trimmed = en.text.slice(0, remaining);
+      clippedNodes.push({ ...en, text: trimmed });
+      totalChars += trimmed.length;
+    }
+    // Append "..." spanning at current position
+    if (clippedNodes.length > 0) {
+      var lastNode = clippedNodes[clippedNodes.length - 1]!;
+      var dotX     = lastNode.x + lastNode.text.length * CHAR_W;
+      clippedNodes.push({ x: dotX, text: '...', color: lastNode.color });
+    }
+    lines = [{ ...firstLine, nodes: clippedNodes }];
+  }
+
   return lines;
 }
 
@@ -423,14 +448,15 @@ function _layoutNodesImpl(
       var ndSpans   = transformSpans(nd.spans, nd.textTransform);
 
       // Build flow opts including bgImage (item 386) and word-break (item 421)
-      function makeFlowOpts(): typeof undefined | { bgColor?: number; bgGradient?: string; bgImageUrl?: string; wordBreak?: string; overflowWrap?: string } {
-        var o: { bgColor?: number; bgGradient?: string; bgImageUrl?: string; wordBreak?: string; overflowWrap?: string } = {};
+      function makeFlowOpts(): typeof undefined | { bgColor?: number; bgGradient?: string; bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean } {
+        var o: { bgColor?: number; bgGradient?: string; bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean } = {};
         var any = false;
         if (bgColor !== undefined)  { o.bgColor = bgColor; any = true; }
         if (bgGradient)             { o.bgGradient = bgGradient; any = true; }
         if (nd.bgImage)             { o.bgImageUrl = nd.bgImage; any = true; }
         if (nd.wordBreak)           { o.wordBreak = nd.wordBreak; any = true; }
         if (nd.overflowWrap)        { o.overflowWrap = nd.overflowWrap; any = true; }
+        if (nd.textOverflow === 'ellipsis') { o.ellipsis = true; any = true; }  // item 465
         return any ? o : undefined;
       }
 

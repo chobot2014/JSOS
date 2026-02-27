@@ -387,6 +387,115 @@ export function registerCommands(g: any): void {
     });
   };
 
+  // [Item 709] zip — create a JSOS archive containing one or more files/directories
+  g.zip = function(outPath: string) {
+    var paths: string[] = Array.prototype.slice.call(arguments, 1);
+    if (!outPath || paths.length === 0) { terminal.println('usage: zip(outPath, path1, path2, ...)'); return; }
+    var entries: Array<{name: string; content: string}> = [];
+    function addPath(p: string, base: string) {
+      if (fs.isDirectory(p)) {
+        var items = fs.ls(p);
+        for (var ki = 0; ki < items.length; ki++) {
+          var np = p.replace(/\/*$/, '/') + items[ki].name;
+          addPath(np, base);
+        }
+      } else {
+        var c = fs.readFile(p);
+        if (c !== null) {
+          var name = p.length > base.length && p.startsWith(base) ? p.slice(base.length) : p;
+          entries.push({ name: name.replace(/^\/+/, ''), content: c });
+        }
+      }
+    }
+    for (var pi = 0; pi < paths.length; pi++) {
+      var p = paths[pi];
+      var lastSlash = p.lastIndexOf('/');
+      var base = p.endsWith('/') ? p : lastSlash >= 0 ? p.slice(0, lastSlash + 1) : '';
+      addPath(p, base);
+    }
+    var archive = 'JSZIP/1.0\n' + JSON.stringify(entries);
+    if (fs.writeFile(outPath, archive))
+      terminal.colorPrintln('zip: ' + entries.length + ' file(s) → ' + outPath, Color.LIGHT_GREEN);
+    else terminal.println('zip: failed to write ' + outPath);
+  };
+
+  // [Item 709] unzip — extract a JSOS archive
+  g.unzip = function(zipPath: string, destDir?: string) {
+    if (!zipPath) { terminal.println('usage: unzip(zipPath[, destDir])'); return; }
+    var raw = fs.readFile(zipPath);
+    if (!raw) { terminal.println('unzip: ' + zipPath + ': not found'); return; }
+    if (!raw.startsWith('JSZIP/1.0\n')) { terminal.println('unzip: ' + zipPath + ': not a JSOS zip archive'); return; }
+    var entries: Array<{name: string; content: string}> = JSON.parse(raw.slice('JSZIP/1.0\n'.length));
+    var dest = destDir ? destDir.replace(/\/*$/, '/') : '';
+    for (var ei = 0; ei < entries.length; ei++) {
+      var e = entries[ei];
+      var outPath = dest ? (dest + e.name) : ('/' + e.name);
+      var lastSlash = outPath.lastIndexOf('/');
+      if (lastSlash > 0) { var dir = outPath.slice(0, lastSlash); if (dir) fs.mkdir(dir); }
+      fs.writeFile(outPath, e.content);
+      terminal.println('  extracting: ' + outPath);
+    }
+    terminal.colorPrintln('unzip: ' + entries.length + ' file(s) extracted', Color.LIGHT_GREEN);
+  };
+
+  // [Item 710] tar — create a JSOS tar archive (directories preserved)
+  g.tar = function(outPath: string) {
+    var paths: string[] = Array.prototype.slice.call(arguments, 1);
+    if (!outPath || paths.length === 0) { terminal.println('usage: tar(outPath, path1, path2, ...)'); return; }
+    var entries: Array<{name: string; type: string; content: string}> = [];
+    function addTarPath(p: string, base: string) {
+      if (fs.isDirectory(p)) {
+        var name = p.length > base.length && p.startsWith(base) ? p.slice(base.length) : p;
+        entries.push({ name: name.replace(/^\/+/, ''), type: 'd', content: '' });
+        var items = fs.ls(p);
+        for (var ki = 0; ki < items.length; ki++) {
+          var np = p.replace(/\/*$/, '/') + items[ki].name;
+          addTarPath(np, base);
+        }
+      } else {
+        var c = fs.readFile(p);
+        if (c !== null) {
+          var fname = p.length > base.length && p.startsWith(base) ? p.slice(base.length) : p;
+          entries.push({ name: fname.replace(/^\/+/, ''), type: 'f', content: c });
+        }
+      }
+    }
+    for (var pi = 0; pi < paths.length; pi++) {
+      var tp = paths[pi];
+      var lastSlash = tp.lastIndexOf('/');
+      var base = tp.endsWith('/') ? tp : lastSlash >= 0 ? tp.slice(0, lastSlash + 1) : '';
+      addTarPath(tp, base);
+    }
+    var archive = 'JSTAR/1.0\n' + JSON.stringify(entries);
+    if (fs.writeFile(outPath, archive))
+      terminal.colorPrintln('tar: ' + entries.length + ' item(s) → ' + outPath, Color.LIGHT_GREEN);
+    else terminal.println('tar: failed to write ' + outPath);
+  };
+
+  // [Item 710] untar — extract a JSOS tar archive
+  g.untar = function(tarPath: string, destDir?: string) {
+    if (!tarPath) { terminal.println('usage: untar(tarPath[, destDir])'); return; }
+    var raw = fs.readFile(tarPath);
+    if (!raw) { terminal.println('untar: ' + tarPath + ': not found'); return; }
+    if (!raw.startsWith('JSTAR/1.0\n')) { terminal.println('untar: ' + tarPath + ': not a JSOS tar archive'); return; }
+    var entries: Array<{name: string; type: string; content: string}> = JSON.parse(raw.slice('JSTAR/1.0\n'.length));
+    var dest = destDir ? destDir.replace(/\/*$/, '/') : '';
+    for (var ei = 0; ei < entries.length; ei++) {
+      var e = entries[ei];
+      var outPath = dest ? (dest + e.name) : ('/' + e.name);
+      if (e.type === 'd') {
+        fs.mkdir(outPath);
+        terminal.println('   creating: ' + outPath + '/');
+      } else {
+        var lastSlash = outPath.lastIndexOf('/');
+        if (lastSlash > 0) { var dir = outPath.slice(0, lastSlash); if (dir) fs.mkdir(dir); }
+        fs.writeFile(outPath, e.content);
+        terminal.println('  extracting: ' + outPath);
+      }
+    }
+    terminal.colorPrintln('untar: ' + entries.length + ' item(s) extracted', Color.LIGHT_GREEN);
+  };
+
   g.run = function(path: string) {
     if (!path) { terminal.println('usage: run(path)'); return; }
     var code = fs.readFile(path) || fs.readFile('/bin/' + path);

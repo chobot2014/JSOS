@@ -446,6 +446,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
       if (curCSS.zIndex !== undefined) blk.zIndex    = curCSS.zIndex;
     }
     if (curCSS.overflow !== undefined) blk.overflow  = curCSS.overflow;
+    if (curCSS.textOverflow !== undefined) blk.textOverflow = curCSS.textOverflow; // item 465
     if (curCSS.whiteSpace !== undefined) blk.whiteSpace = curCSS.whiteSpace;
     if (curCSS.textTransform !== undefined) blk.textTransform = curCSS.textTransform;
     if (curCSS.lineHeight !== undefined) blk.lineHeight = curCSS.lineHeight;
@@ -924,8 +925,8 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
           // Normalize novel input types to renderable equivalents
           var iTypeStr = iType as string;
           if (iTypeStr === 'number' || iTypeStr === 'email' || iTypeStr === 'url' ||
-              iTypeStr === 'search' || iTypeStr === 'tel'   || iTypeStr === 'date' ||
-              iTypeStr === 'time'   || iTypeStr === 'color' || iTypeStr === 'range' ||
+              iTypeStr === 'tel'   || iTypeStr === 'date' ||
+              iTypeStr === 'time'  || iTypeStr === 'color' || iTypeStr === 'range' ||
               iTypeStr === 'datetime-local' || iTypeStr === 'month' || iTypeStr === 'week') {
             iType = 'text';
           }

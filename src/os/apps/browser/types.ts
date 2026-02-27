@@ -164,12 +164,12 @@ export interface RenderedLine {
 
 // ── Navigation ────────────────────────────────────────────────────────────────
 
-export interface HistoryEntry { url: string; title: string; }
+export interface HistoryEntry { url: string; title: string; folder?: string; }
 
 // ── Widgets / Forms ───────────────────────────────────────────────────────────
 
 export type WidgetKind =
-  | 'text' | 'password' | 'submit' | 'reset' | 'button'
+  | 'text' | 'password' | 'search' | 'submit' | 'reset' | 'button'
   | 'checkbox' | 'radio' | 'select' | 'textarea' | 'file' | 'hidden'
   | 'img';
 

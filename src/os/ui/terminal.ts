@@ -104,9 +104,11 @@ export class Terminal {
 
   private _rebuildColor(): void {
     var fg = (this._bold && this._fgIdx < 8) ? this._fgIdx + 8 : this._fgIdx;
+    if (this._dim && fg >= 8) fg -= 8;  // [Item 667] dim: remove bright bit
     var fgFinal = this._reverse ? (this._bgIdx & 7) : (fg & 0xF);
     var bgFinal = this._reverse ? (fg & 7) : (this._bgIdx & 7);
-    this._color = (bgFinal << 4) | fgFinal;
+    var blinkBit = this._blink ? 0x80 : 0; // [Item 667] blink: VGA text-mode blink bit
+    this._color = blinkBit | (bgFinal << 4) | fgFinal;
   }
 
   private _processAnsiSGR(params: string): void {
@@ -243,10 +245,39 @@ export class Terminal {
       if (code >= 0x40 && code <= 0x7E) {
         // Final byte of CSI sequence
         if (ch === 'm') this._processAnsiSGR(this._escBuf); // SGR
-        else if (ch === 'J') { /* clear screen/line — ignore for now */ }
-        else if (ch === 'K') { /* erase line — ignore */ }
-        // Cursor movement CSI sequences: A=up B=down C=right D=left H/f=position
-        // not implemented yet but silently consumed
+        else if (ch === 'A') { // [Item 668] Cursor up
+          var ciN = parseInt(this._escBuf || '1', 10) || 1;
+          this._row = Math.max(0, this._row - ciN);
+          kernel.vgaSetCursor(this._row, this._col);
+        } else if (ch === 'B') { // [Item 668] Cursor down
+          var cdN = parseInt(this._escBuf || '1', 10) || 1;
+          this._row = Math.min(VGA_H - 1, this._row + cdN);
+          kernel.vgaSetCursor(this._row, this._col);
+        } else if (ch === 'C') { // [Item 668] Cursor right
+          var crN = parseInt(this._escBuf || '1', 10) || 1;
+          this._col = Math.min(VGA_W - 1, this._col + crN);
+          kernel.vgaSetCursor(this._row, this._col);
+        } else if (ch === 'D') { // [Item 668] Cursor left
+          var clN = parseInt(this._escBuf || '1', 10) || 1;
+          this._col = Math.max(0, this._col - clN);
+          kernel.vgaSetCursor(this._row, this._col);
+        } else if (ch === 'H' || ch === 'f') { // [Item 668] Cursor absolute position (1-based row;col)
+          var cpP = (this._escBuf || '').split(';');
+          var cpR = (parseInt(cpP[0] || '1', 10) || 1) - 1;
+          var cpC = (parseInt(cpP[1] || '1', 10) || 1) - 1;
+          this._row = Math.max(0, Math.min(VGA_H - 1, cpR));
+          this._col = Math.max(0, Math.min(VGA_W - 1, cpC));
+          kernel.vgaSetCursor(this._row, this._col);
+        } else if (ch === 'J') { // Erase in display (2=whole screen)
+          var ceN = parseInt(this._escBuf || '0', 10);
+          if (ceN === 2 || ceN === 3) {
+            kernel.vgaFill(' ', this._color);
+            for (var ceR = 0; ceR < VGA_H; ceR++) this._screen[ceR].fill(((this._color & 0xFF) << 8) | 0x20);
+            this._row = 0; this._col = 0; kernel.vgaSetCursor(0, 0);
+          }
+        } else if (ch === 'K') { // [Item 668] Erase in line (to end of line)
+          for (var ekC = this._col; ekC < VGA_W; ekC++) this._put(this._row, ekC, ' ', this._color);
+        }
         this._escMode = 0;
       } else {
         // Parameter or intermediate byte — accumulate

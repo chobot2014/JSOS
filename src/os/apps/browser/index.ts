@@ -135,6 +135,9 @@ export class BrowserApp implements App {
   private _urlSuggestions: HistoryEntry[] = [];
   private _urlSuggestIdx  = -1;  // -1 = none selected; 0..n-1 = highlighted row
 
+  // Reader mode (item 634)
+  private _readerMode     = false;
+
   // JavaScript runtime for the current page (null if page has no scripts)
   private _pageJS: PageJS | null = null;
   private _jsStartMs = 0;
@@ -438,9 +441,14 @@ export class BrowserApp implements App {
         if (event.x >= 4  && event.x <= 25) { this._goBack();    return; }
         if (event.x >= 28 && event.x <= 49) { this._goForward(); return; }
         if (event.x >= 52 && event.x <= 73) { this._reload();    return; }
+        var winW = this._win!.width;
+        // Print button (item 635)
+        if (event.x >= winW - 56 && event.x < winW - 28) { this._printPage(); return; }
+        // Reader mode button (item 634)
+        if (event.x >= winW - 28) { this._toggleReaderMode(); return; }
         if (event.x > 76) {
           var urlX  = 76;
-          var urlW  = this._win!.width - urlX - 4;
+          var urlW  = winW - urlX - 56 - 4;
           var maxCh = Math.max(1, Math.floor((urlW - 8) / CHAR_W));
           this._urlInput       = this._pageURL;
           this._urlBarFocus    = true;
@@ -635,7 +643,9 @@ export class BrowserApp implements App {
 
     // URL bar
     var urlX = 76;
-    var urlW = w - urlX - 4;
+    var pBtnW  = 28; // print button width (item 635)
+    var rdBtnW = 28; // reader mode button width
+    var urlW = w - urlX - pBtnW - rdBtnW - 4;
     canvas.fillRect(urlX, tbY + 5, urlW, 20, CLR_URL_BG);
     canvas.drawRect(urlX, tbY + 5, urlW, 20, this._urlBarFocus ? CLR_URL_FOCUS : CLR_TOOLBAR_BD);
 
@@ -689,6 +699,20 @@ export class BrowserApp implements App {
         canvas.drawText(dropX + 4, ry + 4, sugLabel, hlClr);
       }
     }
+
+    // Print button (item 635)
+    var ptX  = w - pBtnW - rdBtnW;
+    canvas.fillRect(ptX, tbY + 5, pBtnW - 2, 20, CLR_BTN_BG);
+    canvas.drawRect(ptX, tbY + 5, pBtnW - 2, 20, CLR_TOOLBAR_BD);
+    canvas.drawText(ptX + 4, tbY + 11, 'Pt', CLR_BTN_TXT);
+
+    // Reader mode button (item 634) — toggles reader view
+    var rdX   = w - rdBtnW;
+    var rdBg  = this._readerMode ? CLR_URL_FOCUS : CLR_BTN_BG;
+    var rdClr = this._readerMode ? 0xFFFFFFFF    : CLR_BTN_TXT;
+    canvas.fillRect(rdX, tbY + 5, rdBtnW - 2, 20, rdBg);
+    canvas.drawRect(rdX, tbY + 5, rdBtnW - 2, 20, CLR_TOOLBAR_BD);
+    canvas.drawText(rdX + 4, tbY + 11, 'Rd', rdClr);
   }
 
   private _drawContent(canvas: Canvas): void {
@@ -815,6 +839,7 @@ export class BrowserApp implements App {
       switch (wp.kind) {
         case 'text':
         case 'password':  this._drawInputField(canvas, wp, wy, focused); break;
+        case 'search':    this._drawSearchField(canvas, wp, wy, focused); break;
         case 'textarea':  this._drawTextarea(canvas, wp, wy, focused); break;
         case 'submit':
         case 'reset':
@@ -838,6 +863,31 @@ export class BrowserApp implements App {
     if (focused && (this._cursorBlink >> 4) % 2 === 0) {
       var cursorX = wp.px + 4 + Math.min(wp.cursorPos, maxCh) * CHAR_W;
       canvas.fillRect(cursorX, wy + 4, 1, CHAR_H, CLR_INPUT_TXT);
+    }
+  }
+
+  /** Draw a search input with a × clear button on the right (item 616). */
+  private _drawSearchField(canvas: Canvas, wp: PositionedWidget, wy: number, focused: boolean): void {
+    var bdClr  = focused ? CLR_INPUT_FOCUS : CLR_INPUT_BD;
+    var btnW   = 18;
+    var textW  = wp.pw - btnW;
+    canvas.fillRect(wp.px, wy, wp.pw, wp.ph, CLR_INPUT_BG);
+    canvas.drawRect(wp.px, wy, wp.pw, wp.ph, bdClr);
+    // text area
+    var maxCh   = Math.max(1, Math.floor((textW - 8) / CHAR_W));
+    var disp    = wp.curValue;
+    var showStr = disp.length > maxCh ? disp.slice(disp.length - maxCh) : disp;
+    canvas.drawText(wp.px + 4, wy + 5, showStr, CLR_INPUT_TXT);
+    if (focused && (this._cursorBlink >> 4) % 2 === 0) {
+      var cursorX = wp.px + 4 + Math.min(wp.cursorPos, maxCh) * CHAR_W;
+      canvas.fillRect(cursorX, wy + 4, 1, CHAR_H, CLR_INPUT_TXT);
+    }
+    // clear button (×)
+    if (wp.curValue.length > 0) {
+      var bx = wp.px + textW;
+      canvas.fillRect(bx, wy, btnW, wp.ph, CLR_BTN_BG);
+      canvas.drawLine(bx, wy, bx, wy + wp.ph, CLR_INPUT_BD);
+      canvas.drawText(bx + 5, wy + 5, 'x', CLR_BTN_TXT);
     }
   }
 
@@ -992,6 +1042,26 @@ export class BrowserApp implements App {
         this._dirty  = true;
         break;
       }
+      case 'search': {
+        // If clicking the × clear button area (rightmost 18px), clear value (item 616)
+        var clearBtnX = wp.px + (wp.pw - 18);
+        if (cx >= clearBtnX && wp.curValue.length > 0) {
+          wp.curValue  = '';
+          wp.cursorPos = 0;
+          if (this._pageJS) this._pageJS.fireInput(wp.name, '');
+          this._dirty  = true;
+        } else {
+          this._focusedWidget  = idx;
+          this._urlBarFocus    = false;
+          this._urlAllSelected = false;
+          var maxCwS   = Math.max(1, Math.floor((wp.pw - 26) / CHAR_W));
+          var scrollOS = Math.max(0, wp.curValue.length - maxCwS);
+          var relXS    = cx - (wp.px + 4);
+          wp.cursorPos = scrollOS + Math.max(0, Math.min(wp.curValue.length - scrollOS, Math.round(relXS / CHAR_W)));
+          this._dirty  = true;
+        }
+        break;
+      }
       case 'submit':
       case 'button':  {
         // let JS handle the click first; if no JS or not consumed, do form submit
@@ -1020,7 +1090,8 @@ export class BrowserApp implements App {
     if (wp.disabled || wp.readonly) return false;
     switch (wp.kind) {
       case 'text':
-      case 'password': {
+      case 'password':
+      case 'search': {
         if (ext === 0x4B) { wp.cursorPos = Math.max(0, wp.cursorPos - 1); this._dirty = true; return true; }
         if (ext === 0x4D) { wp.cursorPos = Math.min(wp.curValue.length, wp.cursorPos + 1); this._dirty = true; return true; }
         if (ext === 0x47) { wp.cursorPos = 0; this._dirty = true; return true; }
@@ -1108,7 +1179,7 @@ export class BrowserApp implements App {
       var wp2 = this._widgets[wi];
       if (wp2.formIdx !== formIdx || wp2.disabled) continue;
       switch (wp2.kind) {
-        case 'text': case 'password': case 'textarea':
+        case 'text': case 'password': case 'search': case 'textarea':
           if (wp2.name) fields.push({ name: wp2.name, value: wp2.curValue }); break;
         case 'checkbox':
           if (wp2.curChecked && wp2.name) fields.push({ name: wp2.name, value: wp2.curValue || '1' }); break;
@@ -1363,6 +1434,87 @@ export class BrowserApp implements App {
     if (this._pageJS) { this._pageJS.dispose(); this._pageJS = null; }
   }
 
+  /** Toggle reader mode and re-render the current page (item 634). */
+  private _toggleReaderMode(): void {
+    this._readerMode = !this._readerMode;
+    if (this._pageSource) {
+      this._showHTML(this._pageSource, this._pageTitle, this._pageURL);
+    }
+    this._scrollY = 0;
+    this._dirty   = true;
+  }
+
+  /** [Item 635] Save rendered page text to /tmp/print-<ts>.txt. */
+  private _printPage(): void {
+    var lines: string[] = [];
+    var bar = ''; for (var bi = 0; bi < 72; bi++) bar += '=';
+    lines.push(bar);
+    lines.push('  ' + (this._pageTitle || this._pageURL));
+    lines.push('  ' + this._pageURL);
+    lines.push(bar);
+    lines.push('');
+    for (var li = 0; li < this._pageLines.length; li++) {
+      var pl = this._pageLines[li];
+      var rowText = '';
+      for (var si = 0; si < pl.nodes.length; si++) rowText += pl.nodes[si].text;
+      lines.push(rowText);
+    }
+    os.fs.mkdir('/tmp');
+    var dest = '/tmp/print-' + Date.now() + '.txt';
+    var saved = os.fs.write(dest, lines.join('\n'));
+    this._status = saved ? 'Printed to ' + dest : 'Print failed: write error';
+    this._dirty  = true;
+  }
+
+  /**
+   * Extract readable article content from raw HTML (item 634).
+   *
+   * Strategy:
+   *  1. Remove script, style, nav, header, footer, aside blocks.
+   *  2. If <article> or <main> exists, extract just that.
+   *  3. Wrap in clean HTML with readable styling.
+   */
+  private _extractReaderContent(html: string): string {
+    // Remove blocks we never want in reader mode
+    var stripped = html
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<nav\b[^>]*>[\s\S]*?<\/nav>/gi, '')
+      .replace(/<header\b[^>]*>[\s\S]*?<\/header>/gi, '')
+      .replace(/<footer\b[^>]*>[\s\S]*?<\/footer>/gi, '')
+      .replace(/<aside\b[^>]*>[\s\S]*?<\/aside>/gi, '');
+
+    // Try to find <article> first, then <main>
+    var articleMatch = stripped.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i);
+    var mainMatch    = stripped.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i);
+    var bodyMatch    = stripped.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
+
+    var content = (articleMatch && articleMatch[1]) ||
+                  (mainMatch    && mainMatch[1])    ||
+                  (bodyMatch    && bodyMatch[1])    ||
+                  stripped;
+
+    // Extract the page title for reader view
+    var titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+    var title = titleMatch ? titleMatch[1].trim() : 'Reader View';
+
+    return [
+      '<!DOCTYPE html><html><head><title>' + title + ' — Reader View</title>',
+      '<style>',
+      'body { max-width: 680px; margin: 0 auto; padding: 24px 16px;',
+      '       font-size: 18px; line-height: 1.6; color: #222; background: #fff; }',
+      'h1,h2,h3,h4 { margin-top: 1.2em; }',
+      'p { margin: 0.8em 0; }',
+      'img { max-width: 100%; height: auto; }',
+      'pre,code { background: #f4f4f4; padding: 2px 4px; }',
+      '</style>',
+      '</head><body>',
+      '<h1 style="border-bottom:1px solid #ccc;padding-bottom:8px">' + title + '</h1>',
+      content,
+      '</body></html>',
+    ].join('\n');
+  }
+
   private _startFetch(rawURL: string): void {
     this._cancelFetch();
     this._pageURL       = rawURL;
@@ -1587,12 +1739,40 @@ export class BrowserApp implements App {
   private _bookmarksHTML(): string {
     if (!this._bookmarks.length)
       return '<h1>Bookmarks</h1><p>No bookmarks yet. Press <kbd>Ctrl+D</kbd> to bookmark a page.</p>';
-    var ls = ['<h1>Bookmarks</h1><ul>'];
+
+    // Group bookmarks by folder (item 631)
+    var folderMap = new Map<string, HistoryEntry[]>();
     for (var i = 0; i < this._bookmarks.length; i++) {
       var bk = this._bookmarks[i];
-      ls.push('<li><a href="' + bk.url + '">' + (bk.title || bk.url) + '</a></li>');
+      var folder = bk.folder || '';
+      if (!folderMap.has(folder)) folderMap.set(folder, []);
+      folderMap.get(folder)!.push(bk);
     }
-    ls.push('</ul>');
+
+    var ls = ['<h1>Bookmarks</h1>'];
+
+    // Render unfiled bookmarks first, then folders
+    var unfiledBks = folderMap.get('') || [];
+    if (unfiledBks.length > 0) {
+      ls.push('<ul>');
+      for (var ui = 0; ui < unfiledBks.length; ui++) {
+        var ubk = unfiledBks[ui];
+        ls.push('<li><a href="' + ubk.url + '">' + (ubk.title || ubk.url) + '</a></li>');
+      }
+      ls.push('</ul>');
+    }
+
+    // Render each folder
+    folderMap.forEach(function(bks: HistoryEntry[], fname: string) {
+      if (!fname) return; // already rendered unfiled
+      ls.push('<h2>' + fname + '</h2><ul>');
+      for (var fi = 0; fi < bks.length; fi++) {
+        var fbk = bks[fi];
+        ls.push('<li><a href="' + fbk.url + '">' + (fbk.title || fbk.url) + '</a></li>');
+      }
+      ls.push('</ul>');
+    });
+
     return ls.join('\n');
   }
 
@@ -1651,6 +1831,11 @@ export class BrowserApp implements App {
   // ── Page display ──────────────────────────────────────────────────────────
 
   private _showHTML(html: string, fallbackTitle: string, url: string): void {
+    // Reader mode (item 634): extract article content and present cleanly
+    if (this._readerMode) {
+      html = this._extractReaderContent(html);
+    }
+
     // ── Reset CSS variable registry for new page ─────────────────────────────
     resetCSSVars();
 

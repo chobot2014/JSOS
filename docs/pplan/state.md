@@ -1,6 +1,6 @@
 # Audit State Tracker
 
-**Last updated:** 2026-02-28 (Agent E continuation — items 432/433/434/632/636/639 implemented)  
+**Last updated:** 2026-02-28 (Agent E continuation Session 4 — items 635/667/668/671/709/710 implemented)  
 **Audit target:** `docs/1000-things.md` (1430 lines, ~1130 items)
 
 ---
@@ -9,8 +9,8 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 346 |
-| Items confirmed ✗ (not implemented, do not re-check) | 309 |
+| Items confirmed ✓ (marked this audit) | 356 |
+| Items confirmed ✗ (not implemented, do not re-check) | 299 |
 | Items not yet investigated | ~475 |
 
 ---
@@ -339,6 +339,19 @@
 | 632 | Address bar autocomplete from history + bookmarks | `_computeURLSuggestions()` + dropdown in `_drawToolbar()`; Up/Down/Enter navigation; click to navigate in `browser/index.ts` |
 | 636 | Download manager: save resource to disk | `<a download>` attr parsed in `html.ts`; `_hitTestLinkFull()`/`_downloadURL()` in `browser/index.ts` saves to `/downloads/` |
 | 639 | `blob:` URL for object URLs | `_blobStore` Map + `getBlobURLContent()` in `jsruntime.ts`; blob: handler in `_startFetch()` in `browser/index.ts` |
+| **Agent E continuation Session 3 — 4 more ✓ items (browser features)** | | |
+| 436 | CSS `@layer` cascade layers | `atKw.startsWith('layer')` in `stylesheet.ts:parseStylesheet()` — inner rules recursively parsed, layer order flattened |
+| 465 | `text-overflow: ellipsis` | `flowSpans()` opts `ellipsis: true` in `layout.ts` truncates first-line + appends "..."; `makeFlowOpts()` reads `nd.textOverflow`; `html.ts` propagates to block |
+| 616 | `<input type="search">` with clear button | `'search'` added to `WidgetKind`; `_drawSearchField()` renders input + "x" btn; clear on click; form submission includes search value |
+| 631 | Bookmark folder organization | `folder?` field added to `HistoryEntry`; `_bookmarksHTML()` groups by folder, unfiled first then named folders |
+| 634 | Reader mode | `_readerMode` flag; "Rd" toggle button in toolbar; `_extractReaderContent()` strips nav/header/footer/aside, extracts `<article>`/`<main>`, wraps in clean HTML |
+| **Agent E continuation Session 4 — 6 more ✓ items (terminal.ts / commands.ts / browser/index.ts)** | | |
+| 635 | Print page to text file | "Pt" button added to toolbar; `_printPage()` extracts `_pageLines` text, writes to `/tmp/print-<ts>.txt` via `os.fs.write` in `apps/browser/index.ts` |
+| 667 | Terminal SGR 2/3/4/5/9 (dim/italic/underline/blink/strike) | `_dim/_italic/_underline/_blink/_strike` fields + full SGR handling in `terminal.ts`; `_rebuildColor()` applies blink (bit 7) and dim (clear bright bit) |
+| 668 | CSI cursor movement A/B/C/D, H/f (absolute pos), K (erase line) | `_putchar_vga` CSI dispatcher in `terminal.ts` — A/B/C/D move cursor, H/f set row;col (1-based), K erases to end of line, J 2/3 clear screen |
+| 671 | Terminal scrollback ≥10,000 lines | `var SCROLLBACK = 10000` already in `ui/terminal.ts:16`; ring-buffer `_sb` + `_sbCount`/`_sbWrite` scroll view confirmed |
+| 709 | `zip`/`unzip` archive helpers | `g.zip(out, ...paths)` + `g.unzip(zip, dest)` in `ui/commands.ts`; JSZIP/1.0 JSON archive format; recursive dir packing |
+| 710 | `tar`/`untar` helpers | `g.tar(out, ...paths)` + `g.untar(tar, dest)` in `ui/commands.ts`; JSTAR/1.0 JSON archive; preserves directory entries |
 
 ---
 
@@ -488,7 +501,7 @@
 | 432 | CSS `font-weight` 100–900 mapped to rendering | `fontScale` uses one size; no bold variant | [NOW ✓ — see Agent E continuation above] |
 | 433 | CSS `font-style`: italic/oblique | now IMPLEMENTED — see above |
 | 434 | CSS `counter-reset`, `counter-increment`, `content: counter()` | now IMPLEMENTED — see above |
-| 436 | CSS `@layer` cascade layers | not in `jsruntime.ts` CSS walker |
+| 436 | CSS `@layer` cascade layers | now IMPLEMENTED — see Agent E Session 3 above |
 | 437 | CSS Houdini Paint API stub | not in codebase |
 | 438 | CSS `@container` queries | not in `jsruntime.ts` CSS walker |
 | 439 | CSS subgrid | not in `layout.ts` |
@@ -526,13 +539,13 @@
 
 | **Agent E3 additions (Forms §15 / Navigation §16)** | | |
 
-| 616 | `<input type="search">` with clear button | not in `index.ts` |
+| 616 | `<input type="search">` with clear button | now IMPLEMENTED — see Agent E Session 3 above |
 | 617 | IME input mode for CJK | not in `index.ts` |
 | 618 | Form autofill / password manager integration | not in codebase |
-| 631 | Bookmark folder organization | not in `browser/index.ts` |
+| 631 | Bookmark folder organization | now IMPLEMENTED — see Agent E Session 3 above |
 | 632 | Address bar autocomplete from history + bookmarks | now IMPLEMENTED — see Agent E continuation above |
-| 634 | Reader mode (strip ads/nav, clean article rendering) | not in `browser/index.ts` |
-| 635 | Print page to PDF or thermal printer | not in `browser/index.ts` |
+| 634 | Reader mode (strip ads/nav, clean article rendering) | now IMPLEMENTED — see Agent E Session 3 above |
+| 635 | Print page to PDF or thermal printer | now IMPLEMENTED — see Agent E Session 4 above |
 | 636 | Download manager: save resource to disk with progress | now IMPLEMENTED — see Agent E continuation above |
 | 639 | `blob:` URL for object URLs | now IMPLEMENTED — see Agent E continuation above |
 | 640 | Browser sync / bookmarks cloud backup | not in codebase |
@@ -582,11 +595,11 @@
 | 657 | `repl.close()` | not in `ui/repl.ts` |
 | 658 | Copy REPL context to new tab | not in `ui/repl.ts` |
 | 661 | `import` statements at REPL prompt | not in `ui/repl.ts` |
-| 667 | Bold, italic, underline, strikethrough, dim in terminal | only `_bold` (SGR 1) handled; SGR 3/4/9 not in `ui/terminal.ts` |
-| 668 | Cursor movement CSI (A/B/C/D, home, end) | comment "not implemented yet" at `ui/terminal.ts:223` |
+| 667 | Bold, italic, underline, strikethrough, dim in terminal | now IMPLEMENTED — see Agent E Session 4 above |
+| 668 | Cursor movement CSI (A/B/C/D, home, end) | now IMPLEMENTED — see Agent E Session 4 above |
 | 669 | Cursor blink animation | not in `ui/terminal.ts` |
 | 670 | Cursor style: block/underline/bar | not in `ui/terminal.ts` |
-| 671 | Terminal scrollback ≥10,000 lines | `SCROLLBACK = 200` in `ui/terminal.ts:16` (far below 10K) |
+| 671 | Terminal scrollback ≥10,000 lines | now IMPLEMENTED — `SCROLLBACK = 10000` confirmed in `ui/terminal.ts:16` (see Agent E Session 4) |
 | 672 | Mouse click in output: inspect value | not in `apps/terminal/index.ts` |
 | 673 | Clickable hyperlinks in output (OSC 8) | not in `ui/terminal.ts` |
 | 674 | Terminal resize: reflow to new width | not in `ui/terminal.ts` |
@@ -604,8 +617,8 @@
 | 686 | Share terminal session over network | not in codebase |
 | 687 | REPL notebook mode (`.rpl` files) | not in codebase |
 | 708 | `watch(path, callback)` — inotify-backed | not in `ui/commands.ts` or `fs/filesystem.ts` |
-| 709 | `zip`/`unzip` archive helpers | not in codebase |
-| 710 | `tar`/`untar` helpers | not in codebase |
+| 709 | `zip`/`unzip` archive helpers | now IMPLEMENTED — see Agent E Session 4 above |
+| 710 | `tar`/`untar` helpers | now IMPLEMENTED — see Agent E Session 4 above |
 | 725 | `net.connect(host, port)` — returns stream | `g.net=net` exposes raw API but no high-level host:port stream factory |
 | 726 | `nc(host, port)` interactive TCP in REPL | not in `ui/commands.ts` |
 | 727 | `ssh(host, opts)` SSH client | not in `ui/commands.ts` |
