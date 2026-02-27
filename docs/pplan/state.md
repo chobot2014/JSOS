@@ -1,6 +1,6 @@
 # Audit State Tracker
 
-**Last updated:** 2026-02-28 (Agent E continuation Session 4 — items 635/667/668/671/709/710 implemented)  
+**Last updated:** 2026-02-28 (Agent E continuation Session 5 — items 431/435/440 confirmed ✓; 669/670/673/682/683/725/726/739/740/438/775/776 implemented)  
 **Audit target:** `docs/1000-things.md` (1430 lines, ~1130 items)
 
 ---
@@ -9,7 +9,7 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 356 |
+| Items confirmed ✓ (marked this audit) | 371 |
 | Items confirmed ✗ (not implemented, do not re-check) | 299 |
 | Items not yet investigated | ~475 |
 
@@ -352,6 +352,22 @@
 | 671 | Terminal scrollback ≥10,000 lines | `var SCROLLBACK = 10000` already in `ui/terminal.ts:16`; ring-buffer `_sb` + `_sbCount`/`_sbWrite` scroll view confirmed |
 | 709 | `zip`/`unzip` archive helpers | `g.zip(out, ...paths)` + `g.unzip(zip, dest)` in `ui/commands.ts`; JSZIP/1.0 JSON archive format; recursive dir packing |
 | 710 | `tar`/`untar` helpers | `g.tar(out, ...paths)` + `g.untar(tar, dest)` in `ui/commands.ts`; JSTAR/1.0 JSON archive; preserves directory entries |
+| **Agent E continuation Session 5 — items confirmed ✓ + new implementations** | | |
+| 431 | CSS `font-family` | `case 'font-family': p.fontFamily = val` at `css.ts:465`; also extracted from `font` shorthand in `css.ts:516` |
+| 435 | CSS `@supports` at-rule | `CSSSupportsRule_` class at `jsruntime.ts:2047`; parsed at line 1905; evaluated in `walkRules()` via `CSS_.supports()` at line 2477 |
+| 440 | CSS `color-mix()`, `hwb()`, `oklch()`, `lab()`, `lch()`, `currentColor` | all implemented in `css.ts`: `currentColor` sentinel (line 109), `hwb()` (line 151), `oklch()` (line 172), `lab()` (line 191), `lch()` (line 207), `color-mix()` (line 223) |
+| 669 | Cursor blink animation in terminal | `_blinkOn` flag toggled every 500ms via `setInterval`; `_drawCursor()` skips draw when `!_blinkOn`; `_resetBlink()` forces visible on keystroke in `ui/terminal.ts` |
+| 670 | Cursor style: block/underline/bar | `_cursorStyle: 'block'|'underline'|'bar'` field; CSI `q` (DECSCUSR) sets style; `_drawCursor()` draws full cell, bottom 2px bar, or left 2px bar in `ui/terminal.ts` |
+| 673 | OSC 8 clickable hyperlinks in terminal | OSC 8 parser in `_putchar_vga()`; `_oscLinkUrl` + `_oscLinkId` stored; spans tagged with `linkUrl`; click handler in `apps/terminal/index.ts` opens URL in browser |
+| 682 | Progress bar `terminal.progress(val, max, width)` | `g.progress(val, max, width?)` in `ui/commands.ts`; renders `[████░░░░] 60%` via Unicode block chars |
+| 683 | Spinner animation `terminal.spinner(msg)` → returns `stop()` | `g.spinner(msg?)` in `ui/commands.ts`; rotates `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` via `setInterval`; returns `{stop()}` |
+| 725 | `net.connect(host, port)` stream factory | `g.connect(host, port)` in `ui/commands.ts`; resolves DNS, opens TCP socket, returns `{write(s), read(), close()}` stream object |
+| 726 | `nc(host, port)` interactive TCP in REPL | `g.nc(host, port)` in `ui/commands.ts`; connects and prints data to terminal, reads typed input lines |
+| 738 | `perf.sample(fn, ms?)` CPU profiler | `g.perf.sample(fn, ms)` in `ui/commands.ts`; runs fn repeatedly for ms, reports ops/sec + min/avg/max |
+| 739 | `perf.memory()` heap snapshot | `g.perf.memory()` in `ui/commands.ts`; calls `sys.gc()` then reads `kernel.pagesFree()` + usage estimates |
+| 438 | CSS `@container` queries | `CSSContainerRule_` class in `jsruntime.ts`; `@container` parsed by `walkRules()`; container size checked vs query in `_evalContainerQuery()` |
+| 775 | Calculator app | `apps/calculator/index.ts` — expression evaluator + display; launched as `calc()` from REPL |
+| 776 | Clock/timer/stopwatch app | `apps/clock/index.ts` — digital clock + stopwatch + countdown timer; launched as `clock()` from REPL |
 
 ---
 

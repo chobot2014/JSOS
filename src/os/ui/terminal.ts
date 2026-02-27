@@ -99,8 +99,18 @@ export class Terminal {
   // [Item 669] Cursor blink state
   private _cursorBlink   = true;  // blink enabled
   private _cursorVisible = true;  // hardware cursor shown
+  private _blinkOn       = true;  // current blink phase (true = visible)
+  private _blinkTick     = 0;     // tick counter for blink timing (call tick() each frame)
   // [Item 670] Cursor style: 'block' | 'underline' | 'bar'
   private _cursorStyle: 'block' | 'underline' | 'bar' = 'block';
+  // [Item 673] OSC 8 hyperlink state
+  private _oscMode    = false;   // true = inside an OSC escape
+  private _oscBuf     = '';      // accumulated OSC params
+  private _oscEscSeen = false;   // ESC seen inside OSC (waiting for '\')
+  private _oscLinkUrl = '';      // current active hyperlink URL ('' = none)
+  private _oscLinkId  = '';      // optional link ID
+  // Parallel screen layer: tracks hyperlink URL for each cell
+  private _screenLinks: (string|null)[][] = [];
 
   private _rebuildColor(): void {
     var fg = (this._bold && this._fgIdx < 8) ? this._fgIdx + 8 : this._fgIdx;
@@ -168,7 +178,10 @@ export class Terminal {
   readonly height = VGA_H;
 
   constructor() {
-    for (var i = 0; i < VGA_H; i++) this._screen.push(blankRow(0x07));
+    for (var i = 0; i < VGA_H; i++) {
+      this._screen.push(blankRow(0x07));
+      this._screenLinks.push(new Array(VGA_W).fill(null));
+    }
     for (var i = 0; i < SCROLLBACK; i++) this._sb.push(new Uint16Array(VGA_W));
   }
 
@@ -197,6 +210,8 @@ export class Terminal {
   private _put(row: number, col: number, ch: string, color: number): void {
     var cell = ((color & 0xFF) << 8) | (ch.charCodeAt(0) & 0xFF);
     this._screen[row][col] = cell;
+    // [Item 673] track hyperlink per cell
+    this._screenLinks[row][col] = this._oscLinkUrl || null;
     kernel.vgaPut(row, col, ch, color);
   }
 
@@ -236,8 +251,21 @@ export class Terminal {
     var code = ch.charCodeAt(0);
 
     // ── ANSI escape state machine (item 666) ──────────────────────────────
+    // [Item 673] OSC mode: accumulate until BEL or ESC-backslash
+    if (this._oscMode) {
+      if (this._oscEscSeen) {
+        this._oscEscSeen = false;
+        if (ch === '\\') { this._parseOSC(this._oscBuf); this._oscMode = false; return; }
+        // ESC was not a ST start — continue
+      }
+      if (code === 0x1B) { this._oscEscSeen = true; return; }  // might be ST
+      if (code === 7) { this._parseOSC(this._oscBuf); this._oscMode = false; return; } // BEL = ST
+      this._oscBuf += ch;
+      return;
+    }
     if (this._escMode === 1) {
       if (ch === '[') { this._escMode = 2; this._escBuf = ''; return; }
+      if (ch === ']') { this._oscMode = true; this._oscBuf = ''; this._oscEscSeen = false; this._escMode = 0; return; } // [Item 673] OSC
       // Unrecognized ESC sequence — drop the ESC and re-process this char
       this._escMode = 0;
       // fall through to normal processing
@@ -277,6 +305,12 @@ export class Terminal {
           }
         } else if (ch === 'K') { // [Item 668] Erase in line (to end of line)
           for (var ekC = this._col; ekC < VGA_W; ekC++) this._put(this._row, ekC, ' ', this._color);
+        } else if (ch === 'q') { // [Item 670] DECSCUSR — cursor style
+          var qN = parseInt(this._escBuf || '0', 10);
+          // 0,1,2=block; 3,4=underline; 5,6=bar
+          if (qN === 0 || qN === 1 || qN === 2) this._cursorStyle = 'block';
+          else if (qN === 3 || qN === 4)        this._cursorStyle = 'underline';
+          else if (qN === 5 || qN === 6)        this._cursorStyle = 'bar';
         }
         this._escMode = 0;
       } else {
@@ -368,10 +402,12 @@ export class Terminal {
     for (var r = 0; r < VGA_H; r++) {
       var row = this._screen[r];
       for (var c = 0; c < VGA_W; c++) row[c] = 0x0720;
+      this._screenLinks[r].fill(null);
     }
     this._row = 0; this._col = 0; this._color = 0x07;
     this._fgIdx = 7; this._bgIdx = 0; this._bold = false;
     this._escMode = 0; this._escBuf = '';
+    this._oscMode = false; this._oscBuf = ''; this._oscLinkUrl = ''; this._oscLinkId = '';
     this._viewOffset = 0;
     kernel.vgaSetCursor(0, 0);
   }
@@ -542,6 +578,48 @@ export class Terminal {
   showCursor(): void { this._cursorVisible = true; }
   hideCursor(): void { this._cursorVisible = false; }
   isCursorVisible(): boolean { return this._cursorVisible; }
+
+  /** [Item 669] Called each frame (or ~2Hz) to animate cursor blink. */
+  tick(frameMs: number): void {
+    if (!this._cursorBlink || !this._cursorVisible || this._viewOffset !== 0) return;
+    this._blinkTick += frameMs;
+    if (this._blinkTick >= 500) {
+      this._blinkTick = 0;
+      this._blinkOn = !this._blinkOn;
+      if (this._blinkOn) kernel.vgaShowCursor();
+      else               kernel.vgaHideCursor();
+    }
+  }
+
+  /** [Item 669] Force cursor visible (call on any keystroke to reset blink phase). */
+  resetBlink(): void {
+    this._blinkOn = true;
+    this._blinkTick = 0;
+    if (this._cursorVisible && this._viewOffset === 0) kernel.vgaShowCursor();
+  }
+
+  /** [Item 673] Return the hyperlink URL at a given screen cell, or '' if none. */
+  getLinkAt(row: number, col: number): string {
+    if (row < 0 || row >= VGA_H || col < 0 || col >= VGA_W) return '';
+    return this._screenLinks[row][col] || '';
+  }
+
+  /** [Item 673] Parse an OSC buffer (called when ST/BEL received). */
+  private _parseOSC(buf: string): void {
+    // OSC 8 ; params ; url
+    var semi1 = buf.indexOf(';');
+    if (semi1 < 0) return;
+    var cmd = buf.substring(0, semi1);
+    if (cmd !== '8') return;
+    var rest = buf.substring(semi1 + 1);
+    var semi2 = rest.indexOf(';');
+    if (semi2 < 0) return;
+    var params = rest.substring(0, semi2);
+    var url    = rest.substring(semi2 + 1);
+    // Extract optional id= param
+    this._oscLinkId  = params.indexOf('id=') === 0 ? params.substring(3) : '';
+    this._oscLinkUrl = url;  // empty URL = cancel hyperlink
+  }
 }
 
 const terminal = new Terminal();

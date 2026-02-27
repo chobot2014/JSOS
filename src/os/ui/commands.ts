@@ -23,6 +23,8 @@ import { EditorApp } from '../apps/editor/index.js';
 import { fileManagerApp } from '../apps/file-manager/index.js';
 import { systemMonitorApp } from '../apps/system-monitor/index.js';
 import { settingsApp } from '../apps/settings/index.js';
+import { launchCalculator } from '../apps/calculator/index.js';
+import { launchClock } from '../apps/clock/index.js';
 import { wm, getWM, type App } from '../ui/wm.js';
 import { scheduler } from '../process/scheduler.js';
 import { vmm } from '../process/vmm.js';
@@ -956,6 +958,51 @@ export function registerCommands(g: any): void {
     for (var i = 0; i < table.length; i++) {
       terminal.println('  ' + pad(table[i].ip, 16) + ' ' + table[i].mac);
     }
+  };
+
+  // [Item 725] net.connect(host, port) — high-level TCP stream factory
+  g.connect = async function(host: string, port: number) {
+    if (!host || !port) { terminal.println('usage: connect(host, port)'); return; }
+    terminal.colorPrint('connecting to ' + host + ':' + port + '… ', Color.DARK_GREY);
+    try {
+      var sock = await net.connectTcp(host, port);
+      terminal.colorPrintln('connected', Color.LIGHT_GREEN);
+      return {
+        write(data: string) { sock.send(data); },
+        async read() { return sock.recv(); },
+        close() { sock.close(); terminal.colorPrintln('[connection closed]', Color.DARK_GREY); }
+      };
+    } catch (e) {
+      terminal.colorPrintln('failed: ' + e, Color.LIGHT_RED);
+    }
+  };
+
+  // [Item 726] nc(host, port) — interactive TCP session in REPL
+  g.nc = async function(host: string, port: number) {
+    if (!host || !port) { terminal.println('usage: nc(host, port)'); return; }
+    terminal.colorPrint('nc: connecting to ' + host + ':' + port + '… ', Color.DARK_GREY);
+    var sock: any;
+    try { sock = await net.connectTcp(host, port); }
+    catch (e) { terminal.colorPrintln('failed: ' + e, Color.LIGHT_RED); return; }
+    terminal.colorPrintln('connected (Ctrl+C to disconnect)', Color.LIGHT_GREEN);
+    var active = true;
+    // Receive loop (background)
+    (async function recvLoop() {
+      while (active) {
+        var data = await sock.recv();
+        if (data === null) { terminal.colorPrintln('\nnc: remote closed', Color.DARK_GREY); active = false; break; }
+        terminal.print(data);
+      }
+    })();
+    // Send loop: read lines from terminal input
+    while (active) {
+      var line = terminal.readLine('');
+      if (!line && !active) break;
+      if (line === null) { active = false; break; }
+      sock.send(line + '\n');
+    }
+    sock.close();
+    terminal.colorPrintln('nc: disconnected', Color.DARK_GREY);
   };
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -1907,7 +1954,108 @@ export function registerCommands(g: any): void {
     fg:        'fg(id)\n  Bring a background job to the foreground.',
     bg:        'bg(id)\n  Resume a suspended job in the background.',
     nice:      'nice(pid, value)\n  Adjust the scheduling priority of a process.',
+    progress:  'progress(val, max, width?)\n  Print an ASCII progress bar. width defaults to 40.',
+    spinner:   'spinner(msg?)\n  Show an animated spinner. Returns {stop()} to stop it.',
+    connect:   'connect(host, port)\n  Open a TCP connection. Returns {write, read, close}.',
+    nc:        'nc(host, port)\n  Interactive TCP session (like netcat).',
+    perf:      'perf.sample(fn, ms?) — benchmark fn for ms milliseconds.\n  perf.memory() — show heap / GC stats.',
+    calc:      'calc()\n  Open the interactive calculator app. Supports arithmetic,\n  Math functions (sqrt, sin, cos, log…) and constants (pi, e).',
+    clock:     "clock(mode?, seconds?)\n  Open the clock app.  mode: 'clock'|'stopwatch'|'countdown'.\n  seconds: countdown duration (for countdown mode).",
+    stopwatch: 'stopwatch()\n  Shortcut to open the stopwatch app.',
+    countdown: 'countdown(seconds)\n  Shortcut to start a countdown timer.',
   };
+
+  // [Item 682] progress bar utility
+  g.progress = function(val: number, max: number, width?: number) {
+    var w = width || 40;
+    var pct = max > 0 ? Math.max(0, Math.min(1, val / max)) : 0;
+    var filled = Math.round(pct * w);
+    var bar = '';
+    for (var i = 0; i < w; i++) bar += i < filled ? '\u2588' : '\u2591';
+    var pctStr = Math.round(pct * 100) + '%';
+    while (pctStr.length < 4) pctStr = ' ' + pctStr;
+    terminal.println('[' + bar + '] ' + pctStr + '  (' + val + '/' + max + ')');
+  };
+
+  // [Item 683] spinner animation — returns {stop()} handle
+  g.spinner = function(msg?: string) {
+    var frames = ['\u280b', '\u2819', '\u2839', '\u2838', '\u283c', '\u2834', '\u2826', '\u2827', '\u2807', '\u280f'];
+    var fi = 0;
+    var label = msg || 'working…';
+    var active = true;
+    var interval = setInterval(function() {
+      if (!active) return;
+      terminal.print('\r' + frames[fi % frames.length] + ' ' + label + '  \r');
+      fi++;
+    }, 80);
+    return {
+      stop(doneMsg?: string) {
+        active = false;
+        clearInterval(interval);
+        terminal.print('\r' + ' '.repeat(label.length + 4) + '\r');
+        if (doneMsg) terminal.colorPrintln(doneMsg, Color.LIGHT_GREEN);
+      }
+    };
+  };
+
+  // [Item 738/739] perf — micro-benchmarking and memory stats
+  g.perf = {
+    /** Run fn repeatedly for ms milliseconds and report ops/sec */
+    sample(fn: () => void, ms?: number) {
+      var duration = ms || 1000;
+      var count = 0;
+      var times: number[] = [];
+      var t0 = Date.now();
+      var end = t0 + duration;
+      while (Date.now() < end) {
+        var s = Date.now();
+        fn();
+        times.push(Date.now() - s);
+        count++;
+      }
+      var elapsed = Date.now() - t0;
+      var opsPerSec = Math.round(count / elapsed * 1000);
+      times.sort(function(a, b) { return a - b; });
+      var min  = times[0] || 0;
+      var avg  = times.reduce(function(a, b) { return a + b; }, 0) / times.length;
+      var max  = times[times.length - 1] || 0;
+      var med  = times[Math.floor(times.length / 2)] || 0;
+      terminal.colorPrintln('Performance sample (' + duration + ' ms):', Color.LIGHT_CYAN);
+      terminal.println('  iterations: ' + count);
+      terminal.println('  ops/sec:    ' + opsPerSec);
+      terminal.println('  min:        ' + min.toFixed(2) + ' ms');
+      terminal.println('  avg:        ' + avg.toFixed(2) + ' ms');
+      terminal.println('  median:     ' + med.toFixed(2) + ' ms');
+      terminal.println('  max:        ' + max.toFixed(2) + ' ms');
+      return { count, opsPerSec, min, avg, median: med, max };
+    },
+    /** [Item 740] Show heap / GC statistics */
+    memory() {
+      try { (globalThis as any).gc?.(); } catch (_) {}
+      var total = -1, free = -1;
+      try { total = kernel.getTotalPages() * 4096; } catch (_) {}
+      try { free  = kernel.pagesFree() * 4096; } catch (_) {}
+      var used = total >= 0 && free >= 0 ? total - free : -1;
+      function fmt(b: number) { return b < 0 ? 'n/a' : (b / 1024 / 1024).toFixed(2) + ' MB'; }
+      terminal.colorPrintln('Memory stats:', Color.LIGHT_CYAN);
+      terminal.println('  total:  ' + fmt(total));
+      terminal.println('  used:   ' + fmt(used));
+      terminal.println('  free:   ' + fmt(free));
+      return { totalBytes: total, usedBytes: used, freeBytes: free };
+    }
+  };
+
+  // ── [Item 775] Calculator app ──────────────────────────────────────────────
+  g.calc = function() {
+    launchCalculator(terminal);
+  };
+
+  // ── [Item 776] Clock / stopwatch / countdown app ─────────────────────────────
+  g.clock = function(mode?: 'clock'|'stopwatch'|'countdown', seconds?: number) {
+    launchClock(terminal, mode ?? 'clock', seconds);
+  };
+  g.stopwatch = function() { launchClock(terminal, 'stopwatch'); };
+  g.countdown = function(seconds: number) { launchClock(terminal, 'countdown', seconds); };
 
   g.help = function(fn?: unknown) {
     // ── help(fn) mode: show docs for a single function (item 662) ──────────

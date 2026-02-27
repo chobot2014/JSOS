@@ -147,6 +147,7 @@ export class TerminalApp implements App {
     var ch  = event.ch;
     var key = event.key;
     this._dirty = true;
+    terminal.resetBlink(); // [Item 669] reset blink on any keystroke
 
     // ── History navigation (items 642–643) ─────────────────────────────────
     if (key === 'ArrowUp') {
@@ -229,9 +230,22 @@ export class TerminalApp implements App {
     } catch (_) {}
   }
 
-  onMouse(_event: MouseEvent): void { /* no-op for terminal */ }
+  onMouse(event: MouseEvent): void {
+    // [Item 673] OSC 8 hyperlink click: map pixel → VGA cell, look up link
+    if (event.type === 'click') {
+      var col = Math.floor(event.x / CHAR_W);
+      var row = Math.floor(event.y / CHAR_H);
+      var url = terminal.getLinkAt(row, col);
+      if (url) {
+        // Open URL in browser app if available
+        try { (os as any).browser?.navigate(url); } catch (_) {}
+      }
+    }
+  }
 
   render(_canvas: Canvas): boolean {
+    // [Item 669] Tick cursor blink on every render frame (~16ms @ 60fps)
+    terminal.tick(16);
     // Terminal writes directly into win.canvas during onKey() / print().
     // Here we just signal whether it's been modified since the last frame.
     if (!this._dirty) return false;

@@ -1906,6 +1906,12 @@ export function createPageJS(
           var sp2 = new CSSSupportsRule_(hdr.slice(9).trim()); sp2.parentStyleSheet = this;
           var inner3 = new CSSStyleSheet_(); inner3._parseText(body2); sp2.cssRules = inner3.cssRules;
           this.cssRules.push(sp2);
+        } else if (lhdr.startsWith('@container')) {
+          // [Item 438] @container queries
+          var ctrHdr = hdr.slice(10).trim();
+          var ctr2 = new CSSContainerRule_(ctrHdr); ctr2.parentStyleSheet = this;
+          var inner5 = new CSSStyleSheet_(); inner5._parseText(body2); ctr2.cssRules = inner5.cssRules;
+          this.cssRules.push(ctr2);
         } else if (lhdr.startsWith('@layer')) {
           // @layer — flatten inner rules into current sheet
           var inner4 = new CSSStyleSheet_(); inner4._parseText(body2);
@@ -2050,6 +2056,28 @@ export function createPageJS(
     conditionText = '';
     cssRules: CSSRule_[] = [];
     constructor(conditionText: string) { super(); this.conditionText = conditionText; this.cssText = '@supports ' + conditionText + ' { }'; }
+    insertRule(rule: string, index = 0): number { this.cssRules.splice(index, 0, new CSSStyleRule_(rule, '')); return index; }
+    deleteRule(index: number): void { this.cssRules.splice(index, 1); }
+  }
+
+  /** CSSContainerRule — @container rule [Item 438] (type=15) */
+  class CSSContainerRule_ extends CSSRule_ {
+    type = 15;
+    containerName = '';
+    conditionText = '';
+    cssRules: CSSRule_[] = [];
+    constructor(header: string) {
+      super();
+      // Header is like: "sidebar (min-width: 300px)" or "(min-width: 500px)"
+      var parenIdx = header.indexOf('(');
+      if (parenIdx > 0) {
+        this.containerName = header.slice(0, parenIdx).trim();
+        this.conditionText = header.slice(parenIdx).trim();
+      } else {
+        this.conditionText = header.trim();
+      }
+      this.cssText = '@container ' + header + ' { }';
+    }
     insertRule(rule: string, index = 0): number { this.cssRules.splice(index, 0, new CSSStyleRule_(rule, '')); return index; }
     deleteRule(index: number): void { this.cssRules.splice(index, 1); }
   }
@@ -2476,6 +2504,11 @@ export function createPageJS(
           var sCond: string = rule.conditionText || '';
           var sMatches = !sCond || (typeof CSS_ !== 'undefined' ? CSS_.supports(sCond) : true);
           if (sMatches) walkRules(rule.cssRules);
+        } else if (rule.type === 15 && rule.cssRules) {
+          // [Item 438] @container — evaluate size condition against containing block
+          var cCond: string = (rule as any).conditionText || '';
+          var cName: string = (rule as any).containerName || '';
+          if (!cCond || _evalContainerQuery(el, cName, cCond)) walkRules(rule.cssRules);
         }
       }
     }
@@ -3307,6 +3340,39 @@ export function createPageJS(
       return true;
     });
   }
+
+  /** [Item 438] Evaluate a CSS @container query condition against the element's container.
+   *  Looks up the named container element (or nearest block ancestor) and checks its size. */
+  function _evalContainerQuery(el: VElement, containerName: string, conditionText: string): boolean {
+    // Walk ancestors to find the named container (or any container)
+    var ancestor: VElement | null = el.parentNode as VElement | null;
+    while (ancestor && ancestor.tagName) {
+      var ct = (ancestor as any)._cssCache?.['container-type'] || (ancestor as any)._cssCache?.['containerType'];
+      var cn = (ancestor as any)._cssCache?.['container-name'] || (ancestor as any)._cssCache?.['containerName'] || '';
+      if (ct || cn) {
+        if (!containerName || cn === containerName || cn.split(/\s+/).indexOf(containerName) >= 0) break;
+      }
+      ancestor = ancestor.parentNode as VElement | null;
+    }
+    // Estimate container size: use rendered width heuristic or fall back to viewport
+    var cw = 1024, ch = 768;
+    if (ancestor && (ancestor as any)._renderedWidth)  cw = (ancestor as any)._renderedWidth;
+    if (ancestor && (ancestor as any)._renderedHeight) ch = (ancestor as any)._renderedHeight;
+    // Parse the condition text (same logic as _evalMQCore but for container dims)
+    var innerCond = conditionText.replace(/^\(|\)$/g, '');
+    var cparts = innerCond.match(/\([^)]+\)/g) || [innerCond];
+    return cparts.every(part => {
+      var inner = part.replace(/^\(|\)$/g, '').trim().toLowerCase();
+      var mw2 = inner.match(/^(min|max)-width\s*:\s*([\d.]+)(px|em|rem)?$/);
+      if (mw2) { var v2 = parseFloat(mw2[2]); return mw2[1] === 'min' ? cw >= v2 : cw <= v2; }
+      var mh2 = inner.match(/^(min|max)-height\s*:\s*([\d.]+)(px|em|rem)?$/);
+      if (mh2) { var v3 = parseFloat(mh2[2]); return mh2[1] === 'min' ? ch >= v3 : ch <= v3; }
+      var ar2 = inner.match(/^(min-|max-)?aspect-ratio\s*:\s*(\d+)\s*\/\s*(\d+)$/);
+      if (ar2) { var rat2 = parseInt(ar2[2]) / parseInt(ar2[3]); var act2 = cw / ch; return ar2[1] === 'min-' ? act2 >= rat2 : ar2[1] === 'max-' ? act2 <= rat2 : Math.abs(act2 - rat2) < 0.01; }
+      return true;  // unknown — permissive
+    });
+  }
+
   function _makeMediaQueryList(q: string): any {
     var listeners: Array<(ev: {matches: boolean; media: string}) => void> = [];
     return {
