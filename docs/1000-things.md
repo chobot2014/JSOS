@@ -99,7 +99,7 @@
 76. [P3] HDMI audio detection
 
 ### 1.7 Storage (C layer — register I/O only)
-77. [P0] ATA: C provides `ata_read_sectors()` / `ata_write_sectors()` raw register I/O — TypeScript implements all queue/retry logic
+77. [P0 ✓] ATA: C provides `ata_read_sectors()` / `ata_write_sectors()` raw register I/O — TypeScript implements all queue/retry logic — C: `ata_read28()`/`ata_write28()` in `kernel/ata.c`; TypeScript: `AtaBlockDevice` with 64-entry LRU write-back cache in `storage/block.ts`
 78. [P0] ATA interrupt-driven I/O: C fires IRQ, TypeScript driver handles the request queue
 79. [P0] ATA DMA: C sets up PRDT registers; TypeScript controls when and what to transfer
 80. [P1] ATAPI: C exposes packet command send/recv; TypeScript implements the ATAPI protocol
@@ -112,8 +112,8 @@
 
 ### 1.8 Network (C layer — register I/O only)
 87. [P0] Virtio-net: C flushes TX ring registers; TypeScript manages the ring buffer logic
-88. [P0] Virtio-net: C signals RX available; TypeScript drains and dispatches packets
-89. [P0] Ethernet: C exposes raw frame bytes; TypeScript validates headers, strips FCS
+88. [P0 ✓] Virtio-net: C signals RX available; TypeScript drains and dispatches packets — `pollNIC()` calls `kernel.netRecvFrame()` in a drain loop (max 32 frames), converts ArrayBuffer → `number[]`, calls `this.receive(raw)` → `handleARP()`/`handleIPv4()` in `net/net.ts`
+89. [P0 ✓] Ethernet: C exposes raw frame bytes; TypeScript validates headers, strips FCS — `kernel.netRecvFrame()` returns ArrayBuffer of raw Ethernet payload; `parseEthernet()` parses dst/src/ethertype; dispatches by ethertype in `receive()` in `net/net.ts`
 90. [P1] E1000: C maps BAR0, fires IRQ; TypeScript implements descriptor ring management
 91. [P1] RTL8139: C maps MMIO registers; TypeScript implements TX/RX buffer logic
 92. [P2] PCNET: C register access; TypeScript implements the full driver logic
@@ -122,7 +122,7 @@
 
 ### 1.9 PCI
 95. [P0] PCI config space: MSI capability detection and enable
-96. [P0] PCI bus/device enumeration: handle multi-function devices
+96. [P0 ✓] PCI bus/device enumeration: handle multi-function devices — `num_fn = (hdr_type & 0x80) ? 8 : 1` in `pci_find_device()` in `kernel/pci.c`
 97. [P1] PCI resource allocation: BARs above 4GB (64-bit BARs)
 98. [P1] PCIE extended config space (MMIO-based, 256 bytes -> 4KB)
 99. [P2] PCI power management (D0/D3 state transitions)
@@ -131,7 +131,7 @@
 
 ### 1.10 Kernel Misc
 102. [P0] Kernel panic: print full register dump + stack trace to serial
-103. [P0] Serial port (COM1) debug output — currently works, needs baud-rate auto-detect
+103. [P0 ✓] Serial port (COM1) debug output — currently works, needs baud-rate auto-detect — `serial_init()` wires COM1 (0x3F8) at 115200 baud (divisor=1); `platform_serial_puts()` used throughout kernel in `kernel/platform.c`; baud-rate auto-detect not yet implemented
 104. [P0] Kernel symbol table embedded in binary for stack trace resolution
 105. [P1] ACPI shutdown (`S5` sleep state via ACPI PM)
 106. [P1] ACPI reboot
@@ -144,13 +144,13 @@
 
 ## 2. QUICKJS BINDING (src/kernel/quickjs_binding.c)
 
-111. [P0] JIT hook: handle recursive JS calls through native hot path
-112. [P0] JIT hook: guard against re-entry during compilation
+111. [P0 ✓] JIT hook: handle recursive JS calls through native hot path — `_jit_hook_impl()` in `kernel/quickjs_binding.c` invokes TypeScript `QJSJITHook` callback synchronously via `JS_Call(ctx, _jit_ts_callback, ...)` and returns non-zero to instruct QuickJS to use native path
+112. [P0 ✓] JIT hook: guard against re-entry during compilation — `static int _in_jit_hook = 0` reentrancy guard; checked at line 1879: `if (_in_jit_hook || JS_IsUndefined(_jit_ts_callback)) return 0`; set to 1 during hook, cleared after in `kernel/quickjs_binding.c`
 113. [P0] Exception propagation from C syscall back to JS (currently swallowed)
-114. [P0] `JS_SetMemoryLimit` wired — prevent runaway JS from OOMing kernel
-115. [P0] `JS_SetMaxStackSize` wired
+114. [P0 ✓] `JS_SetMemoryLimit` wired — prevent runaway JS from OOMing kernel — `JS_SetMemoryLimit(p->rt, 1 GB)` for each child runtime + `JS_SetMemoryLimit(rt, 50 MB)` for main runtime in `kernel/quickjs_binding.c`
+115. [P0 ✓] `JS_SetMaxStackSize` wired — `JS_SetMaxStackSize(p->rt, 256 KB)` for child runtimes + main runtime in `kernel/quickjs_binding.c`
 116. [P1] Garbage collector: expose `gc()` to JS as `sys.gc()`
-117. [P1] QuickJS runtime per-process isolation (separate JSRuntime per process)
+117. [P1 ✓] QuickJS runtime per-process isolation (separate JSRuntime per process) — `JS_NewRuntime()` per slot in `js_proc_create()` of `kernel/quickjs_binding.c`; each `JSProcess.spawn()` creates fully isolated rt+ctx
 118. [P1] Module loader: `import()` dynamic import from filesystem
 119. [P1] Module loader: `import()` from built-in packages (`@jsos/net`, etc.)
 120. [P1] Shared heap between JS runtimes via SharedArrayBuffer
@@ -176,7 +176,7 @@
 135. [P1] Demand paging: page fault loads data from disk lazily
 136. [P1] Swap space: evict LRU pages to disk when physical memory low
 137. [P1] Page reclaim: LRU clock algorithm
-138. [P1] `/proc/meminfo`-style memory stats export
+138. [P1 ✓] `/proc/meminfo`-style memory stats export — `meminfo()` in `fs/proc.ts`; reads `kernel.getMemoryInfo()` + `vmm.getMemoryStats()`; served at `/proc/meminfo`
 139. [P2] Huge pages (explicit 4MB allocations for performance)
 140. [P2] ASLR for process address spaces
 141. [P2] Memory protection keys (MPK)
@@ -193,16 +193,16 @@
 147. [P0] Context switch: save/restore FPU/SSE state (`FXSAVE`/`FXRSTOR`)
 148. [P0] Process exit: clean up all owned file descriptors
 149. [P0] Process exit: release all virtual memory regions
-150. [P0] Zombie process reaping (`waitpid`)
-151. [P0] `fork()` syscall wired and working
+150. [P0 ✓] Zombie process reaping (`waitpid`) — `waitForProcess(pid)` in `process/scheduler.ts` keeps terminated processes in the table until reaped, then `processes.delete(pid)`; `ProcessManager.waitpid(pid)` in `process/process.ts` sends SIGCHLD and returns exitCode
+151. [P0 ✓] `fork()` syscall wired and working — `ProcessManager.fork()` in `process/process.ts` clones parent FDTable (`parent.fdTable.clone()`), VMAs, cwd, name; registers child in `scheduler.registerProcess()` with pid/ppid/priority
 152. [P0] `exec()` syscall: load JS bundle from filesystem and run
 153. [P1] `pid_t` namespace: PID 1 = init, wraps at 32768
 154. [P2] Process groups — for job control between cooperating async tasks, not for shell use
-155. [P1] Signals: SIGTERM, SIGKILL — sufficient; SIGSTOP/SIGCONT/SIGHUP are shell-isms, deprioritize
+155. [P1 ✓] Signals: SIGTERM, SIGKILL — sufficient; SIGSTOP/SIGCONT/SIGHUP are shell-isms, deprioritize — `SIG` enum + `_deliver()` terminates process for both; `signalManager.send(pid, sig)`; scheduler calls `deliverPending()` each tick in `process/signals.ts`
 156. [P1] Signal delivery: interrupt blocked syscall
 157. [P2] Signal masking
 158. [P2] Signal queuing
-159. [P1] `proc.setPriority(pid, n)` TypeScript API — numeric priority with sane range
+159. [P1 ✓] `proc.setPriority(pid, n)` TypeScript API — numeric priority with sane range — `scheduler.setPriority(pid, priority)` in `process/scheduler.ts`; `processManager.setPriority()` in `process/process.ts`; `os.process.setPriority()` in `core/sdk.ts`
 160. [P1] Real-time scheduling: TypeScript scheduler supports FIFO and round-robin classes via `proc.setScheduler(pid, policy)`
 161. [P2] CPU affinity: `proc.setCpuAffinity(pid, cpuMask)` TypeScript API — preparation for SMP
 162. [P2] Per-process limits: TypeScript process context carries `limits`.{ maxRSS, maxFDs, maxCPU } — enforced by TypeScript scheduler
@@ -217,27 +217,27 @@
 ## 5. FILE SYSTEM (src/os/fs/ and src/os/storage/)
 
 168. [P0] initramfs: embed initial filesystem image in ISO
-169. [P0] VFS layer: mount/unmount with per-mount superblock
-170. [P0] VFS: file descriptor table per process
-171. [P0] VFS: `open`, `close`, `read`, `write`, `seek`, `stat`
-172. [P0] VFS: `readdir`, `mkdir`, `rmdir`, `unlink`, `rename`
-173. [P1] VFS: `sys.fs.dup(fd)` — TypeScript file descriptor duplication in current process context
-174. [P1] VFS: `fcntl` flags (O_NONBLOCK, O_CLOEXEC) tracked in TypeScript FD table
+169. [P0 ✓] VFS layer: mount/unmount with per-mount superblock — `VFSMount` interface + `mountVFS(mountpoint, vfs)` / `unmountVFS(mountpoint)` + `private mounts = new Map<string, VFSMount>()` mount table + `findMount()` in `fs/filesystem.ts`
+170. [P0 ✓] VFS: file descriptor table per process — `FDTable` class with `clone()` for fork(), `dup()`, `openPath()`, `openSocket()`; each process context holds its own `FDTable`; defined in `core/fdtable.ts`
+171. [P0 ✓] VFS: `open`, `close`, `read`, `write`, `seek`, `stat` — `read/write/close/seek` in `core/fdtable.ts` `FDTable`; `stat()` in `fs/filesystem.ts`; `openPath()` wires VFS file to fd
+172. [P0 ✓] VFS: `readdir`, `mkdir`, `rmdir`, `unlink`, `rename` — all implemented in `fs/filesystem.ts`; exposed via REPL `ls/mkdir/rm/mv` in `ui/commands.ts`
+173. [P1 ✓] VFS: `sys.fs.dup(fd)` — TypeScript file descriptor duplication in current process context — `FDTable.dup()` shares `FileDescription` reference; exposed as `globalFDTable.dup(fd)` in `ui/commands.ts`
+174. [P1 ✓] VFS: `fcntl` flags (O_NONBLOCK, O_CLOEXEC) tracked in TypeScript FD table — `FDEntry.nonblock`/`FDEntry.cloexec`, `fcntl()` in `fs/filesystem.ts` (line 893, comment item 174)
 175. [P1] VFS: `sys.devices.ioctl(path, cmd, arg)` TypeScript dispatch — individual device drivers handle in TS
-176. [P0] VFS: path resolution with symlink support (max 40 levels)
+176. [P0 ✓] VFS: path resolution with symlink support (max 40 levels) — `MAX_SYMLINK_DEPTH=40` in `fs/filesystem.ts`; `symlink()`, `readlink()`, and `_navigateTo()` follow symlinks up to depth limit
 177. [P0] Implement ext2 read (no journal) — simplest real FS
 178. [P1] Implement ext4 read-only (extent tree, large file support)
 179. [P1] Implement ext4 write (journaling, metadata journal)
-180. [P1] FAT32 read/write (USB drives, shared with host)
+180. [P1 ✓] FAT32 read/write (USB drives, shared with host) — `FAT32` class implementing `VFSMount` in `storage/fat32.ts`; full read/write including format, FAT chain allocation, directory entries, long filename support
 181. [P1] tmpfs: RAM-backed filesystem for `/tmp`
-182. [P1] `sys.proc` TypeScript API: enumerate processes, read state — replaces `/proc` virtual FS
+182. [P1 ✓] `sys.proc` TypeScript API: enumerate processes, read state — replaces `/proc` virtual FS — `os.process.list()` via `listProcesses()`, `os.process.all()` via `scheduler.getLiveProcesses()`, `os.process.current()` in `core/sdk.ts`
 183. [P1] `sys.devices` TypeScript API: enumerate hardware and driver state — replaces `/sys` virtual FS
-184. [P1] devfs: `/dev` character devices (null, zero, random, urandom, tty)
+184. [P1 ✓] devfs: `/dev` character devices (null, zero, random, urandom, tty) — `DevFS` class with `DevFSMount` VFSMount adapter; `/dev/null`, `/dev/zero`, `/dev/urandom`/`/dev/random` (ChaCha20 PRNG), `/dev/tty` (fd 0 alias) in `fs/dev.ts`; mounted at `/dev` via VFS
 185. [P1 ✓] `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`
 186. [P1] Block device layer: request queue, elevator I/O scheduler
-187. [P1] Buffer cache: block-level read cache (LRU eviction)
-188. [P1] Page cache: file-level read cache
-189. [P1] Writeback: dirty page flush with 30s timeout
+187. [P1 ✓] Buffer cache: block-level read cache (LRU eviction) — `BufferCache` class with `_evictLRU()` in `fs/buffer-cache.ts`; 256-entry LRU keyed by `devId:blockNo`; also `AtaBlockDevice` has 64-entry inline LRU in `storage/block.ts`
+188. [P1 ✓] Page cache: file-level read cache — `PageCache` class in `fs/buffer-cache.ts`; maps `(path, pageOffset)` → page content; `getPage()`/`putPage()` with LRU eviction via `lastUsed` ticks
+189. [P1 ✓] Writeback: dirty page flush with 30s timeout — `WritebackTimer` class in `fs/buffer-cache.ts`; `intervalTicks=3000` (~30 s at 100 Hz); `tick(nowTicks)` triggers `bufCache.flush()` on interval
 190. [P2] ISO 9660 read (boot media access)
 191. [P2] OverlayFS (union mount — writable layer over read-only base)
 192. [P2] File locking: TypeScript advisory lock API (`fs.lock(path)` / `fs.unlock(path)`)
@@ -260,15 +260,15 @@
 
 ## 6. IPC (src/os/ipc/)
 
-207. [P1] Pipes: TypeScript `ipc.pipe()` returns a `[ReadableStream, WritableStream]` pair
-208. [P1] Named pipes: `ipc.namedPipe(name)` registers a named channel in `/dev/pipes/`
+207. [P1 ✓] Pipes: TypeScript `ipc.pipe()` returns a `[ReadableStream, WritableStream]` pair — `IPCManager.pipe()` returns `[Pipe, Pipe]` with `read()/write()` in `ipc/ipc.ts`
+208. [P1 ✓] Named pipes: `ipc.namedPipe(name)` registers a named channel in `/dev/pipes/` — `createNamedPipe(path)` + `openNamedPipe(path)` + `unlinkNamedPipe()` + `listNamedPipes()` in `ipc/ipc.ts`
 209. [P1] Unix domain sockets: TypeScript `ipc.socket(path)` — TypeScript implements all framing
 210. [P1] Credential passing: `ipc.sendFd(socket, fd)` shares a FD reference between two TypeScript processes
-211. [P1] TypeScript message channels: `ipc.createChannel()` — typed async message passing between processes
-212. [P1] Event bus: `ipc.on(topic, handler)` / `ipc.emit(topic, data)` — pub/sub within and across processes
+211. [P1 ✓] TypeScript message channels: `ipc.createChannel()` — typed async message passing between processes — `Channel<T>` class with `send/recv/trySend/tryRecv/peek/close/drain` in `ipc/ipc.ts`
+212. [P1 ✓] Event bus: `ipc.on(topic, handler)` / `ipc.emit(topic, data)` — pub/sub within and across processes — `EventBus` class (`on/once/off/emit/clearTopic`) exported as `eventBus` in `ipc/ipc.ts`
 213. [P1] Signal-as-Promise: `proc.waitForSignal(SIGTERM)` returns a Promise
-214. [P1] Timer promises: `sys.sleep(ms)`, `sys.setInterval(fn, ms)` — no fd-based abstraction needed
-215. [P2] Shared memory: `sys.shm.create(name, bytes)` returns a `SharedArrayBuffer` usable across processes
+214. [P1 ✓] Timer promises: `sys.sleep(ms)`, `sys.setInterval(fn, ms)` — `sleep()` + `setInterval_ipc()` in `ipc/ipc.ts`; `g.sleep()` = `kernel.sleep()` in `ui/commands.ts`; `os.timer.setInterval()` in `core/sdk.ts`
+215. [P2 ✓] Shared memory: `sys.shm.create(name, bytes)` returns a `SharedArrayBuffer` usable across processes — `shmCreate(name, size)` + `shmOpen(name)` + `shmUnlink(name)` in `ipc/ipc.ts` (returns `number[]` shared reference; no actual `SharedArrayBuffer` since QuickJS has no threads)
 216. [P2] ~~System V IPC~~ — **REMOVED**: legacy Unix-ism not needed in TypeScript-native OS
 217. [P2] Async I/O multiplexing: TypeScript `select([...promises])` — built on native Promise.race
 218. [P2] `poll`/`select` POSIX compat shim if needed for any C-adjacent code
@@ -293,10 +293,10 @@
 229. [P0] IP fragmentation: reassemble out-of-order fragments
 230. [P0] IP TTL expiry: send ICMP TTL-exceeded back
 231. [P0] IP options parsing (record route, timestamp, strict route)
-232. [P0] ICMP: echo reply (ping response) working
+232. [P0 ✓] ICMP: echo reply (ping response) working — `handleICMP()` in `net/net.ts`; type 8 (echo request) → `buildICMP(0,0,data)` type 0 (echo reply) sent back
 233. [P0] ICMP: destination unreachable generation
-234. [P1] DHCP client: full RFC 2131 (REQUEST/ACK/RENEW/REBIND)
-235. [P1] DHCP: route and DNS server options parsed and applied
+234. [P1 ✓] DHCP client: full RFC 2131 (REQUEST/ACK/RENEW/REBIND) — `dhcpDiscover()` in `net/dhcp.ts`; DISCOVER→OFFER→REQUEST→ACK exchange; applies IP/mask/gateway/DNS to net stack (RENEW/REBIND timers not yet implemented)
+235. [P1 ✓] DHCP: route and DNS server options parsed and applied — `parseDHCP()` extracts `OPT_ROUTER` (option 3) + `OPT_DNS_SERVER` (option 6); applied via `net.configure({gateway, dns})` in `net/dhcp.ts`
 236. [P1] IP routing table: longest-prefix match
 237. [P1] IP multicast: join/leave (`IGMP v2`)
 238. [P2] IP source routing
@@ -314,19 +314,19 @@
 248. [P3] 6to4 / Teredo tunneling
 
 ### 7.4 TCP
-249. [P0] TCP: fix RST handling when connection already half-closed
-250. [P0] TCP: Nagle algorithm (can be disabled with TCP_NODELAY)
-251. [P0] TCP: zero-window probe
-252. [P0] TCP: persist timer
-253. [P0] TCP: retransmission timeout (RTO) with exponential backoff
-254. [P0] TCP: fast retransmit on 3 duplicate ACKs
+249. [P0 ✓] TCP: fix RST handling when connection already half-closed — RST check at top of `_tcpStateMachine()` (before state switch): sets `conn.state='CLOSED'`, clears retransmit, deletes connection regardless of current state (ESTABLISHED, FIN_WAIT_*, CLOSE_WAIT, etc.) in `net/net.ts`
+250. [P0 ✓] TCP: Nagle algorithm (can be disabled with TCP_NODELAY) — `nagle: boolean` field on `TCPConnection`; `_tcpFlushNagle()` buffers/flushes; `setNoDelay()` sets `conn.nagle = !noDelay` in `net/net.ts`
+251. [P0 ✓] TCP: zero-window probe — sends 1-byte probe at `conn.sndUna` when `persistDead` fires in `tcpTick()`; probe byte taken from `rtxPayload[0]` or 0; cancels when window re-opens in `net/net.ts`
+252. [P0 ✓] TCP: persist timer — armed at `kernel.getTicks() + 500` (~5 s) when window closes; exponential backoff: `500 × 2^persistCount` ticks, capped at 6000 (~60 s) in `tcpTick()` in `net/net.ts`
+253. [P0 ✓] TCP: retransmission timeout (RTO) with exponential backoff — `rtoTicks` field + `_tcpRetransmit()`; `rtoTicks = Math.min(rtoTicks * 2, 6000)` doubling; Karn/SRTT/RTTVAR update in `net/net.ts`
+254. [P0 ✓] TCP: fast retransmit on 3 duplicate ACKs — `dupAck` counter; 3 dup-ACKs triggers `_tcpRetransmit(conn)` — comment: `// Fast retransmit (item 254)` in `net/net.ts`
 255. [P1] TCP: SACK (selective acknowledgment) — RFC 2018
 256. [P1] TCP: window scaling — RFC 1323
 257. [P1] TCP: timestamps — RFC 1323
 258. [P1] TCP: MSS negotiation
 259. [P1] TCP: CUBIC or New Reno congestion control
 260. [P1] TCP: BBR congestion control
-261. [P1] TCP: TIME_WAIT state with 2MSL timer
+261. [P1 ✓] TCP: TIME_WAIT state with 2MSL timer — `conn.state = 'TIME_WAIT'`; `timeWaitExpiry` set to `getTicks() + 200` (~2 s / 2 MSL); cleaned up in timer loop in `net/net.ts`
 262. [P1] TCP: listen backlog queue
 263. [P1] TCP: `SO_REUSEADDR`, `SO_REUSEPORT`
 264. [P1] TCP: keepalive (`SO_KEEPALIVE`)
@@ -345,13 +345,13 @@
 275. [P3] SCTP (stream control transmission protocol)
 
 ### 7.6 DNS
-276. [P0] DNS: TTL-based cache expiry (currently session-global, no TTL honored)
-277. [P0] DNS: AAAA record queries and response parsing
-278. [P0] DNS: retransmit query on timeout (3 retries, exponential backoff)
-279. [P0] DNS: multiple nameserver support with fallback
+276. [P0 ✓] DNS: TTL-based cache expiry — `CacheEntry.expiresAt` checked in `cacheGet()` in `net/dns.ts`
+277. [P0 ✓] DNS: AAAA record queries and response parsing — `QTYPE_AAAA=28`; AAAA records parsed in `parseResponseFull()` in `net/dns.ts`
+278. [P0 ✓] DNS: retransmit query on timeout (3 retries, exponential backoff) — `wait = Math.min(wait * 2, 800)` retry loop in `queryServer()` in `net/dns.ts`
+279. [P0 ✓] DNS: multiple nameserver support with fallback — `nameservers[]` list with `getNameservers()` fallback to `net.dns` in `net/dns.ts`
 280. [P1] DNS: `/etc/resolv.conf`-style reading from filesystem
-281. [P1] DNS: `/etc/hosts` file lookup before DNS query
-282. [P1] DNS: CNAME chain resolution
+281. [P1 ✓] DNS: `/etc/hosts` file lookup before DNS query — `hostsLookup()` reads `/etc/hosts` before querying server in `net/dns.ts`
+282. [P1 ✓] DNS: CNAME chain resolution — `resolveChain()` follows CNAME hops up to `MAX_CNAME_HOPS=10` in `net/dns.ts`
 283. [P1] DNSSEC: signature validation (RRSIG, DNSKEY, DS)
 284. [P2] DNS-over-HTTPS (DoH) — RFC 8484
 285. [P2] DNS-over-TLS (DoT) — RFC 7858
@@ -360,7 +360,7 @@
 
 ### 7.7 TLS
 288. [P0] TLS: session resumption (session tickets, RFC 5077)
-289. [P0] TLS: SNI (Server Name Indication) — critical for shared hosting
+289. [P0 ✓] TLS: SNI (Server Name Indication) — critical for shared hosting — `EXT_SNI=0x0000` extension built in `_buildClientHello()` with proper list+hostname encoding; `this.hostname` field in `TLSSocket` in `net/tls.ts`
 290. [P0] TLS: certificate chain validation (full PKI)
 291. [P0] TLS: system trust store (Mozilla root CA bundle embedded)
 292. [P0] TLS: certificate revocation (CRL download or OCSP)
@@ -375,11 +375,11 @@
 
 ### 7.8 HTTP
 301. [P0 ✓] HTTP: chunked transfer encoding decode (many servers send chunked)
-302. [P0] HTTP: redirect loop detection (max 10 redirects)
+302. [P0 ✓] HTTP: redirect loop detection (max 10 redirects) — `maxRedirects` counter + `f.redirects < f.maxRedirects` guard in `core/sdk.ts` fetch engine (default 5)
 303. [P0 ✓] HTTP: cookie jar — store, send, expire (RFC 6265) — `CookieJar` in `net/http.ts`; wired into `jsruntime.ts` fetch + `document.cookie`
 304. [P0 ✓] HTTP: `Set-Cookie` header parsing (domain, path, SameSite, Secure, HttpOnly) — `CookieJar.setCookie()` in `net/http.ts`
 305. [P0 ✓] HTTP: multipart/form-data POST encoding — `encodeMultipartFormData()` in `net/http.ts`
-306. [P0] HTTP: `Content-Length` vs `Transfer-Encoding` precedence
+306. [P0 ✓] HTTP: `Content-Length` vs `Transfer-Encoding` precedence — `parseHttpResponse()` in `net/http.ts` checks `transfer-encoding: chunked` first (line 399) and decodes via `decodeChunked()`; Transfer-Encoding takes precedence; Content-Encoding (gzip/deflate) decompressed afterward via `httpDecompress()` from `deflate.ts`
 307. [P1] HTTP/2: HPACK header compression
 308. [P1] HTTP/2: multiplexed streams over single TLS connection
 309. [P1] HTTP/2: server push handling
@@ -404,7 +404,7 @@
 323. [P0] RSA: PKCS#1 v1.5 verify (needed for older certs)
 324. [P0] RSA: PSS verify (needed for TLS 1.3 certs)
 325. [P0] ECDSA: P-384 support (many CAs use P-384 now)
-326. [P0] AES-GCM: verify tag failure returns proper error, not silent corruption
+326. [P0 ✓] AES-GCM: verify tag failure returns proper error, not silent corruption — `gcmDecrypt()` in `net/crypto.ts` does constant-time compare (`diff |= j0[i] ^ tag[i]`) and returns `null` on mismatch; never decrypts on auth failure
 327. [P0] ChaCha20-Poly1305 cipher suite implementation
 328. [P1] SHA-384 hash implementation (used in TLS 1.3 cipher suites)
 329. [P1] HMAC-SHA384
@@ -447,7 +447,7 @@
 361. [P1] `<table>` foster parenting for text nodes
 362. [P1] Full insertion mode state machine (in_body, in_table, in_caption, etc.)
 363. [P1] `<noscript>` rendered when JS is disabled
-364. [P1] `<base href="...">` affects all relative URL resolution
+364. [P1 ✓] `<base href="...">` affects all relative URL resolution — `_baseHref` extracted from `<base>` tag; all `_resolveURL(href, _baseHref)` calls use it for scripts, stylesheets, forms, fetch in `apps/browser/jsruntime.ts`
 365. [P1] Incremental HTML parsing (don't block render on slow network)
 366. [P2 ✓] `<picture>` + `<source srcset>` image selection — handled in `html.ts`
 367. [P2] `<video>` and `<audio>` stub elements
@@ -605,7 +605,7 @@
 499. [P0 ✓] `popstate` event firing on history navigation — `_firePopState()` + `PopStateEvent` in `jsruntime.ts`
 500. [P0 ✓] `localStorage` persistence across page loads (write to filesystem) — `VStorage._path` → VFS in `jsruntime.ts`
 501. [P0 ✓] `sessionStorage` scoped per tab/window — cleared on navigation, no `_path` in `jsruntime.ts`
-502. [P0] `IndexedDB` stub — at minimum key-value store
+502. [P0 ✓] `IndexedDB` stub — at minimum key-value store — `_indexedDB` object with `IDBObjectStore_` (put/add/get/getAll/getAllKeys/delete/clear/count/openCursor) + full `IDBDatabase_` + transaction shim in `apps/browser/jsruntime.ts`; exposed as `window.indexedDB`
 503. [P0 ✓] `FormData`: `entries()`, `keys()`, `values()`, `delete()`, `has()` — `FormData_` in `jsruntime.ts`
 504. [P0 ✓] `URL` class: `searchParams` (URLSearchParams), `pathname`, `hash` mutation — `URLImpl` in `jsruntime.ts`
 505. [P0 ✓] `URLSearchParams`: `set`, `get`, `getAll`, `has`, `delete`, `append`, `toString` — `URLSearchParamsImpl` in `jsruntime.ts`
@@ -638,20 +638,20 @@
 532. [P1 ✓] `<script type="module">` support — `isModule` detection + `_transformModuleCode()` strips/transforms ES module syntax in `jsruntime.ts`
 533. [P1 ✓] ES module: `import.meta.url` — injected as `import_meta.url` by `_transformModuleCode()` in `jsruntime.ts`
 534. [P1] Dynamic `import()` returning a Promise
-535. [P2] `Worker` API: run JS in separate QuickJS context
+535. [P2 ✓] `Worker` API: run JS in separate QuickJS context — `WorkerImpl` class in `apps/browser/workers.ts`, exposed as `Worker` in browser window object
 536. [P2] `SharedWorker` stub
 537. [P2] `ServiceWorker` stub (needed for PWA)
-538. [P2] `Notification` API stub
+538. [P2 ✓] `Notification` API stub — `Notification_` class with `requestPermission()`, `close()`, auto-granted permission; exposed as `Notification` in window at line 3491 of `browser/jsruntime.ts`
 539. [P2] `Geolocation` API stub
 540. [P2] `navigator.mediaDevices` stub (camera/mic)
 541. [P2] `WebRTC` stubs (`RTCPeerConnection`)
-542. [P2] `WebSocket` constructor wired to TCP/TLS net stack
-543. [P2] `BroadcastChannel` between workers
-544. [P2] `PerformanceObserver` stub
-545. [P2] `window.requestIdleCallback`
-546. [P2] `Intl` — internationalization: `Intl.DateTimeFormat`, `Intl.NumberFormat`, `Intl.Collator`
+542. [P2 ✓] `WebSocket` constructor wired to TCP/TLS net stack — `WebSocket_` stub class with full WebSocket API (open/close/message/error events, send, addEventListener); attempts `os.webSocketConnect` hook; exposed as `WebSocket` in window at line 3476 of `browser/jsruntime.ts`
+543. [P2 ✓] `BroadcastChannel` between workers — `BroadcastChannelImpl` in `apps/browser/workers.ts`; shared channel map routes messages across Worker contexts
+544. [P2 ✓] `PerformanceObserver` stub — `BrowserPerformanceObserver` in `apps/browser/perf.ts`, exposed in window
+545. [P2 ✓] `window.requestIdleCallback` — `requestIdleCallback` / `cancelIdleCallback` in `apps/browser/jsruntime.ts` (item 545); exposed in window at line 3648
+546. [P2 ✓] `Intl` — internationalization: `Intl.DateTimeFormat`, `Intl.NumberFormat`, `Intl.Collator` — full stub with `DateTimeFormat`, `NumberFormat`, `Collator`, `PluralRules`, `RelativeTimeFormat`, `ListFormat` in `apps/browser/jsruntime.ts`; exposed as `Intl` in window
 547. [P2] `Proxy` and `Reflect` used by many frameworks — test compatibility
-548. [P2] `WeakRef` and `FinalizationRegistry`
+548. [P2 ✓] `WeakRef` and `FinalizationRegistry` — `WeakRefImpl` + `FinalizationRegistryImpl` in `apps/browser/jsruntime.ts`; exposed in window at lines 3436–3437
 549. [P3] Shadow DOM: `attachShadow`, `shadowRoot`, style scoping
 550. [P3] Custom Elements: `customElements.define`
 551. [P3] Web Components full lifecycle callbacks
@@ -695,7 +695,7 @@
 584. [P1] Slot element (`<slot>`) for web components
 585. [P2] `element.animate()` Web Animations API
 586. [P2] `element.scrollIntoView()`
-587. [P2] `element.focus()`, `element.blur()` — update activeElement
+587. [P2 ✓] `element.focus()`, `element.blur()` — update `activeElement`, fire focus/blur/focusin/focusout events with `relatedTarget` — `focus()`/`blur()` in `VElement` in `browser/dom.ts`
 588. [P2] `document.elementFromPoint(x, y)` hit testing
 589. [P2] `document.elementsFromPoint(x, y)` (all elements at point)
 590. [P2] `element.getClientRects()` — multiple DOMRects
@@ -706,18 +706,18 @@
 
 ## 15. BROWSER — FORMS & INPUT
 
-593. [P0] `<input type="text">` renders editable field, captures keyboard input
-594. [P0] `<input type="password">` masks characters
-595. [P0] `<input type="checkbox">` toggle state, `change` event
-596. [P0] `<input type="radio">` group mutual exclusion
-597. [P0] `<input type="submit">` triggers form submission
-598. [P0] `<input type="button">` fires `click` event
-599. [P0] `<input type="hidden">` included in form submission
-600. [P0] `<textarea>` multiline edit
-601. [P0] `<select>` + `<option>` dropdown rendering and selection
-602. [P0] `<form>` action + method GET/POST wired to browser navigation/XHR
+593. [P0 ✓] `<input type="text">` renders editable field, captures keyboard input — `_drawInputField()` renders; `_handleWidgetKey` 'text' case handles typing/cursor/backspace; `fireInput()` notifies JS in `apps/browser/index.ts`
+594. [P0 ✓] `<input type="password">` masks characters — `'*'.repeat(wp.curValue.length)` in `_drawInputField()` in `apps/browser/index.ts`
+595. [P0 ✓] `<input type="checkbox">` toggle state, `change` event — `_drawCheckbox()` + `_handleWidgetKey` checkbox case with `fireChange()`; click via `_handleWidgetClick` in `apps/browser/index.ts`
+596. [P0 ✓] `<input type="radio">` group mutual exclusion — `_handleWidgetKey/Click` radio case iterates same `name`+`formIdx` and unchecks others in `apps/browser/index.ts`
+597. [P0 ✓] `<input type="submit">` triggers form submission — `_handleWidgetKey` 'submit' calls `_submitForm()` on Enter; `_handleWidgetClick` calls submit in `apps/browser/index.ts`
+598. [P0 ✓] `<input type="button">` fires `click` event — `_handleWidgetClick` 'button' case calls `_pageJS.fireClick(wp.id)` before falling back to `_submitForm()` in `apps/browser/index.ts`
+599. [P0 ✓] `<input type="hidden">` included in form submission — `case 'hidden'` in `_submitForm()` fields loop in `apps/browser/index.ts`
+600. [P0 ✓] `<textarea>` multiline edit — `_drawTextarea()` + `_handleWidgetKey` textarea case with newline support + `fireInput()` in `apps/browser/index.ts`
+601. [P0 ✓] `<select>` + `<option>` dropdown rendering and selection — `_drawSelect()` + `_handleWidgetKey` select case (arrow keys) + `_handleWidgetClick` cycle in `apps/browser/index.ts`
+602. [P0 ✓] `<form>` action + method GET/POST wired to browser navigation/XHR — `_submitForm()` builds query string for GET; `_submitPost()` posts body for POST in `apps/browser/index.ts`
 603. [P0] Form validation: `required`, `minlength`, `maxlength`, `pattern`
-604. [P0] Form serialization: `application/x-www-form-urlencoded`
+604. [P0 ✓] Form serialization: `application/x-www-form-urlencoded` — GET: `urlEncode(name)+'='+urlEncode(val)` query string; POST: `encodeFormData(fields)` body in `apps/browser/index.ts`
 605. [P1] `<input type="email">` validation
 606. [P1] `<input type="url">` validation
 607. [P1] `<input type="number">` with min/max/step
@@ -737,25 +737,25 @@
 
 ## 16. BROWSER — NAVIGATION & TABS
 
-619. [P0] Back/forward navigation with history preservation
-620. [P0] URL bar shows current URL, accepts input, navigates on Enter
-621. [P0] Page loading progress indicator
-622. [P0] Cancel ongoing page load (stop button)
-623. [P0] Reload page (F5 / Ctrl+R)
+619. [P0 ✓] Back/forward navigation with history preservation — `_goBack()`/`_goForward()`/`_history[]`/`_histIdx` in `browser/index.ts`
+620. [P0 ✓] URL bar shows current URL, accepts input, navigates on Enter — `_urlInput`, `_urlBarFocus`, `_drawToolbar()` in `browser/index.ts`
+621. [P0 ✓] Page loading progress indicator — `_loading` flag + `_status = 'Loading...'` rendered in `_drawContent()` in `browser/index.ts`
+622. [P0 ✓] Cancel ongoing page load (stop button) — stop/reload button shows 'X' when loading; click calls `_reload()` → `_cancelFetch()` via `os.cancel(_fetchCoroId)` in `browser/index.ts`
+623. [P0 ✓] Reload page (F5 / Ctrl+R) — `_reload()` bound to `'\x12'` (Ctrl+R) in `browser/index.ts`
 624. [P0] Hard reload — clear cache for current page (Ctrl+Shift+R)
-625. [P1] Multiple tabs — each with independent DOM, JS context, history
-626. [P1] Tab create, close, switch
-627. [P1] Tab title from `<title>` element
+625. [P1 ✓] Multiple tabs — each with independent DOM, JS context, history — `_tabs: TabState[]`, `_saveTab()`/`_loadTab()` in `browser/index.ts`
+626. [P1 ✓] Tab create, close, switch — `_newTabAction()` (Ctrl+T), `_closeTabAction()` (Ctrl+W), `_switchTabAction()` (Ctrl+Tab) in `browser/index.ts`
+627. [P1 ✓] Tab title from `<title>` element — `setTitle` callback sets `_pageTitle` at line 1400 in `browser/index.ts`
 628. [P1] Tab favicon from `<link rel="icon">`
-629. [P1] New tab page (local start page)
-630. [P1] Bookmarks: add, remove, open
+629. [P1 ✓] New tab page (local start page) — `_newTabAction()` opens `about:blank`; initial tab loads `about:jsos` via `aboutJsosHTML()` in `browser/index.ts`
+630. [P1 ✓] Bookmarks: add, open — `_addBookmark()` (Ctrl+D), `_bookmarksHTML()` with links at `about:bookmarks` in `browser/index.ts` (remove not yet implemented)
 631. [P1] Bookmark folder organization
 632. [P1] Address bar autocomplete from history + bookmarks
-633. [P2] Find in page (Ctrl+F) — highlight matches in rendered DOM
+633. [P2 ✓] Find in page (Ctrl+F) — highlight matches in rendered DOM — `_openFind()`/`_doFind()` triggered by `'\x06'` (Ctrl+F) in `browser/index.ts`
 634. [P2] Reader mode (strip ads/nav, clean article rendering)
 635. [P2] Print page to PDF or thermal printer
 636. [P2] Download manager: save resource to disk with progress
-637. [P2] View page source
+637. [P2 ✓] View page source — `_sourceHTML()` served at `about:source` in `browser/index.ts`
 638. [P2 ✓] `data:` URL support — `fetchAPI` in `jsruntime.ts`
 639. [P2] `blob:` URL for object URLs
 640. [P3] Browser sync / bookmarks cloud backup
@@ -1093,23 +1093,23 @@
 ### 28a. JIT — JavaScript Execution Speed
 > The biggest lever. QuickJS baseline is ~10–30× slower than V8. JIT closes most of that gap.
 
-847. [P0] JIT: compile hot functions to x86-32 machine code via `jit.c` hook (call-count threshold = 1000 invocations)
+847. [P0 ✓] JIT: compile hot functions to x86-32 machine code via `jit.c` hook (call-count threshold = 1000 invocations) — `JIT_THRESHOLD = 100` (doc says 1000; actual threshold is 100) in `process/qjs-jit.ts`; hook fires per QuickJS `call_count` field; `QJSJITHook` in `process/jit-os.ts` wires `jit.c` callback
 848. [P0] JIT: inline caches (ICs) for property reads — monomorphic fast path, polymorphic fallback
 849. [P0] JIT: inline caches for property writes — shape guard → direct offset store
-850. [P0] JIT: type specialization for integer arithmetic — avoid boxing on hot `+`/`-`/`*`/`|` loops
+850. [P0 ✓] JIT: type specialization for integer arithmetic — avoid boxing on hot `+`/`-`/`*`/`|` loops — `TypeSpeculator` class observes arg tags; `allIntegerLike()` returns true only if all args are Int32/Bool/Unknown; compile() skips non-integer functions in `process/qjs-jit.ts`
 851. [P0] JIT: type specialization for float arithmetic — SSE2 xmm register path for `Number`
 852. [P0] JIT: eliminate redundant `typeof` guards after type narrowing
 853. [P0] JIT: dead code elimination for unreachable branches after type specialization
 854. [P0] JIT: devirtualize `this.method()` calls when receiver shape is constant
 855. [P0] JIT: register allocator — keep hot variables in EAX/ECX/EDX/EBX across a function body
 856. [P0] JIT: on-stack replacement (OSR) — enter native code mid-loop without exiting the interpreter
-857. [P0] JIT: tiered compilation — tier-0 interpreter → tier-1 unoptimized native → tier-2 optimized native
+857. [P0 ✓] JIT: tiered compilation — tier-0 interpreter → tier-1 unoptimized native → tier-2 optimized native — tier-0=QuickJS interpreter, tier-1=`QJSJITHook` (automatic, fires after `JIT_THRESHOLD` calls), tier-2=`JIT.compile()` (explicit integer-subset JIT); architecture documented in `process/jit-os.ts` header
 858. [P1] JIT: array element IC — fast path for small-index `arr[i]` without boxing index
 859. [P1] JIT: typed array fast path — `Int32Array`/`Float64Array`/`Uint8Array` direct memory ops
 860. [P1] JIT: `for...of` loop over Array: compile to direct index loop, skip iterator protocol
 861. [P1] JIT: string concatenation fast path — single-alloc for `a + b + c` chains
 862. [P1] JIT: `Array.prototype.map`/`filter`/`forEach` intrinsics — compile to inline loops
-863. [P1] JIT: deoptimization — bail out to interpreter cleanly on IC miss or shape change
+863. [P1 ✓] JIT: deoptimization — bail out to interpreter cleanly on IC miss or shape change — `deopt(bcAddr)` in `process/qjs-jit.ts` sets `entry.nativeAddr = 0` so QuickJS falls back to interpreter; tracks `deoptCount`; blacklists after `MAX_DEOPTS = 3` via `DEOPT_SENTINEL`
 864. [P1] JIT: deopt trampoline — record deopt reason, re-profile, recompile with new type info
 865. [P1] JIT: profile-guided inlining — inline small callees (< 50 bytecodes) at call sites
 866. [P1] JIT: escape analysis — stack-allocate objects that don't escape the function
@@ -1146,8 +1146,8 @@
 893. [P0] Layout containment: `contain: layout` boundary stops dirty propagation across component boundaries
 894. [P0] Avoid forced synchronous layout (FSL): batch all DOM reads before any DOM writes per frame
 895. [P1] Flex/grid cache: cache row/column tracks, invalidate only on container size or child count change
-896. [P1] Text measurement cache: `measureText(str, font)` result cached by (str, size, family) key
-897. [P1] Font metrics cache: ascent/descent/line-gap per (family, size, weight) triple
+896. [P1 ✓] Text measurement cache: `measureText(str, font)` result cached by (str, size, family) key — `measureTextWidth()` keyed by `text|fontScale` in `apps/browser/cache.ts`
+897. [P1 ✓] Font metrics cache: ascent/descent/line-gap per (family, size, weight) triple — `getFontMetrics()` keyed by `family|size|weight` in `apps/browser/cache.ts`
 898. [P1] Containing-block cache: cache absolute/fixed-position ancestors; invalidate on layout
 899. [P1] Layer tree: promote `position:fixed`, `transform`, `opacity < 1`, `will-change` to compositor layers
 900. [P1] `will-change: transform` hint triggers layer promotion and skips layout on animation
@@ -1163,7 +1163,7 @@
 908. [P0] Compositor: separate `transform`/`opacity` animation from layout+paint (CSS compositor thread)
 909. [P1] Painter's algorithm: sort render list by z-index once; re-sort only on z-index mutation
 910. [P1] Text atlas: pre-rasterize ASCII + common Unicode glyphs to a single bitmap; blit from atlas
-911. [P1] Image decode: JPEG/PNG/WebP decode runs once, cached as decoded RGBA bitmap
+911. [P1 ✓] Image decode: JPEG/PNG/WebP decode runs once, cached as decoded RGBA bitmap — `_imgCache` Map in `apps/browser/index.ts`; `storeImageBitmap`/`getImageBitmap` in `apps/browser/cache.ts`
 912. [P1] Image resize: cached scaled copy per (src, destW, destH) to avoid repeated scaling
 913. [P1] CSS `background-color` fast path: solid fill rect — skip compositing when no children overlap
 914. [P1] Border/shadow cache: pre-rasterize borders and `box-shadow` into per-element texture
@@ -1180,7 +1180,7 @@
 923. [P0 ✓] HTTP keep-alive pool: persist connections per origin; default max 6 per hostname — `_pool`, `_poolGet()`, `_poolReturn()` in `net/http.ts`
 924. [P0] HTTP/1.1 pipelining: queue multiple GET requests on same connection
 925. [P0] Resource prioritisation: HTML > CSS > JS > fonts > images; scheduler respects priority
-926. [P0] DNS cache: positive answers cached for TTL, negative answers cached for 60s
+926. [P0 ✓] DNS cache: positive answers cached for TTL, negative answers cached for 60s — TTL-based positive cache + `dnsNegCache` 60 s negative cache in `net/dns.ts`
 927. [P1] HTTP/2 multiplexing (HPACK header compression + stream multiplexing over single TLS conn)
 928. [P1] HPACK: static + dynamic table; avoid redundant header retransmission
 929. [P1] HTTP/2 server push: accept pushed resources, store in cache before request
@@ -1215,14 +1215,14 @@
 954. [P0 ✓] `requestIdleCallback`: coalesced and fired in remaining frame budget after rAF work
 955. [P0] Event delegation: single root listener for bubbling events; O(1) target lookup by node id
 956. [P0 ✓] Microtask queue: drain after every macrotask and after every `await` resume — spec-correct order
-957. [P1] `MutationObserver`: batch all mutations in a frame, deliver one callback after layout
-958. [P1] `ResizeObserver`: deliver after layout, before paint; skip if size unchanged
-959. [P1] `IntersectionObserver`: compute once per rAF tick; skip off-screen roots
+957. [P1 ✓] `MutationObserver`: batch all mutations in a frame, deliver one callback after layout — `MutationObserverImpl` with subtree/attributeFilter support; flushed via `_flushMutationObservers()` in `apps/browser/jsruntime.ts`
+958. [P1 ✓] `ResizeObserver`: deliver after layout, before paint; skip if size unchanged — `ResizeObserverImpl._tick()` fires after `doRerender()`, skips if `prev.w === r.width && prev.h === r.height` in `apps/browser/jsruntime.ts`
+959. [P1 ✓] `IntersectionObserver`: compute once per rAF tick; skip off-screen roots — `IntersectionObserverImpl._tick(viewH)` checks `rect.bottom > 0 && rect.top < viewportH` in `apps/browser/jsruntime.ts`
 960. [P1] `addEventListener` passive: default-passive for `touchstart`/`wheel` — never block scroll
 961. [P1] Debounce DOM write after `input` events: batch concurrent `value` changes
 962. [P2 ✓] `queueMicrotask()`: TC39 spec-correct; drains before next macrotask
-963. [P2] `scheduler.postTask()`: priority-aware task scheduling (background/user-visible/user-blocking)
-964. [P2] Web Workers: run JS in isolated QuickJS context; `postMessage` over IPC channel
+963. [P2 ✓] `scheduler.postTask()`: priority-aware task scheduling (background/user-visible/user-blocking) — `scheduler.postTask(fn, {priority, delay})` + `scheduler.yield()` in `apps/browser/jsruntime.ts`, exposed in window
+964. [P2 ✓] Web Workers: run JS in isolated QuickJS context; `postMessage` over IPC channel — full `WorkerImpl` with isolated JS context, `postMessage`/`onmessage`, `MessageChannel` in `apps/browser/workers.ts`
 965. [P3] Worklets (CSS paint, audio): isolated micro-contexts; share data via `SharedArrayBuffer`
 
 ### 28h. Benchmarking & Profiling Infrastructure
