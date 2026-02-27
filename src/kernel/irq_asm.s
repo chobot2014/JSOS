@@ -31,6 +31,94 @@ IRQ_STUB 13
 IRQ_STUB 14
 IRQ_STUB 15
 
+; ── CPU exception stubs (vectors 0–31) ────────────────────────────────────
+; Intel SDM Vol. 3A §6.3.1 — some exceptions push an error code before EIP;
+; the rest do not.  We normalise the stack by pushing a dummy 0 so that
+; exception_common_stub always sees:
+;   [esp+0]  vector       (pushed by stub)
+;   [esp+4]  error_code   (CPU-pushed, or dummy 0 from ISR_NOERR)
+;   [esp+8]  eip          ]
+;   [esp+12] cs           } pushed by CPU
+;   [esp+16] eflags       ]
+
+extern exception_dispatch
+
+%macro ISR_NOERR 1
+global isr%1
+isr%1:
+    cli
+    push dword 0        ; dummy error_code (no hardware error code)
+    push dword %1       ; vector number
+    jmp  exception_common_stub
+%endmacro
+
+%macro ISR_ERR 1
+global isr%1
+isr%1:
+    cli
+    ; CPU already pushed error_code before EIP/CS/EFLAGS
+    push dword %1       ; vector number
+    jmp  exception_common_stub
+%endmacro
+
+; Assignments per Intel SDM §6.3 / §6.15
+ISR_NOERR  0  ; #DE  Divide-by-zero
+ISR_NOERR  1  ; #DB  Debug
+ISR_NOERR  2  ;      NMI
+ISR_NOERR  3  ; #BP  Breakpoint
+ISR_NOERR  4  ; #OF  Overflow
+ISR_NOERR  5  ; #BR  Bound Range Exceeded
+ISR_NOERR  6  ; #UD  Invalid Opcode
+ISR_NOERR  7  ; #NM  Device Not Available (FPU)
+ISR_ERR    8  ; #DF  Double Fault       (error code always = 0)
+ISR_NOERR  9  ;      Coprocessor Segment Overrun (reserved)
+ISR_ERR   10  ; #TS  Invalid TSS
+ISR_ERR   11  ; #NP  Segment Not Present
+ISR_ERR   12  ; #SS  Stack-Segment Fault
+ISR_ERR   13  ; #GP  General Protection Fault
+ISR_ERR   14  ; #PF  Page Fault
+ISR_NOERR 15  ;      Reserved
+ISR_NOERR 16  ; #MF  x87 FPU Exception
+ISR_ERR   17  ; #AC  Alignment Check
+ISR_NOERR 18  ; #MC  Machine Check
+ISR_NOERR 19  ; #XM  SIMD Floating-Point Exception
+ISR_NOERR 20  ; #VE  Virtualization Exception
+ISR_ERR   21  ; #CP  Control-Protection Exception
+ISR_NOERR 22  ;      Reserved
+ISR_NOERR 23  ;      Reserved
+ISR_NOERR 24  ;      Reserved
+ISR_NOERR 25  ;      Reserved
+ISR_NOERR 26  ;      Reserved
+ISR_NOERR 27  ;      Reserved
+ISR_NOERR 28  ;      Reserved
+ISR_NOERR 29  ;      Reserved
+ISR_ERR   30  ; #SX  Security Exception
+ISR_NOERR 31  ;      Reserved
+
+; Common handler stub.
+; On entry: [esp] = vector, [esp+4] = error_code, [esp+8]+ = CPU frame.
+; Saves all GP registers + DS and passes a pointer to the frame to C.
+exception_common_stub:
+    pusha                   ; pushes edi,esi,ebp,esp(dummy),ebx,edx,ecx,eax
+    mov  eax, ds
+    push eax                ; save DS
+    mov  ax,  0x10          ; switch to kernel data segment (GDT slot 1)
+    mov  ds,  ax
+    mov  es,  ax
+    mov  fs,  ax
+    mov  gs,  ax
+    push esp                ; *exception_frame_t — argument to exception_dispatch
+    call exception_dispatch
+    add  esp, 4
+    pop  eax                ; restore DS
+    mov  ds,  ax
+    mov  es,  ax
+    mov  fs,  ax
+    mov  gs,  ax
+    popa
+    add  esp, 8             ; discard vector + error_code
+    iret
+
 ; GDT for protected mode (required for IDT to work)
 global gdt_flush
 global gdt_start
