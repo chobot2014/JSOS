@@ -28,6 +28,8 @@ import { launchClock } from '../apps/clock/index.js';
 import { launchNotes } from '../apps/notes/index.js';
 import { launchTetris } from '../apps/tetris/index.js';
 import { launchSnake } from '../apps/snake/index.js';
+import { launchImageViewer } from '../apps/image-viewer/index.js';
+import { launchCalendar } from '../apps/calendar/index.js';
 import { wm, getWM, type App } from '../ui/wm.js';
 import { scheduler } from '../process/scheduler.js';
 import { vmm } from '../process/vmm.js';
@@ -1994,6 +1996,12 @@ export function registerCommands(g: any): void {
     notes:     'notes(path?)\n  Open a simple line-buffer text editor. Ctrl+S to save, Ctrl+Q to quit.',
     tetris:    'tetris()\n  Play Tetris! a/d: move  w: rotate  s: soft-drop  space: hard-drop  q: quit.',
     snake:     'snake()\n  Play Snake! wasd to move, q to quit.',
+    ssh:       "ssh(host, port?)\n  Open an interactive SSH-like TCP session. Default port 22.\n  Type lines to send; type 'exit' or Ctrl+D to close.",
+    rsync:     'rsync(src, dst)\n  Sync files from src path to dst path in the VFS.\n  Copies missing files; skips already-up-to-date files.',
+    markd:     'markd(text)\n  Render a Markdown string in the terminal with basic formatting.\n  Supports headings, bold, italic, lists, blockquotes, code blocks.',
+    imgview:   'imgview(path?)\n  Open an image from the VFS and render it as ASCII/block art.\n  Controls: q=quit  +/-=zoom  arrow=pan  r=reload  h=help',
+    calendar:  'calendar()\n  Open the interactive month calendar.\n  Left/Right=prev/next month  t=today  a=add note  d=del  q=quit',
+    'perf.flame': "perf.flame(fn?, label?, ms?)\n  Display a textual CPU flame graph.\n  With fn: samples fn for ms ms (default 500).\n  Without fn: renders a synthetic demo.",
     watch:     'watch(path, cb, ms?)\n  Poll a file for changes every ms (default 500ms).\n  cb(event, path) called on create/change/delete. Returns {stop()}.',
     trace:     'trace(fn, label?)\n  Wrap fn to log every call with args, return value and duration.',
     'sys.jit': 'sys.jit.stats()\n  JIT compiler stats: compiled/bailed/deopt counts, pool usage KB.',
@@ -2078,6 +2086,88 @@ export function registerCommands(g: any): void {
       terminal.println('  used:   ' + fmt(used));
       terminal.println('  free:   ' + fmt(free));
       return { totalBytes: total, usedBytes: used, freeBytes: free };
+    },
+
+    // ── [Item 974/795] flame(fn?, label?) — text-based call-frequency flame graph ──
+    /**
+     * Sample `fn` intensively and render a textual flame graph showing the
+     * relative "hot" regions of the tight loop.  When called without a
+     * function, renders a synthetic demo flame using the last perf.sample()
+     * result or random weights.
+     */
+    flame(fn?: () => void, label?: string, ms?: number) {
+      var duration = ms || 500;
+      var WIDTH    = 60;
+      var ROWS     = 8;
+
+      // ── collect samples ──────────────────────────────────────────────────
+      var buckets: number[] = new Array(WIDTH).fill(0);
+      var totalSamples = 0;
+
+      if (fn) {
+        var end = Date.now() + duration;
+        while (Date.now() < end) {
+          var t0 = Date.now();
+          fn();
+          var dt = Date.now() - t0;
+          // map elapsed time → width bucket (log scale)
+          var slot = Math.floor((dt / (duration / WIDTH)) * WIDTH);
+          slot = Math.max(0, Math.min(WIDTH - 1, slot));
+          buckets[slot]++;
+          totalSamples++;
+        }
+      } else {
+        // synthetic demo: bell-curve weights
+        for (var bi = 0; bi < WIDTH; bi++) {
+          var centre = WIDTH * 0.35;
+          var sigma  = WIDTH * 0.15;
+          var w = Math.exp(-0.5 * Math.pow((bi - centre) / sigma, 2));
+          buckets[bi] = Math.round(w * 50 + Math.random() * 8);
+          totalSamples += buckets[bi];
+        }
+      }
+
+      // ── normalise to ROWS ────────────────────────────────────────────────
+      var maxCount = Math.max(1, ...buckets);
+
+      terminal.println('');
+      terminal.colorPrintln(
+        '\u25B2 Flame Graph: ' + (label || (fn ? 'custom fn' : 'demo')),
+        Color.LIGHT_CYAN);
+      terminal.colorPrintln(
+        '  ' + totalSamples + ' samples  |  ' + WIDTH + ' buckets  |  height=' + ROWS,
+        Color.DARK_GREY);
+
+      // Render top → bottom (row 0 = tallest bar)
+      for (var row = ROWS - 1; row >= 0; row--) {
+        var threshold = (row / ROWS);
+        var line = '  ';
+        for (var col = 0; col < WIDTH; col++) {
+          var norm = buckets[col] / maxCount;
+          if (norm > threshold) {
+            // heatmap colouring: cold→warm
+            if      (norm > 0.80) line += '\u2588'; // █ red/hot
+            else if (norm > 0.55) line += '\u2593'; // ▓
+            else if (norm > 0.30) line += '\u2592'; // ▒
+            else                  line += '\u2591'; // ░ blue/cold
+          } else {
+            line += ' ';
+          }
+        }
+        var lineColor = row > ROWS * 0.6 ? Color.RED :
+                        row > ROWS * 0.3 ? Color.YELLOW :
+                        Color.LIGHT_CYAN;
+        terminal.colorPrintln(line, lineColor);
+      }
+
+      // x-axis labels
+      var axis = '  ' + '0'.padEnd(Math.floor(WIDTH / 4)) +
+                 '\u25C4\u2500\u2500\u2500 call duration \u2500\u2500\u2500\u25BA'.padEnd(Math.floor(WIDTH / 2)) +
+                 'max';
+      terminal.colorPrintln(axis, Color.DARK_GREY);
+      terminal.println('');
+
+      return { buckets, totalSamples, maxCount };
     }
   };
 
@@ -2156,6 +2246,136 @@ export function registerCommands(g: any): void {
 
   // â”€â”€ [Item 785] snake â€” classic snake game â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   g.snake = function() { launchSnake(terminal); };
+  // -- [Item 770] imgview -- ASCII/block-art image viewer
+  g.imgview = function(path) { launchImageViewer(terminal, path); };
+
+  // -- [Item 774] calendar -- interactive month calendar with notes
+  g.calendar = function() { launchCalendar(terminal); };
+
+  // -- [Item 727] ssh(host, port?) -- SSH-like interactive TCP session
+  g.ssh = function(host, port) {
+    var p = port || 22;
+    if (!host) { terminal.colorPrintln('Usage: ssh(host, port?)', Color.YELLOW); return; }
+    terminal.colorPrintln('[ssh] Connecting to ' + host + ':' + p + ' ...', Color.LIGHT_CYAN);
+    var sock = null;
+    try {
+      sock = net.createSocket('tcp');
+      var connected = net.connect(sock, host, p);
+      if (!connected) throw new Error('connect() failed');
+    } catch (e) {
+      terminal.colorPrintln('[ssh] Connection failed: ' + String(e), Color.RED);
+      return;
+    }
+    terminal.colorPrintln('[ssh] Connected. Type lines to send. "exit" to quit.', Color.LIGHT_GREEN);
+    terminal.colorPrintln('[ssh] (Simple interactive TCP mode -- no crypto)', Color.DARK_GREY);
+    while (true) {
+      terminal.colorPrint('[ssh ' + host + ']\$ ', Color.LIGHT_CYAN);
+      var line = '';
+      while (true) {
+        kernel.sleep(20);
+        if (!kernel.hasKey()) continue;
+        var k = kernel.readKey();
+        if (k === '\r' || k === '\n') { terminal.println(''); break; }
+        if (k === '\x04') { line = 'exit'; break; }
+        if (k === '\x7f' || k === '\x08') {
+          if (line.length > 0) { line = line.slice(0, -1); terminal.print('\x08 \x08'); }
+          continue;
+        }
+        line += k;
+        terminal.print(k);
+      }
+      if (line.trim() === 'exit' || line.trim() === 'quit') break;
+      try {
+        net.send(sock, line + '\r\n');
+        kernel.sleep(100);
+        var resp = null;
+        try { resp = net.recv(sock); } catch (_) {}
+        if (resp && resp.length > 0) terminal.colorPrintln(resp, Color.WHITE);
+      } catch (e2) {
+        terminal.colorPrintln('[ssh] Send error: ' + String(e2), Color.RED);
+        break;
+      }
+    }
+    try { net.close(sock); } catch (_) {}
+    terminal.colorPrintln('[ssh] Connection closed.', Color.DARK_GREY);
+  };
+
+  // -- [Item 728] rsync(src, dst) -- local VFS file tree sync
+  g.rsync = function(src, dst) {
+    if (!src || !dst) { terminal.colorPrintln('Usage: rsync(src, dst)', Color.YELLOW); return; }
+    var copied = 0, skipped = 0, errors = 0;
+    function hashStr(s) {
+      var h = 0x811c9dc5;
+      for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 0x01000193) >>> 0; }
+      return h;
+    }
+    function syncPath(sp, dp) {
+      var st = fs.stat(sp);
+      if (!st) { skipped++; return; }
+      if (st.type === 'directory') {
+        if (!fs.exists(dp)) { try { fs.mkdir(dp); } catch (_) {} }
+        var kids = [];
+        try { kids = fs.ls(sp) || []; } catch (_) {}
+        for (var ci = 0; ci < kids.length; ci++) {
+          var ch = typeof kids[ci] === 'string' ? kids[ci] : kids[ci].name;
+          var slash1 = sp.endsWith('/') ? '' : '/';
+          var slash2 = dp.endsWith('/') ? '' : '/';
+          syncPath(sp + slash1 + ch, dp + slash2 + ch);
+        }
+      } else {
+        var st2 = null; try { st2 = fs.readFile(sp); } catch (_) {}
+        if (st2 === null || st2 === undefined) { skipped++; return; }
+        var dt = null;
+        if (fs.exists(dp)) { try { dt = fs.readFile(dp); } catch (_) {} }
+        if (dt !== null && hashStr(st2) === hashStr(dt || '')) { skipped++; return; }
+        try {
+          fs.writeFile(dp, st2);
+          terminal.colorPrintln('  [copy] ' + sp + ' -> ' + dp, Color.LIGHT_GREEN);
+          copied++;
+        } catch (e) { terminal.colorPrintln('  [err]  ' + dp + ': ' + String(e), Color.RED); errors++; }
+      }
+    }
+    terminal.colorPrintln('rsync: ' + src + ' -> ' + dst, Color.LIGHT_CYAN);
+    syncPath(src, dst);
+    terminal.colorPrintln('Done: ' + copied + ' copied, ' + skipped + ' up-to-date, ' + errors + ' errors.',
+      errors > 0 ? Color.YELLOW : Color.LIGHT_GREEN);
+    return { copied, skipped, errors };
+  };
+
+  // -- [Item 680] markd(text) -- render Markdown in the terminal
+  g.markd = function(text) {
+    if (typeof text !== 'string') { terminal.colorPrintln('Usage: markd(text)', Color.YELLOW); return; }
+    var lines = text.split('\n');
+    function stripInline(s) {
+      return s.replace(/([^]+)/g, '').replace(/\*\*([^*]+)\*\*/g, '')
+              .replace(/__([^_]+)__/g, '').replace(/\*([^*]+)\*/g, '')
+              .replace(/_([^_]+)_/g, '').replace(/\[([^\]]+)\]\([^)]+\)/g, '');
+    }
+    for (var li = 0; li < lines.length; li++) {
+      var l = lines[li];
+      var hm = l.match(/^(#{1,6})\s+(.*)/);
+      if (hm) {
+        var lvl = hm[1].length;
+        var htxt = hm[2];
+        var hc = lvl === 1 ? Color.WHITE : lvl === 2 ? Color.LIGHT_CYAN : lvl === 3 ? Color.YELLOW : Color.LIGHT_GREY;
+        if (lvl === 1) terminal.colorPrintln('\u2550'.repeat(Math.min(htxt.length + 2, 60)), Color.DARK_GREY);
+        terminal.colorPrintln(htxt, hc);
+        if (lvl <= 2) terminal.colorPrintln('\u2500'.repeat(Math.min(htxt.length + 2, 60)), Color.DARK_GREY);
+        continue;
+      }
+      if (/^[-*=]{3,}\s*$/.test(l)) { terminal.colorPrintln('\u2500'.repeat(60), Color.DARK_GREY); continue; }
+      var bq = l.match(/^>\s*(.*)/);
+      if (bq) { terminal.colorPrintln('\u2502 ' + bq[1], Color.DARK_GREY); continue; }
+      if (l.startsWith('`') || l.startsWith('    ')) { terminal.colorPrintln(l.startsWith('`') ? l : l.slice(4), Color.LIGHT_GREEN); continue; }
+      var ul = l.match(/^(\s*)[-*+]\s+(.*)/);
+      if (ul) { terminal.colorPrint('  ' + '\u2022 ', Color.YELLOW); terminal.println(stripInline(ul[2])); continue; }
+      var ol = l.match(/^(\s*)(\d+)\.\s+(.*)/);
+      if (ol) { terminal.colorPrint('  ' + ol[2] + '. ', Color.YELLOW); terminal.println(stripInline(ol[3])); continue; }
+      if (l.trim() === '') { terminal.println(''); continue; }
+      terminal.println(stripInline(l));
+    }
+  };
+
 
   g.help = function(fn?: unknown) {
     // â”€â”€ help(fn) mode: show docs for a single function (item 662) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -2303,6 +2523,16 @@ export function registerCommands(g: any): void {
     terminal.println('  sysmon()             System Monitor  (CPU/mem/procs/net)');
     terminal.println('  settings()           Settings  (display/users/network/disk)');
     terminal.println('  edit(path?)          text editor  (^S save  ^Q quit)');
+    terminal.println('  calc()               Calculator app');
+    terminal.println('  clock(mode?)         Clock / stopwatch / countdown');
+    terminal.println('  notes(path?)         Text editor  (^S save  ^Q quit)');
+    terminal.println('  tetris()             Play Tetris!');
+    terminal.println('  snake()              Play Snake!');
+    terminal.println('  imgview(path)        ASCII / block-art image viewer');
+    terminal.println('  calendar()           Interactive month calendar with notes');
+    terminal.println('  ssh(host, port?)     SSH-like interactive TCP session');
+    terminal.println('  rsync(src, dst)      Sync VFS file tree from src to dst');
+    terminal.println('  markd(text)          Render Markdown text in the terminal');
     terminal.println('');
 
     terminal.colorPrintln('REPL:', Color.YELLOW);

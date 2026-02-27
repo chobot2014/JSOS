@@ -1,4 +1,4 @@
-/**
+﻿/**
  * JSOS Inter-Process Communication
  *
  * Pipes, signals, and message queues — all in TypeScript.
@@ -817,12 +817,13 @@ export class UnixSocket {
     var q = unixAcceptQueues.get(path);
     if (!q) return false;
     q.push(this);
-    // Wait for accept()
+    // Wait for accept() — cast to avoid TS narrowing false-positive after assignment above
     var deadline = kernel.getTicks() + timeoutTicks;
-    while (this.state !== 'CONNECTED' && kernel.getTicks() < deadline) {
+    const self = this as { state: string };
+    while (self.state !== 'CONNECTED' && kernel.getTicks() < deadline) {
       kernel.sleep(1);
     }
-    return this.state === 'CONNECTED';
+    return self.state === 'CONNECTED';
   }
 
   /** [Item 209] Send data to the peer. */
@@ -888,4 +889,138 @@ export function socketpair(pid1: number, pid2: number): [UnixSocket, UnixSocket]
   a.state = 'CONNECTED'; (a as any)._peer = b;
   b.state = 'CONNECTED'; (b as any)._peer = a;
   return [a, b];
+}
+
+// ── [Item 217] Async I/O multiplexing: select() ───────────────────────────────
+
+/**
+ * Represents an I/O endpoint that can be polled for readability.
+ * Any of: Pipe, MessageQueue, UnixSocket, Channel<T>, or a custom object
+ * implementing `hasData(): boolean`.
+ */
+export interface ReadableFd {
+  hasData(): boolean;
+  /** Optional: descriptive label for error messages. */
+  label?: string;
+}
+
+/**
+ * [Item 217] select — wait until at least one fd in the set has data, or timeout.
+ *
+ * Works in JSOS's cooperative-multitasking model: spins with kernel.sleep(1)
+ * between polls so other processes can run.
+ *
+ * @param fds        List of readableFd objects to monitor.
+ * @param timeoutMs  Maximum time to wait in milliseconds (0 = non-blocking, -1 = infinite).
+ * @returns          Array of fds that are ready (may be subset of `fds`), or [] on timeout.
+ */
+export function select(fds: ReadableFd[], timeoutMs = -1): ReadableFd[] {
+  if (fds.length === 0) return [];
+
+  var deadline = timeoutMs >= 0
+    ? kernel.getTicks() + Math.ceil(timeoutMs / 10)
+    : Infinity;
+
+  while (true) {
+    var ready: ReadableFd[] = [];
+    for (var i = 0; i < fds.length; i++) {
+      try { if (fds[i].hasData()) ready.push(fds[i]); } catch (_) {}
+    }
+    if (ready.length > 0) return ready;
+    if (kernel.getTicks() >= deadline) return [];
+    if (timeoutMs === 0) return [];
+    kernel.sleep(1);
+  }
+}
+
+// ── [Item 218] poll() — POSIX-style file descriptor polling ──────────────────
+
+/** POSIX poll event flags. */
+export const POLLIN   = 0x0001;  // There is data to read
+export const POLLOUT  = 0x0004;  // Writing now will not block
+export const POLLERR  = 0x0008;  // Error condition
+export const POLLHUP  = 0x0010;  // Hang up
+export const POLLNVAL = 0x0020;  // Invalid file descriptor
+
+/** Entry for poll(): one fd with requested events and returned revents. */
+export interface PollFd {
+  fd:       ReadableFd;
+  events:   number;   // POLLIN | POLLOUT | …  (requested)
+  revents:  number;   // filled in by poll()    (returned)
+}
+
+/**
+ * [Item 218] poll — POSIX-compatible poll() shim for JSOS IPC objects.
+ *
+ * Monitors the given file descriptors for the events specified in `events`.
+ * Fills in `revents` for each entry and returns the count of descriptors
+ * with non-zero revents (or 0 on timeout, -1 on EINVAL).
+ *
+ * @param fds       Array of PollFd entries to monitor (mutated in-place).
+ * @param timeoutMs Timeout ms; -1 = block indefinitely, 0 = non-blocking.
+ * @returns         Number of ready descriptors, 0 on timeout, -1 on error.
+ */
+export function poll(fds: PollFd[], timeoutMs = -1): number {
+  if (!fds || fds.length === 0) return -1;
+
+  // Clear revents
+  for (var i = 0; i < fds.length; i++) fds[i].revents = 0;
+
+  var deadline = timeoutMs >= 0
+    ? kernel.getTicks() + Math.ceil(timeoutMs / 10)
+    : Infinity;
+
+  while (true) {
+    var nReady = 0;
+    for (var j = 0; j < fds.length; j++) {
+      var pfd = fds[j];
+      pfd.revents = 0;
+      if (pfd.events & POLLIN) {
+        try {
+          if (pfd.fd.hasData()) { pfd.revents |= POLLIN; nReady++; }
+        } catch (_) {
+          pfd.revents |= POLLERR;
+          nReady++;
+        }
+      }
+      // POLLOUT: always writable for in-memory IPC (no flow control)
+      if (pfd.events & POLLOUT) { pfd.revents |= POLLOUT; nReady++; }
+    }
+    if (nReady > 0) return nReady;
+    if (kernel.getTicks() >= deadline) return 0;
+    if (timeoutMs === 0) return 0;
+    kernel.sleep(1);
+  }
+}
+
+// ── Adapt existing types to ReadableFd ───────────────────────────────────────
+
+/**
+ * Wrap a Pipe as a ReadableFd so it can be used with select()/poll().
+ */
+export function pipeAsFd(pipe: Pipe, label?: string): ReadableFd {
+  return {
+    hasData() { return pipe.available > 0; },
+    label: label ?? 'pipe',
+  };
+}
+
+/**
+ * Wrap a MessageQueue as a ReadableFd.
+ */
+export function mqAsFd(mq: MessageQueue, pid: number, label?: string): ReadableFd {
+  return {
+    hasData() { return mq.available(pid) > 0; },
+    label: label ?? ('mq[' + pid + ']'),
+  };
+}
+
+/**
+ * Wrap a UnixSocket as a ReadableFd.
+ */
+export function unixSocketAsFd(sock: UnixSocket, label?: string): ReadableFd {
+  return {
+    hasData() { return sock.state === 'CONNECTED' && sock.read(1) !== null; },
+    label: label ?? ('unix:' + sock.path),
+  };
 }

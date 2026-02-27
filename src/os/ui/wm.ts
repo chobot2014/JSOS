@@ -1,4 +1,4 @@
-/**
+﻿/**
  * JSOS Window Manager — Phase 3
  *
  * All window layout, z-order, event routing, drag, resize, and compositing
@@ -252,6 +252,9 @@ export class WindowManager {
 
   // Context menu state
   private _contextMenu: { x: number; y: number; items: MenuItem[] } | null = null;
+
+  // ── [Item 755] Toast notification queue ───────────────────────────────────
+  private _toasts: Array<{ msg: string; bg: number; expires: number }> = [];
 
   constructor(screen: Canvas) {
     this._screen  = screen;
@@ -551,6 +554,41 @@ export class WindowManager {
 
   getClipboard(): string { return this._clipboard; }
   setClipboard(text: string): void { this._clipboard = text; this._wmDirty = true; }
+
+  // -- [Item 755] Toast notification methods --
+    showToast(msg, durationMs, bgColor) {
+    var dur = durationMs || 3000;
+    var bg  = bgColor || 0xFF1A3A6A;
+    var exp = kernel.getTicks() + Math.round(dur / 10);
+    this._toasts.push({ msg: msg, bg: bg, expires: exp });
+    this._wmDirty = true;
+  }
+  _pruneToasts() {
+    var now = kernel.getTicks();
+    var ts = this._toasts;
+    var next = [];
+    for (var ti = 0; ti < ts.length; ti++) { if (ts[ti].expires > now) next.push(ts[ti]); }
+    this._toasts = next;
+  }
+  _drawToasts() {
+    this._pruneToasts();
+    if (this._toasts.length === 0) return;
+    var s = this._screen;
+    var PAD = 6, H = 22, W = 240;
+    var barY = s.height - TASKBAR_H;
+    var baseY = barY - PAD;
+    for (var i = this._toasts.length - 1; i >= 0; i--) {
+      var t = this._toasts[i];
+      baseY -= H + 2;
+      var tx = s.width - W - PAD;
+      s.fillRect(tx, baseY, W, H, t.bg);
+      s.drawRect(tx, baseY, W, H, Colors.WHITE);
+      var label = t.msg.length > 29 ? t.msg.substring(0, 28) + '\u2026' : t.msg;
+      s.drawText(tx + PAD, baseY + PAD, label, Colors.WHITE);
+    }
+    this._wmDirty = true;
+  }
+
 
   // ── Query ──────────────────────────────────────────────────────────────
 
@@ -1174,3 +1212,164 @@ export function getWM(): WindowManager {
   if (!wm) throw new Error('WindowManager not yet initialised');
   return wm;
 }
+
+// ================================================================================
+// [Item 757] Theme System — colour scheme management
+// [Item 758] Dark Mode support
+// ================================================================================
+
+/**
+ * A theme defines the colour palette used throughout the JSOS desktop.
+ * All colours are ARGB 32-bit values matching the PixelColor format used
+ * by the Canvas API.
+ */
+export interface OSTheme {
+  name:        string;
+  desktopBg:   number;  // desktop background
+  taskbarBg:   number;  // taskbar background
+  titleBg:     number;  // inactive title bar
+  titleFocused:number;  // active/focused title bar
+  windowBg:    number;  // window content area background
+  border:      number;  // window border
+  accentColor: number;  // highlights and focus rings
+  textPrimary: number;  // main text (ARGB)
+  textDim:     number;  // secondary / dim text
+  darkMode:    boolean;
+}
+
+/** Built-in light theme. */
+export const THEME_LIGHT: OSTheme = {
+  name:         'Light',
+  desktopBg:    0xFF3A7AC4,
+  taskbarBg:    0xFF1A2B3C,
+  titleBg:      0xFF3A4A5A,
+  titleFocused: 0xFF2A5F8F,
+  windowBg:     0xFFF0F0F0,
+  border:       0xFF5599CC,
+  accentColor:  0xFF3399FF,
+  textPrimary:  0xFFFFFFFF,
+  textDim:      0xFF888888,
+  darkMode:     false,
+};
+
+/** Built-in dark theme (default). */
+export const THEME_DARK: OSTheme = {
+  name:         'Dark',
+  desktopBg:    0xFF1A2533,
+  taskbarBg:    0xFF0A0E14,
+  titleBg:      0xFF1E2A38,
+  titleFocused: 0xFF1E3A5F,
+  windowBg:     0xFF111111,
+  border:       0xFF334455,
+  accentColor:  0xFF2255AA,
+  textPrimary:  0xFFFFFFFF,
+  textDim:      0xFF556677,
+  darkMode:     true,
+};
+
+/** Solarized dark theme. */
+export const THEME_SOLARIZED: OSTheme = {
+  name:         'Solarized Dark',
+  desktopBg:    0xFF002B36,
+  taskbarBg:    0xFF073642,
+  titleBg:      0xFF073642,
+  titleFocused: 0xFF268BD2,
+  windowBg:     0xFF002B36,
+  border:       0xFF586E75,
+  accentColor:  0xFF268BD2,
+  textPrimary:  0xFFEEE8D5,
+  textDim:      0xFF657B83,
+  darkMode:     true,
+};
+
+/** High-contrast accessibility theme. */
+export const THEME_HIGH_CONTRAST: OSTheme = {
+  name:         'High Contrast',
+  desktopBg:    0xFF000000,
+  taskbarBg:    0xFF000000,
+  titleBg:      0xFF000000,
+  titleFocused: 0xFF0000FF,
+  windowBg:     0xFF000000,
+  border:       0xFFFFFF00,
+  accentColor:  0xFF00FF00,
+  textPrimary:  0xFFFFFFFF,
+  textDim:      0xFFCCCCCC,
+  darkMode:     true,
+};
+
+/** All built-in themes by name. */
+export const BUILTIN_THEMES: Record<string, OSTheme> = {
+  dark:          THEME_DARK,
+  light:         THEME_LIGHT,
+  solarized:     THEME_SOLARIZED,
+  'high-contrast': THEME_HIGH_CONTRAST,
+};
+
+/**
+ * [Item 757 / 758] ThemeManager — central colour-scheme and dark-mode registry.
+ *
+ * Usage:
+ *   themeManager.setTheme('solarized');
+ *   themeManager.setDarkMode(true);
+ *   var t = themeManager.current;   // OSTheme
+ */
+export class ThemeManager {
+  private _current: OSTheme = THEME_DARK;
+  private _custom = new Map<string, OSTheme>();
+
+  /** The active theme. */
+  get current(): OSTheme { return this._current; }
+
+  /** True if the current theme has darkMode=true. */
+  get isDark(): boolean { return this._current.darkMode; }
+
+  /**
+   * Switch to a named built-in or user-registered theme.
+   * Returns the new theme, or null if the name was not found.
+   */
+  setTheme(name: string): OSTheme | null {
+    var t: OSTheme | undefined =
+      this._custom.get(name) ?? BUILTIN_THEMES[name.toLowerCase()];
+    if (!t) return null;
+    this._current = t;
+    if (wm) wm.markDirty();
+    return t;
+  }
+
+  /**
+   * [Item 758] Toggle dark/light mode.
+   * Switches between THEME_DARK and THEME_LIGHT while preserving the
+   * user's custom base if they have one.
+   */
+  setDarkMode(dark: boolean): void {
+    if (this._current.darkMode === dark) return;
+    if (dark) {
+      this.setTheme('dark');
+    } else {
+      this.setTheme('light');
+    }
+  }
+
+  /** Register a custom theme (can be retrieved by name later). */
+  register(theme: OSTheme): void {
+    this._custom.set(theme.name.toLowerCase(), theme);
+  }
+
+  /** Create a custom theme from a partial set of overrides. */
+  customize(name: string, overrides: Partial<OSTheme>): OSTheme {
+    var base = this._current;
+    var t: OSTheme = Object.assign({}, base, overrides, { name });
+    this.register(t);
+    return t;
+  }
+
+  /** List all available theme names (built-in + custom). */
+  listThemes(): string[] {
+    var names = Object.keys(BUILTIN_THEMES);
+    this._custom.forEach(function(_v, k) { names.push(k); });
+    return names;
+  }
+}
+
+/** Singleton ThemeManager instance. */
+export const themeManager = new ThemeManager();

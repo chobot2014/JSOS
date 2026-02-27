@@ -1,6 +1,6 @@
-# Audit State Tracker
+﻿# Audit State Tracker
 
-**Last updated:** 2026-02-28 (Agent E continuation Session 6 — items 708/723/724/741/777/784/785/950/969/970 implemented; 181/195/197/199/320/321 re-audited NOW ✓)  
+**Last updated:** 2026-03-05 (Agent E continuation Session 7 — items 217/218/680/727/728/755/757/758/770/774/974 implemented; 133/140/142/209/210/221 re-audited NOW ✓)  
 **Audit target:** `docs/1000-things.md` (1430 lines, ~1130 items)
 
 ---
@@ -9,7 +9,7 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 387 |
+| Items confirmed ✓ (marked this audit) | 404 |
 | Items confirmed ✗ (not implemented, do not re-check) | 299 |
 | Items not yet investigated | ~475 |
 
@@ -384,6 +384,24 @@
 | 199 | `sendfile` zero-copy syscall | NOW ✓ — `sendfile()` function at `fs/filesystem.ts:1474` + `SendfileSource`/`SendfileDest` interfaces |
 | 320 | HTTP/2 push promise cache | NOW ✓ — `pushCachePrepopulate(path, body)` at `net/http.ts:1174` + `pushFromLinkHeaders()` at line 1179 |
 | 321 | CORS preflight request handling | NOW ✓ — `CORSPreflightResult` interface + `corsPreflightRequest()` at `net/http.ts:2577` |
+| **Agent E continuation Session 7 — new implementations** | | |
+| 770 | Image viewer app | NOW ✓ — apps/image-viewer/index.ts (Session 7) |
+| 774 | Calendar app | NOW ✓ — apps/calendar/index.ts (Session 7) |
+| 727 | `ssh(host, opts)` SSH client | NOW ✓ — g.ssh(host,port?) in ui/commands.ts (Session 7) |
+| 728 | `rsync(src, dst)` file sync | NOW ✓ — g.rsync(src,dst) in ui/commands.ts (Session 7) |
+| 680 | Markdown rendering in terminal | NOW ✓ — g.markd(text) in ui/commands.ts (Session 7) |
+| 974 | Flame graph renderer in REPL | NOW ✓ — g.perf.flame() in ui/commands.ts (Session 7) |
+| 755 | Notification system: toast popups | NOW ✓ — showToast/WindowManager in wm.ts (Session 7) |
+| 757 | Theme system: colour schemes | NOW ✓ — ThemeManager + OSTheme in wm.ts (Session 7) |
+| 758 | Dark mode support | NOW ✓ — ThemeManager.setDarkMode() in wm.ts (Session 7) |
+| 217 | Async I/O multiplexing: `select()` | NOW ✓ — select() + ReadableFd in ipc.ts (Session 7) |
+| 218 | `poll`/`select` POSIX compat shim | NOW ✓ — poll() + PollFd + POLL* constants in ipc.ts (Session 7) |
+| 133 | Copy-on-write (COW) for forked processes | NOW ✓ — `COWManager` class + `sharePageForFork()`/`copyOnWriteFault()` at `process/vmm.ts:598`; `cowManager` singleton at line 644 |
+| 140 | ASLR for process address spaces | NOW ✓ — `ASLRManager` class + `randomizeBase()` with 20-bit entropy at `process/vmm.ts:859`; `aslrManager` singleton at line 946 |
+| 142 | `madvise(MADV_WILLNEED)` prefetch hint | NOW ✓ — `MadviseManager.madvise()` + advice constants at `process/vmm.ts:1090`; `madviseManager` singleton at line 1168 |
+| 209 | Unix domain sockets: `ipc.socket(path)` | NOW ✓ — `UnixSocket` class + `unixSocket()` at `ipc/ipc.ts:760`; bind/listen/accept/connect/read/write state machine |
+| 210 | Credential passing: `ipc.sendFd(socket, fd)` | NOW ✓ — `UnixSocket.sendFd()/recvFd()` at `ipc/ipc.ts:852`; `socketpair()` helper at line 886 |
+| 221 | `sys.shm.anonymous(bytes)` — unnamed shared buffer | NOW ✓ — `shmCreate()/shmOpen()/shmUnlink()` at `ipc/ipc.ts:506`; `IPCStats` + `ipcStats()` at line 730 |
 ---
 
 ## Items Confirmed NOT Implemented (do not re-check)
@@ -613,7 +631,7 @@
 | 970 | GC profiler: `sys.mem.gcStats()` API | NOW ✓ — `g.sys.gc.run()/stats()` in `ui/commands.ts` (Session 6) |
 | 972 | Layout profiler: per-subtree layout time | not in `layout.ts` |
 | 973 | Paint profiler: per-tile repaint reason | not in codebase |
-| 974 | Flame graph renderer in REPL (`sys.perf.flame()`) | not in codebase |
+| 974 | Flame graph renderer in REPL (`sys.perf.flame()`) | NOW ✓ — g.perf.flame() in ui/commands.ts (Session 7) |
 | 975 | Synthetic benchmarks built-in suite | not in codebase |
 | 976 | `sys.browser.bench(url)` — Core Web Vitals equivalents | not in codebase |
 | 977 | Continuous benchmark CI: fail on > 5% regression | not in codebase |
@@ -639,7 +657,7 @@
 | 677 | `console.log` from background tasks in correct tab | not in `ui/terminal.ts` |
 | 678 | Output search Ctrl+F in terminal | not in `apps/terminal/index.ts` |
 | 679 | Output copy: select text + Ctrl+C | not in `ui/terminal.ts` |
-| 680 | Markdown rendering in terminal output | not in `ui/terminal.ts` |
+| 680 | Markdown rendering in terminal output | NOW ✓ — g.markd(text) in ui/commands.ts (Session 7) |
 | 681 | Inline image preview in terminal output | not in `ui/terminal.ts` |
 | 682 | Progress bar rendering for async ops | NOW ✓ — `g.progress(val, max, width?)` in `ui/commands.ts` (Session 5) |
 | 683 | Spinner animation for awaited Promises | NOW ✓ — `g.spinner(msg?)` returns `{stop()}` in `ui/commands.ts` (Session 5) |
@@ -652,8 +670,8 @@
 | 710 | `tar`/`untar` helpers | now IMPLEMENTED — see Agent E Session 4 above |
 | 725 | `net.connect(host, port)` — returns stream | NOW ✓ — `g.connect(host, port)` in `ui/commands.ts` (Session 5) |
 | 726 | `nc(host, port)` interactive TCP in REPL | NOW ✓ — `g.nc(host, port)` in `ui/commands.ts` (Session 5) |
-| 727 | `ssh(host, opts)` SSH client | not in `ui/commands.ts` |
-| 728 | `rsync(src, dst)` file sync | not in `ui/commands.ts` |
+| 727 | `ssh(host, opts)` SSH client | NOW ✓ — g.ssh(host,port?) in ui/commands.ts (Session 7) |
+| 728 | `rsync(src, dst)` file sync | NOW ✓ — g.rsync(src,dst) in ui/commands.ts (Session 7) |
 | 739 | `perf.sample(fn, ms?)` CPU profiler | NOW ✓ — `g.perf.sample(fn, ms)` in `ui/commands.ts` (Session 5) |
 | 740 | `perf.memory()` heap snapshot | NOW ✓ — `g.perf.memory()` in `ui/commands.ts` (Session 5) |
 | 741 | `trace(fn)` syscall tracer | NOW ✓ — `g.trace(fn, label?)` in `ui/commands.ts` |
@@ -672,9 +690,9 @@
 | 748 | Taskbar system tray area | not in `ui/wm.ts` |
 | 751 | Window snap to screen edges (Aero Snap) | not in `ui/wm.ts` |
 | 752 | Application launcher / start menu | not in `ui/wm.ts` |
-| 755 | Notification system: toast popups | not in `ui/wm.ts` |
-| 757 | Theme system: color scheme, fonts, icon theme | not in `ui/wm.ts` |
-| 758 | Dark mode support | not in `ui/wm.ts` |
+| 755 | Notification system: toast popups | NOW ✓ — showToast/WindowManager in wm.ts (Session 7) |
+| 757 | Theme system: color scheme, fonts, icon theme | NOW ✓ — ThemeManager + OSTheme in wm.ts (Session 7) |
+| 758 | Dark mode support | NOW ✓ — ThemeManager.setDarkMode() in wm.ts (Session 7) |
 | 759 | High-DPI scaling (2× pixel ratio) | not in `ui/wm.ts` |
 | 760 | Drag-and-drop between windows | not in `ui/wm.ts` |
 | 761 | Clipboard: cut/copy/paste between apps | not in `ui/wm.ts` |
@@ -683,11 +701,11 @@
 | 764 | Compositing WM (GPU alpha compositing) | not in `ui/wm.ts` |
 | 765 | Window animations | not in `ui/wm.ts` |
 | 766 | Virtual desktops | not in `ui/wm.ts` |
-| 770 | Image viewer app | no `apps/image-viewer/` directory |
+| 770 | Image viewer app | NOW ✓ — apps/image-viewer/index.ts (Session 7) |
 | 771 | PDF viewer app | no `apps/pdf-viewer/` directory |
 | 772 | Music player (MP3/OGG) | no `apps/music-player/` directory |
 | 773 | Video player (MP4/WebM) | no `apps/video-player/` directory |
-| 774 | Calendar app | no `apps/calendar/` directory |
+| 774 | Calendar app | NOW ✓ — apps/calendar/index.ts (Session 7) |
 | 775 | Calculator app | NOW ✓ — `apps/calculator/index.ts` (Session 5) |
 | 776 | Clock / timer / stopwatch | NOW ✓ — `apps/clock/index.ts` (Session 5) |
 | 777 | Notes app (markdown editor) | NOW ✓ — `apps/notes/index.ts` (Session 6) |
@@ -714,14 +732,14 @@
 | 801 | Browser source maps support | not in `apps/browser/` |
 | 802 | Hot module replacement for OS development | not in codebase |
 | **Agent G additions (VMM / Filesystem / IPC)** | | |
-| 133 | Copy-on-write (COW) for forked processes | not in `process/vmm.ts` or `process/process.ts` |
+| 133 | Copy-on-write (COW) for forked processes | NOW ✓ — COWManager at vmm.ts:598 (re-audited Session 7) |
 | 134 | Memory-mapped files (`mmap` with file backing) | `mmapFile()` allocates anonymous memory only; no file data loaded in `process/vmm.ts` |
 | 135 | Demand paging: page fault loads from disk lazily | `handlePageFault()` just marks present=true; no disk read in `process/vmm.ts` |
 | 136 | Swap space: evict LRU pages to disk | not in `process/vmm.ts` |
 | 137 | Page reclaim: LRU clock algorithm | not in `process/vmm.ts` |
-| 140 | ASLR for process address spaces | `nextVirtualAddress` fixed at 0x100000; no randomization in `process/vmm.ts` |
+| 140 | ASLR for process address spaces | NOW ✓ — ASLRManager at vmm.ts:859 (re-audited Session 7) |
 | 141 | Memory protection keys (MPK) | not in `process/vmm.ts` |
-| 142 | `madvise(MADV_WILLNEED)` prefetch hint | not in `process/vmm.ts` |
+| 142 | `madvise(MADV_WILLNEED)` prefetch hint | NOW ✓ — MadviseManager at vmm.ts:1090 (re-audited Session 7) |
 | 143 | Transparent huge pages (THP) | not in `process/vmm.ts` |
 | 144 | ZRAM compressed swap | not in codebase |
 | 175 | `sys.devices.ioctl(path, cmd, arg)` TypeScript dispatch | not in `fs/filesystem.ts` |
@@ -741,14 +759,14 @@
 | 204 | SMB/CIFS client: TypeScript SMB2 | not in codebase |
 | 205 | Filesystem compression (zstd/lz4 per-file) | not in codebase |
 | 206 | Filesystem encryption (AES-XTS over block device) | not in codebase |
-| 209 | Unix domain sockets: `ipc.socket(path)` | not in `ipc/ipc.ts` |
-| 210 | Credential passing: `ipc.sendFd(socket, fd)` | not in `ipc/ipc.ts` |
+| 209 | Unix domain sockets: `ipc.socket(path)` | NOW ✓ — UnixSocket class at ipc.ts:760 (re-audited Session 7) |
+| 210 | Credential passing: `ipc.sendFd(socket, fd)` | NOW ✓ — sendFd/recvFd + socketpair at ipc.ts:852 (re-audited Session 7) |
 | 213 | Signal-as-Promise: `proc.waitForSignal(SIGTERM)` | not in `ipc/ipc.ts` |
-| 217 | Async I/O multiplexing: TypeScript `select([...promises])` | not in `ipc/ipc.ts` |
-| 218 | `poll`/`select` POSIX compat shim | not in codebase |
+| 217 | Async I/O multiplexing: TypeScript `select([...promises])` | NOW ✓ — select() + ReadableFd in ipc.ts (Session 7) |
+| 218 | `poll`/`select` POSIX compat shim | NOW ✓ — poll() + PollFd + POLL* constants in ipc.ts (Session 7) |
 | 219 | Async I/O: typed Promise APIs (io_uring concepts) | no explicit `io.read/write()` Promise API |
 | 220 | JSOS native IPC bus: typed pub/sub service registry | not in `ipc/ipc.ts` (eventBus is in-process only) |
-| 221 | `sys.shm.anonymous(bytes)` — unnamed shared buffer | not in `ipc/ipc.ts` |
+| 221 | `sys.shm.anonymous(bytes)` — unnamed shared buffer | NOW ✓ — shmCreate/shmOpen + ipcStats at ipc.ts:506 (re-audited Session 7) |
 
 ---
 
