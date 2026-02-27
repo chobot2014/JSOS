@@ -2587,7 +2587,194 @@ export function registerCommands(g: any): void {
       return { ttfb, fcp, lcp, tbt, cls, score };
     },
   };
-  (g as any)._helpDocs['bench'] = 'bench.run()  — full synthetic benchmark suite\nbench.micro(fn, iters?, label?)  — micro-benchmark\nbench.browser(url)  — Core Web Vitals style page benchmark';
+  /** [Item 977] CI benchmark threshold check — fails if regression > threshold% (default 5%). */
+  g.bench.ci = function(thresholdPct: number = 5) {
+    terminal.colorPrintln('JSOS CI Benchmark Gate (threshold: ' + thresholdPct + '%)', Color.WHITE);
+    terminal.colorPrintln('─'.repeat(44), Color.DARK_GREY);
+    var baseline: Record<string, number> = {};
+    try {
+      var stored = (kernel as any).fs?.readFile?.('/tmp/.bench-baseline.json');
+      if (stored) baseline = JSON.parse(stored);
+    } catch (_) {}
+
+    var current = g.bench.run(false);
+    var hadBaseline = Object.keys(baseline).length > 0;
+    var failures: string[] = [];
+
+    Object.keys(current).forEach(function(name) {
+      var cur = current[name];
+      var base = baseline[name];
+      if (!base) { baseline[name] = cur; return; }
+      var pct = (base - cur) / base * 100;
+      var status: string;
+      if (pct > thresholdPct) {
+        status = '✗ REGRESSION ' + pct.toFixed(1) + '%';
+        failures.push(name + ': ' + pct.toFixed(1) + '% slower');
+        terminal.colorPrint('  ' + name.padEnd(28), Color.RED);
+      } else if (pct < -2) {
+        status = '↑ IMPROVEMENT ' + (-pct).toFixed(1) + '%';
+        terminal.colorPrint('  ' + name.padEnd(28), Color.LIGHT_GREEN);
+      } else {
+        status = '✓ OK';
+        terminal.colorPrint('  ' + name.padEnd(28), Color.LIGHT_CYAN);
+      }
+      terminal.println(status);
+    });
+
+    // Save new baseline
+    try {
+      (kernel as any).fs?.writeFile?.('/tmp/.bench-baseline.json', JSON.stringify(current));
+    } catch (_) {}
+
+    terminal.println('');
+    if (!hadBaseline) {
+      terminal.colorPrintln('Baseline saved. Run again to compare.', Color.YELLOW);
+    } else if (failures.length === 0) {
+      terminal.colorPrintln('CI PASS — all benchmarks within threshold.', Color.LIGHT_GREEN);
+    } else {
+      terminal.colorPrintln('CI FAIL — ' + failures.length + ' regression(s):', Color.RED);
+      failures.forEach(function(f) { terminal.colorPrintln('  ' + f, Color.RED); });
+      return false;
+    }
+    return true;
+  };
+
+  (g as any)._helpDocs['bench'] = 'bench.run()  — full synthetic benchmark suite\nbench.micro(fn, iters?, label?)  — micro-benchmark\nbench.browser(url)  — Core Web Vitals style page benchmark\nbench.ci(threshold?)  — CI regression gate (default 5%)';
+
+  // [Item 685] Terminal session recorder: g.record() / g.stopRecord() / g.replay(name)
+  (function() {
+    var _recording: string[] = [];
+    var _recStart: number = 0;
+    var _isRecording: boolean = false;
+
+    g.record = function(name?: string) {
+      if (_isRecording) {
+        terminal.colorPrintln('Already recording. Call stopRecord() first.', Color.YELLOW);
+        return;
+      }
+      _recording = [];
+      _recStart = kernel.getTicks();
+      _isRecording = true;
+      var _recName = name ?? 'session-' + Date.now();
+      (g as any)._currentRecName = _recName;
+      // Intercept terminal output
+      var _orig = terminal.println.bind(terminal);
+      (g as any)._recPrintln = _orig;
+      terminal.println = function(msg: string) {
+        _recording.push(JSON.stringify({ t: kernel.getTicks() - _recStart, out: msg }));
+        _orig(msg);
+      };
+      terminal.colorPrintln('Recording started. Call stopRecord() to finish.', Color.LIGHT_GREEN);
+    };
+
+    g.stopRecord = function() {
+      if (!_isRecording) {
+        terminal.colorPrintln('Not recording.', Color.YELLOW);
+        return;
+      }
+      _isRecording = false;
+      // Restore
+      if ((g as any)._recPrintln) { terminal.println = (g as any)._recPrintln; delete (g as any)._recPrintln; }
+      var name = (g as any)._currentRecName ?? 'session';
+      var path = '/home/' + name + '.trec';
+      var data = _recording.join('\n');
+      try { (kernel as any).fs?.writeFile?.(path, data); } catch (_) {}
+      terminal.colorPrintln('Recording saved to ' + path + ' (' + _recording.length + ' events)', Color.LIGHT_GREEN);
+      return data;
+    };
+
+    g.replay = function(nameOrPath: string, speedMultiplier: number = 1) {
+      var path = nameOrPath.includes('/') ? nameOrPath : '/home/' + nameOrPath + '.trec';
+      var data: string;
+      try {
+        data = (kernel as any).fs?.readFile?.(path) ?? '';
+      } catch (_) {
+        terminal.colorPrintln('replay: cannot read ' + path, Color.RED);
+        return;
+      }
+      if (!data) { terminal.colorPrintln('replay: empty recording ' + path, Color.YELLOW); return; }
+      var events = data.split('\n').filter(Boolean).map(function(l: string) {
+        try { return JSON.parse(l); } catch (_) { return null; }
+      }).filter(Boolean);
+      terminal.colorPrintln('[Replay] ' + path + ' (' + events.length + ' events)', Color.YELLOW);
+      var last = 0;
+      var realStart = kernel.getTicks();
+      function step(i: number) {
+        if (i >= events.length) { terminal.colorPrintln('[Replay done]', Color.DARK_GREY); return; }
+        var ev = events[i];
+        var delay = Math.max(0, Math.round((ev.t - last) / speedMultiplier));
+        last = ev.t;
+        if (delay > 0 && typeof kernel.sleep === 'function') kernel.sleep(delay);
+        terminal.println(ev.out);
+        step(i + 1);
+      }
+      step(0);
+    };
+  })();
+  (g as any)._helpDocs['record']     = 'record(name?)  — start recording terminal session to /home/<name>.trec';
+  (g as any)._helpDocs['stopRecord'] = 'stopRecord()  — stop recording and save the session file';
+  (g as any)._helpDocs['replay']     = 'replay(nameOrPath, speed?)  — replay a recorded terminal session';
+
+  // [Item 687] REPL notebook mode: g.notebook(name?)
+  g.notebook = function(name?: string) {
+    var path = name
+      ? (name.includes('/') ? name : '/home/' + name + '.rpl')
+      : '/home/notebook.rpl';
+
+    terminal.colorPrintln('REPL Notebook: ' + path, Color.YELLOW);
+    terminal.colorPrintln('─'.repeat(44), Color.DARK_GREY);
+
+    var source = '';
+    try {
+      source = (kernel as any).fs?.readFile?.(path) ?? '';
+    } catch (_) {}
+
+    if (!source) {
+      // Create a starter notebook
+      source = [
+        '# JSOS REPL Notebook',
+        '# Lines starting with # are comments.',
+        '# Lines starting with $ are commands to execute.',
+        '# Blank lines separate cells.',
+        '',
+        '# Cell 1: System info',
+        '$ sys.sysinfo()',
+        '',
+        '# Cell 2: List root',
+        '$ ls("/")',
+      ].join('\n');
+      try { (kernel as any).fs?.writeFile?.(path, source); } catch (_) {}
+      terminal.colorPrintln('(Created starter notebook at ' + path + ')', Color.DARK_GREY);
+    }
+
+    var cells = source.split(/\n{2,}/).filter(function(c: string) { return c.trim(); });
+    var cellNum = 0;
+    cells.forEach(function(cell: string) {
+      var lines = cell.split('\n');
+      var cmds = lines.filter(function(l: string) { return l.startsWith('$'); });
+      var comments = lines.filter(function(l: string) { return l.startsWith('#'); });
+
+      cellNum++;
+      terminal.colorPrint('Cell [' + cellNum + ']', Color.YELLOW);
+      comments.forEach(function(c: string) { terminal.colorPrintln(' ' + c.slice(1).trim(), Color.DARK_GREY); });
+
+      cmds.forEach(function(cmd: string) {
+        var code = cmd.slice(1).trim();
+        terminal.colorPrintln('  > ' + code, Color.LIGHT_CYAN);
+        try {
+          var result = (0, eval)(code);
+          if (result !== undefined) terminal.colorPrintln('  ' + JSON.stringify(result), Color.WHITE);
+        } catch (e) {
+          terminal.colorPrintln('  Error: ' + String(e), Color.RED);
+        }
+      });
+      terminal.println('');
+    });
+
+    terminal.colorPrintln('Notebook complete.', Color.LIGHT_GREEN);
+    return path;
+  };
+  (g as any)._helpDocs['notebook'] = 'notebook(name?)  — run a .rpl REPL notebook file from /home/<name>.rpl';
 
   g.help = function(fn?: unknown) {
     // â”€â”€ help(fn) mode: show docs for a single function (item 662) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

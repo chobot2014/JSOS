@@ -1,6 +1,6 @@
 ﻿# Audit State Tracker
 
-**Last updated:** 2026-02-27 (Agent E continuation Session 8 — items 213/219/220/322/655/656/657/658/678/679/746/748/751/752/761/762/765/766/975/976 implemented)  
+**Last updated:** 2026-02-27 (Agent E continuation Session 9 — items 202/685/687/756b/758b/759b/792/793/794/795/796/977 implemented; 175/178/183/190/191 re-audited as false negatives → ✓)  
 **Audit target:** `docs/1000-things.md` (1430 lines, ~1130 items)
 
 ---
@@ -9,7 +9,7 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 424 |
+| Items confirmed ✓ (marked this audit) | 441 |
 | Items confirmed ✗ (not implemented, do not re-check) | 299 |
 | Items not yet investigated | ~475 |
 
@@ -655,7 +655,7 @@
 | 974 | Flame graph renderer in REPL (`sys.perf.flame()`) | NOW ✓ — g.perf.flame() in ui/commands.ts (Session 7) |
 | 975 | Synthetic benchmarks built-in suite | NOW ✓ — g.bench.run() + g.bench.micro() in ui/commands.ts (Session 8) |
 | 976 | sys.browser.bench(url) Core Web Vitals | NOW ✓ — g.bench.browser(url) in ui/commands.ts (Session 8) |
-| 977 | Continuous benchmark CI: fail on > 5% regression | not in codebase |
+| 977 | Continuous benchmark CI: fail on > 5% regression | NOW ✓ — `g.bench.ci(threshold?)` in `ui/commands.ts` (Session 9) |
 | **Agent F additions (REPL / Terminal / Built-in APIs / Init / GUI / Apps / DevTools)** | | |
 | 651 | Tab completion with function signatures + type hints | `tabComplete()` completes names/paths but no type hints |
 | 653 | Multiple terminal instances: N REPLs simultaneously | not in `ui/terminal.ts` or `apps/terminal/` |
@@ -683,9 +683,9 @@
 | 682 | Progress bar rendering for async ops | NOW ✓ — `g.progress(val, max, width?)` in `ui/commands.ts` (Session 5) |
 | 683 | Spinner animation for awaited Promises | NOW ✓ — `g.spinner(msg?)` returns `{stop()}` in `ui/commands.ts` (Session 5) |
 | 684 | Split-pane terminal | not in `ui/wm.ts` |
-| 685 | Terminal recording/playback | not in codebase |
+| 685 | Terminal recording/playback | NOW ✓ — `g.record()/stopRecord()/replay()` in `ui/commands.ts` (Session 9) |
 | 686 | Share terminal session over network | not in codebase |
-| 687 | REPL notebook mode (`.rpl` files) | not in codebase |
+| 687 | REPL notebook mode (`.rpl` files) | NOW ✓ — `g.notebook(name?)` in `ui/commands.ts` (Session 9) |
 | 708 | `watch(path, callback)` — inotify-backed | NOW ✓ — `g.watch(path, cb, ms?)` in `ui/commands.ts`; polling via setInterval |
 | 709 | `zip`/`unzip` archive helpers | now IMPLEMENTED — see Agent E Session 4 above |
 | 710 | `tar`/`untar` helpers | now IMPLEMENTED — see Agent E Session 4 above |
@@ -700,9 +700,9 @@
 | 751b | Process credentials uid/gid enforced by scheduler | not in `process/scheduler.ts` |
 | 754b | Pluggable auth `sys.auth.registerProvider` | not in `users/users.ts` |
 | 755b | SSH daemon (TypeScript SSH server) | not in codebase |
-| 756b | TOTP TypeScript implementation (2FA) | not in codebase |
-| 758b | Mandatory access control policy engine | not in codebase |
-| 759b | Syscall allowlist sandboxing | not in codebase |
+| 756b | TOTP TypeScript implementation (2FA) | NOW ✓ — `TOTP` + `TOTPStore` + `totpStore` singleton in `users/totp.ts` (Session 9) |
+| 758b | Mandatory access control policy engine | NOW ✓ — `MACPolicyEngine` + `macPolicy` singleton + default JSOS policy in `users/mac.ts` (Session 9) |
+| 759b | Syscall allowlist sandboxing | NOW ✓ — `SandboxManager` + `sandboxManager` singleton + `pledge()` helper in `users/sandbox.ts` (Session 9) |
 | 723 | Parallel service startup | NOW ✓ — `changeRunlevel()` in `process/init.ts` batches by `startPriority` |
 | 724 | Service logs to `/var/log/<service>.log` | NOW ✓ — `startService()` appends to `/var/log/<name>.log` in `process/init.ts` |
 | 725s | Socket activation | not in `process/init.ts` |
@@ -741,11 +741,11 @@
 | 787 | In-REPL type checking (red underline on type errors) | not in `ui/repl.ts` |
 | 790 | JSOS SDK npm package for host machine authoring | not in codebase |
 | 791 | Build system: rebuild JSOS from within JSOS | not in codebase |
-| 792 | Debugger: breakpoint via serial DevTools protocol | not in codebase |
-| 793 | Debugger: step over/in/out | not in codebase |
-| 794 | Debugger: variable inspection | not in codebase |
-| 795 | Profiler: CPU flame graph | not in codebase |
-| 796 | Profiler: memory heap snapshot | not in codebase |
+| 792 | Debugger: breakpoint via serial DevTools protocol | NOW ✓ — `Debugger.attach()` + `DebugSession` in `process/debugger.ts` (Session 9) |
+| 793 | Debugger: step over/in/out | NOW ✓ — `DebugSession.stepOver/stepInto/stepOut/continue/pause` in `process/debugger.ts` (Session 9) |
+| 794 | Debugger: variable inspection | NOW ✓ — `DebugSession.inspectValue(pid, expr)` + `DebugSession.stackTrace(pid)` in `process/debugger.ts` (Session 9) |
+| 795 | Profiler: CPU flame graph | NOW ✓ — `Profiler.cpuProfile(pid, ms)` → `FlameNode` tree in `process/debugger.ts` (Session 9) |
+| 796 | Profiler: memory heap snapshot | NOW ✓ — `Profiler.heapSnapshot(pid)` → `HeapSnapshot` in `process/debugger.ts` (Session 9) |
 | 797 | Browser DevTools panel (F12) | not in `apps/browser/` |
 | 798 | Browser DOM inspector | not in `apps/browser/` |
 | 799 | Browser network inspector | not in `apps/browser/` |
@@ -763,19 +763,19 @@
 | 142 | `madvise(MADV_WILLNEED)` prefetch hint | NOW ✓ — MadviseManager at vmm.ts:1090 (re-audited Session 7) |
 | 143 | Transparent huge pages (THP) | not in `process/vmm.ts` |
 | 144 | ZRAM compressed swap | not in codebase |
-| 175 | `sys.devices.ioctl(path, cmd, arg)` TypeScript dispatch | not in `fs/filesystem.ts` |
-| 178 | ext4 read-only (extent tree, large file support) | not in codebase |
+| 175 | `sys.devices.ioctl(path, cmd, arg)` TypeScript dispatch | NOW ✓ — `IoctlRegistry` + `ioctlRegistry` singleton in `fs/devices.ts` (re-audited Session 9) |
+| 178 | ext4 read-only (extent tree, large file support) | NOW ✓ — `Ext4BlockDevice` + extent tree reader in `fs/ext4.ts` (561 lines, re-audited Session 9) |
 | 179 | ext4 write (journaling, metadata journal) | not in codebase |
-| 183 | `sys.devices` TypeScript API: enumerate hardware | not in codebase |
+| 183 | `sys.devices` TypeScript API: enumerate hardware | NOW ✓ — `SysDevices` + `sysDevices` singleton in `fs/devices.ts` (re-audited Session 9) |
 | 186 | Block device layer: request queue, elevator I/O scheduler | not in codebase |
-| 190 | ISO 9660 read (boot media access) | not in codebase |
-| 191 | OverlayFS (union mount) | not in codebase |
+| 190 | ISO 9660 read (boot media access) | NOW ✓ — `ISO9660FS implements VFSMount` in `fs/iso9660.ts` (re-audited Session 9) |
+| 191 | OverlayFS (union mount) | NOW ✓ — `OverlayFS implements WritableVFSMount` in `fs/overlayfs.ts` (re-audited Session 9) |
 | 195 | Filesystem quota: TypeScript per-user limit enforcement | NOW ✓ — `QuotaManager` class in `fs/filesystem.ts:1199` (re-audited Session 6) |
 | 197 | Sparse file support | NOW ✓ — `SparseFile` class in `fs/filesystem.ts:1292` (re-audited Session 6) |
 | 199 | `sendfile` zero-copy syscall | NOW ✓ — `sendfile()` at `fs/filesystem.ts:1474` (re-audited Session 6) |
 | 200 | Btrfs read-only TypeScript driver | not in codebase |
 | 201 | ZFS read-only TypeScript driver stubs | not in codebase |
-| 202 | TypeScript pluggable FS driver API | not in codebase |
+| 202 | TypeScript pluggable FS driver API | NOW ✓ — `FSDriverRegistry` + `fsDriverRegistry` singleton + `nullFSDriver` in `fs/fs-driver.ts` (Session 9) |
 | 203 | NFS client: TypeScript NFS protocol | not in codebase |
 | 204 | SMB/CIFS client: TypeScript SMB2 | not in codebase |
 | 205 | Filesystem compression (zstd/lz4 per-file) | not in codebase |
