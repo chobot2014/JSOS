@@ -66,6 +66,8 @@ export interface PageJS {
   fireKeydown(id: string, key: string, keyCode: number): boolean;
   fireSubmit(formId: string): boolean;
   fireLoad(): boolean;
+  /** [Item 950] Fire resize event and trigger media query listeners whose match state changed. */
+  fireResize(width: number, height: number): boolean;
   /** Called when the page is unloaded — fires beforeunload */
   dispose(): void;
   /** Synchronously tick any pending timers (called on each render frame) */
@@ -3373,17 +3375,38 @@ export function createPageJS(
     });
   }
 
+  // [Item 950] Registry of all MediaQueryList objects so we can fire their listeners on resize
+  var _mqlRegistry: Array<{ mql: any; lastMatches: boolean }> = [];
+
+  function _checkMediaListeners(): void {
+    for (var entry of _mqlRegistry) {
+      var nowMatches = entry.mql.matches as boolean;
+      if (nowMatches !== entry.lastMatches) {
+        entry.lastMatches = nowMatches;
+        var evt = { matches: nowMatches, media: entry.mql.media as string };
+        // Fire onchange handler
+        if (typeof entry.mql.onchange === 'function') { try { entry.mql.onchange(evt); } catch(_) {} }
+        // Fire all addEventListener/addListener listeners (access via internal ref)
+        var ls = (entry.mql as any)._listeners as Array<(e: unknown) => void> | undefined;
+        if (ls) { for (var fn of ls) { try { fn(evt); } catch(_) {} } }
+      }
+    }
+  }
+
   function _makeMediaQueryList(q: string): any {
     var listeners: Array<(ev: {matches: boolean; media: string}) => void> = [];
-    return {
+    var mql: any = {
       get matches() { return _evalMediaQuery(q); },
       media: q,
       onchange: null as ((ev: unknown) => void) | null,
+      _listeners: listeners,
       addEventListener(_type: string, fn: (ev: unknown) => void): void { listeners.push(fn as any); },
       removeEventListener(_type: string, fn: (ev: unknown) => void): void { var i = listeners.indexOf(fn as any); if (i >= 0) listeners.splice(i, 1); },
       addListener(fn: (ev: unknown) => void)    { listeners.push(fn as any); },    // legacy
       removeListener(fn: (ev: unknown) => void) { var i = listeners.indexOf(fn as any); if (i >= 0) listeners.splice(i, 1); }, // legacy
     };
+    _mqlRegistry.push({ mql, lastMatches: _evalMediaQuery(q) });
+    return mql;
   }
 
   // ── Build the global window object ────────────────────────────────────────
@@ -4043,6 +4066,17 @@ export function createPageJS(
     fireLoad(): boolean {
       return fireAndCheck(() => {
         var ev = new VEvent('load'); doc.dispatchEvent(ev);
+      });
+    },
+    fireResize(width: number, height: number): boolean {
+      // [Item 950] Update viewport dimensions, fire resize event, check MQL listeners
+      win['innerWidth']  = width;
+      win['outerWidth']  = width;
+      win['innerHeight'] = height;
+      win['outerHeight'] = height;
+      _checkMediaListeners();
+      return fireAndCheck(() => {
+        var ev = new VEvent('resize'); doc.dispatchEvent(ev);
       });
     },
     dispose(): void {

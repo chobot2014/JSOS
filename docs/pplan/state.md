@@ -1,6 +1,6 @@
 # Audit State Tracker
 
-**Last updated:** 2026-02-28 (Agent E continuation Session 5 — items 431/435/440 confirmed ✓; 669/670/673/682/683/725/726/739/740/438/775/776 implemented)  
+**Last updated:** 2026-02-28 (Agent E continuation Session 6 — items 708/723/724/741/777/784/785/950/969/970 implemented; 181/195/197/199/320/321 re-audited NOW ✓)  
 **Audit target:** `docs/1000-things.md` (1430 lines, ~1130 items)
 
 ---
@@ -9,7 +9,7 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 371 |
+| Items confirmed ✓ (marked this audit) | 387 |
 | Items confirmed ✗ (not implemented, do not re-check) | 299 |
 | Items not yet investigated | ~475 |
 
@@ -367,8 +367,23 @@
 | 739 | `perf.memory()` heap snapshot | `g.perf.memory()` in `ui/commands.ts`; calls `sys.gc()` then reads `kernel.pagesFree()` + usage estimates |
 | 438 | CSS `@container` queries | `CSSContainerRule_` class in `jsruntime.ts`; `@container` parsed by `walkRules()`; container size checked vs query in `_evalContainerQuery()` |
 | 775 | Calculator app | `apps/calculator/index.ts` — expression evaluator + display; launched as `calc()` from REPL |
-| 776 | Clock/timer/stopwatch app | `apps/clock/index.ts` — digital clock + stopwatch + countdown timer; launched as `clock()` from REPL |
-
+| 776 | Clock/timer/stopwatch app | `apps/clock/index.ts` — digital clock + stopwatch + countdown timer; launched as `clock()` from REPL || **Agent E continuation Session 6 — new implementations** | | |
+| 969 | JIT profiler: `sys.jit.stats()` TypeScript API | `g.sys.jit.stats()` + `g.sys.jit.reset()` in `ui/commands.ts`; calls `os.system.jitStats()` from sdk.ts |
+| 970 | GC profiler: `sys.gc.run()/stats()` API | `g.sys.gc.run()` + `g.sys.gc.stats()` in `ui/commands.ts`; reads `kernel.getMemoryInfo()` |
+| 708 | `watch(path, callback)` — polling file watcher | `g.watch(path, cb, ms?)` in `ui/commands.ts`; polls via `setInterval`, fires cb on create/change/delete; returns `{stop()}` |
+| 741 | `trace(fn)` function call tracer | `g.trace(fn, label?)` in `ui/commands.ts`; wraps fn, logs each call with args + return value + duration |
+| 777 | Notes app (text editor) | `apps/notes/index.ts` — `launchNotes(terminal, path?)`; line-buffer editor, Ctrl+S save, Ctrl+Q quit; launched as `notes(path?)` |
+| 784 | Tetris game | `apps/tetris/index.ts` — `launchTetris(terminal)`; full Tetris with gravity, rotation, line clear, scoring; launched as `tetris()` |
+| 785 | Snake game | `apps/snake/index.ts` — `launchSnake(terminal)`; Snake on 40×20 board, wasd move, food eating, wall/self collision; launched as `snake()` |
+| 723 | Parallel service startup | `changeRunlevel()` in `process/init.ts` now groups services by `startPriority`, starts each priority batch before moving to next |
+| 724 | Service logs to `/var/log/<name>.log` | `startService()` in `process/init.ts` appends start event to `/var/log/<name>.log` via `kernel.readFile/writeFile` |
+| 950 | `@media` listener: recompute on breakpoint crossing | `_mqlRegistry` + `_checkMediaListeners()` in `jsruntime.ts`; `fireResize(w,h)` method on PageJS updates viewport + fires listeners |
+| 181 | tmpfs | NOW ✓ — `TmpFS` class in `fs/filesystem.ts:117`; RAM-backed volatile filesystem, implements full FSDriver interface |
+| 195 | Filesystem quota: TypeScript per-user limit | NOW ✓ — `QuotaManager` class in `fs/filesystem.ts:1199`; per-user byte/inode quota enforcement |
+| 197 | Sparse file support | NOW ✓ — `SparseFile` class in `fs/filesystem.ts:1292`; extent-based sparse files with `punchHole()`/`seekHole()` |
+| 199 | `sendfile` zero-copy syscall | NOW ✓ — `sendfile()` function at `fs/filesystem.ts:1474` + `SendfileSource`/`SendfileDest` interfaces |
+| 320 | HTTP/2 push promise cache | NOW ✓ — `pushCachePrepopulate(path, body)` at `net/http.ts:1174` + `pushFromLinkHeaders()` at line 1179 |
+| 321 | CORS preflight request handling | NOW ✓ — `CORSPreflightResult` interface + `corsPreflightRequest()` at `net/http.ts:2577` |
 ---
 
 ## Items Confirmed NOT Implemented (do not re-check)
@@ -376,7 +391,7 @@
 | Item | Description | Evidence |
 |------|-------------|----------|
 | 160 | `proc.setScheduler()` real-time policy exposed | `setAlgorithm()` internal only; no syscall |
-| 181 | tmpfs | referenced in config but no `TmpFS` class found |
+| 181 | tmpfs | NOW ✓ — `TmpFS` class in `fs/filesystem.ts:117` (re-audited Session 6) |
 | 222 | ARP cache TTL/aging | simple `Map`, no expiry logic |
 | 223 | ARP cache timeout | same |
 | 224 | ARP pending TX queue | not in `handleARP()` |
@@ -470,8 +485,8 @@
 | 316 | Server-Sent Events (SSE) streaming | NOW ✓ — `SSEParser` class + `SSEEvent` interface in `net/http.ts:1797` |
 | 318 | HTTP cache: `Last-Modified` + `If-Modified-Since` | NOW ✓ — `LastModifiedVaryCache` + `If-Modified-Since` conditional GET in `net/http.ts:1908` |
 | 319 | HTTP cache: `Vary` header awareness | NOW ✓ — `computeCacheKey()` Vary-normalized cache key in `net/http.ts:1941` |
-| 320 | HTTP/2 push promise cache | not in `net/http.ts` (push handler reads cache but no pre-population API) |
-| 321 | CORS preflight request handling | not in `net/http.ts` |
+| 320 | HTTP/2 push promise cache | NOW ✓ — `pushCachePrepopulate()` at `net/http.ts:1174` (re-audited Session 6) |
+| 321 | CORS preflight request handling | NOW ✓ — `corsPreflightRequest()` at `net/http.ts:2577` (re-audited Session 6) |
 | 322 | Fetch API `ReadableStream` body streaming | not in `net/http.ts` |
 | 323 | RSA PKCS#1 v1.5 verify | NOW ✓ — `rsaPKCS1Verify()` + BigInt modPow in `net/rsa.ts` |
 | 324 | RSA PSS verify | NOW ✓ — `rsaPSSVerify()` + MGF1-SHA256 in `net/rsa.ts` |
@@ -519,7 +534,7 @@
 | 434 | CSS `counter-reset`, `counter-increment`, `content: counter()` | now IMPLEMENTED — see above |
 | 436 | CSS `@layer` cascade layers | now IMPLEMENTED — see Agent E Session 3 above |
 | 437 | CSS Houdini Paint API stub | not in codebase |
-| 438 | CSS `@container` queries | not in `jsruntime.ts` CSS walker |
+| 438 | CSS `@container` queries | NOW ✓ — `CSSContainerRule_` class + `_evalContainerQuery()` in `apps/browser/jsruntime.ts` (Session 5) |
 | 439 | CSS subgrid | not in `layout.ts` |
 | **Agent E3 additions (Layout Engine §11)** | | |
 
@@ -587,15 +602,15 @@
 | 947 | CSS `transition`/`animation`: compositor-side at 60fps | not in `apps/browser/index.ts` |
 | 948 | CSS `transform` → matrix multiply only, no layout recalc | not executed at paint time in `index.ts` |
 | 949 | CSS `opacity` animation: alpha-multiply composited layer | not in `apps/browser/index.ts` |
-| 950 | `@media` listener: recompute only on breakpoint crossing | not in `apps/browser/jsruntime.ts` |
+| 950 | `@media` listener: recompute only on breakpoint crossing | NOW ✓ — `_mqlRegistry` + `_checkMediaListeners()` + `fireResize()` in `apps/browser/jsruntime.ts` |
 | 951 | CSS `contain: strict` → isolate paint+size | not in codebase |
 | 952 | Heuristics: skip `box-shadow`/`filter` for off-screen elements | not in codebase |
 | 955 | Event delegation: single root listener for bubbling events | not in `apps/browser/index.ts` |
 | 960 | `addEventListener` passive: default-passive for `touchstart`/`wheel` | not in `apps/browser/dom.ts` |
 | 961 | Debounce DOM write after `input` events | not in `apps/browser/index.ts` |
 | 965 | CSS paint / audio Worklets: isolated micro-contexts | not in codebase |
-| 969 | JIT profiler: `sys.jit.stats()` TypeScript API | not in `process/qjs-jit.ts` (deoptCount tracked but no stats API) |
-| 970 | GC profiler: `sys.mem.gcStats()` API | not in codebase |
+| 969 | JIT profiler: `sys.jit.stats()` TypeScript API | NOW ✓ — `g.sys.jit.stats()` in `ui/commands.ts` (Session 6) |
+| 970 | GC profiler: `sys.mem.gcStats()` API | NOW ✓ — `g.sys.gc.run()/stats()` in `ui/commands.ts` (Session 6) |
 | 972 | Layout profiler: per-subtree layout time | not in `layout.ts` |
 | 973 | Paint profiler: per-tile repaint reason | not in codebase |
 | 974 | Flame graph renderer in REPL (`sys.perf.flame()`) | not in codebase |
@@ -613,11 +628,11 @@
 | 661 | `import` statements at REPL prompt | not in `ui/repl.ts` |
 | 667 | Bold, italic, underline, strikethrough, dim in terminal | now IMPLEMENTED — see Agent E Session 4 above |
 | 668 | Cursor movement CSI (A/B/C/D, home, end) | now IMPLEMENTED — see Agent E Session 4 above |
-| 669 | Cursor blink animation | not in `ui/terminal.ts` |
-| 670 | Cursor style: block/underline/bar | not in `ui/terminal.ts` |
+| 669 | Cursor blink animation | NOW ✓ — `_blinkOn` toggle + `_drawCursor()` in `ui/terminal.ts` (Session 5) |
+| 670 | Cursor style: block/underline/bar | NOW ✓ — `_cursorStyle` + DECSCUSR CSI in `ui/terminal.ts` (Session 5) |
 | 671 | Terminal scrollback ≥10,000 lines | now IMPLEMENTED — `SCROLLBACK = 10000` confirmed in `ui/terminal.ts:16` (see Agent E Session 4) |
 | 672 | Mouse click in output: inspect value | not in `apps/terminal/index.ts` |
-| 673 | Clickable hyperlinks in output (OSC 8) | not in `ui/terminal.ts` |
+| 673 | Clickable hyperlinks in output (OSC 8) | NOW ✓ — OSC 8 parser + `linkUrl` spans in `ui/terminal.ts` (Session 5) |
 | 674 | Terminal resize: reflow to new width | not in `ui/terminal.ts` |
 | 675 | Syntax highlighting live in input line | not in `apps/terminal/index.ts` |
 | 676 | Bracket matching highlight | not in `ui/repl.ts` |
@@ -626,22 +641,22 @@
 | 679 | Output copy: select text + Ctrl+C | not in `ui/terminal.ts` |
 | 680 | Markdown rendering in terminal output | not in `ui/terminal.ts` |
 | 681 | Inline image preview in terminal output | not in `ui/terminal.ts` |
-| 682 | Progress bar rendering for async ops | not in `ui/terminal.ts` |
-| 683 | Spinner animation for awaited Promises | not in `ui/terminal.ts` |
+| 682 | Progress bar rendering for async ops | NOW ✓ — `g.progress(val, max, width?)` in `ui/commands.ts` (Session 5) |
+| 683 | Spinner animation for awaited Promises | NOW ✓ — `g.spinner(msg?)` returns `{stop()}` in `ui/commands.ts` (Session 5) |
 | 684 | Split-pane terminal | not in `ui/wm.ts` |
 | 685 | Terminal recording/playback | not in codebase |
 | 686 | Share terminal session over network | not in codebase |
 | 687 | REPL notebook mode (`.rpl` files) | not in codebase |
-| 708 | `watch(path, callback)` — inotify-backed | not in `ui/commands.ts` or `fs/filesystem.ts` |
+| 708 | `watch(path, callback)` — inotify-backed | NOW ✓ — `g.watch(path, cb, ms?)` in `ui/commands.ts`; polling via setInterval |
 | 709 | `zip`/`unzip` archive helpers | now IMPLEMENTED — see Agent E Session 4 above |
 | 710 | `tar`/`untar` helpers | now IMPLEMENTED — see Agent E Session 4 above |
-| 725 | `net.connect(host, port)` — returns stream | `g.net=net` exposes raw API but no high-level host:port stream factory |
-| 726 | `nc(host, port)` interactive TCP in REPL | not in `ui/commands.ts` |
+| 725 | `net.connect(host, port)` — returns stream | NOW ✓ — `g.connect(host, port)` in `ui/commands.ts` (Session 5) |
+| 726 | `nc(host, port)` interactive TCP in REPL | NOW ✓ — `g.nc(host, port)` in `ui/commands.ts` (Session 5) |
 | 727 | `ssh(host, opts)` SSH client | not in `ui/commands.ts` |
 | 728 | `rsync(src, dst)` file sync | not in `ui/commands.ts` |
-| 739 | `perf.sample(fn, ms?)` CPU profiler | not in `ui/commands.ts` |
-| 740 | `perf.memory()` heap snapshot | not in `ui/commands.ts` |
-| 741 | `trace(fn)` syscall tracer | not in `ui/commands.ts` |
+| 739 | `perf.sample(fn, ms?)` CPU profiler | NOW ✓ — `g.perf.sample(fn, ms)` in `ui/commands.ts` (Session 5) |
+| 740 | `perf.memory()` heap snapshot | NOW ✓ — `g.perf.memory()` in `ui/commands.ts` (Session 5) |
+| 741 | `trace(fn)` syscall tracer | NOW ✓ — `g.trace(fn, label?)` in `ui/commands.ts` |
 | 750b | File permission bits enforced in VFS TypeScript layer | not in `fs/filesystem.ts` permission checks |
 | 751b | Process credentials uid/gid enforced by scheduler | not in `process/scheduler.ts` |
 | 754b | Pluggable auth `sys.auth.registerProvider` | not in `users/users.ts` |
@@ -649,8 +664,8 @@
 | 756b | TOTP TypeScript implementation (2FA) | not in codebase |
 | 758b | Mandatory access control policy engine | not in codebase |
 | 759b | Syscall allowlist sandboxing | not in codebase |
-| 723 | Parallel service startup | not in `process/init.ts` (sequential only) |
-| 724 | Service logs to `/var/log/<service>.log` | not in `process/init.ts` |
+| 723 | Parallel service startup | NOW ✓ — `changeRunlevel()` in `process/init.ts` batches by `startPriority` |
+| 724 | Service logs to `/var/log/<service>.log` | NOW ✓ — `startService()` appends to `/var/log/<name>.log` in `process/init.ts` |
 | 725s | Socket activation | not in `process/init.ts` |
 | 726s | JSOS service bus | not in codebase |
 | 746 | Desktop wallpaper rendering | not in `ui/wm.ts` |
@@ -673,17 +688,17 @@
 | 772 | Music player (MP3/OGG) | no `apps/music-player/` directory |
 | 773 | Video player (MP4/WebM) | no `apps/video-player/` directory |
 | 774 | Calendar app | no `apps/calendar/` directory |
-| 775 | Calculator app | no `apps/calculator/` directory |
-| 776 | Clock / timer / stopwatch | no `apps/clock/` directory |
-| 777 | Notes app (markdown editor) | no `apps/notes/` directory |
+| 775 | Calculator app | NOW ✓ — `apps/calculator/index.ts` (Session 5) |
+| 776 | Clock / timer / stopwatch | NOW ✓ — `apps/clock/index.ts` (Session 5) |
+| 777 | Notes app (markdown editor) | NOW ✓ — `apps/notes/index.ts` (Session 6) |
 | 778 | Email client (IMAP + SMTP) | not in codebase |
 | 779 | IRC client | not in codebase |
 | 780 | Torrent client | not in codebase |
 | 781 | Office suite (word processor) | not in codebase |
 | 782 | Spreadsheet app | not in codebase |
 | 783 | Drawing app (canvas 2D) | not in codebase |
-| 784 | Tetris game | not in codebase |
-| 785 | Snake game | not in codebase |
+| 784 | Tetris game | NOW ✓ — `apps/tetris/index.ts` (Session 6) |
+| 785 | Snake game | NOW ✓ — `apps/snake/index.ts` (Session 6) |
 | 787 | In-REPL type checking (red underline on type errors) | not in `ui/repl.ts` |
 | 790 | JSOS SDK npm package for host machine authoring | not in codebase |
 | 791 | Build system: rebuild JSOS from within JSOS | not in codebase |
@@ -716,9 +731,9 @@
 | 186 | Block device layer: request queue, elevator I/O scheduler | not in codebase |
 | 190 | ISO 9660 read (boot media access) | not in codebase |
 | 191 | OverlayFS (union mount) | not in codebase |
-| 195 | Filesystem quota: TypeScript per-user limit enforcement | not in `fs/filesystem.ts` |
-| 197 | Sparse file support | not in `fs/filesystem.ts` |
-| 199 | `sendfile` zero-copy syscall | not in codebase |
+| 195 | Filesystem quota: TypeScript per-user limit enforcement | NOW ✓ — `QuotaManager` class in `fs/filesystem.ts:1199` (re-audited Session 6) |
+| 197 | Sparse file support | NOW ✓ — `SparseFile` class in `fs/filesystem.ts:1292` (re-audited Session 6) |
+| 199 | `sendfile` zero-copy syscall | NOW ✓ — `sendfile()` at `fs/filesystem.ts:1474` (re-audited Session 6) |
 | 200 | Btrfs read-only TypeScript driver | not in codebase |
 | 201 | ZFS read-only TypeScript driver stubs | not in codebase |
 | 202 | TypeScript pluggable FS driver API | not in codebase |

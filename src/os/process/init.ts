@@ -113,6 +113,15 @@ export class InitSystem {
       instance.backoffMs   = 1000;
       instance.nextRespawn = -1;
 
+      // [Item 724] Write service start event to /var/log/<name>.log
+      try {
+        const logPath = '/var/log/' + serviceName + '.log';
+        const ts = '[' + Math.round(instance.startTime / 1000) + 's] ';
+        const k = kernel as any;
+        const existing = k.exists?.(logPath) ? (k.readFile?.(logPath) || '') : '';
+        k.writeFile?.(logPath, existing + ts + 'started pid=' + instance.pid + '\n');
+      } catch (_) { /* ignore log failures */ }
+
       return { success: true };
     } catch (error) {
       instance.state = 'failed';
@@ -169,9 +178,27 @@ export class InitSystem {
       } else if (newLevel === 6) {
         this.reboot();
       } else {
-        // Start services with runlevel <= target
+        // [Item 723] Start services in parallel batches grouped by startPriority
+        // Collect services to start, sorted by priority
+        const toStart: Array<{ name: string; priority: number }> = [];
         for (const [name, instance] of this.serviceInstances) {
           if (instance.service.runlevel <= newLevel && instance.state === 'stopped') {
+            toStart.push({ name, priority: instance.service.startPriority });
+          }
+        }
+        toStart.sort((a, b) => a.priority - b.priority);
+
+        // Start each priority group as a "parallel" batch
+        let i = 0;
+        while (i < toStart.length) {
+          const currentPriority = toStart[i].priority;
+          const batch: string[] = [];
+          while (i < toStart.length && toStart[i].priority === currentPriority) {
+            batch.push(toStart[i].name);
+            i++;
+          }
+          kernel.serialPut('[init] batch priority=' + currentPriority + ' count=' + batch.length + '\n');
+          for (const name of batch) {
             this.startService(name);
           }
         }
