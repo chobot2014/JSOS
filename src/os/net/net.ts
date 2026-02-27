@@ -3381,3 +3381,305 @@ export function advanceSourceRoute(
 export const routingTables = new RoutingTableManager();
 export const policyRouter  = new PolicyRoutingEngine(routingTables);
 
+// ── 6to4 / Teredo IPv6 Transition Tunnelling (Item 248) ──────────────────────
+//
+// RFC 3056 (6to4) and RFC 4380 (Teredo) provide automatic IPv6-in-IPv4 tunnels
+// so single-stack IPv4 hosts can send/receive IPv6 packets.
+//
+// 6to4: Embeds the IPv4 address in the IPv6 address (2002::/16 prefix).
+//       Packets are encapsulated as IPv4 protocol 41 (IPv6).
+// Teredo: Tunnels IPv6 through NATs via UDP port 3544, uses a Teredo server
+//       to derive a routable IPv6 address from the public IPv4:port.
+//
+// JSOS implementation strategy:
+//  • The kernel provides net.sendIPv4Raw(dst, proto, payload) for protocol-41
+//    injection; TeredoTunnel uses net.udpSendTo for the UDP path.
+//  • Encapsulation/decapsulation is done entirely in TypeScript.
+//  • Both classes follow the same stub pattern as MPTCPConnection (Item 268):
+//    the public API surface is complete; actual packet injection is guarded
+//    by capability checks.
+
+/**
+ * [Item 248] Convert a 6to4 IPv6 address (2002:aabb:ccdd::/48) to the
+ * embedded IPv4 address string.
+ */
+export function decode6to4Address(ipv6: string): string | null {
+  // Normalise: strip leading '2002:'
+  if (!ipv6.toLowerCase().startsWith('2002:')) return null;
+  var parts = ipv6.split(':');
+  if (parts.length < 3) return null;
+  var w1 = parseInt(parts[1], 16);
+  var w2 = parseInt(parts[2], 16);
+  if (isNaN(w1) || isNaN(w2)) return null;
+  return [(w1 >> 8) & 0xff, w1 & 0xff, (w2 >> 8) & 0xff, w2 & 0xff].join('.');
+}
+
+/**
+ * [Item 248] Derive the 6to4 IPv6 address for a given IPv4 address.
+ * Returns a string of the form '2002:aabb:ccdd::1'.
+ */
+export function encode6to4Address(ipv4: string): string {
+  var octs = ipv4.split('.').map(Number);
+  var w1 = ((octs[0] & 0xff) << 8) | (octs[1] & 0xff);
+  var w2 = ((octs[2] & 0xff) << 8) | (octs[3] & 0xff);
+  return '2002:' + w1.toString(16).padStart(4, '0') + ':' +
+                   w2.toString(16).padStart(4, '0') + '::1';
+}
+
+/**
+ * [Item 248] 6to4 tunnel endpoint.
+ *
+ * Encapsulates outbound IPv6 packets as IPv4 protocol-41 datagrams and
+ * decapsulates inbound protocol-41 datagrams back to IPv6.
+ *
+ * RFC 3056 §5: the relay router address is an IPv4 anycast (192.88.99.1 for
+ * the public relay, or a local relay on the same site).
+ */
+export class Tun6to4 {
+  /** Local IPv4 address used as the tunnel source. */
+  readonly localIPv4: string;
+  /** 6to4 relay router (default: 192.88.99.1 anycast, RFC 3068). */
+  readonly relayIPv4: string;
+  /** Derived 6to4 IPv6 address for this node. */
+  readonly ipv6Address: string;
+
+  constructor(localIPv4: string, relayIPv4 = '192.88.99.1') {
+    this.localIPv4  = localIPv4;
+    this.relayIPv4  = relayIPv4;
+    this.ipv6Address = encode6to4Address(localIPv4);
+  }
+
+  /**
+   * Encapsulate an IPv6 packet for 6to4 transmission.
+   * Returns a raw IPv4 datagram (protocol 41) ready to send via sendIPv4Raw().
+   *
+   * @param dstIPv6  Destination 6to4 IPv6 address (must start with 2002::).
+   * @param ipv6Pkt  Raw IPv6 packet bytes.
+   */
+  encapsulate(dstIPv6: string, ipv6Pkt: number[]): { dest: string; payload: number[] } {
+    var dstIPv4 = decode6to4Address(dstIPv6) ?? this.relayIPv4;
+    // Protocol = 41 (IPv6-in-IPv4); payload = raw IPv6 packet
+    return { dest: dstIPv4, payload: ipv6Pkt.slice() };
+  }
+
+  /**
+   * Decapsulate an inbound protocol-41 IPv4 datagram.
+   * Strips the IPv4 header (variable-length) and returns the inner IPv6 bytes.
+   *
+   * @param ipv4Pkt  Raw IPv4 datagram (starting at the IP header).
+   */
+  decapsulate(ipv4Pkt: number[]): number[] | null {
+    if (ipv4Pkt.length < 20) return null;
+    var proto = ipv4Pkt[9];
+    if (proto !== 41) return null;  // not IPv6-in-IPv4
+    var ihl = (ipv4Pkt[0] & 0x0f) * 4;
+    if (ipv4Pkt.length < ihl + 40) return null;  // too short for IPv6 header
+    return ipv4Pkt.slice(ihl);
+  }
+
+  /**
+   * Send an IPv6 packet through the 6to4 tunnel.
+   * Uses kernel.sendIPv4Raw when available, otherwise records the intent.
+   */
+  send(dstIPv6: string, ipv6Pkt: number[]): boolean {
+    var { dest, payload } = this.encapsulate(dstIPv6, ipv6Pkt);
+    if (typeof kernel !== 'undefined' && (kernel as any).sendIPv4Raw) {
+      return (kernel as any).sendIPv4Raw(dest, 41 /* IPPROTO_IPV6 */, payload);
+    }
+    return false;
+  }
+}
+
+// ── Teredo (RFC 4380) ─────────────────────────────────────────────────────────
+
+/** UDP port used by Teredo (RFC 4380 §2.5). */
+const TEREDO_PORT = 3544;
+
+/** [Item 248] Teredo IPv6 address structure decoded from a Teredo address. */
+export interface TeredoAddress {
+  /** Teredo server IPv4 address (embedded bits 32–63). */
+  serverIPv4: string;
+  /** Client flags (bits 64–79). */
+  flags: number;
+  /** Obfuscated UDP port (bits 80–95) — XOR with 0xffff to get real port. */
+  mappedPort: number;
+  /** Obfuscated client IPv4 (bits 96–127) — each octet XOR'd with 0xff. */
+  mappedIPv4: string;
+}
+
+/**
+ * [Item 248] Decode the embedded server/client info from a Teredo IPv6 address.
+ * Teredo prefix: 2001:0000::/32 (RFC 4380 §4).
+ */
+export function decodeTeredoAddress(ipv6: string): TeredoAddress | null {
+  var parts = ipv6.split(':');
+  if (parts.length < 8) return null;
+  if (parts[0].toLowerCase() !== '2001' || parts[1] !== '0000') return null;
+
+  var serverWord1 = parseInt(parts[2], 16);
+  var serverWord2 = parseInt(parts[3], 16);
+  var flags       = parseInt(parts[4], 16);
+  var portObs     = parseInt(parts[5], 16);
+  var addrObs1    = parseInt(parts[6], 16);
+  var addrObs2    = parseInt(parts[7], 16);
+
+  if ([serverWord1, serverWord2, flags, portObs, addrObs1, addrObs2].some(isNaN)) return null;
+
+  var serverIPv4 = [(serverWord1 >> 8) & 0xff, serverWord1 & 0xff,
+                    (serverWord2 >> 8) & 0xff, serverWord2 & 0xff].join('.');
+  var realPort   = (portObs ^ 0xffff) & 0xffff;
+  var a1 = ((addrObs1 >> 8) ^ 0xff) & 0xff;
+  var a2 = (addrObs1 ^ 0xff) & 0xff;
+  var a3 = ((addrObs2 >> 8) ^ 0xff) & 0xff;
+  var a4 = (addrObs2 ^ 0xff) & 0xff;
+
+  return {
+    serverIPv4,
+    flags,
+    mappedPort: realPort,
+    mappedIPv4: [a1, a2, a3, a4].join('.'),
+  };
+}
+
+/**
+ * [Item 248] Teredo tunnel endpoint stub (RFC 4380).
+ *
+ * Tunnels IPv6 packets over UDP/IPv4 so NAT-traversal is handled automatically
+ * by Teredo relay routers.  Each IPv6 packet is wrapped in a Teredo UDP packet
+ * sent to the Teredo server or a peer relay.
+ *
+ * Lifetime:
+ *   1. qualify() exchanges RS/RA with the server to obtain a Teredo IPv6 address.
+ *   2. send() encapsulates the IPv6 packet as a Teredo UDP datagram.
+ *   3. decapsulate() strips the Teredo UDP header from an inbound datagram.
+ */
+export class TeredoTunnel {
+  /** Teredo server address (default: teredo.ipv6.microsoft.com resolved to IPv4). */
+  readonly serverIPv4: string;
+  /** Teredo server port. */
+  readonly serverPort: number;
+  /** Derived Teredo IPv6 address (populated after qualify()). */
+  ipv6Address: string | null = null;
+  /** Mapped public IPv4 of this node (learned from Router Advertisement). */
+  mappedIPv4: string | null = null;
+  /** Mapped UDP port (learned from Router Advertisement). */
+  mappedPort: number | null = null;
+  /** Internal UDP socket fd. */
+  private _sock: number = -1;
+
+  constructor(serverIPv4: string, serverPort: number = TEREDO_PORT) {
+    this.serverIPv4 = serverIPv4;
+    this.serverPort = serverPort;
+  }
+
+  /**
+   * Qualify the Teredo tunnel: send a Router Solicitation to the server
+   * and parse the Router Advertisement to learn our mapped address/port.
+   *
+   * On JSOS this uses net.udpCreateSocket / net.udpSendTo.  Returns true if
+   * qualification succeeded and ipv6Address was populated.
+   */
+  qualify(): boolean {
+    if (typeof net === 'undefined') return false;
+    var sock = net.udpCreateSocket();
+    if (!sock || sock.fd < 0) return false;
+    this._sock = sock.fd;
+
+    // Router Solicitation (ICMPv6 type 133): minimal 8-byte empty RS
+    // Teredo encapsulation: no authentication indicator, no origin indication
+    var rs: number[] = [0x86, 0xdd,  // fake Ethernet type (IPv6)
+                        0x60, 0x00, 0x00, 0x00, 0x00, 0x08, 0x3a, 0xff,
+                        // src: all-zeros
+                        0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+                        // dst: all-routers multicast ff02::2
+                        0xff,0x02,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0x02,
+                        // ICMPv6 RS header
+                        0x85, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    net.udpSendTo(sock, this.serverIPv4, this.serverPort, rs);
+
+    // Wait for Router Advertisement (type 134) — abbreviated busy-wait
+    if (typeof kernel !== 'undefined') {
+      var deadline = kernel.getTicks() + 500;
+      while (kernel.getTicks() < deadline) {
+        var pkt = net.udpRecvFrom(sock);
+        if (pkt && pkt.data.length > 8) {
+          var inner = this.decapsulate(pkt.data);
+          if (inner && inner.length > 40 && inner[40] === 134 /* RA */) {
+            // Parse origin indication from Teredo server: last 6 bytes of RA
+            // carry the mapped port (2 bytes, XOR 0xffff) and IPv4 (4 bytes, XOR each 0xff)
+            var portObs = (inner[inner.length - 6] << 8) | inner[inner.length - 5];
+            var port    = (portObs ^ 0xffff) & 0xffff;
+            var ip      = [(inner[inner.length - 4] ^ 0xff), (inner[inner.length - 3] ^ 0xff),
+                           (inner[inner.length - 2] ^ 0xff), (inner[inner.length - 1] ^ 0xff)].join('.');
+            this.mappedIPv4 = ip;
+            this.mappedPort = port;
+            // Build a Teredo IPv6 address: 2001:0000:<server32>:<flags>:<portObs>:<ipObs>
+            var sip = this.serverIPv4.split('.').map(Number);
+            var sw1 = (sip[0] << 8) | sip[1];
+            var sw2 = (sip[2] << 8) | sip[3];
+            var oip = ip.split('.').map(function(o: string) { return (parseInt(o, 10) ^ 0xff) & 0xff; });
+            var ow1 = (oip[0] << 8) | oip[1];
+            var ow2 = (oip[2] << 8) | oip[3];
+            this.ipv6Address =
+              '2001:0000:' + sw1.toString(16).padStart(4,'0') + ':' + sw2.toString(16).padStart(4,'0') +
+              ':0000:' + portObs.toString(16).padStart(4,'0') + ':' +
+              ow1.toString(16).padStart(4,'0') + ':' + ow2.toString(16).padStart(4,'0');
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Encapsulate an IPv6 packet as a Teredo UDP payload.
+   * Per RFC 4380 §4: the IPv6 packet is the UDP payload; no additional header.
+   */
+  encapsulate(ipv6Pkt: number[]): number[] { return ipv6Pkt.slice(); }
+
+  /**
+   * Strip a Teredo origin indication (if present) from an inbound UDP datagram
+   * and return the inner IPv6 packet.
+   *
+   * RFC 4380 §5.2.1: an origin indication starts with 0x00 0x00.
+   * Authentication indication starts with 0x00 0x01 — both are skipped.
+   */
+  decapsulate(data: number[]): number[] | null {
+    if (data.length < 2) return null;
+    var off = 0;
+    // Skip indicators
+    while (off + 2 <= data.length && data[off] === 0x00 &&
+           (data[off + 1] === 0x00 || data[off + 1] === 0x01)) {
+      if (data[off + 1] === 0x01) {
+        // Authentication indicator: variable length, skip
+        if (off + 4 > data.length) return null;
+        var idLen    = data[off + 2];
+        var auLen    = data[off + 3];
+        off += 4 + idLen + auLen + 8;  // +8 for nonce/confirmation
+      } else {
+        // Origin indication: fixed 8 bytes
+        off += 8;
+      }
+    }
+    if (off >= data.length) return null;
+    var ipv6 = data.slice(off);
+    // Validate: first nibble of IPv6 header must be 0x6x
+    if ((ipv6[0] >> 4) !== 6) return null;
+    return ipv6;
+  }
+
+  /**
+   * Send an IPv6 packet through the Teredo tunnel to the given peer relay.
+   * @param dstRelay  IPv4 address of the Teredo relay for the destination.
+   * @param dstPort   UDP port of the Teredo relay (default TEREDO_PORT).
+   * @param ipv6Pkt   Raw IPv6 packet bytes.
+   */
+  send(dstRelay: string, ipv6Pkt: number[], dstPort: number = TEREDO_PORT): boolean {
+    if (this._sock < 0 || typeof net === 'undefined') return false;
+    var sock = { fd: this._sock } as any;
+    var payload = this.encapsulate(ipv6Pkt);
+    return net.udpSendTo(sock, dstRelay, dstPort, payload) > 0;
+  }
+}
+
