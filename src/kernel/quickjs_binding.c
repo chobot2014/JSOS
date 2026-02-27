@@ -2822,6 +2822,51 @@ static JSValue js_wasm_jit_compile(JSContext *c, JSValueConst _t, int _ac, JSVal
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * FPU / SSE CONTEXT SAVE & RESTORE — item 147
+ *
+ * C provides three thin hardware primitives; ALL scheduling policy lives in TS.
+ *
+ *   fpuAllocState()          → allocate a 512-byte 16-byte-aligned state buffer
+ *   fpuSave(physAddr)        → FXSAVE to the buffer (returns bool success)
+ *   fpuRestore(physAddr)     → FXRSTOR from the buffer (returns bool success)
+ *
+ * FXSAVE/FXRSTOR require the target address to be 16-byte aligned.
+ * alloc_page() returns a 4096-byte-aligned physical page, so alignment is
+ * always satisfied.  Only the first 512 bytes of the page are used.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static JSValue js_fpu_alloc_state(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; (void)_ac; (void)av;
+    /* alloc_page() returns physical page number; each page is 4 KB = 16-byte aligned */
+    uint32_t page = alloc_page();
+    if (page == (uint32_t)-1) return JS_NewInt32(c, 0);   /* 0 = OOM sentinel */
+    /* Zero the 512-byte FXSAVE area so FXRSTOR finds a valid initial state */
+    uint8_t *buf = (uint8_t *)(uintptr_t)(page * 4096);
+    for (int i = 0; i < 512; i++) buf[i] = 0;
+    return JS_NewInt32(c, (int32_t)(page * 4096));
+}
+
+static JSValue js_fpu_save(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t;
+    if (_ac < 1) return JS_NewBool(c, 0);
+    uint32_t addr;
+    if (JS_ToUint32(c, &addr, av[0])) return JS_EXCEPTION;
+    if (!addr || (addr & 0xF)) return JS_NewBool(c, 0);    /* must be 16-byte aligned */
+    __asm__ volatile("fxsave (%0)" :: "r"((void *)(uintptr_t)addr) : "memory");
+    return JS_NewBool(c, 1);
+}
+
+static JSValue js_fpu_restore(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t;
+    if (_ac < 1) return JS_NewBool(c, 0);
+    uint32_t addr;
+    if (JS_ToUint32(c, &addr, av[0])) return JS_EXCEPTION;
+    if (!addr || (addr & 0xF)) return JS_NewBool(c, 0);    /* must be 16-byte aligned */
+    __asm__ volatile("fxrstor (%0)" :: "r"((void *)(uintptr_t)addr) : "memory");
+    return JS_NewBool(c, 1);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * MODULE LOADER — item 118 (filesystem import()) + item 119 (@jsos/* pkgs)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -3137,6 +3182,10 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("wasmJitCompile",      1, js_wasm_jit_compile),
     /* Module loader registration (items 118, 119) */
     JS_CFUNC_DEF("setModuleReader",     1, js_set_module_reader),
+    /* FPU/SSE context save/restore (item 147) */
+    JS_CFUNC_DEF("fpuAllocState",       0, js_fpu_alloc_state),
+    JS_CFUNC_DEF("fpuSave",             1, js_fpu_save),
+    JS_CFUNC_DEF("fpuRestore",          1, js_fpu_restore),
 };
 
 /*  Initialization  */

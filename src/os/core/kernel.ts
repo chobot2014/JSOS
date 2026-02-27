@@ -413,6 +413,26 @@ export interface KernelAPI {
    */
   jitProcAlloc(id: number, size: number): number;
 
+  // ─ FPU / SSE context save & restore (item 147) ───────────────────────────
+  /**
+   * Allocate a 512-byte, 16-byte-aligned physical buffer for FXSAVE/FXRSTOR.
+   * Returns the physical address, or 0 on OOM.
+   * The caller must keep this address alive for the lifetime of the process.
+   */
+  fpuAllocState(): number;
+  /**
+   * Execute `FXSAVE` into the 512-byte buffer at `physAddr`.
+   * `physAddr` must be 16-byte aligned (returned by `fpuAllocState()`).
+   * Returns `true` on success, `false` if the address is invalid/unaligned.
+   */
+  fpuSave(physAddr: number): boolean;
+  /**
+   * Execute `FXRSTOR` from the 512-byte buffer at `physAddr`.
+   * `physAddr` must be 16-byte aligned (returned by `fpuAllocState()`).
+   * Returns `true` on success, `false` if the address is invalid/unaligned.
+   */
+  fpuRestore(physAddr: number): boolean;
+
   // Phase A/B: child process render surface + infrastructure
 
   /** Return a view of the BSS render slab for child process `id` (width×height×4 bytes). */

@@ -1,5 +1,9 @@
 # Agent E2 — Browser HTML Parser / CSS Engine
 
+**STATUS: COMPLETE ✓** — Audited 2026-03-02.  
+Result: 4 new ✓ items (363, 367, 368, 369). All unconfirmed items in §9–10 are NOT implemented.  
+43 new NOT-implemented items recorded in `state.md`.
+
 **One-shot agent. Read source files and directly mark all implemented items in `docs/1000-things.md`.**
 
 ## Your Job

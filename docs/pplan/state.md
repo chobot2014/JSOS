@@ -1,6 +1,6 @@
 # Audit State Tracker
 
-**Last updated:** 2026-03-01  
+**Last updated:** 2026-03-02  
 **Audit target:** `docs/1000-things.md` (1430 lines, ~1130 items)
 
 ---
@@ -9,9 +9,9 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 156 |
-| Items confirmed ✗ (not implemented, do not re-check) | 23 |
-| Items not yet investigated | ~1001 |
+| Items confirmed ✓ (marked this audit) | 169 |
+| Items confirmed ✗ (not implemented, do not re-check) | 435 |
+| Items not yet investigated | ~526 |
 
 ---
 
@@ -180,6 +180,24 @@
 | 3 | UEFI/GPT boot path | `scripts/build-uefi-image.sh`: BOOTX64.EFI+BOOTIA32.EFI via grub-mkimage; FAT32 ESP+GPT disk; `iso/grub-uefi.cfg` |
 | 29 | MSI for PCI devices | `pci_find_msi_cap()`/`pci_enable_msi()` with 32/64-bit address+data in `kernel/pci.c` (same as item 95) |
 | 51 | NTP synchronization (TypeScript) | `ntp.sync()` SNTPv4 + fallback IPs; `kernel.setWallClock/getWallClock()` + `timer_set/get_wall_clock()` in `kernel/timer.c`; `src/os/net/ntp.ts` |
+| **Agent C — no new ✓ items** | | Agent C found all unconfirmed items in §7.1–7.4a, §28e are NOT implemented. See NOT list below. |
+| **Agent D — no new ✓ items** | | Agent D found all unconfirmed items in §7.6–8 (DNS/TLS/HTTP/Crypto) are NOT implemented. See NOT list below. |
+| **Agent E1/E2/E3 additions** | | |
+| 363 | `<noscript>` correctly skipped when JS enabled | `skipUntilClose = 'noscript'` in `apps/browser/html.ts:574` |
+| 367 | `<video>` + `<audio>` stub elements | placeholder text rendered in `apps/browser/html.ts:559–564` |
+| 368 | `<iframe>` stub placeholder | `[🖼️ iframe: src]` in `apps/browser/html.ts:550` |
+| 369 | `<canvas>` element in HTML | placeholder `[canvas WxH]` in `apps/browser/html.ts:569` |
+| 537 | ServiceWorker stub | `navigator.serviceWorker` object in `apps/browser/jsruntime.ts:394` |
+| 539 | Geolocation API stub | `navigator.geolocation.getCurrentPosition/watchPosition` error stub in `apps/browser/jsruntime.ts:379` |
+| 547 | `Proxy` and `Reflect` | exposed as globals via QuickJS native at `apps/browser/jsruntime.ts:3618` |
+| **Agent F additions** | | |
+| 753 | File Manager application | `FileManagerApp` in `apps/file-manager/index.ts` |
+| 754 | Settings application (Display/Users/Network/Storage) | `SettingsApp` in `apps/settings/index.ts` |
+| **Agent G additions** | | |
+| 128 | VMM: `allocatePages` tracks physical frames | `allocatedPhysicalPages = new Set<number>()` in `process/vmm.ts` |
+| 129 | VMM: `freePages` unmap + return physical frames | `freeVirtualMemory()` + `freePhysicalPage()` + `pageTable.delete()` in `process/vmm.ts` |
+| 130 | VMM: prevent double-free of physical pages | `allocatedPhysicalPages.has(i)` guard before alloc in `process/vmm.ts` |
+| 139 | VMM: huge pages (4MB allocations) | `enableHardwarePaging()` maps RAM with 4MB PDEs in `process/vmm.ts` |
 
 ---
 
@@ -209,22 +227,445 @@
 | 853 | JIT register allocator | not in `qjs-jit.ts` (linear scan only) |
 | 855 | JIT on-stack replacement (OSR) | not in `qjs-jit.ts` |
 | 856 | JIT loop optimization | not in `qjs-jit.ts` |
+| **Agent C additions (net stack)** | | |
+| 225 | Ethernet VLAN 802.1Q tag handling | `parseEthernet()` has no 802.1Q branch in `net/net.ts` |
+| 226 | Ethernet jumbo frames (MTU > 1500) | no MTU check or jumbo path in `net/net.ts` |
+| 227 | Ethernet 802.3ad link aggregation | not in `net/net.ts` |
+| 228 | Software Ethernet bridge | not in `net/net.ts` |
+| 231 | IP options parsing (record route, timestamp, strict route) | `parseIPv4()` uses `ihl` to skip options but does not parse them |
+| 233 | ICMP destination unreachable generation | `handleICMP()` only handles type 8 (echo request); no unreachable generation |
+| 236 | IP routing table: longest-prefix match | only default gateway used; no routing table in `net/net.ts` |
+| 237 | IP multicast (IGMP v2) | not in `net/net.ts` |
+| 238 | IP source routing | not in `net/net.ts` |
+| 239 | Policy-based routing | not in `net/net.ts` |
+| 240 | `ip rule` equivalents (multiple routing tables) | not in `net/net.ts` |
+| 241 | IPv6 basic forwarding and addressing | no IPv6 in `net/net.ts` |
+| 242 | ICMPv6 neighbor discovery (NDP) | no IPv6 in `net/net.ts` |
+| 243 | SLAAC (RFC 4862) | not in `net/net.ts` |
+| 244 | DHCPv6 client | not in `net/net.ts` |
+| 245 | IPv6 extension headers | not in `net/net.ts` |
+| 246 | MLDv2 multicast listener discovery | not in `net/net.ts` |
+| 247 | IPv6 Privacy Extensions (RFC 4941) | not in `net/net.ts` |
+| 248 | 6to4 / Teredo tunneling | not in `net/net.ts` |
+| 255 | TCP SACK (RFC 2018) | `buildTCP()` hardcodes `data offset = 5 words`; no SACK option |
+| 256 | TCP window scaling (RFC 1323) | SYN_SENT case notes "simplified: use 1460 default"; no scale option |
+| 257 | TCP timestamps (RFC 1323) | not in `buildTCP()`/`parseTCP()` |
+| 258 | TCP MSS negotiation | comment "Honour remote MSS option if present (simplified: use 1460 default)" — not parsed |
+| 259 | TCP CUBIC / New Reno congestion control | no congestion control in `net/net.ts` |
+| 260 | TCP BBR congestion control | not in `net/net.ts` |
+| 262 | TCP listen backlog queue | `listen()` sets `listeners.set(port, sock)` with no backlog queue |
+| 263 | `SO_REUSEADDR`, `SO_REUSEPORT` | no socket options API in `net/net.ts` |
+| 264 | TCP keepalive (`SO_KEEPALIVE`) | no keepalive timer in `tcpTick()` |
+| 265 | TCP_FASTOPEN | not in `connect()` in `net/net.ts` |
+| 266 | TCP connection tracking for NAT | not in `net/net.ts` |
+| 267 | TCP MD5 authentication | not in `net/net.ts` |
+| 268 | MPTCP stubs | not in `net/net.ts` |
+| 269 | QUIC protocol (UDP-based) | not in `net/net.ts` |
+| 270 | UDP `EADDRINUSE` on bind collision | `bind()` does not check for port collision |
+| 271 | UDP broadcast `SO_BROADCAST` socket option | no `SO_BROADCAST` opt; broadcast dst works but unenforced |
+| 272 | UDP multicast send/receive | not in `net/net.ts` |
+| 273 | `SO_RCVBUF` / `SO_SNDBUF` tunable | not in `net/net.ts` |
+| 274 | DTLS | not in `net/net.ts` |
+| 275 | SCTP | not in `net/net.ts` |
+| 922 | Zero-copy recv (DMA to ArrayBuffer) | `pollNIC()` converts ArrayBuffer → `number[]` loop; not zero-copy end-to-end |
+| 924 | HTTP/1.1 pipelining | not in `net/http.ts` (grep: no `pipeline` keyword) |
+| 925 | Resource prioritisation (HTML>CSS>JS>…) | not in `net/http.ts` |
+| 927 | HTTP/2 multiplexing | not in `net/http.ts` |
+| 928 | HPACK static + dynamic table | not in `net/http.ts` |
+| 929 | HTTP/2 server push | not in `net/http.ts` |
+| 930 | TLS session resumption (0-RTT tickets) | confirmed absent — TLS header says no resumption |
+| 931 | TCP fast open (SYN+data on reconnect) | not in `connect()` in `net/net.ts` |
+| 932 | Preconnect (`<link rel="preconnect">`) | not in `net/http.ts` |
+| 935 | Disk-backed resource cache `/var/cache/browser/` | not in `net/http.ts` |
+| 937 | Service Worker API | not in `net/net.ts` |
+| 938 | HTTP/3 (QUIC over UDP) | not in `net/net.ts` |
+| 939 | TCP congestion: CUBIC algorithm | not in `net/net.ts` |
+| 940 | Receive window scaling (large window) | `_sendTCPSeg` hardcodes `window: 65535`; no scale option |
+| 941 | Parallel image decode via microtask scheduler | not in `net/net.ts` |
+| 942 | SPDY compat | not in `net/net.ts` |
+| **Agent D additions (DNS/TLS/HTTP/Crypto)** | | |
+| 280 | DNS: `/etc/resolv.conf` reading from filesystem | `dns.ts` only reads `/etc/hosts`; no resolv.conf parser |
+| 283 | DNSSEC signature validation | not in `net/dns.ts` |
+| 284 | DNS-over-HTTPS (DoH) | not in `net/dns.ts` |
+| 285 | DNS-over-TLS (DoT) | not in `net/dns.ts` |
+| 286 | mDNS `.local` resolution | not in `net/dns.ts` |
+| 287 | Full recursive DNS resolver | not in `net/dns.ts` (stub resolver only) |
+| 293 | TLS OCSP stapling | not in `net/tls.ts`; header says "No certificate validation" |
+| 294 | TLS ALPN negotiation | no EXT_ALPN in `_buildClientHello()` in `net/tls.ts` |
+| 295 | TLS ChaCha20-Poly1305 cipher suite | not in `net/crypto.ts` or `net/tls.ts` |
+| 296 | TLS ECDSA certificate support | sig_algs advertised but cert not validated in `net/tls.ts` |
+| 297 | TLS 1.2 fallback | only `CS_AES_128_GCM_SHA256` + TLS 1.3 offered in ClientHello |
+| 298 | TLS client certificates | not in `net/tls.ts` |
+| 299 | TLS certificate pinning API | not in `net/tls.ts` |
+| 300 | QUIC/TLS 1.3 unified handshake | not implemented |
+| 307 | HTTP/2 HPACK header compression | not in `net/http.ts` |
+| 308 | HTTP/2 multiplexed streams | not in `net/http.ts` |
+| 309 | HTTP/2 server push handling | not in `net/http.ts` |
+| 310 | HTTP/2 flow control | not in `net/http.ts` |
+| 311 | HTTP/2 SETTINGS frame negotiation | not in `net/http.ts` |
+| 312 | HTTP/2 priority and dependency tree | not in `net/http.ts` |
+| 313 | HTTP/3 QUIC transport | not in `net/http.ts` |
+| 314 | WebSocket Upgrade handshake + framing | not in `net/http.ts` (no WebSocket keyword found) |
+| 315 | WebSocket ping/pong keepalive | not in `net/http.ts` |
+| 316 | Server-Sent Events (SSE) streaming | not in `net/http.ts` |
+| 318 | HTTP cache: `Last-Modified` + `If-Modified-Since` | not in `net/http.ts` |
+| 319 | HTTP cache: `Vary` header awareness | not in `net/http.ts` |
+| 320 | HTTP/2 push promise cache | not in `net/http.ts` |
+| 321 | CORS preflight request handling | not in `net/http.ts` |
+| 322 | Fetch API `ReadableStream` body streaming | not in `net/http.ts` |
+| 328 | SHA-384 hash implementation | `net/crypto.ts` only exports SHA-256 |
+| 329 | HMAC-SHA384 | not in `net/crypto.ts` |
+| 330 | HKDF-Expand with SHA-384 | `hkdfExpand` uses SHA-256 only in `net/crypto.ts` |
+| 331 | X.509 subjectAltName extension parsing | no X.509 parser in codebase |
+| 332 | X.509 basicConstraints + keyUsage | no X.509 parser |
+| 333 | X.509 certificate chain length validation | no X.509 parser |
+| 334 | X.509 validity date range check | no X.509 parser |
+| 335 | X.509 name comparison case-insensitive | no X.509 parser |
+| 336 | Ed25519 signature verification | not in `net/crypto.ts` |
+| 337 | Curve448 / X448 key exchange | not in `net/crypto.ts` |
+| 338 | AES-CBC with HMAC-SHA256 | not in `net/crypto.ts` |
+| 339 | RSA key generation | not in `net/crypto.ts` |
+| 340 | ECDSA key generation (P-256) | not in `net/crypto.ts` |
+| 341 | `window.crypto.subtle` full Web Crypto API | `crypto.subtle` stub in `apps/browser/jsruntime.ts:2676` returns fixed dummy values only |
+| 342 | `SubtleCrypto.importKey` | stub only |
+| 343 | `SubtleCrypto.encrypt`/`decrypt` | stub only |
+| 344 | `SubtleCrypto.sign`/`verify` | stub only |
+| 345 | `SubtleCrypto.deriveKey`/`deriveBits` | stub only |
+| 346 | Post-quantum Kyber-768 key exchange | not in codebase |
+| 347 | Post-quantum Dilithium3 signatures | not in codebase |
+| 348 | Hardware RNG (RDRAND) replacing Math.random | `cpuid_features.rdrand` flag exists but no `kernel.rdrand()` binding or use in Math.random |
+| **Agent E2 additions (HTML parser / CSS engine)** | | |
+| 349 | DOCTYPE quirks mode detection | `html.ts` does not parse `<!DOCTYPE>` for quirks mode |
+| 357 | `<template>` tag: parse into document fragment | no `case 'template'` in `html.ts` |
+| 358 | WHATWG HTML5 tokenizer state machine | ad-hoc parser confirmed in `html.ts`; no state machine |
+| 360 | Misnested tags: foster parenting algorithm | not in `html.ts` |
+| 361 | `<table>` foster parenting for text nodes | not in `html.ts` |
+| 362 | Full insertion mode state machine (in_body, in_table, etc.) | not in `html.ts` |
+| 365 | Incremental HTML parsing (non-blocking on slow network) | not in `html.ts`; parsing is synchronous |
+| 370 | HTML sanitizer for `innerHTML` | not in `apps/browser/` |
+| 371 | SVG inline parsing | not in `html.ts` |
+| 372 | MathML parsing | not in `html.ts` |
+| 386 | CSS `background-image: url()` → trigger image fetch | parsed in `css.ts:438` but no fetch triggered in `index.ts`/`jsruntime.ts` |
+| 394 | CSS `white-space`: normal/nowrap/pre/pre-wrap | parsed in `css.ts`, stored on node, NOT used in `layout.ts` rendering |
+| 395 | CSS `overflow`: visible/hidden/scroll/auto | parsed in `css.ts`, stored, NOT used in `layout.ts`/`index.ts` rendering |
+| 398 | CSS `z-index` stacking context | parsed in `css.ts`, stored, NOT used in `layout.ts` or `index.ts` render order |
+| 400 | CSS `clear`: left, right, both | not in `layout.ts` |
+| 401 | CSS Flexbox: `flex-direction`, `justify-content`, `align-items`, `flex-wrap` | parsed in `css.ts`, NOT used in `layout.ts` (only `flexGrow`+`gap` in `flex-row` node) |
+| 402 | CSS Flexbox: `flex-shrink`, `flex-basis`, `flex` shorthand | not used in `layout.ts` render |
+| 403 | CSS Flexbox: `align-self`, `order` | not in `layout.ts` |
+| 404 | CSS Grid: `display: grid`, `grid-template-columns/rows`, `grid-column/row` | parsed, NOT in `layout.ts` layout pass |
+| 405 | CSS Grid: `fr` unit, `repeat()`, `minmax()` | not in `layout.ts` |
+| 414 | CSS `opacity` smooth values | only binary hidden/visible check in `layout.ts`; no alpha blend for partial opacity |
+| 415 | CSS `pointer-events` | not used anywhere in `layout.ts`/`index.ts` event routing |
+| 416 | CSS `cursor` property | not rendered (no mouse cursor shape changes in `index.ts`) |
+| 418 | CSS `table-layout`: fixed, auto | not in `layout.ts` |
+| 419 | CSS `border-collapse`, `border-spacing` | not in `layout.ts` |
+| 420 | CSS `vertical-align` | not in `layout.ts` |
+| 421 | CSS `word-break`, `overflow-wrap` | not in `layout.ts` |
+| 422 | CSS `clip-path` | not in `layout.ts`/`index.ts` |
+| 423 | CSS `filter`: blur/brightness/contrast | not in `index.ts` renderer |
+| 424 | CSS `backdrop-filter` | not in `index.ts` renderer |
+| 425 | CSS `mix-blend-mode` | not in `index.ts` renderer |
+| 426 | CSS `appearance` property | not rendered |
+| 427 | CSS `resize` property | not in `index.ts` |
+| 428 | CSS `will-change` (GPU planning hint) | parsed in `css.ts`; no layer promotion logic in `index.ts` |
+| 429 | CSS `contain` | not in `layout.ts` |
+| 430 | CSS `@font-face` | no web font download/registration |
+| 432 | CSS `font-weight` 100–900 mapped to rendering | `fontScale` uses one size; no bold variant |
+| 433 | CSS `font-style`: italic/oblique | not in `layout.ts`/`index.ts` rendering |
+| 434 | CSS `counter-reset`, `counter-increment`, `content: counter()` | not in `stylesheet.ts`/`layout.ts` |
+| 436 | CSS `@layer` cascade layers | not in `jsruntime.ts` CSS walker |
+| 437 | CSS Houdini Paint API stub | not in codebase |
+| 438 | CSS `@container` queries | not in `jsruntime.ts` CSS walker |
+| 439 | CSS subgrid | not in `layout.ts` |
+| **Agent E3 additions (Layout Engine §11)** | | |
+| 441 | Block formatting context (BFC) — full spec | simplified / partial in `layout.ts` |
+| 443 | Intrinsic sizes: min-content, max-content, fit-content | not in `layout.ts` |
+| 448 | `box-sizing: border-box` vs `content-box` | not in `layout.ts`; no `box-sizing` check |
+| 449 | Table layout algorithm (fixed + auto) | no `<table>` layout in `layout.ts` |
+| 452 | Grid layout pass | not in `layout.ts` |
+| 455 | Sticky positioning | not in `layout.ts` |
+| 457 | Multi-column layout (`column-count`, `column-width`) | not in `layout.ts` |
+| 458 | Inline-block layout | not in `layout.ts` |
+| 459 | `overflow: scroll` — clip and add scrollbar | not in `layout.ts` rendering |
+| 460 | `overflow: hidden` — clip without scrollbar | not rendered (overflow not clipped in `index.ts`) |
+| 461 | Scrollable container scroll offset | not in `layout.ts`/`index.ts` |
+| 462 | `window.scrollY`/`scrollX` accurate | not tracked; always 0 on non-scrolling pages |
+| 463 | Writing modes (`writing-mode: vertical-rl`) | not in `layout.ts` |
+| 464 | BiDi (bidirectional text — Arabic, Hebrew) | not in `layout.ts` |
+| 465 | `text-overflow: ellipsis` | not in `layout.ts` line-wrap |
+| 466 | CSS shapes: `shape-outside` for float wrapping | not in `layout.ts` |
+| 467 | Baseline alignment in inline contexts | not in `layout.ts` |
+| 468 | Ruby text layout (`<ruby>`, `<rt>`) | not in `layout.ts` |
+| 469 | Subpixel layout (fractional pixel positions) | not in `layout.ts` |
+| 470 | CSS regions / page-break layout for printing | not in `layout.ts` |
+| **Agent E3 additions (Rendering §12)** | | |
+| 471 | Render bitmap font at multiple sizes (not just 8×8) | fixed-size font only in `apps/browser/index.ts` |
+| 472 | Font metrics: character width table for proportional fonts | not in `apps/browser/` |
+| 473 | Anti-aliased text rendering (grayscale) | not in `apps/browser/index.ts` |
+| 474 | Sub-pixel RGB text (ClearType-style) | not in `apps/browser/index.ts` |
+| 476 | PNG interlaced decode support | `img-png.ts` does not handle interlaced |
+| 477 | GIF image decode (LZW decoder) | no `img-gif.ts` in codebase |
+| 478 | GIF animation: frame disposal and timing | no GIF support |
+| 479 | WebP image decode (VP8L/VP8) | no `img-webp.ts` in codebase |
+| 480 | SVG rendering: basic shapes | not in `apps/browser/index.ts` |
+| 481 | GPU compositing: separate paint layers | not in `apps/browser/index.ts` |
+| 483 | Scroll partial repaint (fixed header stays, scroll area repaints) | not in `apps/browser/index.ts` |
+| 484 | Alpha compositing for `opacity` and RGBA | not in `apps/browser/index.ts` |
+| 485 | Rounded rectangle rendering (`border-radius`) | `drawRoundRect()` in `canvas.ts` but NOT called by browser renderer |
+| 486 | Box shadow rendering | `boxShadow` parsed/stored, NOT rendered in `index.ts` |
+| 487 | Gradient rendering: linear/radial/conic | `createLinearGradient/createRadialGradient` stubs (noop) in `canvas.ts`/`jsruntime.ts:3193` |
+| 489 | Clipping path rendering | not in `apps/browser/index.ts` |
+| 490 | Stacking context correct paint order (z-index) | z-index stored, NOT used in paint order in `index.ts` |
+| 491 | `<canvas>` 2D rendering wired to framebuffer | stub only; no actual canvas draw calls in `index.ts` |
+| 492 | WebGL 1.0 software rasterizer stub | not in `apps/browser/` |
+| 493 | WOFF/WOFF2 font decode and rasterization | not in `apps/browser/` |
+| 494 | Emoji rendering (color emoji bitmap font) | not in `apps/browser/` |
+| 495 | ICC color profile support | not in `apps/browser/` |
+| 496 | Hardware-accelerated 2D via Virtio-GPU | not in `apps/browser/` |
+| **Agent E3 additions (JS Runtime §13 / DOM §14)** | | |
+| 511 | `async`/`await` properly integrated with event loop tick | QuickJS microtask queue exists but event loop integration depth unverified |
+| 534 | Dynamic `import()` returning a Promise | no `dynamic import()` handler in `apps/browser/jsruntime.ts`; `_transformModuleCode()` strips static imports only |
+| 536 | `SharedWorker` stub | not in `apps/browser/workers.ts` |
+| 540 | `navigator.mediaDevices` stub | not in `apps/browser/jsruntime.ts` |
+| 541 | `WebRTC` stubs (`RTCPeerConnection`) | not in `apps/browser/jsruntime.ts` |
+| 549 | Shadow DOM: `attachShadow`, `shadowRoot`, style scoping | not in `apps/browser/dom.ts` |
+| 550 | Custom Elements: `customElements.define` | not in `apps/browser/jsruntime.ts` |
+| 551 | Web Components full lifecycle callbacks | not in codebase |
+| 552 | `Worklet` API | not in codebase |
+| 584 | `<slot>` element for web components | not in `apps/browser/dom.ts` |
+| 585 | `element.animate()` Web Animations API | not in `apps/browser/dom.ts` |
+| 586 | `element.scrollIntoView()` | not in `apps/browser/dom.ts` |
+| 588 | `document.elementFromPoint(x, y)` hit testing | not in `apps/browser/` |
+| 589 | `document.elementsFromPoint(x, y)` | not in `apps/browser/` |
+| 590 | `element.getClientRects()` — multiple DOMRects | not in `apps/browser/dom.ts` |
+| 591 | XPath: `document.evaluate()` | not in codebase |
+| 592 | `document.all` legacy collection | not in `apps/browser/dom.ts` |
+| **Agent E3 additions (Forms §15 / Navigation §16)** | | |
+| 603 | Form validation: `required`, `minlength`, `maxlength`, `pattern` | `_submitForm()` in `index.ts` does no validation checks |
+| 605 | `<input type="email">` validation | no email format check in `index.ts` |
+| 606 | `<input type="url">` validation | no url format check |
+| 607 | `<input type="number">` with min/max/step | not in `index.ts` widget handling |
+| 608 | `<input type="range">` slider | not in `index.ts` |
+| 609 | `<input type="date">`, `<input type="time">` pickers | not in `index.ts` |
+| 610 | `<input type="color">` color picker | not in `index.ts` |
+| 611 | `<input type="file">` — VFS file picker dialog | not in `index.ts` |
+| 612 | `autofocus` attribute | not processed in `index.ts` form init |
+| 613 | Tab order (`tabindex`) | not in `index.ts` keyboard navigation |
+| 614 | `<datalist>` autocomplete suggestions | not in `index.ts` |
+| 615 | Constraint Validation API (`checkValidity()` etc.) | not in `apps/browser/dom.ts` |
+| 616 | `<input type="search">` with clear button | not in `index.ts` |
+| 617 | IME input mode for CJK | not in `index.ts` |
+| 618 | Form autofill / password manager integration | not in codebase |
+| 624 | Hard reload — clear cache for current page (Ctrl+Shift+R) | not in `browser/index.ts` |
+| 628 | Tab favicon from `<link rel="icon">` | only letter-icon placeholder; no `<link rel="icon">` fetch |
+| 631 | Bookmark folder organization | not in `browser/index.ts` |
+| 632 | Address bar autocomplete from history + bookmarks | not in `browser/index.ts` |
+| 634 | Reader mode (strip ads/nav, clean article rendering) | not in `browser/index.ts` |
+| 635 | Print page to PDF or thermal printer | not in `browser/index.ts` |
+| 636 | Download manager: save resource to disk with progress | not in `browser/index.ts` |
+| 639 | `blob:` URL for object URLs | not in `apps/browser/jsruntime.ts` |
+| 640 | Browser sync / bookmarks cloud backup | not in codebase |
+| 641 | Extensions / userscript runner | not in codebase |
+| **Agent E3 additions (Performance §28c-h)** | | |
+| 892 | Style recalc: dirty-mark only elements whose computed style changes | no per-element style dirty tracking; full recompute each frame |
+| 893 | Layout containment: `contain: layout` | not in `layout.ts` |
+| 894 | Avoid forced synchronous layout (batch DOM reads before writes) | not enforced in `apps/browser/` |
+| 895 | Flex/grid cache: cache row/column tracks | not in `layout.ts` |
+| 898 | Containing-block cache for abs/fixed positioned elements | not in `layout.ts` |
+| 899 | Layer tree: promote `position:fixed`/`transform`/`opacity` to compositor layers | not in `apps/browser/index.ts` |
+| 900 | `will-change: transform` triggers layer promotion | not in `apps/browser/index.ts` |
+| 901 | Layout budget: hard 4ms layout deadline per frame | not in `layout.ts` |
+| 902 | Partial style invalidation (`:nth-child`/attr selectors no full recalc) | not in `apps/browser/jsruntime.ts` |
+| 903 | CSS Grid auto-placement fast path | not in `layout.ts` |
+| 904 | Parallel layout: farm flex/grid to microtasks | not in `layout.ts` |
+| 907 | Tile-based renderer: 64×64px tiles, skip clean tiles | not in `apps/browser/index.ts` |
+| 908 | Compositor: separate `transform`/`opacity` animation from layout+paint | not in `apps/browser/index.ts` |
+| 909 | Painter's algorithm: sort render list by z-index once | not in `apps/browser/index.ts` |
+| 910 | Text atlas: pre-rasterize ASCII glyphs to single bitmap | not in `apps/browser/index.ts` |
+| 912 | Image resize cache: cached scaled copy per (src, destW, destH) | not in `apps/browser/cache.ts` |
+| 913 | CSS `background-color` fast path: solid fill rect | not as specific optimization in `apps/browser/index.ts` |
+| 914 | Border/shadow cache: pre-rasterize borders + `box-shadow` | not in codebase |
+| 915 | Canvas 2D `drawImage()` blits from decoded bitmap cache (no re-decode) | canvas 2D wired to framebuffer not implemented |
+| 916 | Subpixel text: LCD subpixel antialiasing | not in `apps/browser/index.ts` |
+| 917 | Glyph atlas grow-on-demand | not in `apps/browser/index.ts` |
+| 918 | CSS `clip-path` acceleration: pre-clip layer bitmap | not in codebase |
+| 919 | Opacity layer: flatten composited layer before blending | not in `apps/browser/index.ts` |
+| 920 | Virtio-GPU: hardware-accelerated blit via virtio 2D resource commands | not in `apps/browser/` |
+| 921 | WebGL stub: `gl.drawArrays()` → software framebuffer rasteriser | not in `apps/browser/` |
+| 947 | CSS `transition`/`animation`: compositor-side at 60fps | not in `apps/browser/index.ts` |
+| 948 | CSS `transform` → matrix multiply only, no layout recalc | not executed at paint time in `index.ts` |
+| 949 | CSS `opacity` animation: alpha-multiply composited layer | not in `apps/browser/index.ts` |
+| 950 | `@media` listener: recompute only on breakpoint crossing | not in `apps/browser/jsruntime.ts` |
+| 951 | CSS `contain: strict` → isolate paint+size | not in codebase |
+| 952 | Heuristics: skip `box-shadow`/`filter` for off-screen elements | not in codebase |
+| 955 | Event delegation: single root listener for bubbling events | not in `apps/browser/index.ts` |
+| 960 | `addEventListener` passive: default-passive for `touchstart`/`wheel` | not in `apps/browser/dom.ts` |
+| 961 | Debounce DOM write after `input` events | not in `apps/browser/index.ts` |
+| 965 | CSS paint / audio Worklets: isolated micro-contexts | not in codebase |
+| 969 | JIT profiler: `sys.jit.stats()` TypeScript API | not in `process/qjs-jit.ts` (deoptCount tracked but no stats API) |
+| 970 | GC profiler: `sys.mem.gcStats()` API | not in codebase |
+| 972 | Layout profiler: per-subtree layout time | not in `layout.ts` |
+| 973 | Paint profiler: per-tile repaint reason | not in codebase |
+| 974 | Flame graph renderer in REPL (`sys.perf.flame()`) | not in codebase |
+| 975 | Synthetic benchmarks built-in suite | not in codebase |
+| 976 | `sys.browser.bench(url)` — Core Web Vitals equivalents | not in codebase |
+| 977 | Continuous benchmark CI: fail on > 5% regression | not in codebase |
+| **Agent F additions (REPL / Terminal / Built-in APIs / Init / GUI / Apps / DevTools)** | | |
+| 651 | Tab completion with function signatures + type hints | `tabComplete()` completes names/paths but no type hints |
+| 653 | Multiple terminal instances: N REPLs simultaneously | not in `ui/terminal.ts` or `apps/terminal/` |
+| 654 | Terminal tabs: Ctrl+Tab switch | not in `ui/wm.ts` |
+| 655 | REPL tab has own variable scope + history | not in `ui/repl.ts` (single context) |
+| 656 | Named REPL sessions `repl.open('debug')` | not in `ui/repl.ts` |
+| 657 | `repl.close()` | not in `ui/repl.ts` |
+| 658 | Copy REPL context to new tab | not in `ui/repl.ts` |
+| 661 | `import` statements at REPL prompt | not in `ui/repl.ts` |
+| 667 | Bold, italic, underline, strikethrough, dim in terminal | only `_bold` (SGR 1) handled; SGR 3/4/9 not in `ui/terminal.ts` |
+| 668 | Cursor movement CSI (A/B/C/D, home, end) | comment "not implemented yet" at `ui/terminal.ts:223` |
+| 669 | Cursor blink animation | not in `ui/terminal.ts` |
+| 670 | Cursor style: block/underline/bar | not in `ui/terminal.ts` |
+| 671 | Terminal scrollback ≥10,000 lines | `SCROLLBACK = 200` in `ui/terminal.ts:16` (far below 10K) |
+| 672 | Mouse click in output: inspect value | not in `apps/terminal/index.ts` |
+| 673 | Clickable hyperlinks in output (OSC 8) | not in `ui/terminal.ts` |
+| 674 | Terminal resize: reflow to new width | not in `ui/terminal.ts` |
+| 675 | Syntax highlighting live in input line | not in `apps/terminal/index.ts` |
+| 676 | Bracket matching highlight | not in `ui/repl.ts` |
+| 677 | `console.log` from background tasks in correct tab | not in `ui/terminal.ts` |
+| 678 | Output search Ctrl+F in terminal | not in `apps/terminal/index.ts` |
+| 679 | Output copy: select text + Ctrl+C | not in `ui/terminal.ts` |
+| 680 | Markdown rendering in terminal output | not in `ui/terminal.ts` |
+| 681 | Inline image preview in terminal output | not in `ui/terminal.ts` |
+| 682 | Progress bar rendering for async ops | not in `ui/terminal.ts` |
+| 683 | Spinner animation for awaited Promises | not in `ui/terminal.ts` |
+| 684 | Split-pane terminal | not in `ui/wm.ts` |
+| 685 | Terminal recording/playback | not in codebase |
+| 686 | Share terminal session over network | not in codebase |
+| 687 | REPL notebook mode (`.rpl` files) | not in codebase |
+| 708 | `watch(path, callback)` — inotify-backed | not in `ui/commands.ts` or `fs/filesystem.ts` |
+| 709 | `zip`/`unzip` archive helpers | not in codebase |
+| 710 | `tar`/`untar` helpers | not in codebase |
+| 725 | `net.connect(host, port)` — returns stream | `g.net=net` exposes raw API but no high-level host:port stream factory |
+| 726 | `nc(host, port)` interactive TCP in REPL | not in `ui/commands.ts` |
+| 727 | `ssh(host, opts)` SSH client | not in `ui/commands.ts` |
+| 728 | `rsync(src, dst)` file sync | not in `ui/commands.ts` |
+| 739 | `perf.sample(fn, ms?)` CPU profiler | not in `ui/commands.ts` |
+| 740 | `perf.memory()` heap snapshot | not in `ui/commands.ts` |
+| 741 | `trace(fn)` syscall tracer | not in `ui/commands.ts` |
+| 750b | File permission bits enforced in VFS TypeScript layer | not in `fs/filesystem.ts` permission checks |
+| 751b | Process credentials uid/gid enforced by scheduler | not in `process/scheduler.ts` |
+| 754b | Pluggable auth `sys.auth.registerProvider` | not in `users/users.ts` |
+| 755b | SSH daemon (TypeScript SSH server) | not in codebase |
+| 756b | TOTP TypeScript implementation (2FA) | not in codebase |
+| 758b | Mandatory access control policy engine | not in codebase |
+| 759b | Syscall allowlist sandboxing | not in codebase |
+| 723 | Parallel service startup | not in `process/init.ts` (sequential only) |
+| 724 | Service logs to `/var/log/<service>.log` | not in `process/init.ts` |
+| 725s | Socket activation | not in `process/init.ts` |
+| 726s | JSOS service bus | not in codebase |
+| 746 | Desktop wallpaper rendering | not in `ui/wm.ts` |
+| 748 | Taskbar system tray area | not in `ui/wm.ts` |
+| 751 | Window snap to screen edges (Aero Snap) | not in `ui/wm.ts` |
+| 752 | Application launcher / start menu | not in `ui/wm.ts` |
+| 755 | Notification system: toast popups | not in `ui/wm.ts` |
+| 757 | Theme system: color scheme, fonts, icon theme | not in `ui/wm.ts` |
+| 758 | Dark mode support | not in `ui/wm.ts` |
+| 759 | High-DPI scaling (2× pixel ratio) | not in `ui/wm.ts` |
+| 760 | Drag-and-drop between windows | not in `ui/wm.ts` |
+| 761 | Clipboard: cut/copy/paste between apps | not in `ui/wm.ts` |
+| 762 | Screen lock / screensaver | not in `ui/wm.ts` |
+| 763 | Login screen GUI | not in `ui/wm.ts` |
+| 764 | Compositing WM (GPU alpha compositing) | not in `ui/wm.ts` |
+| 765 | Window animations | not in `ui/wm.ts` |
+| 766 | Virtual desktops | not in `ui/wm.ts` |
+| 770 | Image viewer app | no `apps/image-viewer/` directory |
+| 771 | PDF viewer app | no `apps/pdf-viewer/` directory |
+| 772 | Music player (MP3/OGG) | no `apps/music-player/` directory |
+| 773 | Video player (MP4/WebM) | no `apps/video-player/` directory |
+| 774 | Calendar app | no `apps/calendar/` directory |
+| 775 | Calculator app | no `apps/calculator/` directory |
+| 776 | Clock / timer / stopwatch | no `apps/clock/` directory |
+| 777 | Notes app (markdown editor) | no `apps/notes/` directory |
+| 778 | Email client (IMAP + SMTP) | not in codebase |
+| 779 | IRC client | not in codebase |
+| 780 | Torrent client | not in codebase |
+| 781 | Office suite (word processor) | not in codebase |
+| 782 | Spreadsheet app | not in codebase |
+| 783 | Drawing app (canvas 2D) | not in codebase |
+| 784 | Tetris game | not in codebase |
+| 785 | Snake game | not in codebase |
+| 787 | In-REPL type checking (red underline on type errors) | not in `ui/repl.ts` |
+| 790 | JSOS SDK npm package for host machine authoring | not in codebase |
+| 791 | Build system: rebuild JSOS from within JSOS | not in codebase |
+| 792 | Debugger: breakpoint via serial DevTools protocol | not in codebase |
+| 793 | Debugger: step over/in/out | not in codebase |
+| 794 | Debugger: variable inspection | not in codebase |
+| 795 | Profiler: CPU flame graph | not in codebase |
+| 796 | Profiler: memory heap snapshot | not in codebase |
+| 797 | Browser DevTools panel (F12) | not in `apps/browser/` |
+| 798 | Browser DOM inspector | not in `apps/browser/` |
+| 799 | Browser network inspector | not in `apps/browser/` |
+| 800 | Browser console (JS errors + log output) | not in `apps/browser/` |
+| 801 | Browser source maps support | not in `apps/browser/` |
+| 802 | Hot module replacement for OS development | not in codebase |
+| **Agent G additions (VMM / Filesystem / IPC)** | | |
+| 131 | Stack growth: handle guard page fault by extending stack | `handlePageFault()` marks present=true but no stack extension logic in `process/vmm.ts` |
+| 132 | Kernel vs userspace page table split (ring 0 vs ring 3) | `user` flag in PTE but not checked in `isValidAccess()` in `process/vmm.ts` |
+| 133 | Copy-on-write (COW) for forked processes | not in `process/vmm.ts` or `process/process.ts` |
+| 134 | Memory-mapped files (`mmap` with file backing) | `mmapFile()` allocates anonymous memory only; no file data loaded in `process/vmm.ts` |
+| 135 | Demand paging: page fault loads from disk lazily | `handlePageFault()` just marks present=true; no disk read in `process/vmm.ts` |
+| 136 | Swap space: evict LRU pages to disk | not in `process/vmm.ts` |
+| 137 | Page reclaim: LRU clock algorithm | not in `process/vmm.ts` |
+| 140 | ASLR for process address spaces | `nextVirtualAddress` fixed at 0x100000; no randomization in `process/vmm.ts` |
+| 141 | Memory protection keys (MPK) | not in `process/vmm.ts` |
+| 142 | `madvise(MADV_WILLNEED)` prefetch hint | not in `process/vmm.ts` |
+| 143 | Transparent huge pages (THP) | not in `process/vmm.ts` |
+| 144 | ZRAM compressed swap | not in codebase |
+| 168 | initramfs: embed initial filesystem image in ISO | not in build scripts or boot sequence |
+| 175 | `sys.devices.ioctl(path, cmd, arg)` TypeScript dispatch | not in `fs/filesystem.ts` |
+| 177 | ext2 read (no journal) | not in codebase |
+| 178 | ext4 read-only (extent tree, large file support) | not in codebase |
+| 179 | ext4 write (journaling, metadata journal) | not in codebase |
+| 183 | `sys.devices` TypeScript API: enumerate hardware | not in codebase |
+| 186 | Block device layer: request queue, elevator I/O scheduler | not in codebase |
+| 190 | ISO 9660 read (boot media access) | not in codebase |
+| 191 | OverlayFS (union mount) | not in codebase |
+| 192 | File locking: TypeScript advisory lock API | not in `fs/filesystem.ts` |
+| 193 | Extended attributes (xattr) TypeScript API | not in `fs/filesystem.ts` |
+| 194 | Access control: TypeScript permission check layer | not in `fs/filesystem.ts` |
+| 195 | Filesystem quota: TypeScript per-user limit enforcement | not in `fs/filesystem.ts` |
+| 197 | Sparse file support | not in `fs/filesystem.ts` |
+| 198 | Hard links across same device | not in `fs/filesystem.ts` |
+| 199 | `sendfile` zero-copy syscall | not in codebase |
+| 200 | Btrfs read-only TypeScript driver | not in codebase |
+| 201 | ZFS read-only TypeScript driver stubs | not in codebase |
+| 202 | TypeScript pluggable FS driver API | not in codebase |
+| 203 | NFS client: TypeScript NFS protocol | not in codebase |
+| 204 | SMB/CIFS client: TypeScript SMB2 | not in codebase |
+| 205 | Filesystem compression (zstd/lz4 per-file) | not in codebase |
+| 206 | Filesystem encryption (AES-XTS over block device) | not in codebase |
+| 209 | Unix domain sockets: `ipc.socket(path)` | not in `ipc/ipc.ts` |
+| 210 | Credential passing: `ipc.sendFd(socket, fd)` | not in `ipc/ipc.ts` |
+| 213 | Signal-as-Promise: `proc.waitForSignal(SIGTERM)` | not in `ipc/ipc.ts` |
+| 217 | Async I/O multiplexing: TypeScript `select([...promises])` | not in `ipc/ipc.ts` |
+| 218 | `poll`/`select` POSIX compat shim | not in codebase |
+| 219 | Async I/O: typed Promise APIs (io_uring concepts) | no explicit `io.read/write()` Promise API |
+| 220 | JSOS native IPC bus: typed pub/sub service registry | not in `ipc/ipc.ts` (eventBus is in-process only) |
+| 221 | `sys.shm.anonymous(bytes)` — unnamed shared buffer | not in `ipc/ipc.ts` |
 
 ---
 
 ## Phase Progress
 
 - [x] Phase 0 — Manual incremental sessions (21 items marked)
-- [ ] Phase 1 — Parallel research (9 agents) — **not started**
-- [ ] Phase 2 — Batch writes — **blocked on Phase 1**
-- [ ] Phase 3 — Validation — **blocked on Phase 2**
+- [x] Phase 1 — Parallel research (9 agents) — **COMPLETE** (agents A–G all audited 2026-03-02)
+- [x] Phase 2 — Batch writes — **COMPLETE** (all confirmed ✓ marks written to `1000-things.md`)
+- [ ] Phase 3 — Validation — verify remaining ~526 uninvestigated items
 
 ---
 
 ## Next Actions
 
-1. Run all 9 Phase 1 agents simultaneously using the specs in `agent-A.md` through `agent-G.md`.
-2. Collect JSON findings from each agent.
-3. Merge, dedup, filter to `confidence: "high"` only.
-4. Write Phase 2 batches using `multi_replace_string_in_file`.
-5. Update this file with new counts.
+1. ~~Run all 9 Phase 1 agents simultaneously~~ — DONE.
+2. Review remaining ~526 un-investigated items (§25 Testing, §26 Audio, §27 Virtualization, §28a–b GC/JIT, §34 Hardening, §35 Final Release Checklist).
+3. Run targeted reads of `src/os/` test files, audio APIs, hardening checks to mark any further ✓ items.
+4. Update this tracker after each batch of new findings.

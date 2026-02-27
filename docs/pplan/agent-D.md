@@ -1,5 +1,9 @@
 # Agent D — DNS / TLS / HTTP / Crypto
 
+**STATUS: COMPLETE ✓** — Audited 2026-03-01.  
+Result: No new ✓ items found. All unconfirmed items in §7.6–§8 are NOT implemented.  
+50 new NOT-implemented items recorded in `state.md`.
+
 **One-shot agent. Read source files and directly mark all implemented items in `docs/1000-things.md`.**
 
 ## Your Job

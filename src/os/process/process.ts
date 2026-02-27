@@ -69,6 +69,25 @@ export class ProcessManager {
     init.state = 'running';
     this._procs.set(init.pid, init);
     this._currentPid = init.pid;
+
+    // ── Items 148 & 149: register cleanup hook with the scheduler ─────────────
+    // When the scheduler terminates any process, close all its file descriptors
+    // and release its virtual memory areas so resources are not leaked.
+    scheduler.addProcessExitHook((pid: number) => {
+      const p = this._procs.get(pid);
+      if (!p) return;
+
+      // Item 148: close every open file descriptor.
+      try { p.fdTable.closeAll(); } catch (_) { /* ignore I/O errors on shutdown */ }
+
+      // Item 149: release all virtual memory areas (the VMA list is the
+      // TypeScript-level resource; hardware page-table clean-up comes later
+      // once the VMM is integrated per-process in Phase 9).
+      p.vmas.length = 0;
+
+      // Mark dead in our own table so subsequent queries see the correct state.
+      p.state = 'dead';
+    });
   }
 
   /**
@@ -93,20 +112,29 @@ export class ProcessManager {
 
     // Register the new child in the process scheduler so it appears in
     // 'ps' output, receives signals, and gets time-slice accounting.
+    var parentCtx = scheduler.getProcess(parent.pid);
     scheduler.registerProcess({
       pid:           child.pid,
       ppid:          child.ppid,
+      // [Item 154] Inherit process group from parent.
+      groupId:       parentCtx ? parentCtx.groupId : child.pid,
       name:          child.name,
       state:         'ready',
       priority:      10,
+      schedPolicy:   'inherit',          // [Item 160]
       timeSlice:     10,
       remainingTime: 10,
       cpuTime:       0,
       startTime:     kernel.getTicks(),
-      threadId:      -1,   // no dedicated kernel thread yet
+      wallTimeStart: kernel.getTicks(),  // [Item 164]
+      ioBytes:       0,                  // [Item 164]
+      cpuMask:       0xffffffff,         // [Item 161]
+      limits:        { maxRSS: 0, maxFDs: 0, maxCPUMs: 0 }, // [Item 162]
+      threadId:      -1,
       registers:     { pc: 0, sp: 0, fp: 0 },
       memory:        { heapStart: 0, heapEnd: 0, stackStart: 0, stackEnd: 0 },
       openFiles:     new Set([0, 1, 2]),
+      fpuStateAddr:  0,
     });
 
     return child.pid;

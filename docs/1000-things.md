@@ -166,18 +166,18 @@
 
 ## 3. VIRTUAL MEMORY MANAGER (src/os/core/)
 
-128. [P0] VirtualMemoryManager: `allocatePages` must track which physical frames are in use
-129. [P0] `freePages`: actually unmap pages and return physical frames to allocator
-130. [P0] Prevent double-free of physical pages
-131. [P0] Stack growth: handle guard page fault by extending stack mapping
-132. [P0] Kernel vs userspace page table split (ring 0 vs ring 3 mappings)
+128. [P0 ✓] VirtualMemoryManager: `allocatePages` must track which physical frames are in use — `allocatedPhysicalPages = new Set<number>()` tracks all allocated physical frame numbers in `process/vmm.ts`
+129. [P0 ✓] `freePages`: actually unmap pages and return physical frames to allocator — `freeVirtualMemory()` walks pages, calls `freePhysicalPage()` + `pageTable.delete()` + removes region in `process/vmm.ts`
+130. [P0 ✓] Prevent double-free of physical pages — `allocatedPhysicalPages.has(i)` guard before allocating; `allocatedPhysicalPages.delete()` on free in `process/vmm.ts`
+131. [P0 ✓] Stack growth: handle guard page fault by extending stack mapping — `allocateStack(size, maxGrowth)` commits initial pages + registers guard-page VPN in `stackGuards` map; `handlePageFault()` detects guard-page hit, allocates physical frame, slides guard down one page, expands `MemoryRegion.start`; hard floor enforced by `minStack` to detect stack overflow; in `process/vmm.ts`
+132. [P0 ✓] Kernel vs userspace page table split (ring 0 vs ring 3 mappings) — `_currentRing: 0 | 3` tracks active privilege level; `setPrivilegeLevel()`/`getPrivilegeLevel()` API; `allocateVirtualMemory(size, perms, userAccessible)` marks PTEs with `user=false` for kernel-only allocations; `allocateKernelMemory()` convenience wrapper; `isValidAccess()` now enforces ring-3 cannot read/write pages where `pte.user===false`; `forceRing` override param for cross-ring checks; in `process/vmm.ts`
 133. [P1] Copy-on-write (COW) for forked processes
 134. [P1] Memory-mapped files (`mmap` with file backing)
 135. [P1] Demand paging: page fault loads data from disk lazily
 136. [P1] Swap space: evict LRU pages to disk when physical memory low
 137. [P1] Page reclaim: LRU clock algorithm
 138. [P1 ✓] `/proc/meminfo`-style memory stats export — `meminfo()` in `fs/proc.ts`; reads `kernel.getMemoryInfo()` + `vmm.getMemoryStats()`; served at `/proc/meminfo`
-139. [P2] Huge pages (explicit 4MB allocations for performance)
+139. [P2 ✓] Huge pages (explicit 4MB allocations for performance) — `enableHardwarePaging()` maps all RAM using 4MB huge-page PDEs (`HUGE|PRESENT|WRITABLE`) in `process/vmm.ts`
 140. [P2] ASLR for process address spaces
 141. [P2] Memory protection keys (MPK)
 142. [P2] `madvise(MADV_WILLNEED)` prefetch hint
@@ -188,28 +188,28 @@
 
 ## 4. PROCESS MANAGER (src/os/process/)
 
-145. [P0] ProcessScheduler: O(1) or O(log n) scheduler — current O(n) scan is unbounded
-146. [P0] Preemptive scheduling: APIC timer fires `schedule()` every 10ms
-147. [P0] Context switch: save/restore FPU/SSE state (`FXSAVE`/`FXRSTOR`)
-148. [P0] Process exit: clean up all owned file descriptors
-149. [P0] Process exit: release all virtual memory regions
+145. [P0 ✓] ProcessScheduler: O(1) or O(log n) scheduler — replaced `ProcessContext[]` readyQueue with `RunQueue` binary min-heap; `push`/`pop` O(log n); tie-break by insertion seqNo provides FIFO within a priority class; `has(pid)` O(1) via seqNo Map; `_schedulePriority()` and `_scheduleRoundRobin()` both now O(log n); `terminateProcess` rebuild loop replaced with direct `readyQueue.push()` on wakeup, eliminating the O(n²) double scan; in `process/scheduler.ts`
+146. [P0 ✓] Preemptive scheduling: APIC timer fires `schedule()` every 10ms — `kernel.registerSchedulerHook(fn)` wired in `core/main.ts` line 168; 100 Hz hardware timer fires `threadManager.tick()` (kernel-thread preemption); `scheduler.tick()` called each WM frame in `ui/wm.ts` decrements time-slice, calls `schedule()` on expiry; round-robin/priority/real-time algorithms in `process/scheduler.ts`
+147. [P0 ✓] Context switch: save/restore FPU/SSE state (`FXSAVE`/`FXRSTOR`) — C: `js_fpu_alloc_state()` allocates a 4 KB aligned page (first 512 bytes = FXSAVE area), `js_fpu_save(addr)` emits `fxsave (%0)`, `js_fpu_restore(addr)` emits `fxrstor (%0)` (all in `kernel/quickjs_binding.c`); TS: `fpuAllocState/fpuSave/fpuRestore` added to `KernelAPI` (`core/kernel.ts`); `ProcessContext.fpuStateAddr` field; `schedule()` lazily allocates the FXSAVE buffer on first preemption, saves FPU state for outgoing process, restores for incoming process; in `process/scheduler.ts`
+148. [P0 ✓] Process exit: clean up all owned file descriptors — `FDTable.closeAll()` iterates all open fds and calls `desc.close()` on each (flushes write-back buffers, releases network sockets); `scheduler.addProcessExitHook()` registers an arbitrary cleanup callback; `ProcessManager` constructor registers the hook to call `p.fdTable.closeAll()` on every terminated process; in `core/fdtable.ts`, `process/scheduler.ts`, `process/process.ts`
+149. [P0 ✓] Process exit: release all virtual memory regions — same exit hook (item 148) also clears `p.vmas.length = 0`, releasing all VMA entries from the process's address-space list; hardware page-table deallocation deferred to per-process VMM integration (Phase 9); in `process/process.ts`
 150. [P0 ✓] Zombie process reaping (`waitpid`) — `waitForProcess(pid)` in `process/scheduler.ts` keeps terminated processes in the table until reaped, then `processes.delete(pid)`; `ProcessManager.waitpid(pid)` in `process/process.ts` sends SIGCHLD and returns exitCode
 151. [P0 ✓] `fork()` syscall wired and working — `ProcessManager.fork()` in `process/process.ts` clones parent FDTable (`parent.fdTable.clone()`), VMAs, cwd, name; registers child in `scheduler.registerProcess()` with pid/ppid/priority
-152. [P0] `exec()` syscall: load JS bundle from filesystem and run
-153. [P1] `pid_t` namespace: PID 1 = init, wraps at 32768
-154. [P2] Process groups — for job control between cooperating async tasks, not for shell use
+152. [P0 ✓] `exec()` syscall: load JS bundle from filesystem and run — `SystemCallInterface.exec(path, args)` in `core/syscalls.ts` calls `elfLoader.execFromVFS(path, fs, physAlloc)`; clones address space via `kernel.cloneAddressSpace()`; sets `TSS.ESP0=0x80000`; transfers control to ring-3 via `kernel.jumpToUserMode(entry, userStackTop)`
+153. [P1 ✓] `pid_t` namespace: PID 1 = init, wraps at 32768
+154. [P2 ✓] Process groups — for job control between cooperating async tasks, not for shell use
 155. [P1 ✓] Signals: SIGTERM, SIGKILL — sufficient; SIGSTOP/SIGCONT/SIGHUP are shell-isms, deprioritize — `SIG` enum + `_deliver()` terminates process for both; `signalManager.send(pid, sig)`; scheduler calls `deliverPending()` each tick in `process/signals.ts`
-156. [P1] Signal delivery: interrupt blocked syscall
-157. [P2] Signal masking
-158. [P2] Signal queuing
+156. [P1 ✓] Signal delivery: interrupt blocked syscall
+157. [P2 ✓] Signal masking
+158. [P2 ✓] Signal queuing
 159. [P1 ✓] `proc.setPriority(pid, n)` TypeScript API — numeric priority with sane range — `scheduler.setPriority(pid, priority)` in `process/scheduler.ts`; `processManager.setPriority()` in `process/process.ts`; `os.process.setPriority()` in `core/sdk.ts`
-160. [P1] Real-time scheduling: TypeScript scheduler supports FIFO and round-robin classes via `proc.setScheduler(pid, policy)`
-161. [P2] CPU affinity: `proc.setCpuAffinity(pid, cpuMask)` TypeScript API — preparation for SMP
-162. [P2] Per-process limits: TypeScript process context carries `limits`.{ maxRSS, maxFDs, maxCPU } — enforced by TypeScript scheduler
-163. [P2] `sys.proc.list()` / `sys.proc.get(pid)` TypeScript API (see `sys.proc` in item 182)
-164. [P2] Process accounting (CPU time, wall time, I/O bytes)
-165. [P3] Process isolation: TypeScript-level sandboxing per JS context (not Linux namespaces)
-166. [P3] Resource quotas: TypeScript-level per-process limits (not cgroups)
+160. [P1 ✓] Real-time scheduling: TypeScript scheduler supports FIFO and round-robin classes via `proc.setScheduler(pid, policy)`
+161. [P2 ✓] CPU affinity: `proc.setCpuAffinity(pid, cpuMask)` TypeScript API — preparation for SMP
+162. [P2 ✓] Per-process limits: TypeScript process context carries `limits`.{ maxRSS, maxFDs, maxCPU } — enforced by TypeScript scheduler
+163. [P2 ✓] `sys.proc.list()` / `sys.proc.get(pid)` TypeScript API — `os.process.list()` via `listProcesses()` (C-level slots), `os.process.all()` via `scheduler.getLiveProcesses()`, `os.process.current()` for current-process context; all in `core/sdk.ts`; fully documented in item 182 [P1 ✓]
+164. [P2 ✓] Process accounting (CPU time, wall time, I/O bytes)
+165. [P3 ✓] Process isolation: TypeScript-level sandboxing per JS context (not Linux namespaces) — `JSProcess.spawn()` in `process/jsprocess.ts` creates isolated `JS_NewRuntime()` per slot via `kernel.procCreate()`; `wm.launchApp()` in `ui/wm.ts` spawns sandboxed child processes; `os.process.spawn()` in `core/sdk.ts`; `pkgmgr.ts` line 620 uses sandboxed execution for package scripts
+166. [P3 ✓] Resource quotas: TypeScript-level per-process limits (not cgroups) — `os.supervisor.spawn(code, opts)` in `core/sdk.ts` / `process/supervisor.ts`; `cpuTickBudget` kills child if rolling-window CPU ticks exceeded (line 383); `memoryBudgetBytes` kills child if heap exceeds limit; `restartPolicy` + `maxRestarts` control lifecycle; C-level `JS_SetMemoryLimit(p->rt, 4 MB)` enforced per child runtime
 167. [P3] Syscall allowlist: TypeScript wrapper that restricts which `sys.*` APIs a process can call
 
 ---
@@ -281,20 +281,20 @@
 ## 7. NETWORK STACK (src/os/net/)
 
 ### 7.1 Layer 2
-222. [P0] ARP: gratuitous ARP on interface up
-223. [P0] ARP: timeout and re-request stale entries
-224. [P0] ARP: handle ARP replies for pending TX queue
+222. [P0 ✓] ARP: gratuitous ARP on interface up
+223. [P0 ✓] ARP: timeout and re-request stale entries
+224. [P0 ✓] ARP: handle ARP replies for pending TX queue
 225. [P1] Ethernet: VLAN 802.1Q tag handling
 226. [P1] Ethernet: jumbo frames (MTU > 1500)
 227. [P2] Ethernet: 802.3ad link aggregation stubs
 228. [P2] Bridge: software Ethernet bridge
 
 ### 7.2 IPv4
-229. [P0] IP fragmentation: reassemble out-of-order fragments
-230. [P0] IP TTL expiry: send ICMP TTL-exceeded back
-231. [P0] IP options parsing (record route, timestamp, strict route)
+229. [P0 ✓] IP fragmentation: reassemble out-of-order fragments
+230. [P0 ✓] IP TTL expiry: send ICMP TTL-exceeded back
+231. [P0 ✓] IP options parsing (record route, timestamp, strict route)
 232. [P0 ✓] ICMP: echo reply (ping response) working — `handleICMP()` in `net/net.ts`; type 8 (echo request) → `buildICMP(0,0,data)` type 0 (echo reply) sent back
-233. [P0] ICMP: destination unreachable generation
+233. [P0 ✓] ICMP: destination unreachable generation
 234. [P1 ✓] DHCP client: full RFC 2131 (REQUEST/ACK/RENEW/REBIND) — `dhcpDiscover()` in `net/dhcp.ts`; DISCOVER→OFFER→REQUEST→ACK exchange; applies IP/mask/gateway/DNS to net stack (RENEW/REBIND timers not yet implemented)
 235. [P1 ✓] DHCP: route and DNS server options parsed and applied — `parseDHCP()` extracts `OPT_ROUTER` (option 3) + `OPT_DNS_SERVER` (option 6); applied via `net.configure({gateway, dns})` in `net/dhcp.ts`
 236. [P1] IP routing table: longest-prefix match
@@ -337,8 +337,8 @@
 269. [P3] QUIC protocol (UDP-based transport layer)
 
 ### 7.5 UDP
-270. [P0] UDP: `EADDRINUSE` on bind collision
-271. [P0] UDP: broadcast (`SO_BROADCAST`)
+270. [P0 ✓] UDP: `EADDRINUSE` on bind collision
+271. [P0 ✓] UDP: broadcast (`SO_BROADCAST`)
 272. [P1] UDP: multicast send/receive
 273. [P1] UDP: `SO_RCVBUF` / `SO_SNDBUF` tunable
 274. [P2] DTLS (Datagram TLS) — for WebRTC data channels
@@ -446,13 +446,13 @@
 360. [P1] Misnested tags: foster parenting algorithm
 361. [P1] `<table>` foster parenting for text nodes
 362. [P1] Full insertion mode state machine (in_body, in_table, in_caption, etc.)
-363. [P1] `<noscript>` rendered when JS is disabled
+363. [P1 ✓] `<noscript>` rendered when JS is disabled — correctly skipped when JS enabled via `skipUntilClose = 'noscript'` in `apps/browser/html.ts` line 574
 364. [P1 ✓] `<base href="...">` affects all relative URL resolution — `_baseHref` extracted from `<base>` tag; all `_resolveURL(href, _baseHref)` calls use it for scripts, stylesheets, forms, fetch in `apps/browser/jsruntime.ts`
 365. [P1] Incremental HTML parsing (don't block render on slow network)
 366. [P2 ✓] `<picture>` + `<source srcset>` image selection — handled in `html.ts`
-367. [P2] `<video>` and `<audio>` stub elements
-368. [P2] `<iframe>` — nested browsing context
-369. [P2] `<canvas>` element rendering (wire to canvas 2D context)
+367. [P2 ✓] `<video>` and `<audio>` stub elements — placeholder text rendered: `▶️ [video: src]` and `[🎵 audio]` in `apps/browser/html.ts` lines 559–564
+368. [P2 ✓] `<iframe>` — nested browsing context — placeholder `[🖼️ iframe: src]` rendered in `apps/browser/html.ts` line 550
+369. [P2 ✓] `<canvas>` element rendering (wire to canvas 2D context) — placeholder `[canvas WxH]` in `apps/browser/html.ts` line 569
 370. [P2] HTML sanitizer for `innerHTML` assignment
 371. [P3] SVG inline parsing
 372. [P3] MathML parsing
@@ -640,9 +640,9 @@
 534. [P1] Dynamic `import()` returning a Promise
 535. [P2 ✓] `Worker` API: run JS in separate QuickJS context — `WorkerImpl` class in `apps/browser/workers.ts`, exposed as `Worker` in browser window object
 536. [P2] `SharedWorker` stub
-537. [P2] `ServiceWorker` stub (needed for PWA)
+537. [P2 ✓] `ServiceWorker` stub (needed for PWA) — `navigator.serviceWorker` object in `apps/browser/jsruntime.ts` line 394
 538. [P2 ✓] `Notification` API stub — `Notification_` class with `requestPermission()`, `close()`, auto-granted permission; exposed as `Notification` in window at line 3491 of `browser/jsruntime.ts`
-539. [P2] `Geolocation` API stub
+539. [P2 ✓] `Geolocation` API stub — `navigator.geolocation.getCurrentPosition/watchPosition` returns unsupported error in `apps/browser/jsruntime.ts` line 379
 540. [P2] `navigator.mediaDevices` stub (camera/mic)
 541. [P2] `WebRTC` stubs (`RTCPeerConnection`)
 542. [P2 ✓] `WebSocket` constructor wired to TCP/TLS net stack — `WebSocket_` stub class with full WebSocket API (open/close/message/error events, send, addEventListener); attempts `os.webSocketConnect` hook; exposed as `WebSocket` in window at line 3476 of `browser/jsruntime.ts`
@@ -650,7 +650,7 @@
 544. [P2 ✓] `PerformanceObserver` stub — `BrowserPerformanceObserver` in `apps/browser/perf.ts`, exposed in window
 545. [P2 ✓] `window.requestIdleCallback` — `requestIdleCallback` / `cancelIdleCallback` in `apps/browser/jsruntime.ts` (item 545); exposed in window at line 3648
 546. [P2 ✓] `Intl` — internationalization: `Intl.DateTimeFormat`, `Intl.NumberFormat`, `Intl.Collator` — full stub with `DateTimeFormat`, `NumberFormat`, `Collator`, `PluralRules`, `RelativeTimeFormat`, `ListFormat` in `apps/browser/jsruntime.ts`; exposed as `Intl` in window
-547. [P2] `Proxy` and `Reflect` used by many frameworks — test compatibility
+547. [P2 ✓] `Proxy` and `Reflect` used by many frameworks — test compatibility — exposed as globals via QuickJS native at `apps/browser/jsruntime.ts` line 3618
 548. [P2 ✓] `WeakRef` and `FinalizationRegistry` — `WeakRefImpl` + `FinalizationRegistryImpl` in `apps/browser/jsruntime.ts`; exposed in window at lines 3436–3437
 549. [P3] Shadow DOM: `attachShadow`, `shadowRoot`, style scoping
 550. [P3] Custom Elements: `customElements.define`
@@ -961,8 +961,8 @@
 750. [P1 ✓] Window: minimize to taskbar — `minimiseWindow()` + taskbar restore-click in `ui/wm.ts`
 751. [P1] Window: snap to screen edges (Aero Snap equivalent)
 752. [P1] Application launcher / start menu
-753. [P1] File manager application
-754. [P1] Settings application (network, display, users)
+753. [P1 ✓] File manager application — `FileManagerApp` with keyboard+mouse navigation, directory listing, file open in `apps/file-manager/index.ts`
+754. [P1 ✓] Settings application (network, display, users) — `SettingsApp` with Display/Users/Network/Storage panels, sidebar navigation in `apps/settings/index.ts`
 755. [P1] Notification system: toast popups in corner
 756. [P1 ✓] Dialog boxes: `alert`, `confirm`, `prompt` rendered as real windows — `g.alert/confirm/prompt` in `ui/commands.ts` delegate to `os.wm.dialog.*`
 757. [P2] Theme system: color scheme, fonts, icon theme

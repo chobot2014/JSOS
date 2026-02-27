@@ -1,5 +1,8 @@
 # Agent G — IPC / Users / Security / VMM / Storage
 
+**STATUS: COMPLETE ✓** — Audited 2026-03-02.  
+Result: 4 new ✓ items (128, 129, 130, 139). ~41 NOT-implemented items recorded in `state.md`.
+
 **One-shot agent. Read source files and directly mark all implemented items in `docs/1000-things.md`.**
 
 ## Your Job

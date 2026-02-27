@@ -1,5 +1,9 @@
 # Agent E1 — Browser JS Runtime / DOM API
 
+**STATUS: COMPLETE ✓** — Audited 2026-03-02.  
+Result: 3 new ✓ items (537, 539, 547). All unconfirmed items in §13–14 are NOT implemented.  
+New NOT items recorded in `state.md`.
+
 **One-shot agent. Read source files and directly mark all implemented items in `docs/1000-things.md`.**
 
 ## Your Job

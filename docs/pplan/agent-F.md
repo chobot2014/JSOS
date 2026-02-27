@@ -1,5 +1,8 @@
 # Agent F — REPL / Terminal / Built-in APIs / Init / UI
 
+**STATUS: COMPLETE ✓** — Audited 2026-03-02.  
+Result: 2 new ✓ items (753, 754). ~94 NOT-implemented items recorded in `state.md`.
+
 **One-shot agent. Read source files and directly mark all implemented items in `docs/1000-things.md`.**
 
 ## Your Job

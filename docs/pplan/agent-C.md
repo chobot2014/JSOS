@@ -1,5 +1,9 @@
 # Agent C — Network Stack (TCP / UDP / IP / ARP / ICMP)
 
+**STATUS: COMPLETE ✓** — Audited 2026-03-01.  
+Result: No new ✓ items found. All unconfirmed items in §7.1–7.4a, §28e are NOT implemented.  
+55 new NOT-implemented items recorded in `state.md`.
+
 **One-shot agent. Read source files and directly mark all implemented items in `docs/1000-things.md`.**
 
 ## Your Job

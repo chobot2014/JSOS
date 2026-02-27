@@ -285,6 +285,20 @@ export class FDTable {
     return t;
   }
 
+  /**
+   * Close every open file descriptor in this table.
+   * Called on process exit (item 148) to flush write-back buffers, release
+   * network sockets, and free all kernel resources owned by this process.
+   */
+  closeAll(): void {
+    // Collect fds first to avoid mutating the map while iterating.
+    const fds: number[] = [];
+    this._fds.forEach((_desc, fd) => fds.push(fd));
+    for (const fd of fds) {
+      this.close(fd);
+    }
+  }
+
   has(fd: number): boolean { return this._fds.has(fd); }
 
   /**

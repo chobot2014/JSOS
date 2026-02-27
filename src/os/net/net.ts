@@ -410,6 +410,15 @@ export class NetworkStack {
   nicReady: boolean = false;
 
   private arpTable    = new Map<IPv4Address, MACAddress>();
+  /** [Item 223] Tick of last ARP update per IP (for stale-entry eviction). */
+  private arpTimestamps = new Map<IPv4Address, number>();
+  /** [Item 224] Frames queued while waiting for ARP resolution. */
+  private arpPendingTx  = new Map<IPv4Address, EthernetFrame[]>();
+  /**
+   * [Item 229] IP fragment reassembly buffers.
+   * Key = "src:id:proto"; value holds fragment map + expected total length.
+   */
+  private ipFragments   = new Map<string, { frags: Map<number, number[]>; total: number }>();
   private connections = new Map<number, TCPConnection>();
   private sockets     = new Map<number, Socket>();
   private listeners   = new Map<number, Socket>(); // listening port → socket
@@ -461,6 +470,19 @@ export class NetworkStack {
     var arp = parseARP(eth.payload);
     if (!arp) return;
     this.arpTable.set(arp.senderIP, arp.senderMAC);
+    // [Item 223] Track the timestamp for stale-entry eviction.
+    this.arpTimestamps.set(arp.senderIP, kernel.getTicks());
+    // [Item 224] On ARP reply, flush any frames queued for this host.
+    if (arp.operation === 2) {
+      var pending = this.arpPendingTx.get(arp.senderIP);
+      if (pending) {
+        for (var fi = 0; fi < pending.length; fi++) {
+          pending[fi].dst = arp.senderMAC;
+          this._sendEth(pending[fi]);
+        }
+        this.arpPendingTx.delete(arp.senderIP);
+      }
+    }
     if (arp.operation === 1 && arp.targetIP === this.ip) {
       this._sendEth({
         dst: arp.senderMAC, src: this.mac, ethertype: ETYPE_ARP,
@@ -473,13 +495,87 @@ export class NetworkStack {
   private handleIPv4(eth: EthernetFrame): void {
     var ip = parseIPv4(eth.payload);
     if (!ip) return;
+
+    // [Item 229] Reassemble fragmented datagrams before further processing.
+    var moreFrags = (ip.flags & 0x1) !== 0;
+    if (moreFrags || ip.fragOff !== 0) {
+      ip = this._reassembleIP(ip);
+      if (!ip) return; // Still waiting for more fragments.
+    }
+
     var isForUs = (ip.dst === this.ip || ip.dst === '255.255.255.255' || ip.dst === '127.0.0.1');
-    if (!isForUs) return;
+    if (!isForUs) {
+      // [Item 230] Packets we are forwarding: send ICMP Time Exceeded if TTL ≤ 1.
+      if (ip.ttl <= 1) this._sendICMPError(ip, 11 /* Time Exceeded */, 0);
+      return;
+    }
+
+    // [Item 230] Silently drop packets with TTL = 0 destined for us.
+    if (ip.ttl === 0) return;
+
     switch (ip.protocol) {
       case PROTO_ICMP: this.handleICMP(ip);  break;
       case PROTO_TCP:  this.handleTCP(ip);   break;
       case PROTO_UDP:  this.handleUDP(ip);   break;
     }
+  }
+
+  /**
+   * [Item 229] IP fragment reassembly.
+   * Buffers payloads keyed by "src:id:proto".  Returns the reassembled
+   * IPv4Packet when all fragments have arrived, or null while still waiting.
+   */
+  private _reassembleIP(ip: IPv4Packet): IPv4Packet | null {
+    var key  = ip.src + ':' + ip.id + ':' + ip.protocol;
+    var entry = this.ipFragments.get(key);
+    if (!entry) {
+      entry = { frags: new Map<number, number[]>(), total: -1 };
+      this.ipFragments.set(key, entry);
+    }
+
+    var byteOff  = ip.fragOff * 8;     // Fragment byte offset in reassembled datagram.
+    entry.frags.set(byteOff, ip.payload);
+    var moreFrags = (ip.flags & 0x1) !== 0;
+    if (!moreFrags) {
+      // This is the last fragment — we now know the total payload length.
+      entry.total = byteOff + ip.payload.length;
+    }
+    if (entry.total < 0) return null;  // Haven't seen last fragment yet.
+
+    // Check whether all bytes are accounted for.
+    var covered = 0;
+    entry.frags.forEach(function(data) { covered += data.length; });
+    if (covered < entry.total) return null;
+
+    // Assemble the full payload from frags (sorted by offset).
+    var offsets: number[] = [];
+    entry.frags.forEach(function(_, off) { offsets.push(off); });
+    offsets.sort(function(a, b) { return a - b; });
+    var payload: number[] = [];
+    for (var oi = 0; oi < offsets.length; oi++) {
+      var chunk = entry.frags.get(offsets[oi])!;
+      for (var ci = 0; ci < chunk.length; ci++) payload.push(chunk[ci]);
+    }
+    this.ipFragments.delete(key);
+    return Object.assign({}, ip, { fragOff: 0, flags: ip.flags & ~0x1, payload });
+  }
+
+  /**
+   * [Items 230, 233] Send an ICMP error message back to the original sender.
+   * type = 11 → Time Exceeded; type = 3 → Destination Unreachable.
+   * Payload = 28 bytes: 4 zeros + original IP header (20 bytes) + first 8 bytes of original payload.
+   */
+  private _sendICMPError(orig: IPv4Packet, type: number, code: number): void {
+    var origHdr  = buildIPv4(orig).slice(0, 20);
+    var origData = orig.payload.slice(0, 8);
+    var icmpBody = [0, 0, 0, 0].concat(origHdr, origData);
+    this._sendIPv4({
+      ihl: 5, dscp: 0, ecn: 0, id: this.idCounter++,
+      flags: 0, fragOff: 0, ttl: 64, protocol: PROTO_ICMP,
+      src: this.ip, dst: orig.src,
+      payload: buildICMP(type, code, icmpBody),
+    });
+    this.stats.icmpTx++;
   }
 
   private handleICMP(ip: IPv4Packet): void {
@@ -517,13 +613,23 @@ export class NetworkStack {
     this.stats.udpRx++;
     var udp = parseUDP(ip.payload);
     if (!udp) return;
-    // Deliver to socket API (string-based)
+
+    // [Item 271] Accept broadcast datagrams for any registered socket/inbox.
+    var isBcast = (ip.dst === '255.255.255.255' || ip.dst === this._broadcast());
+
+    // Deliver to socket API (string-based).
     var sock = this._findUDPSock(udp.dstPort);
     if (sock) sock.recvQueue.push(bytesToStr(udp.payload));
-    // Deliver to raw UDP inbox (byte-based, for DHCP/DNS)
+
+    // Deliver to raw UDP inbox (byte-based, for DHCP/DNS/NTP).
     var inbox = this.udpRxMap.get(udp.dstPort);
     if (inbox !== undefined) {
       inbox.push({ from: ip.src, fromPort: udp.srcPort, data: udp.payload });
+    }
+
+    // [Item 233] If no handler exists for this unicast port, send ICMP Port Unreachable.
+    if (!sock && inbox === undefined && !isBcast) {
+      this._sendICMPError(ip, 3 /* Destination Unreachable */, 3 /* Port Unreachable */);
     }
   }
 
@@ -890,6 +996,16 @@ export class NetworkStack {
     this.mac = hwMac;
     this.arpTable.set(this.ip, this.mac);
     this.nicReady = true;
+    // [Item 222] Gratuitous ARP: announce our IP/MAC to the LAN so that
+    // neighbours can update their ARP caches immediately.
+    this.stats.arpTx++;
+    this._sendEth({
+      dst: 'ff:ff:ff:ff:ff:ff', src: this.mac, ethertype: ETYPE_ARP,
+      payload: buildARP({
+        operation: 1, senderMAC: this.mac, senderIP: this.ip,
+        targetMAC: '00:00:00:00:00:00', targetIP: this.ip,
+      }),
+    });
   }
 
   /**
@@ -929,8 +1045,17 @@ export class NetworkStack {
       var nextHop = sameSubnet(dst, this.ip, this.mask) ? dst : this.gateway;
       dstMac = this.arpTable.get(nextHop) || '';
       if (!dstMac) {
-        // When NIC is active, block-wait for ARP reply (short timeout = 30 ticks ≈ 300 ms)
-        dstMac = this.arpWait(nextHop, this.nicReady ? 100 : 0) || 'ff:ff:ff:ff:ff:ff';
+        // When NIC is active, block-wait briefly for ARP reply.
+        dstMac = this.arpWait(nextHop, this.nicReady ? 100 : 0) || '';
+        if (!dstMac) {
+          // [Item 224] Queue the frame in arpPendingTx so it is sent once
+          // the ARP reply arrives, instead of falling back to broadcast.
+          var pendingQueue = this.arpPendingTx.get(nextHop);
+          if (!pendingQueue) { pendingQueue = []; this.arpPendingTx.set(nextHop, pendingQueue); }
+          pendingQueue.push({ dst: '00:00:00:00:00:00', src: this.mac, ethertype: ETYPE_IPV4, payload: buildIPv4(pkt) });
+          this._arpRequest(nextHop);
+          return;
+        }
       }
     }
     this._sendEth({ dst: dstMac, src: this.mac, ethertype: ETYPE_IPV4, payload: buildIPv4(pkt) });
@@ -960,6 +1085,9 @@ export class NetworkStack {
   }
 
   bind(sock: Socket, port: number, ip?: IPv4Address): boolean {
+    // [Item 270] EADDRINUSE: reject if port is already bound.
+    if (sock.type === 'udp' && this.udpRxMap.has(port)) return false;
+    if (sock.type === 'tcp' && this.listeners.has(port)) return false;
     sock.localPort = port;
     if (ip) sock.localIP = ip;
     sock.state = 'bound';
@@ -1284,9 +1412,12 @@ export class NetworkStack {
   }
 
   /** Open (pre-register) a UDP inbox for `port` so frames arriving before
-   *  the first recvUDPRawNB call are buffered, not dropped. */
-  openUDPInbox(port: number): void {
-    if (!this.udpRxMap.has(port)) this.udpRxMap.set(port, []);
+   *  the first recvUDPRawNB call are buffered, not dropped.
+   * [Item 270] Returns false if the port is already in use (EADDRINUSE). */
+  openUDPInbox(port: number): boolean {
+    if (this.udpRxMap.has(port)) return false;
+    this.udpRxMap.set(port, []);
+    return true;
   }
 
   /** Close and discard the UDP inbox for `port`. */
@@ -1338,6 +1469,19 @@ export class NetworkStack {
   tcpTick(): void {
     var now = kernel.getTicks();
     var toDelete: number[] = [];
+
+    // [Item 223] Evict stale ARP entries (lifetime = 30 000 ticks ≈ 5 min @ 100 Hz).
+    // Own IP and loopback are permanent and are never evicted.
+    const ARP_TTL = 30000;
+    var arpEvict: IPv4Address[] = [];
+    this.arpTimestamps.forEach(function(ts, ip) {
+      if (now - ts > ARP_TTL) arpEvict.push(ip);
+    });
+    for (var ai = 0; ai < arpEvict.length; ai++) {
+      if (arpEvict[ai] === this.ip || arpEvict[ai] === '127.0.0.1') continue;
+      this.arpTable.delete(arpEvict[ai]);
+      this.arpTimestamps.delete(arpEvict[ai]);
+    }
 
     this.connections.forEach((conn, id) => {
       // ── TIME_WAIT cleanup ──────────────────────────────────────────────────

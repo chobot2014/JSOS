@@ -33,6 +33,14 @@ export interface MemoryRegion {
   fileOffset?: number;
 }
 
+/** Metadata for an expandable stack region, keyed by the current guard page number. */
+interface StackGuardEntry {
+  /** Byte address of the current lowest mapped stack page (grows down). */
+  regionStart: number;
+  /** Minimum byte address the stack is allowed to reach (hard floor). */
+  minStack: number;
+}
+
 export class VirtualMemoryManager {
   private pageSize = 4096; // 4KB pages
   private pageTable = new Map<number, PageTableEntry>();
@@ -43,6 +51,39 @@ export class VirtualMemoryManager {
     return (kernel.getRamBytes && kernel.getRamBytes()) || (4 * 1024 * 1024 * 1024);
   }
   private allocatedPhysicalPages = new Set<number>();
+
+  /**
+   * Guard pages for expandable stacks.
+   * key = virtual page number of the guard page (unmapped page just below stack base)
+   * value = metadata needed to extend the stack and relocate the guard
+   */
+  private stackGuards = new Map<number, StackGuardEntry>();
+
+  // ── Privilege level (ring 0 = kernel, ring 3 = user) ─────────────────────
+  /**
+   * Tracks the current CPU privilege ring.
+   * Ring 0 (kernel) may access all pages.
+   * Ring 3 (user) is blocked from pages whose PTE has `user = false`.
+   */
+  private _currentRing: 0 | 3 = 0;
+
+  /** Set the active privilege level (0 = kernel, 3 = user). */
+  setPrivilegeLevel(ring: 0 | 3): void {
+    this._currentRing = ring;
+  }
+
+  /** Return the currently active privilege level. */
+  getPrivilegeLevel(): 0 | 3 {
+    return this._currentRing;
+  }
+
+  /**
+   * Allocate kernel-only virtual memory (ring-0 accessible only).
+   * Identical to `allocateVirtualMemory` but marks PTEs with `user = false`.
+   */
+  allocateKernelMemory(size: number, permissions: MemoryRegion['permissions'] = 'rw'): number | null {
+    return this.allocateVirtualMemory(size, permissions, false);
+  }
 
   constructor() {
     // Initialize kernel memory regions
@@ -90,9 +131,18 @@ export class VirtualMemoryManager {
   }
 
   /**
-   * Allocate virtual memory
+   * Allocate virtual memory.
+   *
+   * @param size            Bytes to allocate.
+   * @param permissions     Read/write/execute permissions string.
+   * @param userAccessible  When `true` (default) the pages are accessible from
+   *                        ring 3.  Pass `false` for kernel-only allocations.
    */
-  allocateVirtualMemory(size: number, permissions: MemoryRegion['permissions'] = 'rw'): number | null {
+  allocateVirtualMemory(
+    size: number,
+    permissions: MemoryRegion['permissions'] = 'rw',
+    userAccessible = true,
+  ): number | null {
     const pagesNeeded = Math.ceil(size / this.pageSize);
     const virtualAddress = this.findFreeVirtualSpace(pagesNeeded * this.pageSize);
 
@@ -118,12 +168,12 @@ export class VirtualMemoryManager {
       const pte: PageTableEntry = {
         present: true,
         writable: permissions.includes('w'),
-        user: true,
+        user: userAccessible,
         accessed: false,
         dirty: false,
         physicalAddress: physicalPages[i] * this.pageSize,
         virtualAddress: virtualPage * this.pageSize,
-        size: this.pageSize
+        size: this.pageSize,
       };
       this.pageTable.set(virtualPage, pte);
     }
@@ -227,33 +277,166 @@ export class VirtualMemoryManager {
   }
 
   /**
-   * Check if memory access is valid
+   * Check if memory access is valid for the **current privilege level**.
+   *
+   * Ring-3 (user) accessors are denied access to kernel-only pages
+   * (`PageTableEntry.user === false`).  Ring-0 (kernel) may access everything.
+   *
+   * @param virtualAddress  Start of the range to check.
+   * @param size            Number of bytes.
+   * @param write           `true` to additionally verify write permission.
+   * @param forceRing       Override the current ring for this check only.
    */
-  isValidAccess(virtualAddress: number, size: number, write: boolean = false): boolean {
-    for (let addr = virtualAddress; addr < virtualAddress + size; addr += this.pageSize) {
-      const translation = this.translateAddress(addr);
-      if (!translation.valid) return false;
+  isValidAccess(
+    virtualAddress: number,
+    size: number,
+    write = false,
+    forceRing?: 0 | 3,
+  ): boolean {
+    const effectiveRing = forceRing ?? this._currentRing;
+    const pageSize = this.pageSize;
+    for (let addr = virtualAddress; addr < virtualAddress + size; addr += pageSize) {
+      const pageNumber = Math.floor(addr / pageSize);
+      const pte = this.pageTable.get(pageNumber);
+      if (!pte || !pte.present) return false;
 
-      if (write && !translation.permissions.includes('w')) return false;
+      // Privilege check: ring-3 cannot touch kernel-only pages.
+      if (effectiveRing === 3 && !pte.user) return false;
+
+      // Write-permission check.
+      if (write && !pte.writable) return false;
     }
     return true;
   }
 
   /**
-   * Handle page fault
+   * Allocate a stack region with an automatic guard page.
+   *
+   * Stack grows downward.  The initially-committed region spans
+   * [stackBase, stackTop).  The page immediately below stackBase is left
+   * unmapped and registered as a guard page.  Any page fault on it will
+   * commit one more page and slide the guard page down, up to `maxGrowth`
+   * bytes from the original top.
+   *
+   * @param initialSize  Bytes committed on first call (must be page-aligned).
+   * @param maxGrowth    Maximum additional bytes the stack may grow (default 1 MB).
+   * @returns The initial stack-pointer value (= stackTop, high watermark).
+   */
+  allocateStack(initialSize: number, maxGrowth: number = 1 * 1024 * 1024): number | null {
+    // Round sizes up to page granularity.
+    initialSize = Math.ceil(initialSize / this.pageSize) * this.pageSize;
+    maxGrowth   = Math.ceil(maxGrowth  / this.pageSize) * this.pageSize;
+
+    // Reserve virtual space: one guard page + maxGrowth (growth area) + initialSize.
+    const totalReserve = this.pageSize + maxGrowth + initialSize;
+    const reserveBase  = this.findFreeVirtualSpace(totalReserve);
+    if (reserveBase === null) return null;
+
+    const stackTop  = reserveBase + totalReserve; // highest address (initial SP)
+    const stackBase = stackTop - initialSize;      // lowest committed address
+
+    // Commit initial pages.
+    for (let offset = 0; offset < initialSize; offset += this.pageSize) {
+      const phys = this.allocatePhysicalPage();
+      if (phys === null) return null; // OOM — partial cleanup omitted for brevity
+      const vpn = Math.floor((stackBase + offset) / this.pageSize);
+      this.pageTable.set(vpn, {
+        present: true,
+        writable: true,
+        user: true,
+        accessed: false,
+        dirty: false,
+        physicalAddress: phys * this.pageSize,
+        virtualAddress: vpn * this.pageSize,
+        size: this.pageSize,
+      });
+    }
+
+    // Register the guard page (one page below the current stack base).
+    const guardVA  = stackBase - this.pageSize;
+    const guardVPN = Math.floor(guardVA / this.pageSize);
+    const minStack = reserveBase + this.pageSize; // never grow below this
+    this.stackGuards.set(guardVPN, { regionStart: stackBase, minStack });
+
+    // Record the committed region.
+    this.addMemoryRegion({
+      start: stackBase,
+      end: stackTop,
+      permissions: 'rw',
+      type: 'stack',
+      backingStore: 'anonymous',
+    });
+
+    return stackTop; // caller sets SP to this value
+  }
+
+  /**
+   * Handle page fault.
+   *
+   * Behaviour:
+   * 1. If the fault is on a registered guard page, commit the page and slide
+   *    the guard down (stack growth). Returns `true` on success.
+   * 2. If the PTE exists but `present` is false (e.g. swapped-out page),
+   *    mark it present and return `true`.
+   * 3. Any other fault returns `false` (caller should panic/kill process).
    */
   handlePageFault(virtualAddress: number): boolean {
     const pageNumber = Math.floor(virtualAddress / this.pageSize);
     const pte = this.pageTable.get(pageNumber);
 
+    // ── Case 1: guard-page hit → extend stack downward ──────────────────────
     if (!pte) {
-      // Page not mapped - this is a real fault
+      const guard = this.stackGuards.get(pageNumber);
+      if (guard) {
+        const newPageVA = pageNumber * this.pageSize;
+
+        // Enforce the hard floor (prevents infinite stack overflow).
+        if (newPageVA < guard.minStack) {
+          // Stack overflow — cannot grow further.
+          return false;
+        }
+
+        // Commit a fresh physical page for this virtual page.
+        const phys = this.allocatePhysicalPage();
+        if (phys === null) return false; // OOM
+
+        this.pageTable.set(pageNumber, {
+          present: true,
+          writable: true,
+          user: true,
+          accessed: false,
+          dirty: false,
+          physicalAddress: phys * this.pageSize,
+          virtualAddress: newPageVA,
+          size: this.pageSize,
+        });
+
+        // Slide the guard page one page lower.
+        this.stackGuards.delete(pageNumber);
+        const nextGuardVPN = pageNumber - 1;
+        if (nextGuardVPN * this.pageSize >= guard.minStack) {
+          this.stackGuards.set(nextGuardVPN, { ...guard, regionStart: newPageVA });
+        }
+
+        // Expand the recorded stack region to include the newly committed page.
+        const region = this.memoryRegions.find(
+          r => r.type === 'stack' && r.start === guard.regionStart,
+        );
+        if (region) {
+          region.start = newPageVA;
+          guard.regionStart = newPageVA;
+        }
+
+        return true; // fault handled — retry the faulting instruction
+      }
+
+      // Not a guard page — true unmapped-memory fault.
       return false;
     }
 
+    // ── Case 2: page present in table but marked not-present (swapped out) ──
     if (!pte.present) {
-      // Page is swapped out - would need swap system
-      // For now, just mark as present
+      // Swap-in would go here; for now just re-mark as present.
       pte.present = true;
       return true;
     }
