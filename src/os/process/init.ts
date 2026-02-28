@@ -474,3 +474,154 @@ export class InitSystem {
 }
 
 export const init = new InitSystem();
+
+// ── Socket Activation — Item 725s ────────────────────────────────────────────
+
+/** A socket-activation descriptor registered with the SocketActivator. */
+export interface SocketActivationEntry {
+  /** Service name to launch when a connection arrives. */
+  service: string;
+  /** Port or path the socket listens on (e.g. 80, '/run/syslog.sock'). */
+  address: number | string;
+  /** Protocol: 'tcp' | 'udp' | 'unix'. */
+  proto: 'tcp' | 'udp' | 'unix';
+  /** True once the service has been started and the socket passed-through. */
+  activated: boolean;
+}
+
+/**
+ * [Item 725s] SocketActivator — lazy service startup à la systemd socket
+ * activation.  A socket is opened and listened on by init; when the first
+ * connection arrives the target service is started and the file descriptor
+ * is passed to it via the SD_LISTEN_FDS protocol.
+ *
+ * In JSOS the activation is simulated: the first call to `accept(address)`
+ * triggers `init.startService(entry.service)` and marks the entry activated.
+ */
+export class SocketActivator {
+  private _entries: Map<string, SocketActivationEntry> = new Map();
+
+  /** Register a socket-activation entry.
+   *  `key` is typically `"service@address"`. */
+  register(entry: SocketActivationEntry): void {
+    var key = entry.service + '@' + entry.address;
+    this._entries.set(key, { ...entry, activated: false });
+  }
+
+  /** Unregister an entry. */
+  unregister(service: string, address: number | string): void {
+    this._entries.delete(service + '@' + address);
+  }
+
+  /**
+   * Simulate an incoming connection on `address`.
+   * If an unactivated entry matches, start the service and mark it activated.
+   * Returns true when a service was started.
+   */
+  accept(address: number | string): boolean {
+    for (var entry of Array.from(this._entries.values())) {
+      if (entry.address === address && !entry.activated) {
+        var result = init.startService(entry.service);
+        entry.activated = result.success;
+        if (result.success) {
+          kernel.serialPut('[socket-activation] started ' + entry.service + ' on ' + address + '\n');
+        }
+        return result.success;
+      }
+    }
+    return false;
+  }
+
+  /** List all registered activation entries. */
+  list(): SocketActivationEntry[] {
+    return Array.from(this._entries.values());
+  }
+
+  /** Reset activation flag (service was stopped, re-arm the socket). */
+  rearm(service: string, address: number | string): void {
+    var e = this._entries.get(service + '@' + address);
+    if (e) e.activated = false;
+  }
+}
+
+export const socketActivator = new SocketActivator();
+
+// ── JSOS Service Bus — Item 726s ─────────────────────────────────────────────
+
+/** A typed message on the service bus. */
+export interface ServiceBusMessage<T = unknown> {
+  /** Source service/component name. */
+  from: string;
+  /** Topic (e.g. 'network.up', 'user.login'). */
+  topic: string;
+  /** Payload — any JSON-serializable value. */
+  payload: T;
+  /** Monotonic timestamp (ms since boot). */
+  ts: number;
+}
+
+/** Subscription handle returned by `serviceBus.subscribe()`. */
+export interface ServiceBusSubscription {
+  id: number;
+  topic: string;
+  cancel(): void;
+}
+
+/**
+ * [Item 726s] ServiceBus — intra-OS pub/sub message bus.
+ *
+ *  Services publish typed events (`serviceBus.publish(topic, payload)`) and
+ *  subscribe to events from other services.  This decouples components: e.g.
+ *  the network stack publishes 'network.up' and the DHCP client subscribes.
+ *
+ *  Topics support simple wildcard matching: 'net.*' matches 'net.up',
+ *  'net.down', 'net.error', etc.
+ */
+export class ServiceBus {
+  private _subs: Array<{ id: number; pattern: string; handler: (msg: ServiceBusMessage) => void }> = [];
+  private _nextId = 1;
+  private _epoch: number = Date.now();
+
+  /** Subscribe to `pattern`; returns a handle with a `cancel()` method. */
+  subscribe<T = unknown>(
+    pattern: string,
+    handler: (msg: ServiceBusMessage<T>) => void,
+  ): ServiceBusSubscription {
+    var id = this._nextId++;
+    this._subs.push({ id, pattern, handler: handler as (msg: ServiceBusMessage) => void });
+    var bus = this;
+    return {
+      id, topic: pattern,
+      cancel() { bus._subs = bus._subs.filter(function(s) { return s.id !== id; }); },
+    };
+  }
+
+  /** Publish a message on `topic` from `from`. */
+  publish<T = unknown>(from: string, topic: string, payload: T): void {
+    var msg: ServiceBusMessage<T> = { from, topic, payload, ts: Date.now() - this._epoch };
+    for (var i = 0; i < this._subs.length; i++) {
+      if (this._matches(topic, this._subs[i].pattern)) {
+        try { this._subs[i].handler(msg as ServiceBusMessage); }
+        catch (e) { /* never let a subscriber crash the bus */ }
+      }
+    }
+  }
+
+  /** Return all current subscriber patterns (for diagnostics). */
+  subscriptions(): Array<{ id: number; pattern: string }> {
+    return this._subs.map(function(s) { return { id: s.id, pattern: s.pattern }; });
+  }
+
+  /** Simple glob match: '*' matches any segment, '**' matches any sub-path. */
+  private _matches(topic: string, pattern: string): boolean {
+    if (pattern === '*' || pattern === '**') return true;
+    if (pattern === topic) return true;
+    // Convert pattern to regex: 'net.*' → /^net\.[^.]+$/
+    var re = new RegExp(
+      '^' + pattern.replace(/\./g, '\\.').replace(/\*\*\\\./g, '(?:.+\\.)?').replace(/\*/g, '[^.]+') + '$'
+    );
+    return re.test(topic);
+  }
+}
+
+export const serviceBus = new ServiceBus();

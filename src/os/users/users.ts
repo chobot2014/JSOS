@@ -592,3 +592,220 @@ export class UserManager {
 
 export const users = new UserManager();
 
+// ── File Permission Bits — Item 750b ─────────────────────────────────────────
+
+/** Unix-style permission bit constants. */
+export const S_IRUSR = 0o0400;  // owner read
+export const S_IWUSR = 0o0200;  // owner write
+export const S_IXUSR = 0o0100;  // owner execute
+export const S_IRGRP = 0o0040;  // group read
+export const S_IWGRP = 0o0020;  // group write
+export const S_IXGRP = 0o0010;  // group execute
+export const S_IROTH = 0o0004;  // other read
+export const S_IWOTH = 0o0002;  // other write
+export const S_IXOTH = 0o0001;  // other execute
+export const S_ISUID = 0o4000;  // set-UID bit
+export const S_ISGID = 0o2000;  // set-GID bit
+export const S_ISVTX = 0o1000;  // sticky bit
+
+/** Default file creation mode (rw-rw-r--). */
+export const DEFAULT_FILE_MODE = 0o0664;
+/** Default directory creation mode (rwxrwxr-x). */
+export const DEFAULT_DIR_MODE  = 0o0775;
+
+/** [Item 750b] Determine whether a process with the given credentials may
+ *  perform `access` ('read' | 'write' | 'exec') on a file.
+ *
+ *  Access check order follows POSIX: owner → group → other.
+ *  Root (uid === 0) bypasses permission checks (except exec on files).
+ *
+ * @param fileMode  Unix permission integer (e.g. 0o0644)
+ * @param fileUid   File owner UID
+ * @param fileGid   File owner GID
+ * @param procUid   Process UID
+ * @param procGids  Process supplementary GIDs (must include primary GID)
+ * @param access    'read' | 'write' | 'exec'
+ */
+export function checkFilePermission(
+  fileMode: number,
+  fileUid:  number,
+  fileGid:  number,
+  procUid:  number,
+  procGids: number[],
+  access: 'read' | 'write' | 'exec',
+): boolean {
+  // Root bypasses all permission checks (except exec)
+  if (procUid === 0 && access !== 'exec') return true;
+
+  const rwx = access === 'read' ? 0o4 : access === 'write' ? 0o2 : 0o1;
+
+  if (procUid === fileUid) {
+    // Owner permissions (bits 6-8)
+    return ((fileMode >> 6) & rwx) === rwx;
+  }
+  if (procGids.indexOf(fileGid) !== -1) {
+    // Group permissions (bits 3-5)
+    return ((fileMode >> 3) & rwx) === rwx;
+  }
+  // Other permissions (bits 0-2)
+  return (fileMode & rwx) === rwx;
+}
+
+/** [Item 750b] FileModeStore — persists per-path mode/uid/gid metadata.
+ *  The VFS layer queries this before granting open/read/write/exec. */
+export class FileModeStore {
+  private _store: Map<string, { mode: number; uid: number; gid: number }> = new Map();
+
+  set(path: string, mode: number, uid: number, gid: number): void {
+    this._store.set(path, { mode, uid, gid });
+  }
+
+  get(path: string): { mode: number; uid: number; gid: number } {
+    return this._store.get(path) ?? { mode: DEFAULT_FILE_MODE, uid: 0, gid: 0 };
+  }
+
+  chmod(path: string, mode: number): boolean {
+    var entry = this._store.get(path);
+    if (!entry) return false;
+    entry.mode = mode & 0o7777;
+    return true;
+  }
+
+  chown(path: string, uid: number, gid: number): boolean {
+    var entry = this._store.get(path);
+    if (!entry) return false;
+    entry.uid = uid;
+    entry.gid = gid;
+    return true;
+  }
+
+  remove(path: string): void { this._store.delete(path); }
+}
+
+export const fileModeStore = new FileModeStore();
+
+// ── Process Credentials — Item 751b ──────────────────────────────────────────
+
+/** [Item 751b] Credentials carried by each JSOS process context. */
+export interface ProcessCredentials {
+  uid:  number;   // effective user ID
+  gid:  number;   // effective group ID
+  gids: number[]; // supplementary group IDs
+  /** True when credentials have been elevated (e.g. via sys.auth.elevate). */
+  elevated: boolean;
+}
+
+/**
+ * [Item 751b] ProcessCredentialStore — maps PID → ProcessCredentials.
+ *
+ *  The process scheduler stores credentials here at fork/exec time.
+ *  The VFS and syscall layer consult it for permission checks.
+ */
+export class ProcessCredentialStore {
+  private _creds: Map<number, ProcessCredentials> = new Map();
+
+  /** Register credentials for a new process. */
+  set(pid: number, creds: ProcessCredentials): void {
+    this._creds.set(pid, creds);
+  }
+
+  /** Return credentials for pid, or root credentials as fallback. */
+  get(pid: number): ProcessCredentials {
+    return this._creds.get(pid) ?? { uid: 0, gid: 0, gids: [0], elevated: false };
+  }
+
+  /** Elevate credentials to root for a session (e.g. after sudo). */
+  elevate(pid: number): void {
+    var c = this.get(pid);
+    this._creds.set(pid, { ...c, elevated: true, uid: 0, gid: 0 });
+  }
+
+  /** Drop elevated credentials back to the stored real UID/GID. */
+  dropElevation(pid: number, realUid: number, realGid: number, realGids: number[]): void {
+    this._creds.set(pid, { uid: realUid, gid: realGid, gids: realGids, elevated: false });
+  }
+
+  /** Remove credentials on process exit. */
+  remove(pid: number): void { this._creds.delete(pid); }
+
+  /** Fork: copy parent credentials to child. */
+  fork(parentPid: number, childPid: number): void {
+    var c = this.get(parentPid);
+    this._creds.set(childPid, { ...c });
+  }
+}
+
+export const processCredentialStore = new ProcessCredentialStore();
+
+// ── Pluggable Authentication Providers — Item 754b ───────────────────────────
+
+/** [Item 754b] AuthProvider interface — any module can register a custom
+ *  authentication backend (PAM module, LDAP, OAuth, etc.). */
+export interface AuthProvider {
+  /** Unique name for this provider (e.g. 'ldap', 'pam', 'oauth2'). */
+  readonly name: string;
+  /** Verify `username` + `secret`; returns a session token or null. */
+  authenticate(username: string, secret: string): Promise<string | null>;
+  /** Optional: return user info for a token (for SSO flows). */
+  userInfo?(token: string): Promise<{ uid: number; gid: number; groups: number[] } | null>;
+}
+
+/**
+ * [Item 754b] AuthProviderRegistry — `sys.auth.registerProvider` API.
+ *
+ *  Built-in password auth is always registered as 'local'.  Plugins register
+ *  additional providers with `register()`.  `authenticate()` tries providers
+ *  in registration order and returns on the first success.
+ */
+export class AuthProviderRegistry {
+  private _providers: AuthProvider[] = [];
+
+  /** Register a provider.  Providers are tried in registration order. */
+  register(provider: AuthProvider): void {
+    // Remove any existing provider with the same name first
+    this._providers = this._providers.filter(function(p) { return p.name !== provider.name; });
+    this._providers.push(provider);
+  }
+
+  /** Unregister a provider by name. */
+  unregister(name: string): void {
+    this._providers = this._providers.filter(function(p) { return p.name !== name; });
+  }
+
+  /** List registered provider names. */
+  list(): string[] {
+    return this._providers.map(function(p) { return p.name; });
+  }
+
+  /** Try all providers in order; return token from first success or null. */
+  async authenticate(username: string, secret: string): Promise<string | null> {
+    for (var i = 0; i < this._providers.length; i++) {
+      var token = await this._providers[i].authenticate(username, secret);
+      if (token !== null) return token;
+    }
+    return null;
+  }
+
+  /** Resolve user info from a token across all providers. */
+  async userInfo(token: string): Promise<{ uid: number; gid: number; groups: number[] } | null> {
+    for (var i = 0; i < this._providers.length; i++) {
+      var p = this._providers[i];
+      if (p.userInfo) {
+        var info = await p.userInfo(token);
+        if (info !== null) return info;
+      }
+    }
+    return null;
+  }
+}
+
+export const authProviderRegistry = new AuthProviderRegistry();
+
+// Expose sys.auth.registerProvider globally
+(globalThis as any).sys = (globalThis as any).sys || {};
+(globalThis as any).sys.auth = Object.assign((globalThis as any).sys.auth || {}, {
+  registerProvider: (p: AuthProvider) => authProviderRegistry.register(p),
+  unregisterProvider: (name: string) => authProviderRegistry.unregister(name),
+  listProviders: () => authProviderRegistry.list(),
+});
+

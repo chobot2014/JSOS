@@ -779,3 +779,199 @@ export const gridAutoPlacement      = GridAutoPlacementFastPath;
 export const parallelLayoutScheduler = new ParallelLayoutScheduler();
 export const layoutProfiler         = new LayoutProfiler();
 
+// ── Additional layout optimizations ──────────────────────────────────────────
+
+/** [Item 894] ReadWriteBatcher — group DOM reads before writes to prevent
+ *  forced synchronous layouts (layout thrashing).
+ *
+ *  Usage: call `read(fn)` for any DOM measurement, `write(fn)` for any DOM
+ *  mutation.  The batcher will run all reads first, then all writes, in a
+ *  single scheduled flush — ensuring the layout engine only runs once. */
+export class ReadWriteBatcher {
+  private _reads:  Array<() => void> = [];
+  private _writes: Array<() => void> = [];
+  private _scheduled = false;
+
+  /** Queue a DOM read (measurement) callback. */
+  read(fn: () => void): void {
+    this._reads.push(fn);
+    this._schedule();
+  }
+
+  /** Queue a DOM write (mutation) callback. */
+  write(fn: () => void): void {
+    this._writes.push(fn);
+    this._schedule();
+  }
+
+  /** Flush reads then writes immediately (called by the frame scheduler). */
+  flush(): void {
+    this._scheduled = false;
+    var reads  = this._reads.splice(0);
+    var writes = this._writes.splice(0);
+    // Reads first — they observe the pre-mutation state without triggering relayout
+    for (var i = 0; i < reads.length; i++) reads[i]();
+    // Then writes — only one layout pass needed
+    for (var j = 0; j < writes.length; j++) writes[j]();
+  }
+
+  private _schedule(): void {
+    if (!this._scheduled) {
+      this._scheduled = true;
+      Promise.resolve().then(() => this.flush());
+    }
+  }
+}
+
+export const readWriteBatcher = new ReadWriteBatcher();
+
+// ── Compositor Layer Tree — Items 899 / 900 ───────────────────────────────────
+
+/** Reasons a node may be promoted to its own compositor layer. */
+export type LayerPromotionReason =
+  | 'position-fixed'
+  | 'transform'
+  | 'opacity'
+  | 'will-change'
+  | 'z-index-stacking'
+  | 'canvas'
+  | 'video';
+
+/** A compositor layer entry. */
+export interface CompositorLayer {
+  nodeId: string;
+  reasons: LayerPromotionReason[];
+  /** Estimated memory cost in bytes (width × height × 4). */
+  memoryCost: number;
+}
+
+/**
+ * [Item 899 / 900] CompositorLayerTree — tracks which DOM nodes have been
+ * promoted to compositor layers and why.
+ *
+ *  - `position: fixed` / `position: sticky` (item 899)
+ *  - `transform`, `opacity` animated properties (item 899)
+ *  - `will-change: transform` (item 900) — explicit promotion hint
+ *
+ * The paint engine consults `isPromoted(id)` to decide whether to draw a
+ * node into its own offscreen surface and composite rather than repaint.
+ */
+export class CompositorLayerTree {
+  private _layers: Map<string, CompositorLayer> = new Map();
+
+  /** Promote a node to a compositor layer with the given reason(s).
+   *  If the node is already promoted, the new reason is merged in. */
+  promote(nodeId: string, reason: LayerPromotionReason, w = 0, h = 0): void {
+    var existing = this._layers.get(nodeId);
+    if (existing) {
+      if (existing.reasons.indexOf(reason) === -1) existing.reasons.push(reason);
+    } else {
+      this._layers.set(nodeId, {
+        nodeId,
+        reasons: [reason],
+        memoryCost: w * h * 4,
+      });
+    }
+  }
+
+  /** Demote a node (e.g. when `will-change` is removed). */
+  demote(nodeId: string): void {
+    this._layers.delete(nodeId);
+  }
+
+  /** Return true when `nodeId` has been promoted. */
+  isPromoted(nodeId: string): boolean {
+    return this._layers.has(nodeId);
+  }
+
+  /** Return all reasons for promotion, or empty array. */
+  reasons(nodeId: string): LayerPromotionReason[] {
+    return this._layers.get(nodeId)?.reasons ?? [];
+  }
+
+  /** Total estimated VRAM usage of all promoted layers (bytes). */
+  totalMemory(): number {
+    var total = 0;
+    this._layers.forEach(function(l) { total += l.memoryCost; });
+    return total;
+  }
+
+  /** All promoted layers (for DevTools layer panel). */
+  all(): CompositorLayer[] {
+    return Array.from(this._layers.values());
+  }
+
+  /** Scan a style object and auto-promote based on CSS properties.
+   *  Call this after a style change is applied. */
+  applyStyle(nodeId: string, style: Record<string, string>, w = 0, h = 0): void {
+    var pos = style['position'];
+    if (pos === 'fixed' || pos === 'sticky') this.promote(nodeId, 'position-fixed', w, h);
+
+    var wc = style['will-change'] ?? '';
+    if (wc.indexOf('transform') !== -1) this.promote(nodeId, 'will-change', w, h);  // [Item 900]
+    if (wc.indexOf('opacity') !== -1)   this.promote(nodeId, 'opacity', w, h);
+
+    if (style['transform'] && style['transform'] !== 'none') this.promote(nodeId, 'transform', w, h);
+    if (style['opacity'] !== undefined && style['opacity'] !== '1') this.promote(nodeId, 'opacity', w, h);
+  }
+}
+
+export const compositorLayerTree = new CompositorLayerTree();
+
+// ── Partial Style Invalidation — Item 902 ────────────────────────────────────
+
+/** Cache-key prefix for selector-based style invalidation groups. */
+type InvalidationGroup = 'nth-child' | 'attr' | 'class' | 'id' | 'pseudo';
+
+/**
+ * [Item 902] StyleInvalidationTracker — fine-grained style invalidation.
+ *
+ *  Instead of triggering a full style recalc when any attribute changes,
+ *  nodes are grouped by the selector types that affect them.  When an
+ *  attribute mutates only the matching group is re-evaluated.
+ *
+ *  Groups:
+ *    - 'nth-child'  — `:nth-child`, `:first-child`, `:last-child`
+ *    - 'attr'       — `[attr]`, `[attr=val]` attribute selectors
+ *    - 'class'      — `.className` selectors
+ *    - 'id'         — `#id` selectors
+ *    - 'pseudo'     — `:hover`, `:focus`, `:active`, `:checked`
+ */
+export class StyleInvalidationTracker {
+  private _groups: Map<InvalidationGroup, Set<string>> = new Map();
+  private _dirty:  Set<InvalidationGroup> = new Set();
+
+  /** Register `nodeId` into the given invalidation group. */
+  registerNode(nodeId: string, groups: InvalidationGroup[]): void {
+    for (var i = 0; i < groups.length; i++) {
+      var g = groups[i];
+      if (!this._groups.has(g)) this._groups.set(g, new Set());
+      this._groups.get(g)!.add(nodeId);
+    }
+  }
+
+  /** Unregister from all groups (on node removal). */
+  unregisterNode(nodeId: string): void {
+    this._groups.forEach(function(set) { set.delete(nodeId); });
+  }
+
+  /** Mark an invalidation group as dirty (e.g. after an attribute mutation). */
+  invalidate(group: InvalidationGroup): void { this._dirty.add(group); }
+
+  /** Return the set of node IDs that need style recalc and reset the dirty set.
+   *  Only nodes in the dirtied groups are returned — others skip recalc. */
+  flush(): Set<string> {
+    var affected = new Set<string>();
+    this._dirty.forEach((g) => {
+      (this._groups.get(g) ?? new Set()).forEach(function(id) { affected.add(id); });
+    });
+    this._dirty.clear();
+    return affected;
+  }
+
+  /** True when any group is pending recalc. */
+  get hasDirty(): boolean { return this._dirty.size > 0; }
+}
+
+export const styleInvalidationTracker = new StyleInvalidationTracker();
+

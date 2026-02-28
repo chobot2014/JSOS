@@ -772,6 +772,14 @@ export class SwapManager {
   isSwapped(physPage: number): boolean { return this.slotMap.has(physPage); }
   freeSwapPages(): number { return this.freeSlots.length; }
   usedSwapPages(): number { return this.slotMap.size; }
+  /** Free a swap slot for `physPage` (alias used by MadviseManager MADV_REMOVE). */
+  freeSlot(physPage: number): void {
+    var slot = this.slotMap.get(physPage);
+    if (slot !== undefined) {
+      this.slotMap.delete(physPage);
+      this.freeSlots.push(slot.slotIndex);
+    }
+  }
 }
 
 export const swapManager = new SwapManager();
@@ -827,6 +835,12 @@ export class LRUClock {
     if (i >= 0) { this.pages.splice(i, 1); if (this.hand >= this.pages.length && this.hand > 0) this.hand--; }
     this.accessed.delete(physPage);
   }
+
+  /** Alias for `add()` — used by MadviseManager (MADV_WILLNEED). */
+  track(physPage: number): void { this.add(physPage); }
+
+  /** Alias for `access()` — mark page as recently accessed. */
+  markAccessed(physPage: number): void { this.access(physPage); }
 
   get size(): number { return this.pages.length; }
 }
@@ -1166,3 +1180,164 @@ export class MadviseManager {
 }
 
 export const madviseManager = new MadviseManager();
+
+// ── Transparent Huge Pages — Item 143 ────────────────────────────────────────
+
+/** 2 MiB huge-page size in bytes. */
+export const THP_SIZE = 2 * 1024 * 1024;
+/** 4 KiB base page size in bytes. */
+export const BASE_PAGE_SIZE = 4096;
+/** Base pages per huge page. */
+export const PAGES_PER_HUGE = THP_SIZE / BASE_PAGE_SIZE; // 512
+
+export type THPMode = 'always' | 'madvise' | 'never';
+
+/** [Item 143] Transparent Huge Pages (THP) tracker.
+ *
+ *  When a process maps a 2 MiB region aligned to 2 MiB, the physical-page
+ *  allocator can back that region with a single 2 MiB huge page instead of
+ *  512 × 4 KiB pages.  THP reduces TLB pressure and page-table walk depth.
+ *
+ *  This TypeScript layer records which virtual ranges have been promoted to
+ *  huge pages.  The decision logic (canPromote) checks alignment and size.
+ *  Actual huge-page allocation is performed by the C kernel
+ *  (kernel.allocHugePage) when available.
+ */
+export class THPManager {
+  /** Kernel-global THP policy. */
+  mode: THPMode = 'madvise';
+
+  /** Map of huge-page start address → { pid, size }. */
+  private _pages: Map<number, { pid: number; size: number }> = new Map();
+
+  /** Return true when vaddr is 2 MiB-aligned and size covers at least THP_SIZE. */
+  canPromote(vaddr: number, sizeBytes: number): boolean {
+    if (this.mode === 'never') return false;
+    return (vaddr % THP_SIZE === 0) && (sizeBytes >= THP_SIZE);
+  }
+
+  /** Record a huge-page promotion for region [vaddr, vaddr+size). */
+  promote(pid: number, vaddr: number, size: number): void {
+    for (var offset = 0; offset < size; offset += THP_SIZE) {
+      this._pages.set(vaddr + offset, { pid, size: THP_SIZE });
+      if (typeof kernel !== 'undefined' && typeof (kernel as any).allocHugePage === 'function') {
+        (kernel as any).allocHugePage(pid, vaddr + offset);
+      }
+    }
+  }
+
+  /** Demote a huge page back to base pages (e.g. on partial unmap). */
+  demote(vaddr: number): void {
+    this._pages.delete(vaddr);
+    if (typeof kernel !== 'undefined' && typeof (kernel as any).freeHugePage === 'function') {
+      (kernel as any).freeHugePage(vaddr);
+    }
+  }
+
+  /** Return true if vaddr belongs to a huge page. */
+  isHuge(vaddr: number): boolean {
+    var aligned = vaddr - (vaddr % THP_SIZE);
+    return this._pages.has(aligned);
+  }
+
+  /** Remove all huge-page entries for a process (on exit). */
+  clearPid(pid: number): void {
+    this._pages.forEach(function(v, addr) {
+      if (v.pid === pid) this._pages.delete(addr);
+    }, this);
+  }
+
+  stats(): { total: number; byPid: Record<number, number> } {
+    var byPid: Record<number, number> = {};
+    this._pages.forEach(function(v) {
+      byPid[v.pid] = (byPid[v.pid] ?? 0) + 1;
+    });
+    return { total: this._pages.size, byPid };
+  }
+}
+
+export const thpManager = new THPManager();
+
+// ── ZRAM Compressed Swap — Item 144 ──────────────────────────────────────────
+
+/** Compression ratio assumed for ZRAM pages (≈2.5 × on typical workloads). */
+const ZRAM_DEFAULT_RATIO = 2.5;
+
+/** [Item 144] ZRAM compressed swap device.
+ *
+ *  ZRAM keeps swapped-out pages compressed in RAM instead of writing them to
+ *  disk.  This dramatically reduces swap latency (no I/O) at the cost of CPU
+ *  cycles for LZ4 compression.  The TypeScript layer here manages the logical
+ *  slot table; actual LZ4 compression is approximated by recording compressed
+ *  sizes.
+ */
+export class ZRAMDevice {
+  /** Maximum number of pages stored (soft limit). */
+  readonly maxPages: number;
+  /** Simulated compressed storage: slot → { compressedSize, origPage }. */
+  private _slots: Map<number, { compressedBytes: number; pid: number; vaddr: number }> = new Map();
+  private _freeSlots: number[] = [];
+  private _nextSlot = 0;
+
+  constructor(maxPages: number = 8192) {
+    this.maxPages = maxPages;
+    for (var i = 0; i < maxPages; i++) this._freeSlots.push(i);
+  }
+
+  /** Compress and store a page.  Returns slot index, or -1 if full. */
+  store(pid: number, vaddr: number, pageSizeBytes = BASE_PAGE_SIZE): number {
+    if (this._freeSlots.length === 0) return -1;
+    var slot = this._freeSlots.pop()!;
+    var compressedBytes = Math.ceil(pageSizeBytes / ZRAM_DEFAULT_RATIO);
+    this._slots.set(slot, { compressedBytes, pid, vaddr });
+    return slot;
+  }
+
+  /** Retrieve (decompress) a page from slot.  Frees the slot. */
+  retrieve(slot: number): { pid: number; vaddr: number } | null {
+    var entry = this._slots.get(slot);
+    if (!entry) return null;
+    this._slots.delete(slot);
+    this._freeSlots.push(slot);
+    return { pid: entry.pid, vaddr: entry.vaddr };
+  }
+
+  /** True when the device contains a valid slot. */
+  hasSlot(slot: number): boolean { return this._slots.has(slot); }
+
+  /** Used pages count. */
+  usedPages(): number { return this._slots.size; }
+
+  /** Free pages count. */
+  freePages(): number { return this._freeSlots.length; }
+
+  /** Approximate compressed RAM used (bytes). */
+  compressedBytes(): number {
+    var total = 0;
+    this._slots.forEach(function(v) { total += v.compressedBytes; });
+    return total;
+  }
+
+  /** Uncompressed equivalent (bytes). */
+  uncompressedBytes(): number {
+    return this._slots.size * BASE_PAGE_SIZE;
+  }
+
+  /** Compression ratio achieved. */
+  effectiveRatio(): number {
+    var cb = this.compressedBytes();
+    return cb > 0 ? this.uncompressedBytes() / cb : 1;
+  }
+
+  /** Clear all slots for a process on exit. */
+  clearPid(pid: number): void {
+    this._slots.forEach(function(v, slot) {
+      if (v.pid === pid) {
+        this._slots.delete(slot);
+        this._freeSlots.push(slot);
+      }
+    }, this);
+  }
+}
+
+export const zramDevice = new ZRAMDevice();

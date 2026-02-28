@@ -2008,3 +2008,338 @@ export class AppLauncher {
 }
 
 export const appLauncher = new AppLauncher();
+// ── [Item 759] High-DPI Scaling (2× pixel ratio) ─────────────────────────────
+
+export interface HiDPIConfig {
+  devicePixelRatio: number; // default 1.0
+  logicalWidth: number;
+  logicalHeight: number;
+}
+
+export class HiDPIManager {
+  private _ratio: number = 1.0;
+  private _logicalW: number = 80;
+  private _logicalH: number = 25;
+
+  setRatio(ratio: number): void {
+    if (ratio <= 0) throw new Error('ratio must be > 0');
+    this._ratio = ratio;
+  }
+
+  get devicePixelRatio(): number { return this._ratio; }
+
+  /** Convert logical CSS pixels to physical device pixels. */
+  toPhysical(logical: number): number { return Math.round(logical * this._ratio); }
+
+  /** Convert physical pixels back to logical CSS pixels. */
+  toLogical(physical: number): number { return physical / this._ratio; }
+
+  setLogicalSize(w: number, h: number): void { this._logicalW = w; this._logicalH = h; }
+
+  get logicalWidth(): number { return this._logicalW; }
+  get logicalHeight(): number { return this._logicalH; }
+  get physicalWidth(): number { return this.toPhysical(this._logicalW); }
+  get physicalHeight(): number { return this.toPhysical(this._logicalH); }
+
+  /** Scale a pixel value from a source ratio to the current ratio. */
+  rescale(value: number, fromRatio: number): number {
+    return Math.round((value / fromRatio) * this._ratio);
+  }
+
+  config(): HiDPIConfig {
+    return { devicePixelRatio: this._ratio, logicalWidth: this._logicalW, logicalHeight: this._logicalH };
+  }
+}
+
+export const hiDPIManager = new HiDPIManager();
+
+// ── [Item 760] Drag-and-Drop Between Windows ──────────────────────────────────
+
+export interface DragPayload {
+  type: 'text' | 'file' | 'widget' | string;
+  data: string;
+  sourceWindowId?: string;
+}
+
+export interface DropTarget {
+  windowId: string;
+  onDrop(payload: DragPayload, x: number, y: number): void;
+  canAccept?(payload: DragPayload): boolean;
+}
+
+export class DragDropManager {
+  private _active: DragPayload | null = null;
+  private _sourceId: string | null = null;
+  private _targets: Map<string, DropTarget> = new Map();
+
+  /** Start a drag originating from a window. */
+  startDrag(windowId: string, payload: DragPayload): void {
+    this._active = { ...payload, sourceWindowId: windowId };
+    this._sourceId = windowId;
+  }
+
+  /** End drag; attempt drop at coordinates over windowId. */
+  endDrag(targetWindowId: string, x: number, y: number): boolean {
+    if (!this._active) return false;
+    const target = this._targets.get(targetWindowId);
+    if (!target) { this._active = null; this._sourceId = null; return false; }
+    const canDrop = target.canAccept ? target.canAccept(this._active) : true;
+    if (!canDrop) { this._active = null; this._sourceId = null; return false; }
+    try { target.onDrop(this._active, x, y); } catch (_) {}
+    this._active = null;
+    this._sourceId = null;
+    return true;
+  }
+
+  cancelDrag(): void { this._active = null; this._sourceId = null; }
+
+  registerTarget(target: DropTarget): void { this._targets.set(target.windowId, target); }
+  unregisterTarget(windowId: string): void { this._targets.delete(windowId); }
+
+  get isDragging(): boolean { return this._active !== null; }
+  get activePayload(): DragPayload | null { return this._active; }
+  get sourceWindowId(): string | null { return this._sourceId; }
+}
+
+export const dragDropManager = new DragDropManager();
+
+// ── [Item 763] Login Screen GUI ───────────────────────────────────────────────
+
+export interface LoginAttempt {
+  username: string;
+  password: string;
+}
+
+export type LoginResult = 'ok' | 'wrong-password' | 'no-user' | 'locked';
+export type LoginHandler = (attempt: LoginAttempt) => LoginResult | Promise<LoginResult>;
+
+export class LoginScreen {
+  private _visible: boolean = false;
+  private _handler: LoginHandler | null = null;
+  private _attemptsLeft: number = 5;
+  private _lockedUntil: number = 0;
+  private _onSuccess: Array<(username: string) => void> = [];
+  private _currentUser: string = '';
+  private _message: string = '';
+
+  show(): void { this._visible = true; this._message = ''; }
+  hide(): void { this._visible = false; }
+  get isVisible(): boolean { return this._visible; }
+
+  setHandler(fn: LoginHandler): void { this._handler = fn; }
+
+  onSuccess(fn: (username: string) => void): void { this._onSuccess.push(fn); }
+
+  async submit(username: string, password: string): Promise<LoginResult> {
+    const now = Date.now();
+    if (this._lockedUntil > now) {
+      this._message = `Locked. Try again in ${Math.ceil((this._lockedUntil - now) / 1000)}s`;
+      return 'locked';
+    }
+    if (!this._handler) { this._message = 'No login handler registered'; return 'wrong-password'; }
+    const result = await this._handler({ username, password });
+    if (result === 'ok') {
+      this._attemptsLeft = 5;
+      this._currentUser = username;
+      this._message = '';
+      this.hide();
+      this._onSuccess.forEach(function(fn) { try { fn(username); } catch (_) {} });
+      return 'ok';
+    }
+    this._attemptsLeft--;
+    if (this._attemptsLeft <= 0) {
+      this._lockedUntil = now + 30_000; // lock 30s
+      this._attemptsLeft = 5;
+      this._message = 'Too many failed attempts. Locked for 30s.';
+      return 'locked';
+    }
+    this._message = result === 'no-user' ? 'Unknown user' : `Wrong password (${this._attemptsLeft} attempts left)`;
+    return result;
+  }
+
+  get currentUser(): string { return this._currentUser; }
+  get message(): string { return this._message; }
+  render(): string {
+    if (!this._visible) return '';
+    return [
+      '┌────────────────────────┐',
+      '│      JSOS Login        │',
+      '│  Username: ___________  │',
+      '│  Password: ___________  │',
+      '│  [Login]   [Shutdown]   │',
+      this._message ? `│  ${this._message.padEnd(22)}│` : '│                        │',
+      '└────────────────────────┘',
+    ].join('\n');
+  }
+}
+
+export const loginScreen = new LoginScreen();
+
+// ── [Item 764] Compositing WM (GPU alpha compositing) ─────────────────────────
+
+export interface CompositorLayer {
+  windowId: string;
+  zIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  alpha: number;       // 0.0–1.0
+  buffer: Uint8Array;  // RGBA pixels (width * height * 4)
+  dirty: boolean;
+}
+
+export class CompositingWM {
+  private _layers: Map<string, CompositorLayer> = new Map();
+  private _outputW: number = 1920;
+  private _outputH: number = 1080;
+
+  setOutputSize(w: number, h: number): void { this._outputW = w; this._outputH = h; }
+
+  addLayer(layer: CompositorLayer): void { this._layers.set(layer.windowId, layer); }
+  removeLayer(windowId: string): void { this._layers.delete(windowId); }
+
+  updateBuffer(windowId: string, buffer: Uint8Array, dirty = true): void {
+    const l = this._layers.get(windowId);
+    if (!l) return;
+    l.buffer = buffer;
+    l.dirty = dirty;
+  }
+
+  setAlpha(windowId: string, alpha: number): void {
+    const l = this._layers.get(windowId);
+    if (l) l.alpha = Math.max(0, Math.min(1, alpha));
+  }
+
+  setZIndex(windowId: string, z: number): void {
+    const l = this._layers.get(windowId);
+    if (l) { l.zIndex = z; }
+  }
+
+  moveLayer(windowId: string, x: number, y: number): void {
+    const l = this._layers.get(windowId);
+    if (l) { l.x = x; l.y = y; l.dirty = true; }
+  }
+
+  /** Composite all layers into a flat RGBA output buffer (painter's algorithm). */
+  composite(): Uint8Array {
+    const out = new Uint8Array(this._outputW * this._outputH * 4);
+    const sorted = Array.from(this._layers.values()).sort(function(a, b) { return a.zIndex - b.zIndex; });
+    for (const layer of sorted) {
+      if (layer.alpha <= 0) continue;
+      for (let row = 0; row < layer.height; row++) {
+        const dstRow = layer.y + row;
+        if (dstRow < 0 || dstRow >= this._outputH) continue;
+        for (let col = 0; col < layer.width; col++) {
+          const dstCol = layer.x + col;
+          if (dstCol < 0 || dstCol >= this._outputW) continue;
+          const srcI = (row * layer.width + col) * 4;
+          const dstI = (dstRow * this._outputW + dstCol) * 4;
+          const srcA = (layer.buffer[srcI + 3] / 255) * layer.alpha;
+          const dstA = 1 - srcA;
+          out[dstI]     = Math.round(layer.buffer[srcI]     * srcA + out[dstI]     * dstA);
+          out[dstI + 1] = Math.round(layer.buffer[srcI + 1] * srcA + out[dstI + 1] * dstA);
+          out[dstI + 2] = Math.round(layer.buffer[srcI + 2] * srcA + out[dstI + 2] * dstA);
+          out[dstI + 3] = Math.min(255, out[dstI + 3] + Math.round(srcA * 255));
+        }
+      }
+      layer.dirty = false;
+    }
+    return out;
+  }
+
+  /** Return only layers that have been marked dirty. */
+  dirtyLayers(): CompositorLayer[] {
+    const res: CompositorLayer[] = [];
+    this._layers.forEach(function(l) { if (l.dirty) res.push(l); });
+    return res;
+  }
+
+  layers(): CompositorLayer[] {
+    return Array.from(this._layers.values()).sort(function(a, b) { return a.zIndex - b.zIndex; });
+  }
+}
+
+export const compositingWM = new CompositingWM();
+
+// ── [Item 684] Split-Pane Terminal ────────────────────────────────────────────
+
+export type SplitDirection = 'horizontal' | 'vertical';
+
+export interface Pane {
+  id: string;
+  terminalId: string;       // ID of the terminal tab/session in the pane
+  direction: SplitDirection | null;
+  children: [Pane, Pane] | null;
+  width: number;            // percentage (0–100)
+  height: number;           // percentage (0–100)
+  active: boolean;
+}
+
+export class SplitPaneTerminal {
+  private _root: Pane | null = null;
+  private _panes: Map<string, Pane> = new Map();
+  private _activeId: string | null = null;
+  private _nextId: number = 1;
+
+  private _mkPane(terminalId: string, w = 100, h = 100): Pane {
+    const id = 'pane-' + (this._nextId++);
+    return { id, terminalId, direction: null, children: null, width: w, height: h, active: false };
+  }
+
+  init(terminalId: string): Pane {
+    const root = this._mkPane(terminalId);
+    root.active = true;
+    this._root = root;
+    this._panes.set(root.id, root);
+    this._activeId = root.id;
+    return root;
+  }
+
+  split(paneId: string, direction: SplitDirection, newTerminalId: string): [Pane, Pane] | null {
+    const parent = this._panes.get(paneId);
+    if (!parent || parent.children) return null;
+    const half1 = this._mkPane(parent.terminalId, parent.width, parent.height);
+    const half2 = this._mkPane(newTerminalId, parent.width, parent.height);
+    parent.direction = direction;
+    parent.children = [half1, half2];
+    parent.terminalId = '';
+    this._panes.set(half1.id, half1);
+    this._panes.set(half2.id, half2);
+    return [half1, half2];
+  }
+
+  close(paneId: string): boolean {
+    const pane = this._panes.get(paneId);
+    if (!pane) return false;
+    this._panes.delete(paneId);
+    if (this._activeId === paneId) {
+      const remaining = Array.from(this._panes.values()).filter(p => !p.children);
+      this._activeId = remaining.length ? remaining[0].id : null;
+      if (this._activeId) { const a = this._panes.get(this._activeId); if (a) a.active = true; }
+    }
+    return true;
+  }
+
+  setActive(paneId: string): void {
+    if (this._activeId) {
+      const old = this._panes.get(this._activeId);
+      if (old) old.active = false;
+    }
+    this._activeId = paneId;
+    const p = this._panes.get(paneId);
+    if (p) p.active = true;
+  }
+
+  get activePane(): Pane | null { return this._activeId ? (this._panes.get(this._activeId) ?? null) : null; }
+  get root(): Pane | null { return this._root; }
+
+  /** Return leaf panes (actual terminal views). */
+  leaves(): Pane[] {
+    const res: Pane[] = [];
+    this._panes.forEach(function(p) { if (!p.children) res.push(p); });
+    return res;
+  }
+}
+
+export const splitPaneTerminal = new SplitPaneTerminal();

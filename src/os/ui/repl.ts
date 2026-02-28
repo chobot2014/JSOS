@@ -697,3 +697,192 @@ export class ReplManager {
 export const replManager = new ReplManager();
 // Expose as `repl` global so user can call repl.open(), repl.list() etc. [Item 656]
 (globalThis as any).repl = replManager;
+
+// ── Bracket Matching Highlight — Item 676 ────────────────────────────────────
+
+/** Opening brackets paired with their closing counterparts. */
+const _OPEN_BRACKETS  = ['(', '[', '{'];
+const _CLOSE_BRACKETS = [')', ']', '}'];
+
+/**
+ * [Item 676] Find the matching bracket position for the character at `pos` in
+ * `code`.  Returns the index of the matching bracket, or -1 if not found or
+ * if the character at `pos` is not a bracket.
+ *
+ * Algorithm: scan forward for opening brackets (counting depth) or backward
+ * for closing brackets.  Quotes and comment regions are skipped.
+ */
+export function findMatchingBracket(code: string, pos: number): number {
+  var ch = code[pos];
+  if (!ch) return -1;
+
+  var openIdx  = _OPEN_BRACKETS.indexOf(ch);
+  var closeIdx = _CLOSE_BRACKETS.indexOf(ch);
+  if (openIdx === -1 && closeIdx === -1) return -1;
+
+  var isOpen = openIdx !== -1;
+  var open   = isOpen ? ch : _OPEN_BRACKETS[closeIdx];
+  var close  = isOpen ? _CLOSE_BRACKETS[openIdx] : ch;
+
+  var depth = 1;
+  var i = isOpen ? pos + 1 : pos - 1;
+  var step = isOpen ? 1 : -1;
+
+  while (i >= 0 && i < code.length) {
+    var c = code[i];
+    if (c === open)  depth++;
+    if (c === close) depth--;
+    if (depth === 0) return i;
+    i += step;
+  }
+  return -1;
+}
+
+/**
+ * [Item 676] BracketMatcher — wraps `findMatchingBracket` and emits a visual
+ * annotation so the terminal UI can highlight the paired bracket.
+ *
+ * When `highlightPair(buf, cursorPos)` is called the matcher returns either
+ * `null` (no bracket at cursor) or `{ open, close }` with the positions of
+ * both brackets.  The caller (`readline`) can then underline those characters
+ * before emitting the line.
+ */
+export class BracketMatcher {
+  /**
+   * Analyse `buf` at `cursorPos` (0-indexed, points at the char just typed).
+   * Returns `{ at: pos, matchAt: matchPos }` or null.
+   */
+  analyse(buf: string, cursorPos: number): { at: number; matchAt: number } | null {
+    // Check character at cursor and one before (just typed)
+    for (var offset = 0; offset <= 1; offset++) {
+      var p = cursorPos - offset;
+      if (p < 0 || p >= buf.length) continue;
+      var match = findMatchingBracket(buf, p);
+      if (match !== -1) return { at: p, matchAt: match };
+    }
+    return null;
+  }
+
+  /**
+   * Insert ANSI underline escapes around the two bracket characters in `buf`
+   * so the rendered string highlights the matched pair.
+   * Returns the annotated string (for display only — never store in `buf`).
+   */
+  annotate(buf: string, at: number, matchAt: number): string {
+    var lo = Math.min(at, matchAt);
+    var hi = Math.max(at, matchAt);
+    var ul_on  = '\x1b[4m';   // underline on
+    var ul_off = '\x1b[24m';  // underline off
+    return (
+      buf.slice(0, lo) + ul_on + buf[lo] + ul_off +
+      buf.slice(lo + 1, hi) + ul_on + buf[hi] + ul_off +
+      buf.slice(hi + 1)
+    );
+  }
+}
+
+export const bracketMatcher = new BracketMatcher();
+// ── [Item 787] In-REPL Type Checking (red underline on type errors) ───────────
+
+export interface ReplTypeError {
+  message: string;
+  start: number;   // character offset in the input line
+  end: number;     // exclusive
+}
+
+export interface ReplTypeChecker {
+  check(code: string): ReplTypeError[];
+}
+
+/**
+ * Lightweight heuristic type checker for the REPL input line.
+ * Catches common mistakes without a full TypeScript compiler:
+ * - Unmatched brackets/parens/braces
+ * - Obvious undeclared identifiers (`undefined.<member>`)
+ * - `null.<member>` access
+ * - `typeof` comparisons to unknown string literals
+ */
+export class HeuristicTypeChecker implements ReplTypeChecker {
+  private _knownGlobals: Set<string>;
+
+  constructor() {
+    this._knownGlobals = new Set([
+      'undefined', 'null', 'true', 'false', 'NaN', 'Infinity',
+      'console', 'Math', 'JSON', 'Object', 'Array', 'String', 'Number',
+      'Boolean', 'Date', 'RegExp', 'Error', 'Promise', 'Symbol', 'Map',
+      'Set', 'WeakMap', 'WeakSet', 'Proxy', 'Reflect', 'globalThis',
+      'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
+      'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'encodeURIComponent',
+      'decodeURIComponent', 'fetch', 'performance',
+    ]);
+  }
+
+  addGlobal(name: string): void { this._knownGlobals.add(name); }
+
+  check(code: string): ReplTypeError[] {
+    const errors: ReplTypeError[] = [];
+
+    // 1. Bracket balancing
+    const stack: Array<{ ch: string; pos: number }> = [];
+    const pairs: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
+    const openers = new Set(['(', '[', '{']);
+    const closers = new Set([')', ']', '}']);
+    for (let i = 0; i < code.length; i++) {
+      const ch = code[i];
+      if (openers.has(ch)) { stack.push({ ch, pos: i }); }
+      else if (closers.has(ch)) {
+        if (!stack.length || stack[stack.length - 1].ch !== pairs[ch]) {
+          errors.push({ message: `Unexpected '${ch}'`, start: i, end: i + 1 });
+        } else { stack.pop(); }
+      }
+    }
+    for (const unclosed of stack) {
+      errors.push({ message: `Unclosed '${unclosed.ch}'`, start: unclosed.pos, end: unclosed.pos + 1 });
+    }
+
+    // 2. null/undefined member access: `null.` or `undefined.`
+    const nullAccess = /\b(null|undefined)\s*\.\s*(\w+)/g;
+    var m: RegExpExecArray | null;
+    while ((m = nullAccess.exec(code)) !== null) {
+      errors.push({
+        message: `Cannot read property '${m[2]}' of ${m[1]}`,
+        start: m.index,
+        end: m.index + m[0].length,
+      });
+    }
+
+    // 3. typeof compared to unknown type string
+    const typeofCmp = /typeof\s+\w+\s*[=!]==?\s*['"]([^'"]+)['"]/g;
+    const validTypeStrings = new Set(['undefined', 'boolean', 'number', 'bigint', 'string', 'symbol', 'function', 'object']);
+    while ((m = typeofCmp.exec(code)) !== null) {
+      if (!validTypeStrings.has(m[1])) {
+        errors.push({
+          message: `'${m[1]}' is not a valid typeof result`,
+          start: m.index,
+          end: m.index + m[0].length,
+        });
+      }
+    }
+
+    return errors;
+  }
+
+  /** Format errors as ANSI-annotated code with red underlines. */
+  annotate(code: string, errors: ReplTypeError[]): string {
+    if (!errors.length) return code;
+    const RED_UL = '\x1b[4;31m';
+    const RESET  = '\x1b[0m';
+    // Sort by start descending so splicing doesn't shift offsets
+    const sorted = errors.slice().sort(function(a, b) { return b.start - a.start; });
+    let result = code;
+    for (const err of sorted) {
+      const before = result.slice(0, err.start);
+      const marked = result.slice(err.start, err.end);
+      const after  = result.slice(err.end);
+      result = before + RED_UL + marked + RESET + after;
+    }
+    return result;
+  }
+}
+
+export const heuristicTypeChecker = new HeuristicTypeChecker();

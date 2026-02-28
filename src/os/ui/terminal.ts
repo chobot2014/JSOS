@@ -717,10 +717,15 @@ export class Terminal {
     var cols = this.cols;
     for (var r = 0; r < rows; r++) {
       var row = this._screen[r];
-      if (!row) { for (var c = 0; c < cols; c++) kernel.vgaWriteCell(c, r, 0x20, 0x07); continue; }
+      if (!row) {
+        for (var c = 0; c < cols; c++) kernel.vgaPut(r, c, ' ', 0x07);
+        continue;
+      }
       for (var c = 0; c < cols; c++) {
-        var cell = row[c] ?? ((0x07 << 8) | 0x20);
-        kernel.vgaWriteCell(c, r, cell & 0xff, (cell >> 8) & 0xff);
+        var cell  = row[c] ?? ((0x07 << 8) | 0x20);
+        var ch    = String.fromCharCode(cell & 0xff);
+        var color = (cell >> 8) & 0xff;
+        kernel.vgaPut(r, c, ch, color);
       }
     }
   }
@@ -751,3 +756,210 @@ export class Terminal {
 
 const terminal = new Terminal();
 export default terminal;
+
+// ── Console.log tab routing — Item 677 ───────────────────────────────────────
+
+/**
+ * [Item 677] ConsoleRouter — ensures that `console.log` output from a
+ * background task (async callback, timer, worker-like coroutine) is written
+ * to the terminal tab that owns that task's PID/context, rather than always
+ * going to whichever tab happens to be in the foreground.
+ *
+ * Usage pattern:
+ *   1.  When a new REPL/terminal tab spawns a process it calls
+ *       `consoleRouter.register(pid, tabId)`.
+ *   2.  The patched `console.log` implementation calls
+ *       `consoleRouter.write(pid, line)`.
+ *   3.  The write is forwarded to the Terminal instance associated with
+ *       `tabId`.  If no terminal is registered for the tab the line falls
+ *       back to the default terminal.
+ */
+export class ConsoleRouter {
+  /** pid → tabId */
+  private _pidTab: Map<number, number> = new Map();
+  /** tabId → Terminal-like writer */
+  private _tabWriter: Map<number, { println(s: string): void }> = new Map();
+
+  /** Register `pid` as belonging to `tabId`. */
+  register(pid: number, tabId: number): void {
+    this._pidTab.set(pid, tabId);
+  }
+
+  /** Unregister a PID on process exit. */
+  unregister(pid: number): void {
+    this._pidTab.delete(pid);
+  }
+
+  /** Associate a writer (e.g. a Terminal instance) with a tab id. */
+  setWriter(tabId: number, writer: { println(s: string): void }): void {
+    this._tabWriter.set(tabId, writer);
+  }
+
+  /** Remove tab writer (on tab close). */
+  removeWriter(tabId: number): void {
+    this._tabWriter.delete(tabId);
+    // Unregister all PIDs that belonged to this tab
+    this._pidTab.forEach(function(tid, pid) {
+      if (tid === tabId) this._pidTab.delete(pid);
+    }, this);
+  }
+
+  /**
+   * Route a log line to the appropriate tab's writer.
+   * Falls back to the default `terminal` when no tab is registered for `pid`.
+   */
+  write(pid: number, line: string): void {
+    var tabId  = this._pidTab.get(pid);
+    var writer = tabId !== undefined ? this._tabWriter.get(tabId) : undefined;
+    if (writer) {
+      writer.println(line);
+    } else {
+      // Fallback to the global terminal
+      terminal.println(line);
+    }
+  }
+
+  /** Return the tabId associated with `pid`, or undefined. */
+  tabOf(pid: number): number | undefined {
+    return this._pidTab.get(pid);
+  }
+}
+
+export const consoleRouter = new ConsoleRouter();
+
+// Patch globalThis.console so background tasks route through consoleRouter.
+// The current executing PID is taken from kernel.getpid() if available.
+(function _patchConsole() {
+  var orig = (globalThis as any).console;
+  if (!orig) return;
+  var origLog = orig.log?.bind(orig);
+  if (!origLog) return;
+  orig.log = function(...args: any[]) {
+    var line = args.map(function(a) {
+      return typeof a === 'object' ? JSON.stringify(a) : String(a);
+    }).join(' ');
+    var pid = typeof kernel !== 'undefined' && typeof (kernel as any).getpid === 'function'
+      ? (kernel as any).getpid() as number
+      : -1;
+    if (pid > 0 && consoleRouter.tabOf(pid) !== undefined) {
+      consoleRouter.write(pid, line);
+    } else {
+      origLog(line);
+    }
+  };
+})();
+// ── [Item 672] Mouse Click in Output: Inspect Value ──────────────────────────
+
+export interface InspectableSpan {
+  line: number;     // 0-based row in terminal history
+  colStart: number; // 0-based column start
+  colEnd: number;   // exclusive
+  value: unknown;   // the JS value to inspect
+}
+
+export class ClickInspector {
+  private _spans: InspectableSpan[] = [];
+  private _handler: ((value: unknown, row: number, col: number) => void) | null = null;
+  private _maxSpans: number = 2000;
+
+  /** Register a span of columns on a given output line as inspectable. */
+  register(span: InspectableSpan): void {
+    this._spans.push(span);
+    if (this._spans.length > this._maxSpans) this._spans.shift();
+  }
+
+  /** Clear all registered spans. */
+  clear(): void { this._spans = []; }
+
+  /** Called when the user clicks at terminal coordinates (row, col). */
+  onClick(row: number, col: number): boolean {
+    for (var i = this._spans.length - 1; i >= 0; i--) {
+      var s = this._spans[i];
+      if (s.line === row && col >= s.colStart && col < s.colEnd) {
+        if (this._handler) {
+          try { this._handler(s.value, row, col); } catch (_) {}
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  setHandler(fn: (value: unknown, row: number, col: number) => void): void {
+    this._handler = fn;
+  }
+
+  /** Generate an OSC 8 link-style annotation for an inspectable token. */
+  static annotate(text: string, value: unknown): string {
+    // Encode value as JSON in a custom OSC 99 prefix
+    var encoded = JSON.stringify(value).replace(/[^\x20-\x7e]/g, '?');
+    return `\x1b]99;${encoded}\x07${text}\x1b]99;\x07`;
+  }
+}
+
+export const clickInspector = new ClickInspector();
+
+// ── [Item 681] Inline Image Preview in Terminal Output ────────────────────────
+
+export interface TerminalImage {
+  id: string;
+  url: string;           // data: or http: URL
+  width: number;         // terminal columns to span
+  height: number;        // terminal rows to span
+  pixelData?: Uint8Array; // optional decoded RGBA
+  altText: string;
+}
+
+export class InlineImageRenderer {
+  private _images: Map<string, TerminalImage> = new Map();
+
+  register(img: TerminalImage): void { this._images.set(img.id, img); }
+  remove(id: string): void { this._images.delete(id); }
+  get(id: string): TerminalImage | undefined { return this._images.get(id); }
+
+  /**
+   * Render an image as a block of colored Unicode block-element characters.
+   * Each terminal row is `height/termRows` pixels of the source image.
+   * This is a text-mode approximation using ANSI 24-bit colour.
+   */
+  renderASCII(img: TerminalImage): string {
+    if (!img.pixelData) {
+      // No pixel data — render a placeholder box
+      const top = '╔' + '═'.repeat(img.width - 2) + '╗';
+      const mid = '║' + img.altText.padEnd(img.width - 2).slice(0, img.width - 2) + '║';
+      const bot = '╚' + '═'.repeat(img.width - 2) + '╝';
+      const rows: string[] = [top];
+      for (let r = 1; r < img.height - 1; r++) rows.push(r === Math.floor(img.height / 2) ? mid : '║' + ' '.repeat(img.width - 2) + '║');
+      rows.push(bot);
+      return rows.join('\n');
+    }
+    // True-colour half-block rendering (▄ = lower half):
+    // Each char cell encodes two pixel rows as fg (lower) + bg (upper).
+    const pw = img.width * 2;   // assume 2 px per column
+    const ph = img.height * 4;  // assume 4 px per row
+    const lines: string[] = [];
+    for (let r = 0; r < img.height; r++) {
+      let line = '';
+      for (let c = 0; c < img.width; c++) {
+        const topPx  = (r * 2 * pw + c * 2) * 4;
+        const botPx  = ((r * 2 + 1) * pw + c * 2) * 4;
+        const safe   = (i: number) => Math.min(255, img.pixelData![i] ?? 0);
+        const tr = safe(topPx); const tg = safe(topPx+1); const tb = safe(topPx+2);
+        const br = safe(botPx); const bg = safe(botPx+1); const bb = safe(botPx+2);
+        line += `\x1b[48;2;${tr};${tg};${tb}m\x1b[38;2;${br};${bg};${bb}m▄`;
+      }
+      line += '\x1b[0m';
+      lines.push(line);
+    }
+    return lines.join('\n');
+  }
+
+  /** Emit an iTerm2/Kitty-compatible inline image escape sequence. */
+  static kittyEscape(img: TerminalImage, base64: string): string {
+    // Kitty graphics protocol: ESC_G <params> ; <data> ESC \
+    const params = `a=T,f=32,s=${img.width},v=${img.height}`;
+    return `\x1b_G${params};${base64}\x1b\\`;
+  }
+}
+
+export const inlineImageRenderer = new InlineImageRenderer();
