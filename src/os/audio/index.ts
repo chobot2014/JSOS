@@ -17,6 +17,8 @@ import { decodeMP3 }                  from './mp3.js';
 import { decodeOGG }                  from './ogg.js';
 import { decodeAAC, decodeFLAC }      from './codecs.js';
 
+export type { AudioSource } from './mixer.js';
+
 // ── Singleton state ────────────────────────────────────────────────────────
 
 let _mixer: AudioMixer | null = null;
@@ -44,8 +46,8 @@ export interface AudioSourceOpts {
  */
 export function initAudio(sampleRate = 44100): void {
   if (_mixer) return;
-  const hw = probeAudioHardware();
-  hw.open({ sampleRate, channels: 2, bitsPerSample: 16 });
+  const fmt = { sampleRate, channels: 2 as const, bitsPerSample: 16 as const };
+  const hw = probeAudioHardware(fmt);  // probeAudioHardware opens the driver
   _mixer = new AudioMixer(hw, sampleRate);
 
   // Schedule mixer ticks using the kernel timer (or Date.now() polyfill)
@@ -95,7 +97,11 @@ export function loadDecoded(
     }
     case 'flac': {
       const r = decodeFLAC(data);
-      pcm = r.samples; sampleRate = r.sampleRate; channels = r.channels as 1|2;
+      if (r) {
+        const shift = Math.max(0, r.bitsPerSample - 16);
+        const i16 = Int16Array.from(r.samples, (s) => (s >> shift));
+        pcm = i16; sampleRate = r.sampleRate; channels = r.channels as 1|2;
+      }
       break;
     }
     case 'pcm':

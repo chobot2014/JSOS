@@ -1417,6 +1417,7 @@ export function tokeniseWHATWG(html: string): HtmlToken[] {
         if (ch === '<') { state = TokState.TAG_OPEN; i++; break; }
         textBuf += ch; i++; break;
 
+      // @ts-ignore TS2678: state is assigned RCDATA at line ~1393 (TypeScript misses loop re-entry)
       case TokState.RCDATA:
         // In RCDATA, only </rawtextElem> ends the state.
         if (ch === '<') {
@@ -1429,6 +1430,7 @@ export function tokeniseWHATWG(html: string): HtmlToken[] {
         }
         textBuf += ch; i++; break;
 
+      // @ts-ignore TS2678: state is assigned RAWTEXT at line ~1393 (TypeScript misses loop re-entry)
       case TokState.RAWTEXT:
         if (ch === '<') {
           var rawendPeek = html.slice(i, i + 2 + rawtextElem.length + 1);

@@ -54,6 +54,39 @@ function buildQuery(id: number, hostname: string, qtype: number): number[] {
   return pkt;
 }
 
+/** Alias used by new DNS resolver code (DoH, DoT, mDNS). */
+const _buildQuery = buildQuery;
+
+/**
+ * Parse a DNS wire-format response and extract IP address strings.
+ * Returns [] on malformed input or negative id (accept-any for mDNS).
+ */
+function _parseReply(data: number[], _hostname: string, qtype: number, id: number): string[] {
+  if (data.length < 12) return [];
+  var actualId = ((data[0] & 0xff) << 8) | (data[1] & 0xff);
+  var records = parseResponseFull(data, id < 0 ? actualId : id);
+  if (!records) return [];
+  var expectedType: 'A' | 'AAAA' | 'CNAME' | null =
+    qtype === QTYPE_A ? 'A' : qtype === QTYPE_AAAA ? 'AAAA' : null;
+  return records
+    .filter(function(r) { return !expectedType || r.type === expectedType; })
+    .map(function(r) { return r.value; });
+}
+
+/**
+ * Encode a raw-bytes ECDSA signature (r || s) into DER SEQUENCE { INTEGER r, INTEGER s }.
+ * Used when DNS stores raw r+s bytes for DNSSEC ECDSA signatures.
+ */
+function rawEcdsaToDer(r: number[], s: number[]): number[] {
+  function pad(b: number[]): number[] {
+    while (b.length > 1 && b[0] === 0) b = b.slice(1);
+    return (b[0] & 0x80) ? [0, ...b] : b;
+  }
+  var rp = pad(r.slice()), sp = pad(s.slice());
+  var body = [0x02, rp.length, ...rp, 0x02, sp.length, ...sp];
+  return [0x30, body.length, ...body];
+}
+
 // ── Packet decoder ────────────────────────────────────────────────────────────
 
 function decodeName(data: number[], off: number): { name: string; end: number } {
@@ -938,7 +971,7 @@ export function verifyRRSIG(
     if (kd.length !== 64 || sig.length < 64) return false;
     var p256Key: P256PublicKey = { x: kd.slice(0, 32), y: kd.slice(32, 64) };
     var hash256 = sha256(signedBuf);
-    return ecdsaP256Verify(p256Key, hash256, sig.slice(0, 32), sig.slice(32, 64));
+    return ecdsaP256Verify(p256Key, hash256, rawEcdsaToDer(sig.slice(0, 32), sig.slice(32, 64)));
   }
 
   if (algo === ALGO_ECDSAP384) {
@@ -946,7 +979,7 @@ export function verifyRRSIG(
     if (kd.length !== 96 || sig.length < 96) return false;
     var p384Key: P384PublicKey = { x: kd.slice(0, 48), y: kd.slice(48, 96) };
     var hash384 = sha384(signedBuf);
-    return ecdsaP384Verify(p384Key, hash384, sig.slice(0, 48), sig.slice(48, 96));
+    return ecdsaP384Verify(p384Key, hash384, rawEcdsaToDer(sig.slice(0, 48), sig.slice(48, 96)));
   }
 
   return false;  // unsupported algorithm
@@ -1452,7 +1485,7 @@ export class SplitHorizonDnsResolver {
 
     if (!rule) {
       // No matching rule — use default resolver
-      return resolve(hostname, type);
+      return type === 'AAAA' ? dnsResolveAAAA(hostname) : dnsResolve(hostname);
     }
 
     // Try appending search domains, then bare hostname
@@ -1507,15 +1540,19 @@ async function _resolveViaNs(
     hostname: string,
     type: 'A' | 'AAAA' | 'PTR',
     ns:   string | null): Promise<string | null> {
-  if (!ns) return resolve(hostname, type as 'A' | 'AAAA');
+  if (!ns) return type === 'AAAA' ? dnsResolveAAAA(hostname) : dnsResolve(hostname);
 
   // Build and send a DNS UDP query directly to the specified server
   var qtype  = type === 'AAAA' ? QTYPE_AAAA : type === 'PTR' ? 12 /* QTYPE_PTR */ : QTYPE_A;
   var id     = (Math.random() * 0xffff) | 0;
   var wire   = _buildQuery(id, hostname, qtype);
-  var answer = await net.udpQuery(ns, 53, wire, 3000 /* ms timeout */);
-  if (!answer || answer.length < 12) return null;
-  var addrs  = _parseReply(answer, hostname, qtype, id);
+  var localPort = 54000 + (Math.random() * 1000 | 0);
+  net.openUDPInbox(localPort);
+  net.sendUDPRaw(localPort, ns as any, 53, wire);
+  var udpReply = net.recvUDPRaw(localPort, 3000);
+  net.closeUDPInbox(localPort);
+  if (!udpReply || udpReply.data.length < 12) return null;
+  var addrs  = _parseReply(udpReply.data, hostname, qtype, id);
   return addrs.length ? addrs[0] : null;
 }
 

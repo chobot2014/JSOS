@@ -21,7 +21,8 @@ declare const kernel: any;
 
 // ── Minimal YAML parser (subset) ──────────────────────────────────────────
 
-type YamlValue = string | number | boolean | null | YamlValue[] | Record<string, YamlValue>;
+interface YamlDict extends Record<string, YamlValue> {}
+type YamlValue = string | number | boolean | null | YamlValue[] | YamlDict;
 
 function parseYaml(text: string): Record<string, YamlValue> {
   // Extremely minimal line-by-line parser for cloud-init YAML

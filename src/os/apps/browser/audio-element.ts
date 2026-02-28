@@ -10,7 +10,7 @@
  * window.HTMLAudioElement, window.HTMLVideoElement) by installMediaElements().
  */
 
-import audio, { type AudioFormat, type AudioSource } from '../../../../audio/index.js';
+import audio, { type AudioFormat, type AudioSource } from '../../audio/index.js';
 
 // ── Format detection ────────────────────────────────────────────────────────
 

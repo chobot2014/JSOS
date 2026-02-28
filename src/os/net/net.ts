@@ -2940,12 +2940,8 @@ export class NetworkStack {
       var port = 443;
       if (host.includes(':')) { var hp = host.split(':'); host = hp[0]; port = parseInt(hp[1]); }
 
-      // Resolve host → IP (use kernel DNS if available)
+      // Resolve host → IP (pass through; caller should resolve hostname before calling)
       var ip = host;
-      if (typeof kernel !== 'undefined' && kernel.dns) {
-        var resolved = await kernel.dns.resolve(host);
-        if (resolved) ip = resolved;
-      }
 
       // Build raw HTTP POST request bytes
       var bodyBytes: number[] = [];
@@ -2994,10 +2990,6 @@ export class NetworkStack {
     try {
       // Resolve host
       var ip = host;
-      if (typeof kernel !== 'undefined' && kernel.dns) {
-        var resolved2 = await kernel.dns.resolve(host);
-        if (resolved2) ip = resolved2;
-      }
       var sock = this.createSocket('tcp');
       if (!this.connect(sock, ip, port)) { this.close(sock); return null; }
       var dataArr: number[] = Array.from(data);
@@ -3066,7 +3058,7 @@ export const net = new NetworkStack();
  * standard Linux `main` routing table.  Additional tables are referenced by
  * policy rules (`ip rule`).
  */
-export interface RouteEntry {
+export interface PolicyRouteEntry {
   /** Destination prefix in CIDR notation, e.g. "10.0.0.0/8". */
   dest:     string;
   /** Gateway IP, or "" for directly-connected networks. */
@@ -3086,7 +3078,7 @@ export interface RouteEntry {
 export interface RoutingTable {
   id:     number;    // 0=unspec, 253=default, 254=main, 255=local
   name:   string;    // symbolic name
-  routes: RouteEntry[];
+  routes: PolicyRouteEntry[];
 }
 
 function _cidrToMaskLen(cidr: string): number {
@@ -3135,7 +3127,7 @@ export class RoutingTableManager {
   }
 
   /** ip route add `entry` to table (default: main=254). */
-  addRoute(entry: RouteEntry, tableId: number = 254): void {
+  addRoute(entry: PolicyRouteEntry, tableId: number = 254): void {
     var tbl = this.table(tableId);
     // Remove duplicates
     tbl.routes = tbl.routes.filter(function(r) {
@@ -3157,7 +3149,7 @@ export class RoutingTableManager {
   }
 
   /** Longest-prefix match in a single table. */
-  lookupInTable(dstIp: string, tableId: number): RouteEntry | null {
+  lookupInTable(dstIp: string, tableId: number): PolicyRouteEntry | null {
     var tbl = this._tables.get(tableId);
     if (!tbl) return null;
     var dst = _ipToNum(dstIp);
@@ -3172,7 +3164,7 @@ export class RoutingTableManager {
   }
 
   /** Dump all routes in a table (for `ip route show`). */
-  showRoutes(tableId: number = 254): RouteEntry[] {
+  showRoutes(tableId: number = 254): PolicyRouteEntry[] {
     return this._tables.get(tableId)?.routes ?? [];
   }
 
@@ -3247,7 +3239,7 @@ export class PolicyRoutingEngine {
    * @param tos    Type of service byte.
    * @param fwmark Firewall mark.
    */
-  lookup(srcIp: string, dstIp: string, tos: number = 0, fwmark: number = 0): RouteEntry | null {
+  lookup(srcIp: string, dstIp: string, tos: number = 0, fwmark: number = 0): PolicyRouteEntry | null {
     for (var i = 0; i < this._rules.length; i++) {
       var rule = this._rules[i];
 
@@ -3581,9 +3573,10 @@ export class TeredoTunnel {
    */
   qualify(): boolean {
     if (typeof net === 'undefined') return false;
-    var sock = net.udpCreateSocket();
-    if (!sock || sock.fd < 0) return false;
-    this._sock = sock.fd;
+    // Use a stable ephemeral source port for this Teredo session
+    var srcPort = 10000 + (Math.random() * 10000 | 0);
+    this._sock = srcPort;
+    net.openUDPInbox(srcPort);
 
     // Router Solicitation (ICMPv6 type 133): minimal 8-byte empty RS
     // Teredo encapsulation: no authentication indicator, no origin indication
@@ -3595,13 +3588,13 @@ export class TeredoTunnel {
                         0xff,0x02,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0x02,
                         // ICMPv6 RS header
                         0x85, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-    net.udpSendTo(sock, this.serverIPv4, this.serverPort, rs);
+    net.sendUDPRaw(srcPort, this.serverIPv4 as any, this.serverPort, rs);
 
     // Wait for Router Advertisement (type 134) — abbreviated busy-wait
     if (typeof kernel !== 'undefined') {
       var deadline = kernel.getTicks() + 500;
       while (kernel.getTicks() < deadline) {
-        var pkt = net.udpRecvFrom(sock);
+        var pkt = net.recvUDPRawNB(srcPort);
         if (pkt && pkt.data.length > 8) {
           var inner = this.decapsulate(pkt.data);
           if (inner && inner.length > 40 && inner[40] === 134 /* RA */) {
@@ -3629,6 +3622,8 @@ export class TeredoTunnel {
         }
       }
     }
+    net.closeUDPInbox(srcPort);
+    this._sock = -1;
     return false;
   }
 
@@ -3677,9 +3672,9 @@ export class TeredoTunnel {
    */
   send(dstRelay: string, ipv6Pkt: number[], dstPort: number = TEREDO_PORT): boolean {
     if (this._sock < 0 || typeof net === 'undefined') return false;
-    var sock = { fd: this._sock } as any;
     var payload = this.encapsulate(ipv6Pkt);
-    return net.udpSendTo(sock, dstRelay, dstPort, payload) > 0;
+    net.sendUDPRaw(this._sock, dstRelay as any, dstPort, payload);
+    return true;
   }
 }
 

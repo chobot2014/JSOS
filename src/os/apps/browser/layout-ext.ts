@@ -930,11 +930,11 @@ export function applyOverflowScroll(
       var ln = visible[yi];
       if (!ln) {
         // Create empty line if needed
-        visible[yi] = { y: yi * LINE_H, lineH: LINE_H, bgColor: '', preBg: false, nodes: [] };
+        visible[yi] = { y: yi * LINE_H, lineH: LINE_H, preBg: false, nodes: [] };
         ln = visible[yi];
       }
       var sbChar = (yi >= barTop && yi < barTop + barH) ? '█' : '░';
-      ln.nodes.push({ x: clipW - 1, color: '#888', bg: '#222', bold: false, text: sbChar });
+      ln.nodes.push({ x: clipW - 1, color: 0xFF888888, bold: false, text: sbChar });
     }
   }
 

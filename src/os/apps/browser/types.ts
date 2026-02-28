@@ -80,6 +80,7 @@ export interface RenderNode {
   // Text presentation
   whiteSpace?:   'normal' | 'nowrap' | 'pre' | 'pre-wrap' | 'pre-line';
   textTransform?: 'none' | 'uppercase' | 'lowercase' | 'capitalize';
+  textOverflow?:  'clip' | 'ellipsis';  // item 465
   lineHeight?:   number;
   // Flex container
   flexDirection?:  'row' | 'row-reverse' | 'column' | 'column-reverse';
@@ -296,7 +297,7 @@ export interface CSSProps {
   verticalAlign?: string;
   listStyleType?: string;
   // ── Box model ─────────────────────────────────────────────────────────────
-  display?:       'flex' | 'inline-flex' | 'grid' | 'inline-block' | 'inline' | 'block' | 'none' | 'table' | 'table-row' | 'table-cell';
+  display?:       'flex' | 'inline-flex' | 'grid' | 'inline-grid' | 'inline-block' | 'inline' | 'block' | 'none' | 'table' | 'table-row' | 'table-cell';
   boxSizing?:     'content-box' | 'border-box';
   width?:         number;    // px (0 = auto)
   height?:        number;    // px (0 = auto)

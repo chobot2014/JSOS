@@ -134,10 +134,10 @@ export const vboxAdditions = new VirtualBoxAdditions();
 
 // ── [Item 841] KVM paravirtualisation ───────────────────────────────────────
 
-const MSR_KVM_WALL_CLOCK  = 0x11n;
-const MSR_KVM_SYSTEM_TIME = 0x12n;
-const MSR_KVM_STEAL_TIME  = 0x4B564D03n;
-const MSR_KVM_PV_EOI_EN   = 0x4B564D04n;
+const MSR_KVM_WALL_CLOCK  = 0x11;
+const MSR_KVM_SYSTEM_TIME = 0x12;
+const MSR_KVM_STEAL_TIME  = 0x4B564D03;
+const MSR_KVM_PV_EOI_EN   = 0x4B564D04;
 const KVM_FEATURE_CLOCKSOURCE2 = 1 << 3;
 
 export interface KVMInfo {
@@ -192,12 +192,12 @@ export const kvmParavirt = new KVMParavirt();
 
 // ── [Item 842] Hyper-V enlightenments ───────────────────────────────────────
 
-const MSR_HV_GUEST_OS_ID     = 0x4000_0000n;
-const MSR_HV_HYPERCALL       = 0x4000_0001n;
-const MSR_HV_VP_INDEX        = 0x4000_0002n;
-const MSR_HV_REFERENCE_TSC   = 0x4000_0021n;
-const MSR_HV_SIMP            = 0x4000_0082n;   // SynIC message page
-const MSR_HV_SIEFP           = 0x4000_0083n;   // SynIC event flags page
+const MSR_HV_GUEST_OS_ID     = 0x40000000;
+const MSR_HV_HYPERCALL       = 0x40000001;
+const MSR_HV_VP_INDEX        = 0x40000002;
+const MSR_HV_REFERENCE_TSC   = 0x40000021;
+const MSR_HV_SIMP            = 0x40000082;   // SynIC message page
+const MSR_HV_SIEFP           = 0x40000083;   // SynIC event flags page
 
 const HV_GUEST_OS_ID_JSOS =
   (0n << 48n) |        // vendor: open-source (0)

@@ -521,6 +521,37 @@ export interface KernelAPI {
    */
   rdrand(): number;
 
+  // ─ Audio hardware drivers (items 825–827) ────────────────────────────────
+  /** AC97: set sample rate. */
+  ac97SetRate?(hz: number): void;
+  /** AC97: set master volume (0-100). */
+  ac97SetVolume?(vol: number): void;
+  /** AC97: DMA write — `ptr` is an ArrayBuffer, `len` is byte length. */
+  ac97WriteBuffer?(ptr: ArrayBuffer, len: number): void;
+  /** Intel HDA: open a PCM output stream. Returns stream ID or -1. */
+  hdaOpenStream?(sampleRate: number, channels: number, bitsPerSample: number): number;
+  /** Intel HDA: write PCM data to an open stream. */
+  hdaWriteStream?(streamId: number, ptr: ArrayBuffer, len: number): void;
+  /** Intel HDA: close an open stream. */
+  hdaCloseStream?(streamId: number): void;
+  /** Virtio-sound: open a PCM output stream. Returns stream ID or -1. */
+  virtioSoundOpen?(sampleRate: number, channels: number): number;
+  /** Virtio-sound: write PCM data to a stream. */
+  virtioSoundWrite?(streamId: number, ptr: ArrayBuffer, len: number): void;
+  /** Virtio-sound: close a stream. */
+  virtioSoundClose?(streamId: number): void;
+
+  // ─ Real-time clock / wall clock (NTP items) ──────────────────────────────
+  /**
+   * Read the hardware RTC.
+   * Returns `{ unix: number }` where `unix` is Unix epoch seconds, or null if unavailable.
+   */
+  rtcRead?(): { unix: number } | null;
+  /** Set the OS wall-clock epoch (Unix seconds). */
+  setWallClock?(epoch: number): void;
+  /** Get the OS wall-clock epoch (Unix seconds, tracking from last NTP sync or RTC). */
+  getWallClock?(): number;
+
   //  Constants 
   colors: KernelColors;
   KEY_UP: number;    KEY_DOWN: number;   KEY_LEFT: number;  KEY_RIGHT: number;

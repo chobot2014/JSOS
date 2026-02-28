@@ -105,8 +105,8 @@ export const ioctlRegistry = new IoctlRegistry();
 // /dev/tty — terminal control
 ioctlRegistry.register('/dev/tty', function(cmd, arg) {
   if (cmd === TIOCGWINSZ) {
-    var w = typeof kernel !== 'undefined' && kernel.getScreenWidth  ? kernel.getScreenWidth()  : 80;
-    var h = typeof kernel !== 'undefined' && kernel.getScreenHeight ? kernel.getScreenHeight() : 25;
+    var w = typeof kernel !== 'undefined' && kernel.screenWidth  != null ? kernel.screenWidth  : 80;
+    var h = typeof kernel !== 'undefined' && kernel.screenHeight != null ? kernel.screenHeight : 25;
     return { ws_col: Math.floor(w / 8), ws_row: Math.floor(h / 16), ws_xpixel: w, ws_ypixel: h };
   }
   return -25;

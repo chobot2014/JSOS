@@ -401,6 +401,32 @@ export class BtrfsFS implements VFSMount {
     if (!diskBytenr) return new Uint8Array(Math.min(st.size, diskNumBytes));
     return this._readBytes(this._logical2physical(diskBytenr), Math.min(st.size, diskNumBytes));
   }
+
+  // ── VFSMount interface ───────────────────────────────────────────────────────
+
+  read(path: string): string | null {
+    const data = this.readFile(path);
+    if (!data) return null;
+    return new TextDecoder().decode(data);
+  }
+
+  list(path: string): Array<{ name: string; type: FileType; size: number }> {
+    const entries = this.readdir(path);
+    if (!entries) return [];
+    return entries.map((e) => {
+      const st = this.stat(path.replace(/\/$/, '') + '/' + e.name);
+      return { name: e.name, type: e.type, size: st ? st.size : 0 };
+    });
+  }
+
+  exists(path: string): boolean {
+    return this.stat(path) !== null;
+  }
+
+  isDirectory(path: string): boolean {
+    const st = this.stat(path);
+    return st !== null && st.type === 'directory';
+  }
 }
 
 export function mountBtrfs(dev: Ext4BlockDevice): BtrfsFS | null {

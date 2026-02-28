@@ -1777,6 +1777,8 @@ export function createPageJS(
     _pendingImports: string[] = [];
     /** O(1) rule index: key → CSSStyleRule_[] (item 943) */
     _ruleIdx: Map<string, CSSStyleRule_[]> = new Map();
+    /** @layer ordering — names in cascade order (earlier = lower priority) */
+    _layerOrder?: string[];
 
     /** Add or remove a CSSStyleRule_ from the bucket index.
      * Buckets are kept sorted ascending by _spec (item 946: pre-sorted rule list). */

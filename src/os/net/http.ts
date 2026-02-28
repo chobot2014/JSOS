@@ -24,19 +24,19 @@ export type ResourcePriority = 'critical' | 'high' | 'medium' | 'low' | 'idle';
 
 // ── HTTP response cache (per-session, keyed by full URL) ──────────────────────
 
-interface CacheEntry {
+interface _SimpleCacheEntry {
   response: HttpResponse;
   expiry:   number;  // kernel.getTicks() target
   etag:     string;  // ETag header value (or '')
   staleUntil: number; // stale-while-revalidate deadline
 }
 
-var _httpCache = new Map<string, CacheEntry>();
+var _httpCache = new Map<string, _SimpleCacheEntry>();
 
 export function httpCacheClear(): void { _httpCache.clear(); }
 
 function _cacheGet(url: string): { response: HttpResponse; stale: boolean } | null {
-  var e = _httpCache.get(url);
+  var e = _httpCache.get(url) as _SimpleCacheEntry | undefined;
   if (!e) return null;
   var now = kernel.getTicks();
   if (now > e.expiry + e.staleUntil) { _httpCache.delete(url); return null; }
@@ -1814,24 +1814,25 @@ export class QUICConnection {
    */
   performHandshake(ip: string, port: number, host: string): boolean {
     try {
-      var pkt  = this.buildEncryptedInitialPacket(host);
-      var sock = net.udpCreateSocket();
-      net.udpSendTo(sock, ip, port, pkt);
+      var pkt       = this.buildEncryptedInitialPacket(host);
+      var srcPort   = 10000 + (Math.random() * 10000 | 0);
+      net.openUDPInbox(srcPort);
+      net.sendUDPRaw(srcPort, ip as any, port, pkt);
 
       // Wait for Initial response from server (QUIC Long Header, top bit = 1)
       var deadline = kernel.getTicks() + 300;  // ~3 s at 100 Hz
       while (kernel.getTicks() < deadline) {
         if (net.nicReady) net.pollNIC();
-        var resp = net.udpRecvFrom(sock);
+        var resp = net.recvUDPRawNB(srcPort);
         if (resp && resp.data && resp.data.length > 0) {
           if ((resp.data[0] & 0x80) !== 0) {
-            net.close(sock);
+            net.closeUDPInbox(srcPort);
             this.state = 'open';
             return true;
           }
         }
       }
-      net.close(sock);
+      net.closeUDPInbox(srcPort);
       return false;
     } catch (_) {
       return false;

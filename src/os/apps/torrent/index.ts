@@ -5,7 +5,8 @@
 
 // ── Bencode ───────────────────────────────────────────────────────────────────
 
-export type BencodeValue = string | number | BencodeValue[] | Record<string, BencodeValue>;
+interface BencodeDict extends Record<string, BencodeValue> {}
+export type BencodeValue = string | number | BencodeValue[] | BencodeDict;
 
 export function bencodeDecode(data: Uint8Array): BencodeValue {
   let pos = 0;
@@ -58,20 +59,20 @@ export function bencodeEncode(val: BencodeValue): Uint8Array {
     }
     if (typeof v === 'string') return encodeStr(v);
     if (Array.isArray(v)) {
-      const parts = [enc.encode('l'), ...v.map(go), enc.encode('e')];
+      const parts: Uint8Array[] = [enc.encode('l'), ...v.map(go), enc.encode('e')];
       const total = parts.reduce(function(a, b) { return a + b.length; }, 0);
       const out = new Uint8Array(total); let off = 0;
-      parts.forEach(function(p) { out.set(p, off); off += p.length; });
+      parts.forEach(function(p) { out.set(p as unknown as Uint8Array<ArrayBuffer>, off); off += p.length; });
       return out;
     }
     // dict — keys must be sorted
     const keys = Object.keys(v).sort();
-    const parts = [enc.encode('d')];
+    const parts: Uint8Array[] = [enc.encode('d')];
     for (const k of keys) { parts.push(encodeStr(k)); parts.push(go(v[k])); }
     parts.push(enc.encode('e'));
     const total = parts.reduce(function(a, b) { return a + b.length; }, 0);
     const out = new Uint8Array(total); let off = 0;
-    parts.forEach(function(p) { out.set(p, off); off += p.length; });
+    parts.forEach(function(p) { out.set(p as unknown as Uint8Array<ArrayBuffer>, off); off += p.length; });
     return out;
   }
   return go(val);

@@ -22,7 +22,7 @@
  */
 
 import { net } from './net.js';
-import { dns } from './dns.js';
+import { dnsResolve } from './dns.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -139,11 +139,11 @@ function syncWithServer(serverIP: string): number | null {
   _state.stratum = response.data[1] & 0xff;
 
   // Compare against RTC to record offset
-  const rtc = kernel.rtcRead();
-  _state.offset = epoch - rtc.unix;
+  const rtc = kernel.rtcRead?.();
+  _state.offset = rtc ? epoch - rtc.unix : 0;
 
   // Update the kernel wall clock
-  kernel.setWallClock(epoch);
+  kernel.setWallClock?.(epoch);
 
   return epoch;
 }
@@ -158,7 +158,7 @@ function syncWithServer(serverIP: string): number | null {
 function sync(): number | null {
   // Attempt 1: resolve pool.ntp.org via DNS
   try {
-    const resolved = dns.resolve(NTP_POOL_HOST);
+    const resolved = dnsResolve(NTP_POOL_HOST);
     if (resolved) {
       const epoch = syncWithServer(resolved);
       if (epoch !== null) return epoch;
@@ -182,7 +182,7 @@ function sync(): number | null {
  * the last NTP sync point (or RTC if no sync has occurred).
  */
 function now(): number {
-  return kernel.getWallClock();
+  return kernel.getWallClock?.() ?? Math.floor(Date.now() / 1000);
 }
 
 /**

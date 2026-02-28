@@ -158,8 +158,8 @@ export function installGetUserMedia(win: Record<string, unknown>): void {
       onended: null,
     };
     const stream: MediaStream = {
-      getTracks():      [track as MediaStreamTrack] { return [track]; },
-      getAudioTracks(): [track as MediaStreamTrack] { return [track]; },
+      getTracks():      MediaStreamTrack[] { return [track as MediaStreamTrack]; },
+      getAudioTracks(): MediaStreamTrack[] { return [track as MediaStreamTrack]; },
       active: true,
     } as MediaStream;
     return stream;

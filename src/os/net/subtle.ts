@@ -678,7 +678,8 @@ export class SubtleCrypto {
     var aad   = algorithm.additionalData ?? [];
 
     if (algorithm.name === 'AES-GCM') {
-      return gcmEncrypt(key._keyData, iv, aad, plain);
+      var gcmOut = gcmEncrypt(key._keyData, iv, aad, plain);
+      return [...gcmOut.ciphertext, ...gcmOut.tag];
     }
     if (algorithm.name === 'AES-CBC') {
       if (iv.length < 16) while (iv.length < 16) iv.push(0);
@@ -701,7 +702,9 @@ export class SubtleCrypto {
     var aad = algorithm.additionalData ?? [];
 
     if (algorithm.name === 'AES-GCM') {
-      var dec = gcmDecrypt(key._keyData, iv, aad, ct);
+      var gcmTag = ct.slice(-16);
+      var gcmCt  = ct.slice(0, -16);
+      var dec = gcmDecrypt(key._keyData, iv, aad, gcmCt, gcmTag);
       if (!dec) throw new Error('AES-GCM authentication failed');
       return dec;
     }
@@ -880,7 +883,7 @@ function _base64UrlDecode(s: string): number[] {
   while (b64.length % 4) b64 += '=';
   var out: number[] = [];
   try {
-    var bin = typeof atob !== 'undefined' ? atob(b64) : Buffer.from(b64, 'base64').toString('binary');
+    var bin = typeof atob !== 'undefined' ? atob(b64) : (globalThis as any).Buffer.from(b64, 'base64').toString('binary');
     for (var i = 0; i < bin.length; i++) out.push(bin.charCodeAt(i));
   } catch (_) {}
   return out;
@@ -888,7 +891,7 @@ function _base64UrlDecode(s: string): number[] {
 
 function _base64UrlEncode(bytes: number[]): string {
   var bin = bytes.map(function(b) { return String.fromCharCode(b); }).join('');
-  var b64 = typeof btoa !== 'undefined' ? btoa(bin) : Buffer.from(bin, 'binary').toString('base64');
+  var b64 = typeof btoa !== 'undefined' ? btoa(bin) : (globalThis as any).Buffer.from(bin, 'binary').toString('base64');
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
 

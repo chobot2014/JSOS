@@ -59,6 +59,7 @@ interface Ext4Superblock {
   inodesCount:         number;
   blocksCountLo:       number;
   blocksCountHi:       number;   // valid if FEATURE_INCOMPAT_64BIT
+  firstDataBlock:      number;   // s_first_data_block (0 for blocksize>1024, 1 for 1024)
   logBlockSize:        number;
   blockSize:           number;
   blocksPerGroup:      number;
@@ -93,6 +94,7 @@ function parseSuperblock(data: Uint8Array): Ext4Superblock | null {
     inodesCount:      u32(dv, 0),
     blocksCountLo:    u32(dv, 4),
     blocksCountHi:    revLevel >= 1 ? u32(dv, 160) : 0,
+    firstDataBlock:   u32(dv, 20),
     logBlockSize,
     blockSize:        1024 << logBlockSize,
     blocksPerGroup:   u32(dv, 32),
@@ -234,7 +236,7 @@ function parseExtentIndex(dv: DataView, off: number): ExtentIndex {
  */
 export class Ext4FS implements VFSMount {
   private _dev:   Ext4BlockDevice;
-  private _sb:    Ext4Superblock | null = null;
+  _sb:    Ext4Superblock | null = null;
   private _ready: boolean = false;
   // JBD2 journal state (Item 179)
   private _journal:  JBD2Journal | null = null;

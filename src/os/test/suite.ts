@@ -411,6 +411,7 @@ export function runAll(): void {
 }
 
 // Auto-run when executed as main module
-if (typeof require !== 'undefined' && require.main === (module as any)) {
+if (typeof (globalThis as any).require !== 'undefined' &&
+    (globalThis as any).require.main === (globalThis as any).module) {
   runAll();
 }

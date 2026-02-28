@@ -179,15 +179,15 @@ export function verifyProperties(machine: ReferenceTcpMachine): Violation[] {
   for (const t of machine.transitions) {
     // RFC 793 §3.2: SYN and FIN MUST NOT both be set
     if ((t.segment.flags & FLAG_SYN) && (t.segment.flags & FLAG_FIN)) {
-      violations.push({ description: 'SYN+FIN both set', ...t });
+      violations.push({ description: 'SYN+FIN both set', from: t.from, segment: t.segment, transition: t });
     }
     // RST must move to CLOSED
     if ((t.segment.flags & FLAG_RST) && t.to !== TcpState.CLOSED) {
-      violations.push({ description: 'RST did not go to CLOSED', ...t });
+      violations.push({ description: 'RST did not go to CLOSED', from: t.from, segment: t.segment, transition: t });
     }
     // State transition must be in the RFC diagram
     if (!isValidTransition(t.from, t.to)) {
-      violations.push({ description: `Invalid transition ${t.from} → ${t.to}`, ...t });
+      violations.push({ description: `Invalid transition ${t.from} → ${t.to}`, from: t.from, segment: t.segment, transition: t });
     }
   }
   return violations;

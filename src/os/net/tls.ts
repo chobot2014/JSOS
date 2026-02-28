@@ -707,7 +707,7 @@ export class TLSSocket {
 // [Item 296] TLS ECDSA certificate support
 // ─────────────────────────────────────────────────────────────────────────────
 
-import type { P256PublicKey } from '../crypto/rsa.js';
+import type { P256PublicKey } from './rsa.js';
 
 export interface ECDSACertConfig {
   /** DER-encoded ECDSA P-256 certificate (can be self-signed). */
@@ -765,17 +765,17 @@ export function buildECDSACert(
 
   // SubjectPublicKeyInfo
   var spki = seq([
-    seq([oid(oidEcPublicKey), oid(oidP256)]),
-    bitStr(publicKeyBytes),
+    ...seq([...oid(oidEcPublicKey), ...oid(oidP256)]),
+    ...bitStr(publicKeyBytes),
   ]);
 
   // Subject DN (just CN)
-  var cnBytes = seq([seq([oid([0x55, 0x04, 0x03]), utf8Str(commonName)])]);
-  var subject = seq([cnBytes]);
+  var cnBytes = seq([...seq([...oid([0x55, 0x04, 0x03]), ...utf8Str(commonName)])]);
+  var subject = seq([...cnBytes]);
 
   // TBSCertificate (version, serial, algo, issuer, validity, subject, spki)
   var serial      = [0x01];
-  var algoId      = seq([oid(oidEcdsaSha256)]);
+  var algoId      = seq([...oid(oidEcdsaSha256)]);
   var notBefore   = [0x17, 13, ...('230101000000Z'.split('').map(function(c) { return c.charCodeAt(0); }))];
   var notAfter    = [0x17, 13, ...('990101000000Z'.split('').map(function(c) { return c.charCodeAt(0); }))];
   var validity    = seq([...notBefore, ...notAfter]);
@@ -783,21 +783,21 @@ export function buildECDSACert(
 
   var tbsCert = seq([
     ...version,
-    integer(serial),
-    algoId,
-    subject,   // issuer (self-signed: same as subject)
-    validity,
-    subject,   // subject
+    ...integer(serial),
+    ...algoId,
+    ...subject,   // issuer (self-signed: same as subject)
+    ...validity,
+    ...subject,   // subject
     ...spki,
   ]);
 
   // Stub signature (48 bytes zero — real impl would ECDSA-sign the tbsCert hash)
   var sigR      = new Array(32).fill(0);
   var sigS      = new Array(32).fill(1);
-  var ecdsaSig  = seq([integer(sigR), integer(sigS)]);
+  var ecdsaSig  = seq([...integer(sigR), ...integer(sigS)]);
   var sigBits   = bitStr(ecdsaSig);
 
-  return seq([...tbsCert, algoId, ...sigBits]);
+  return seq([...tbsCert, ...algoId, ...sigBits]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

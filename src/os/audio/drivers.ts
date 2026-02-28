@@ -61,7 +61,7 @@ export class AC97Driver implements AudioHardware {
   flush(samples: Int16Array): void {
     if (!this._open) return;
     // Transfer via kernel.ac97WriteBuffer(ptr, byteLen)
-    kernel.ac97WriteBuffer?.(samples.buffer, samples.byteLength);
+    kernel.ac97WriteBuffer?.(samples.buffer as ArrayBuffer, samples.byteLength);
   }
 
   close(): void { this._open = false; }
@@ -95,7 +95,7 @@ export class IntelHDADriver implements AudioHardware {
 
   flush(samples: Int16Array): void {
     if (!this._open) return;
-    kernel.hdaWriteStream?.(this._streamId, samples.buffer, samples.byteLength);
+    kernel.hdaWriteStream?.(this._streamId, samples.buffer as ArrayBuffer, samples.byteLength);
   }
 
   close(): void {
@@ -131,7 +131,7 @@ export class VirtioSoundDriver implements AudioHardware {
 
   flush(samples: Int16Array): void {
     if (!this._open) return;
-    kernel.virtioSoundWrite?.(this._streamId, samples.buffer, samples.byteLength);
+    kernel.virtioSoundWrite?.(this._streamId, samples.buffer as ArrayBuffer, samples.byteLength);
   }
 
   close(): void {

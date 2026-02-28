@@ -353,7 +353,7 @@ export class IRCClient {
     this.raw(`NOTICE ${target} :${text}`);
   }
 
-  nick(newNick: string): void { this.raw(`NICK ${newNick}`); }
+  changeNick(newNick: string): void { this.raw(`NICK ${newNick}`); }
 
   topic(channel: string, text?: string): void {
     this.raw(text !== undefined ? `TOPIC ${channel} :${text}` : `TOPIC ${channel}`);

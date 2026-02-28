@@ -525,12 +525,12 @@ export class BrowserApp implements App {
       var newH = this._hitTestLink(event.x, cy2);
       if (newH !== this._hoverHref) {
         this._hoverHref = newH;
-        os.setCursor(newH ? 'pointer' : 'default');
+        os.wm.setCursor(newH ? 'pointer' : 'default');
         this._dirty = true;
       }
     } else if (this._hoverHref) {
       this._hoverHref = '';
-      os.setCursor('default');
+      os.wm.setCursor('default');
       this._dirty = true;
     }
   }
