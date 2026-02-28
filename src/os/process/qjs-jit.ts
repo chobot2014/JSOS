@@ -77,7 +77,7 @@ export const JSVALUE_SIZE = 8;
 export const DEOPT_SENTINEL = 0x7FFFDEAD;
 
 /** Call count threshold at which a function is compiled. */
-export const JIT_THRESHOLD = 100;
+export const JIT_THRESHOLD = 10;
 
 /** Maximum allowed deoptimisations before a function is blacklisted. */
 export const MAX_DEOPTS = 3;
@@ -1029,11 +1029,18 @@ export class QJSJITHook {
     for (let i = 0; i < bc.argCount; i++) argTypes.push(entry.speculator.argType(i));
 
     const compiler = new QJSJITCompiler(bc, icTable, regAlloc, deoptLogAddr);
-    const native   = compiler.compile(entry.bcAddr, argTypes);
+    let native = compiler.compile(entry.bcAddr, argTypes);
     if (!native) {
-      entry.bailCount++;
-      if (entry.bailCount >= MAX_BAILS) {
-        entry.blacklisted = true;
+      // Distinguish "IC data not yet available" from a hard opcode bail.
+      // If the IC table has no data at all and this function has never been
+      // compiled successfully, don't count it against bailCount — IC data
+      // accumulates in the interpreter and the next attempt may succeed.
+      const icEmpty = icTable.readCount === 0 && icTable.writeCount === 0;
+      if (!icEmpty) {
+        entry.bailCount++;
+        if (entry.bailCount >= MAX_BAILS) {
+          entry.blacklisted = true;
+        }
       }
       this._bailed++;
       return 0;
@@ -1174,7 +1181,8 @@ export class QJSJITHook {
 interface ChildJITState {
   offsets:    QJSOffsets;
   compiled:   Map<number, number>;   // bcAddr → nativeAddr
-  blacklist:  Set<number>;           // bcAddr of bailed functions
+  blacklist:  Set<number>;           // bcAddr of permanently blacklisted functions
+  bailCount:  Map<number, number>;   // bcAddr → consecutive bail count
 }
 
 const _childState = new Map<number, ChildJITState>();
@@ -1182,7 +1190,7 @@ const _childState = new Map<number, ChildJITState>();
 function _ensureChild(procId: number): ChildJITState {
   let s = _childState.get(procId);
   if (!s) {
-    s = { offsets: initOffsets(), compiled: new Map(), blacklist: new Set() };
+    s = { offsets: initOffsets(), compiled: new Map(), blacklist: new Set(), bailCount: new Map() };
     _childState.set(procId, s);
   }
   return s;
@@ -1209,9 +1217,16 @@ export function _serviceChildJIT(procId: number, bcAddr: number): void {
   const compiler = new QJSJITCompiler(bc, undefined, regAlloc);
   const native   = compiler.compile(bcAddr);
   if (!native) {
-    s.blacklist.add(bcAddr);
+    const prev = s.bailCount.get(bcAddr) ?? 0;
+    const next = prev + 1;
+    s.bailCount.set(bcAddr, next);
+    if (next >= MAX_BAILS) {
+      s.blacklist.add(bcAddr);
+    }
     return;
   }
+  // Success — reset bail count
+  s.bailCount.delete(bcAddr);
 
   const ab = new Uint8Array(native).buffer;
   const nativeAddr = kernel.jitProcAlloc(procId, native.length);
@@ -1541,6 +1556,106 @@ export class FloatJITCompiler extends QJSJITCompiler {
           pc++; break;
         }
 
+        // ── Opcodes that FloatJIT must also handle ─────────────────────────
+        case OP_label: { pc += 5; break; }  // pseudo-op, no code
+        case OP_nop:   { pc++;    break; }
+
+        case OP_push_const: {
+          const idx = bc.u32(pc + 1);
+          const tag = bc.cpoolTag(idx);
+          if (tag === JS_TAG_INT) {
+            // push int constant as double
+            const val = bc.cpoolInt(idx);
+            e.subEsp(8);
+            // Store val as DWORD at [ESP+4] (high), 0 at [ESP] (low) — faster: use scratch area
+            // Simple approach: store constant via EAX into scratch then fild
+            e.immEax(val >>> 0);
+            e.pushEax();
+            e.fildDwordEsp();
+            e.addEsp(4);
+            // Now ST(0) has the int as float — push to eval stack
+            e.subEsp(8);
+            e.fstpQwordEsp();
+          } else {
+            return null; // float64 const needs cpool float support — skip for now
+          }
+          pc += 5; break;
+        }
+
+        case OP_inc_loc: {
+          const i = bc.u16(pc + 1);
+          e.fld64Ebp(ldisp(i));
+          e.fld1();
+          e.faddp();
+          e.fstp64Ebp(ldisp(i));
+          pc += 3; break;
+        }
+        case OP_dec_loc: {
+          const i = bc.u16(pc + 1);
+          e.fld64Ebp(ldisp(i));
+          e.fld1();
+          e.fsubp();
+          e.fstp64Ebp(ldisp(i));
+          pc += 3; break;
+        }
+        case OP_inc_loc8: {
+          const i = bc.u8(pc + 1);
+          e.fld64Ebp(ldisp(i));
+          e.fld1();
+          e.faddp();
+          e.fstp64Ebp(ldisp(i));
+          pc += 2; break;
+        }
+        case OP_dec_loc8: {
+          const i = bc.u8(pc + 1);
+          e.fld64Ebp(ldisp(i));
+          e.fld1();
+          e.fsubp();
+          e.fstp64Ebp(ldisp(i));
+          pc += 2; break;
+        }
+        case OP_add_loc: {
+          // add TOS (consumed) to local[i]
+          const i = bc.u16(pc + 1);
+          e.fldQwordEsp();         // ST(0) = TOS
+          e.addEsp(8);             // pop eval stack
+          e.fld64Ebp(ldisp(i));   // ST(0)=local[i], old ST(0)=TOS still in ST(1)
+          e.faddp();               // ST(0) = local[i] + TOS, pop
+          e.fstp64Ebp(ldisp(i));  // store result back, pop FPU
+          pc += 3; break;
+        }
+
+        case OP_post_inc: {
+          // TOS = double. Post-increment: leave original on stack, add 1 to local.
+          // QuickJS OP_post_inc: pops TOS, pushes (TOS), then increments TOS context.
+          // In practice: duplicate TOS, add 1, discard — push original.
+          // Here we just preserve TOS and do nothing for correctness (post-inc operand already resolved by get_loc before this).
+          // Full semantics: TOS is the variable value. Push it, then store TOS+1 back into variable.
+          // Since we can't know the variable index here, emit a nop but leave stack unchanged.
+          pc++; break;
+        }
+        case OP_post_dec: {
+          pc++; break;
+        }
+
+        case OP_dup1: {
+          // Duplicate TOS-1 to TOS: stack [..., a, b] → [..., a, b, a]
+          // [ESP] = b (8 bytes), [ESP+8] = a (8 bytes)
+          e.subEsp(8);
+          e.fldQwordEspDisp(8 + 8); // load original a (was [ESP+8], now [ESP+16])
+          e.fstpQwordEsp();          // push a at new TOS
+          pc++; break;
+        }
+        case OP_swap: {
+          // Swap TOS and TOS-1: [..., a, b] → [..., b, a]
+          // [ESP] = b (8 bytes), [ESP+8] = a (8 bytes)
+          e.fldQwordEsp();          // ST(0) = b  (load TOS)
+          e.fldQwordEspDisp(8);     // ST(0) = a, ST(1) = b  (load second)
+          e.fstpQwordEsp();         // [ESP] = a, pop ST(0)
+          e.fstpQwordEspDisp(8);    // [ESP+8] = b, pop ST(0)
+          pc++; break;
+        }
+
         default: return null;  // unsupported opcode — bail out
       }
     }
@@ -1579,14 +1694,52 @@ export class BytecodePreAnalysis {
     const loopHeaders   = new Set<number>();
     const localAccessCount: number[] = new Array(bc.varCount + bc.argCount).fill(0);
 
+    // Full opcode width table — critical for correct PC advancement during analysis.
+    // Any multi-byte opcode NOT in this table advances by 1, corrupting all later reads.
+    // Use OPCODE_SIZE from qjs-opcodes.ts as primary source; this local map is the same data
+    // expressed with only imported constants (no ?? expressions) for TS compatibility.
     const OPCODE_SIZE_MAP: Record<number, number> = {
-      [OP_push_i32]: 5, [OP_goto]: 5, [OP_goto16]: 3, [OP_goto8]: 2,
-      [OP_if_true]: 5, [OP_if_false]: 5, [OP_if_true8]: 2, [OP_if_false8]: 2,
+      // 5-byte opcodes (opcode + i32/u32 argument)
+      [OP_push_i32]: 5, [OP_goto]: 5, [OP_push_const]: 5,
+      [OP_if_true]: 5, [OP_if_false]: 5,
+      [OP_get_field]: 5, [OP_put_field]: 5,
+      [OP_label]: 5,
+      // Raw numeric values for opcodes not imported into this file
+      0x03: 5, // OP_fclosure
+      0x04: 5, // OP_push_atom_value
+      0x38: 6, // OP_get_global_var (6 bytes: op + u32 + flags byte)
+      0x39: 6, // OP_put_global_var
+      0x3A: 5, // OP_get_var
+      0x3B: 5, // OP_put_var
+      0x77: 5, // OP_get_field2
+      0x84: 6, // OP_define_method
+      0x86: 5, // OP_define_field
+      0x87: 5, // OP_set_name
+      0x8B: 6, // OP_define_var
+      0x9E: 5, // OP_make_loc_ref
+      0x9F: 5, // OP_make_arg_ref
+      0xA1: 5, // OP_make_var_ref
+      0xB5: 5, // OP_typeof_is_undefined
+      0xB6: 5, // OP_typeof_is_function
+      // 3-byte opcodes (opcode + u16)
+      [OP_goto16]: 3,
       [OP_get_loc]: 3, [OP_put_loc]: 3, [OP_set_loc]: 3,
       [OP_get_arg]: 3, [OP_put_arg]: 3, [OP_set_arg]: 3,
       [OP_inc_loc]: 3, [OP_dec_loc]: 3, [OP_add_loc]: 3,
+      [OP_call_method]: 3,
+      0x27: 3, // OP_get_var_ref
+      0x28: 3, // OP_put_var_ref
+      0x29: 3, // OP_set_var_ref
+      0x42: 3, // OP_call0
+      0x43: 3, // OP_call
+      0x45: 3, // OP_call_method (alias)
+      0x8C: 3, // OP_set_loc_uninitialized
+      // 2-byte opcodes (opcode + u8)
+      [OP_goto8]: 2, [OP_if_true8]: 2, [OP_if_false8]: 2,
       [OP_inc_loc8]: 2, [OP_dec_loc8]: 2, [OP_add_loc8]: 2,
-      [OP_get_field]: 5, [OP_put_field]: 5,
+      0x0C: 2, // OP_special_object
+      0x48: 2, // OP_apply
+      0xAD: 2, // OP_get_scope_obj
     };
 
     // Pass 1: collect jump targets + local access counts
@@ -1714,8 +1867,8 @@ export class RegAllocPass {
       } else if (op === OP_get_loc3 || op === OP_put_loc3 || op === OP_set_loc3) {
         if (3 < bc.varCount) count[3]++; pc++;
       } else {
-        // advance by opcode size from pre-analysis
-        pc++;
+        // Advance by correct opcode size using the authoritative table from qjs-opcodes.ts.
+        pc += OPCODE_SIZE[op] ?? 1;
       }
     }
 

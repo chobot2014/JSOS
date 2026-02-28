@@ -677,6 +677,30 @@ export class _Emit {
   fldDwordEsp():    void { this._w(0xD9); this._w(0x04); this._w(0x24); }
   /** FLD QWORD [ESP] — load float64 from stack top into ST(0). */
   fldQwordEsp():    void { this._w(0xDD); this._w(0x04); this._w(0x24); }
+  /** FLD QWORD [ESP + disp] — load float64 from stack+offset into ST(0). */
+  fldQwordEspDisp(disp: number): void {
+    if (disp >= 0 && disp <= 127) {
+      this._w(0xDD); this._w(0x44); this._w(0x24); this._w(disp);
+    } else {
+      this._w(0xDD); this._w(0x84); this._w(0x24); this._u32(disp);
+    }
+  }
+  /** FSTP QWORD [ESP + disp] — store ST(0) as float64 to stack+offset (and pop). */
+  fstpQwordEspDisp(disp: number): void {
+    if (disp >= 0 && disp <= 127) {
+      this._w(0xDD); this._w(0x5C); this._w(0x24); this._w(disp);
+    } else {
+      this._w(0xDD); this._w(0x9C); this._w(0x24); this._u32(disp);
+    }
+  }
+  /** FST QWORD [ESP + disp] — store ST(0) as float64 to stack+offset (no pop). */
+  fstQwordEspDisp(disp: number): void {
+    if (disp >= 0 && disp <= 127) {
+      this._w(0xDD); this._w(0x54); this._w(0x24); this._w(disp);
+    } else {
+      this._w(0xDD); this._w(0x94); this._w(0x24); this._u32(disp);
+    }
+  }
   /** FADD ST(0), ST(1) */
   faddSt1():        void { this._w(0xD8); this._w(0xC1); }
   /** FSUB ST(0), ST(1) */
