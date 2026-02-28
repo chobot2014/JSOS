@@ -3834,11 +3834,18 @@ export function createPageJS(
     });
   }
 
+  // Only allow valid JS identifier names as function parameters to avoid
+  // "missing formal parameter" errors from names like "my-id", "0", "gbar.logger"
+  function _isValidIdent(k: string): boolean {
+    return /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(k);
+  }
+
   function _makeHandler(code: string, ctx: Record<string, unknown>): ((e: VEvent) => void) | null {
     try {
-      var fn = new Function(...Object.keys(ctx), 'event', code);
+      var validKeys = Object.keys(ctx).filter(_isValidIdent);
+      var fn = new Function(...validKeys, 'event', code);
       return (e: VEvent) => {
-        try { fn(...Object.values(ctx), e); } catch(err) { cb.log('[JS handler err] ' + String(err)); }
+        try { fn(...validKeys.map(k => ctx[k]), e); } catch(err) { cb.log('[JS handler err] ' + String(err)); }
         checkDirty();
       };
     } catch(e) {
@@ -3851,8 +3858,10 @@ export function createPageJS(
 
   function execScript(code: string): void {
     try {
-      // Build a function with all window properties as named parameters
-      var keys = Object.keys(win);
+      // Build a function with all window properties as named parameters.
+      // Filter to valid JS identifiers only — invalid names (hyphenated DOM IDs,
+      // numeric keys, dotted names) cause "missing formal parameter" in the parser.
+      var keys = Object.keys(win).filter(_isValidIdent);
       var fn   = new Function(...keys, '"use strict";\n' + code);
       fn(...keys.map(k => win[k]));
     } catch (e) {
