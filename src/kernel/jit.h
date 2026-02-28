@@ -54,6 +54,12 @@ int32_t jit_call_i8(void *fn,
                     int32_t a4, int32_t a5, int32_t a6, int32_t a7);
 
 /*
+ * Call a JIT-compiled float64 function (x87 double-cdecl, up to 4 double args).
+ * All args and the return value are IEEE-754 doubles.
+ */
+double jit_call_d4(void *fn, double a0, double a1, double a2, double a3);
+
+/*
  * Return the number of bytes currently consumed in the main JIT pool.
  * The main pool capacity is 8 MB (8,388,608 bytes).
  */

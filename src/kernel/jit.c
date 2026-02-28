@@ -79,6 +79,15 @@ int32_t jit_call_i8(void *fn,
     return ((fn_t)fn)(a0, a1, a2, a3, a4, a5, a6, a7);
 }
 
+/*
+ * Call a JIT-compiled float64 function (x87 double-cdecl ABI, up to 4 args).
+ * All args and the return value are IEEE-754 doubles.
+ */
+double jit_call_d4(void *fn, double a0, double a1, double a2, double a3) {
+    typedef double (*fn_t)(double, double, double, double);
+    return ((fn_t)fn)(a0, a1, a2, a3);
+}
+
 uint32_t jit_used_bytes(void) {
     return _jit_main_used;
 }

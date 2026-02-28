@@ -765,6 +765,14 @@ export class QJSJITHook {
   private _jitDeopts: number = 0;
   /** Number of full pool GC resets performed. */
   private _resets:   number = 0;
+  /**
+   * Float64-compiled native functions: bcAddr → nativeAddr.
+   * These use the x87 FPU double-CDEcl convention and can be called explicitly
+   * via kernel.jitCallF4(nativeAddr, d0, d1, d2, d3).  They are NOT registered
+   * for automatic QuickJS dispatch (which requires C-side double-arg extraction).
+   */
+  private _floatFuncs: Map<number, number> = new Map();
+  private _floatCompiled: number = 0;
 
   private _icTables:    Map<number, InlineCacheTable> = new Map();
   private _osrManager:  OSRManager     = new OSRManager();
@@ -828,10 +836,26 @@ export class QJSJITHook {
     // Bool (0/1) is treated as int32 — same representation in cdecl.
     // Float64 and Any arg types require a future float-specialised tier.
     if (!entry.speculator.allIntegerLike() && argc > 0) {
-      // Float64-only functions may stabilise later; give them 4× threshold
-      // before permanently giving up.
-      if (entry.speculator.callCount >= JIT_THRESHOLD * 4) {
-        entry.blacklisted = true;
+      // Float64-specialised tier (item 851): attempt x87 FPU double-cdecl compilation.
+      // We do NOT register the result with kernel.setJITNative() because the current
+      // QuickJS C dispatch only passes int32 args.  The compiled function is stored in
+      // _floatFuncs for explicit call via kernel.jitCallF4(addr, d0, d1, d2, d3).
+      if (entry.speculator.hasFloat64() &&
+          !entry.speculator.allIntegerLike() &&
+          !this._floatFuncs.has(bcAddr) &&
+          entry.speculator.callCount >= JIT_THRESHOLD) {
+        this._tryCompileFloat(entry);
+      }
+      // Never permanently blacklist float64 functions — they run correctly in
+      // the interpreter.  Only blacklist truly uncompilable Any-arg functions
+      // after a very long wait.
+      if (entry.speculator.callCount >= JIT_THRESHOLD * 16) {
+        const allAny = ((): boolean => {
+          for (let i = 0; i < argc; i++)
+            if (entry.speculator.argType(i) !== ArgType.Any) return false;
+          return argc > 0;
+        })();
+        if (allAny) entry.blacklisted = true;
       }
       return 0;
     }
@@ -928,6 +952,44 @@ export class QJSJITHook {
 
     return 1;
   }
+
+  /**
+   * Attempt to compile a Float64-specialised native function via the x87 FPU tier.
+   * The native address is stored in _floatFuncs for explicit kernel.jitCallF4() invocation.
+   * NOT registered with kernel.setJITNative() — auto-dispatch still uses the interpreter
+   * (integer-ABI only until the C-side double-arg extraction is wired up).
+   */
+  private _tryCompileFloat(entry: FuncEntry): void {
+    let bc: QJSBytecodeReader;
+    try {
+      bc = new QJSBytecodeReader(entry.bcAddr, this._offsets);
+    } catch {
+      return;  // can't read bytecode
+    }
+    const native = FloatJITCompiler.compileFloat(bc, entry.bcAddr);
+    if (!native) return;  // unsupported opcode — can't specialise
+
+    const nativeAddr = kernel.jitAlloc(native.length);
+    if (!nativeAddr) return;  // pool exhausted
+
+    kernel.jitWrite(nativeAddr, new Uint8Array(native).buffer);
+    this._floatFuncs.set(entry.bcAddr, nativeAddr);
+    this._floatCompiled++;
+
+    if (typeof (kernel as any).serialPut === 'function') {
+      (kernel as any).serialPut(
+        `[JIT-f64] compiled bc@${entry.bcAddr.toString(16)} ` +
+        `→ native@${nativeAddr.toString(16)} (${native.length}B)\n`
+      );
+    }
+  }
+
+  /** Return the native address of a float-compiled function, or 0 if not yet compiled. */
+  getFloatAddr(bcAddr: number): number {
+    return this._floatFuncs.get(bcAddr) ?? 0;
+  }
+
+  get floatCompiledCount(): number { return this._floatCompiled; }
 
   /**
    * Full pool GC: clears all compiled native pointers and resets the 8 MB
@@ -1101,29 +1163,274 @@ export class InlineCacheTable {
 // =============================================================================
 
 export class FloatJITCompiler extends QJSJITCompiler {
-  /** Compile with x87 FPU fast-paths for Float64 arguments.
-   *  The stack slots used for Float64 are double-wide (8 bytes each).
+  /**
+   * Compile a Float64-specialised function using the x87 FPU.
+   *
+   * Stack layout (cdecl, double args):
+   *   EBP + 8 + i*8  — arg[i]    (double, 8 bytes each)
+   *   EBP - 8 - i*8  — local[i]  (double, 8 bytes each, zero-inited)
+   *
+   * The virtual JS eval stack is mapped onto the C stack as 8-byte doubles
+   * (pushed via SUB ESP,8; FSTP QWORD [ESP]; popped via FLD QWORD [ESP]; ADD ESP,8).
+   *
+   * Return: double in ST(0) per cdecl convention; function returns int32 0 on
+   * undefined-return.
    */
   static compileFloat(bc: QJSBytecodeReader, bcAddr: number): number[] | null {
-    // Reuse the base compiler but override float arithmetic if needed.
-    // For now: forward to integer compiler with float-tag bypass.
-    // Full x87 FPU path for Float64-only functions compiles the
-    // OP_add/sub/mul/div ops using FILD/FADD/FIST sequences.
     const e = new _Emit();
-    const locals = (bc.argCount + bc.varCount + 8) * 4;
-    e.prologue(locals);
+    const argN = bc.argCount;
+    const varN = bc.varCount;
+    const MAX_EVAL = 8;
 
-    // Stub: emit NOP + return 0 (safe fallback; real tier needs full bytecode scan)
-    // A complete float-tier compiler emits:
-    //   FILD [EBP+arg0_disp]  ; load int32 arg as float
-    //   FILD [EBP+arg1_disp]
-    //   FADD                  ; ST(0) += ST(1)
-    //   FIST [EBP-4]          ; store result as int32
-    //   MOV EAX, [EBP-4]
-    //   LEAVE / RET
-    e.xorEaxEax();
-    e.epilogue();
-    return e.buf;  // returns 0; will be extended in a future tier
+    // Prologue: reserves (varN + MAX_EVAL) * 8 bytes = 8-byte locals + eval-stack headroom
+    const localBytes = (varN + MAX_EVAL) * 8;
+    e.prologue(localBytes);
+
+    // Zero-init all double locals
+    for (let i = 0; i < varN; i++) {
+      const disp = -(8 + i * 8);
+      e.fldz();
+      e.fstpQwordEbpDisp(disp);
+    }
+
+    const bcToNative = new Map<number, number>();
+    const fixups: Array<{ bcTarget: number; fixupOff: number }> = [];
+
+    // Arg displacement: double arg[i] at EBP + 8 + i*8
+    const adisp = (i: number) => 8 + i * 8;
+    // Local displacement: double local[i] at EBP - 8 - i*8
+    const ldisp = (i: number) => -(8 + i * 8);
+
+    // ── Helper: push ST(0) onto the C float eval stack ──
+    // SUB ESP, 8; FSTP QWORD [ESP]
+    const pushST0 = () => { e.subEsp(8); e.fstpQwordEsp(); };
+
+    // ── Helper: pop C float eval stack into ST(0) ──
+    // FLD QWORD [ESP]; ADD ESP, 8
+    const popToST0 = () => { e.fldQwordEsp(); e.addEsp(8); };
+
+    // ── Helper: emit int32 result as 1.0 or 0.0 based on setcc and push ──
+    // Caller must have called e.setX() so AL = 0 or 1 from FCOMIP flags.
+    // MOVZX EAX, AL; PUSH EAX; FILD DWORD [ESP]; ADD ESP, 4; pushST0()
+    const intToBoolDouble = () => {
+      e.movzxEaxAl();    // zero-extend AL → EAX = 0 or 1 (no flags clobbered)
+      e.pushEax();
+      e.fildDwordEsp();  // ST(0) = 0.0 or 1.0
+      e.addEsp(4);
+      pushST0();
+    };
+
+    let pc = 0;
+    while (pc < bc.bcLen) {
+      bcToNative.set(pc, e.here());
+      const op = bc.u8(pc);
+
+      switch (op) {
+        // ── Constant pushes ─────────────────────────────────────────────────
+        case OP_push_false:
+        case OP_null:
+        case OP_undefined: { e.fldz(); pushST0(); pc++; break; }
+        case OP_push_true:  { e.fld1(); pushST0(); pc++; break; }
+        case OP_push_i32: {
+          const v = bc.i32(pc + 1);
+          e.immEax(v >>> 0);
+          e.pushEax();
+          e.fildDwordEsp();
+          e.addEsp(4);
+          pushST0();
+          pc += 5; break;
+        }
+
+        // ── Local variable access ───────────────────────────────────────────
+        case OP_get_loc:  { const i = bc.u16(pc + 1); e.fld64Ebp(ldisp(i)); pushST0(); pc += 3; break; }
+        case OP_put_loc:  { const i = bc.u16(pc + 1); popToST0(); e.fstp64Ebp(ldisp(i)); pc += 3; break; }
+        case OP_set_loc:  { const i = bc.u16(pc + 1); e.fldQwordEsp(); e.fstp64Ebp(ldisp(i)); pc += 3; break; }
+        case OP_get_loc0: { e.fld64Ebp(ldisp(0)); pushST0(); pc++; break; }
+        case OP_get_loc1: { e.fld64Ebp(ldisp(1)); pushST0(); pc++; break; }
+        case OP_get_loc2: { e.fld64Ebp(ldisp(2)); pushST0(); pc++; break; }
+        case OP_get_loc3: { e.fld64Ebp(ldisp(3)); pushST0(); pc++; break; }
+        case OP_put_loc0: { popToST0(); e.fstp64Ebp(ldisp(0)); pc++; break; }
+        case OP_put_loc1: { popToST0(); e.fstp64Ebp(ldisp(1)); pc++; break; }
+        case OP_put_loc2: { popToST0(); e.fstp64Ebp(ldisp(2)); pc++; break; }
+        case OP_put_loc3: { popToST0(); e.fstp64Ebp(ldisp(3)); pc++; break; }
+        case OP_set_loc0: { e.fldQwordEsp(); e.fstp64Ebp(ldisp(0)); pc++; break; }
+        case OP_set_loc1: { e.fldQwordEsp(); e.fstp64Ebp(ldisp(1)); pc++; break; }
+        case OP_set_loc2: { e.fldQwordEsp(); e.fstp64Ebp(ldisp(2)); pc++; break; }
+        case OP_set_loc3: { e.fldQwordEsp(); e.fstp64Ebp(ldisp(3)); pc++; break; }
+
+        // ── Argument access ─────────────────────────────────────────────────
+        case OP_get_arg: { const i = bc.u16(pc + 1); e.fld64Ebp(adisp(i)); pushST0(); pc += 3; break; }
+        case OP_put_arg: { const i = bc.u16(pc + 1); popToST0(); e.fstp64Ebp(adisp(i)); pc += 3; break; }
+        case OP_set_arg: { const i = bc.u16(pc + 1); e.fldQwordEsp(); e.fstp64Ebp(adisp(i)); pc += 3; break; }
+
+        // ── Stack management ────────────────────────────────────────────────
+        case OP_drop: { e.addEsp(8); pc++; break; }
+        case OP_dup:  {
+          // Load TOS double, push another copy
+          e.fldQwordEsp();   // ST(0) = TOS (peek, not pop)
+          pushST0();         // push copy on top
+          pc++; break;
+        }
+        case OP_nop: { pc++; break; }
+
+        // ── Binary float arithmetic ─────────────────────────────────────────
+        // Stack on entry: [ ... a, b ]  b = TOS
+        // Load b into FPU first (becomes ST(1) after loading a)
+        case OP_add: {
+          popToST0();   // ST(0) = b (TOS)
+          popToST0();   // ST(0) = a, ST(1) = b
+          e.faddp();    // ST(1) = a + b; pop → ST(0) = a+b
+          pushST0(); pc++; break;
+        }
+        case OP_sub: {
+          popToST0();   // ST(0) = b
+          popToST0();   // ST(0) = a, ST(1) = b
+          e.fsubr();    // FSUBRP: ST(1) = ST(0)-ST(1) = a-b; pop → ST(0) = a-b
+          pushST0(); pc++; break;
+        }
+        case OP_mul: {
+          popToST0();   // ST(0) = b
+          popToST0();   // ST(0) = a, ST(1) = b
+          e.fmulp();    // ST(0) = a*b
+          pushST0(); pc++; break;
+        }
+        case OP_div: {
+          popToST0();   // ST(0) = b (divisor)
+          popToST0();   // ST(0) = a (dividend), ST(1) = b
+          e.fdivrp();   // FDIVRP: ST(1) = ST(0)/ST(1) = a/b; pop → ST(0) = a/b
+          pushST0(); pc++; break;
+        }
+        case OP_neg: {
+          popToST0();
+          e.fchs();     // ST(0) = -ST(0)
+          pushST0(); pc++; break;
+        }
+        case OP_plus: { pc++; break; }   // no-op for numeric
+
+        // ── Comparisons (push 1.0 or 0.0) ──────────────────────────────────
+        // FCOMIP ST(0), ST(1): compares a vs b (ST(0)=a, ST(1)=b after dual-load)
+        //   CF=1 if a < b, ZF=1 if a == b, both 0 if a > b
+        case OP_eq:
+        case OP_strict_eq: {
+          popToST0();                // ST(0) = b
+          popToST0();                // ST(0) = a, ST(1) = b
+          e.fcomip(); e.fstpSt0();  // compare a vs b; discard b
+          e.sete(); intToBoolDouble(); pc++; break;
+        }
+        case OP_neq:
+        case OP_strict_neq: {
+          popToST0(); popToST0();
+          e.fcomip(); e.fstpSt0();
+          e.setne(); intToBoolDouble(); pc++; break;
+        }
+        case OP_lt: {
+          popToST0(); popToST0();
+          e.fcomip(); e.fstpSt0();
+          e.setb();  intToBoolDouble(); pc++; break;  // CF=1 → a < b
+        }
+        case OP_lte: {
+          popToST0(); popToST0();
+          e.fcomip(); e.fstpSt0();
+          e.setbe(); intToBoolDouble(); pc++; break;  // CF|ZF → a <= b
+        }
+        case OP_gt: {
+          popToST0(); popToST0();
+          e.fcomip(); e.fstpSt0();
+          e.seta();  intToBoolDouble(); pc++; break;  // !CF & !ZF → a > b
+        }
+        case OP_gte: {
+          popToST0(); popToST0();
+          e.fcomip(); e.fstpSt0();
+          e.setae(); intToBoolDouble(); pc++; break;  // !CF → a >= b
+        }
+
+        // ── Conditional branches ────────────────────────────────────────────
+        // Use FLDZ + FCOMIP to test if TOS != 0.0 (truthy)
+        case OP_if_true8: {
+          const rel = bc.i8(pc + 1);
+          const target = pc + 2 + rel;
+          popToST0();    // ST(0) = val
+          e.fldz();      // ST(0) = 0.0, ST(1) = val
+          e.fcomip();    // compare 0.0 vs val; pop 0.0 → ST(0) = val
+          e.fstpSt0();   // discard val
+          // ZF=1 if 0.0 == val; jump if truthy = ZF=0 = JNZ
+          const f = e.jne();
+          fixups.push({ bcTarget: target, fixupOff: f });
+          pc += 2; break;
+        }
+        case OP_if_false8: {
+          const rel = bc.i8(pc + 1);
+          const target = pc + 2 + rel;
+          popToST0(); e.fldz(); e.fcomip(); e.fstpSt0();
+          const f = e.je();   // jump if ZF=1 = val == 0.0
+          fixups.push({ bcTarget: target, fixupOff: f });
+          pc += 2; break;
+        }
+        case OP_if_true: {
+          const rel = bc.i32(pc + 1);
+          const target = pc + 5 + rel;
+          popToST0(); e.fldz(); e.fcomip(); e.fstpSt0();
+          const f = e.jne();
+          fixups.push({ bcTarget: target, fixupOff: f });
+          pc += 5; break;
+        }
+        case OP_if_false: {
+          const rel = bc.i32(pc + 1);
+          const target = pc + 5 + rel;
+          popToST0(); e.fldz(); e.fcomip(); e.fstpSt0();
+          const f = e.je();
+          fixups.push({ bcTarget: target, fixupOff: f });
+          pc += 5; break;
+        }
+
+        // ── Unconditional jumps ─────────────────────────────────────────────
+        case OP_goto8: {
+          const rel = bc.i8(pc + 1);
+          const target = pc + 2 + rel;
+          const f = e.jmp();
+          fixups.push({ bcTarget: target, fixupOff: f });
+          pc += 2; break;
+        }
+        case OP_goto16: {
+          const rel = bc.i16(pc + 1);
+          const target = pc + 3 + rel;
+          const f = e.jmp();
+          fixups.push({ bcTarget: target, fixupOff: f });
+          pc += 3; break;
+        }
+        case OP_goto: {
+          const rel = bc.i32(pc + 1);
+          const target = pc + 5 + rel;
+          const f = e.jmp();
+          fixups.push({ bcTarget: target, fixupOff: f });
+          pc += 5; break;
+        }
+
+        // ── Returns ─────────────────────────────────────────────────────────
+        case OP_return_val: {
+          // Pop result from C float stack into ST(0) — cdecl returns double in ST(0)
+          popToST0();   // ST(0) = return value
+          e.epilogue(); // LEAVE; RET  (leaves ST(0) untouched)
+          pc++; break;
+        }
+        case OP_return_undef: {
+          e.fldz();     // return 0.0
+          e.epilogue();
+          pc++; break;
+        }
+
+        default: return null;  // unsupported opcode — bail out
+      }
+    }
+
+    // Resolve branch fixups
+    for (const fx of fixups) {
+      const targetNative = bcToNative.get(fx.bcTarget);
+      if (targetNative === undefined) return null;
+      e.patch(fx.fixupOff, targetNative);
+    }
+
+    return e.buf;
   }
 }
 

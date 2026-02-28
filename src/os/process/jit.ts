@@ -812,6 +812,28 @@ export class _Emit {
       this._w(0xDB); this._w(0x85); this._u32(disp);
     }
   }
+
+  // ── Additional x87 FPU helpers for the Float64 JIT tier ────────────────────
+  /** FDIVRP ST(1), ST(0): ST(1) = ST(0) / ST(1); pop. For a/b when ST(0)=a, ST(1)=b. */
+  fdivrp():       void { this._w(0xDE); this._w(0xF1); }
+  /** FILD DWORD [ESP] — load int32 from stack top as double into ST(0). */
+  fildDwordEsp(): void { this._w(0xDB); this._w(0x04); this._w(0x24); }
+  /** FCHS — change sign of ST(0) (negate). */
+  fchs():         void { this._w(0xD9); this._w(0xE0); }
+  /** FABS — absolute value of ST(0). */
+  fabs():         void { this._w(0xD9); this._w(0xE1); }
+  /** FXCH ST(1) — exchange ST(0) and ST(1). */
+  fxch():         void { this._w(0xD9); this._w(0xC9); }
+  /** SETB  AL — set if CF=1 (below, unsigned / float a < b after FCOMIP). */
+  setb():  void { this._w(0x0F); this._w(0x92); this._w(0xC0); }
+  /** SETBE AL — set if CF|ZF (float a <= b). */
+  setbe(): void { this._w(0x0F); this._w(0x96); this._w(0xC0); }
+  /** SETA  AL — set if !CF & !ZF (above, float a > b). */
+  seta():  void { this._w(0x0F); this._w(0x97); this._w(0xC0); }
+  /** SETAE AL — set if !CF (above or equal, float a >= b). */
+  setae(): void { this._w(0x0F); this._w(0x93); this._w(0xC0); }
+  /** MOVZX EAX, AL — zero-extend AL into EAX (clears upper 24 bits without affecting flags). */
+  movzxEaxAl(): void { this._w(0x0F); this._w(0xB6); this._w(0xC0); }
 }
 
 // ─── Code generator ───────────────────────────────────────────────────────────

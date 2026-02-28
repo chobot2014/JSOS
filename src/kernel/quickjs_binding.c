@@ -1830,6 +1830,25 @@ static JSValue js_jit_call_i8(JSContext *c, JSValueConst this_val,
 }
 
 /*
+ * kernel.jitCallF4(addr, d0, d1, d2, d3) → float64
+ * Call a JIT-compiled float64 function (x87 double-cdecl ABI, up to 4 double args).
+ * addr — native address returned by kernel.jitAlloc() for a FloatJITCompiler result.
+ */
+static JSValue js_jit_call_f(JSContext *c, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewFloat64(c, 0.0);
+    uint32_t addr = 0;
+    JS_ToUint32(c, &addr, argv[0]);
+    if (!addr) return JS_NewFloat64(c, 0.0);
+    double a[4] = {0.0, 0.0, 0.0, 0.0};
+    for (int i = 0; i < 4 && (i + 1) < argc; i++)
+        JS_ToFloat64(c, &a[i], argv[i + 1]);
+    return JS_NewFloat64(c, jit_call_d4((void *)(uintptr_t)addr,
+                                        a[0], a[1], a[2], a[3]));
+}
+
+/*
  * kernel.physAddrOf(arrayBuffer) → uint32
  * Return the physical (linear) address of a JS ArrayBuffer's backing store.
  * QuickJS uses reference-counting (not a moving GC), so the address is stable
@@ -3108,6 +3127,7 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("jitWrite",     2, js_jit_write),
     JS_CFUNC_DEF("jitCallI",     5, js_jit_call_i),
     JS_CFUNC_DEF("jitCallI8",    9, js_jit_call_i8),
+    JS_CFUNC_DEF("jitCallF4",    5, js_jit_call_f),
     JS_CFUNC_DEF("jitUsedBytes",   0, js_jit_used_bytes),
     JS_CFUNC_DEF("jitMainReset",   0, js_jit_main_reset),
     JS_CFUNC_DEF("physAddrOf",   1, js_physaddr_of),

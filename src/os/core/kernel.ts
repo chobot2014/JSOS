@@ -347,6 +347,12 @@ export interface KernelAPI {
     a0?: number, a1?: number, a2?: number, a3?: number,
     a4?: number, a5?: number, a6?: number, a7?: number): number;
   /**
+   * Call a JIT-compiled float64 function at `addr` (x87 double-cdecl ABI).
+   * Produced by FloatJITCompiler. All args and return value are IEEE-754 doubles.
+   * Use QJSJITHook.getFloatAddr(bcAddr) to obtain the native address.
+   */
+  jitCallF4(addr: number, a0?: number, a1?: number, a2?: number, a3?: number): number;
+  /**
    * Returns the number of bytes currently consumed in the 8 MB main JIT pool.
    * Useful for budget checks and debugging.  Pool capacity = 8,388,608 bytes.
    */

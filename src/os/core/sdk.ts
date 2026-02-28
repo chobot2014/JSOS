@@ -55,6 +55,7 @@ import {
 } from '../net/crypto.js';
 import type { User, Group } from '../users/users.js';
 export { Canvas, Colors, defaultFont, type PixelColor } from '../ui/canvas.js';
+export { Color } from '../core/kernel.js';
 export type { App, WMWindow, KeyEvent, MouseEvent, MenuItem } from '../ui/wm.js';
 export { JSProcess } from '../process/jsprocess.js';
 export { ProcessSupervisor } from '../process/supervisor.js';

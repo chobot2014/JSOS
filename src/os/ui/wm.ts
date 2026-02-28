@@ -162,6 +162,11 @@ export interface WMWindow {
   /** Alpha 0–255. 255 = fully opaque (default). 0 = hidden. */
   opacity: number;
   app: App;
+  /** Set when the app threw an uncaught exception during render/input.
+   *  A crash overlay is drawn and clicking the window content restarts the app. */
+  _crashed?: boolean;
+  /** Short description of the crash reason. */
+  _crashMsg?: string;
 }
 
 /** Context menu item. */
@@ -297,8 +302,12 @@ export class WindowManager {
 
     this._windows.push(win);
     this._focused = win.id;
-    opts.app.onMount(win);
-    if (opts.app.onFocus) opts.app.onFocus();
+    try { opts.app.onMount(win); } catch (me) {
+      win._crashed = true;
+      var mmsg = ''; try { mmsg = (me instanceof Error) ? me.message : String(me); } catch (_) {}
+      win._crashMsg = ('onMount failed: ' + mmsg).substring(0, 80);
+    }
+    if (opts.app.onFocus) { try { opts.app.onFocus(); } catch (_) {} }
     return win;
   }
 
@@ -310,13 +319,13 @@ export class WindowManager {
         // Notify old focused app
         if (prevId !== null) {
           var prev = this._findWindow(prevId);
-          if (prev && prev.app.onBlur) prev.app.onBlur();
+          if (prev && prev.app.onBlur) { try { prev.app.onBlur(); } catch (_) {} }
         }
         this._focused = id;
         // Move to top of stack
         var win = this._windows.splice(i, 1)[0];
         this._windows.push(win);
-        if (win.app.onFocus) win.app.onFocus();
+        if (win.app.onFocus) { try { win.app.onFocus(); } catch (_) {} }
         this._wmDirty = true;
         return;
       }
@@ -327,7 +336,7 @@ export class WindowManager {
     for (var i = 0; i < this._windows.length; i++) {
       var win = this._windows[i];
       if (win.id === id) {
-        win.app.onUnmount();
+        try { win.app.onUnmount(); } catch (_) {}
         this._windows.splice(i, 1);
         if (this._focused    === id) {
           this._focused = this._windows.length > 0
@@ -421,7 +430,7 @@ export class WindowManager {
   minimiseWindow(id: number): void {
     var win = this._findWindow(id);
     if (!win || win.minimised) return;
-    if (win.app.onBlur) win.app.onBlur();
+    if (win.app.onBlur) { try { win.app.onBlur(); } catch (_) {} }
     win.minimised = true;
     if (this._mouseCapture === id) this._mouseCapture = null;
     if (this._dragging     === id) this._dragging     = null;
@@ -434,7 +443,7 @@ export class WindowManager {
         }
       }
       this._focused = next ? next.id : null;
-      if (next && next.app.onFocus) next.app.onFocus();
+      if (next && next.app.onFocus) { try { next.app.onFocus(); } catch (_) {} }
     }
     this._wmDirty = true;
   }
@@ -799,17 +808,38 @@ export class WindowManager {
           if      (btn1 && !prevBtn1)  evType = 'down';
           else if (!btn1 && prevBtn1)  evType = 'up';
           else                         evType = 'move';
-          try {
-            dispWin.app.onMouse({
-              x:       cx - dispWin.x,
-              y:       cy - (dispWin.y + TITLE_H),
-              dx:      cx - prevX,
-              dy:      cy - prevY,
-              buttons: pkt.buttons,
-              type:    evType,
-            });
-          } catch (_e) {}
-          if (evType !== 'move') this._wmDirty = true;
+
+          if (dispWin._crashed) {
+            // Any click (mouse-up) on a crashed window → restart the app
+            if (evType === 'up') {
+              dispWin._crashed  = false;
+              dispWin._crashMsg = undefined;
+              try { dispWin.app.onMount(dispWin); } catch (re) {
+                dispWin._crashed = true;
+                var reMsg = '';
+                try { reMsg = (re instanceof Error) ? re.message : String(re); } catch (_r) { reMsg = 'Restart failed'; }
+                dispWin._crashMsg = ('Restart failed: ' + reMsg).substring(0, 80);
+              }
+              this._wmDirty = true;
+            }
+          } else {
+            try {
+              dispWin.app.onMouse({
+                x:       cx - dispWin.x,
+                y:       cy - (dispWin.y + TITLE_H),
+                dx:      cx - prevX,
+                dy:      cy - prevY,
+                buttons: pkt.buttons,
+                type:    evType,
+              });
+            } catch (me) {
+              dispWin._crashed = true;
+              var meMsg = '';
+              try { meMsg = (me instanceof Error) ? me.message : String(me); } catch (_m) { meMsg = 'Unknown'; }
+              dispWin._crashMsg = meMsg.length > 80 ? meMsg.substring(0, 77) + '...' : meMsg;
+            }
+            if (evType !== 'move') this._wmDirty = true;
+          }
         }
       } else {
         this._mouseCapture = null;
@@ -829,7 +859,14 @@ export class WindowManager {
       for (var k = 0; k < 32; k++) {
         var raw = kernel.readKeyEx();
         if (!raw) break;
-        try { focused.app.onKey(this._makeKeyEvent(raw)); } catch (_e) {}
+        if (!focused._crashed) {
+          try { focused.app.onKey(this._makeKeyEvent(raw)); } catch (ke) {
+            focused._crashed = true;
+            var keMsg = '';
+            try { keMsg = (ke instanceof Error) ? ke.message : String(ke); } catch (_k) { keMsg = 'Unknown error'; }
+            focused._crashMsg = keMsg.length > 80 ? keMsg.substring(0, 77) + '...' : keMsg;
+          }
+        }
         this._wmDirty = true;
       }
     } else {
@@ -923,7 +960,20 @@ export class WindowManager {
     for (var ai = 0; ai < this._windows.length; ai++) {
       var wi = this._windows[ai];
       if (!wi.minimised) {
-        try { if (wi.app.render(wi.canvas)) anyDirty = true; } catch (_e) {}
+        if (wi._crashed) {
+          // Crashed: keep last canvas frame but ensure the overlay is drawn
+          anyDirty = true;
+        } else {
+          try {
+            if (wi.app.render(wi.canvas)) anyDirty = true;
+          } catch (err) {
+            wi._crashed = true;
+            var eMsg = '';
+            try { eMsg = (err instanceof Error) ? err.message : String(err); } catch (_) { eMsg = 'Unknown error'; }
+            wi._crashMsg = eMsg.length > 80 ? eMsg.substring(0, 77) + '...' : eMsg;
+            anyDirty = true;
+          }
+        }
       }
     }
 
@@ -950,12 +1000,14 @@ export class WindowManager {
 
       // Title bar
       s.fillRect(win.x, win.y, win.width, TITLE_H,
+                 win._crashed ? 0xFF7A1111 :
                  focused ? FOCUSED_TITLE_COLOR : TITLE_COLOR);
       // Title text (truncate to avoid overlapping buttons)
       var maxTitleChars = Math.floor((win.width - 58) / 8);
-      var title = win.title.length > maxTitleChars
-        ? win.title.substring(0, maxTitleChars)
-        : win.title;
+      var rawTitle = win._crashed ? '\u26A0 ' + win.title + ' (crashed)' : win.title;
+      var title = rawTitle.length > maxTitleChars
+        ? rawTitle.substring(0, maxTitleChars)
+        : rawTitle;
       s.drawText(win.x + 6, win.y + 5, title, Colors.WHITE);
 
       // Title bar buttons (right→left: close, max, min)
@@ -983,6 +1035,27 @@ export class WindowManager {
         s.blit(win.canvas, 0, 0, win.x, win.y + TITLE_H, blitW, blitH);
       } else {
         s.blitAlpha(win.canvas, 0, 0, win.x, win.y + TITLE_H, blitW, blitH, win.opacity);
+      }
+
+      // Crash overlay: drawn over the content area when app has thrown
+      if (win._crashed) {
+        var cox = win.x;
+        var coy = win.y + TITLE_H;
+        var cow = win.width;
+        var coh = win.height - TITLE_H;
+        // Dark translucent red background
+        s.fillRect(cox, coy, cow, coh, 0xC0200000);
+        // Warning icon + title
+        s.drawText(cox + 10, coy + 10, '\u26A0  App Crashed', Colors.WHITE);
+        // Error message
+        var errLine0 = (win._crashMsg || 'Uncaught exception').substring(0, Math.floor((cow - 20) / 8));
+        s.drawText(cox + 10, coy + 26, errLine0, 0xFFFF9988);
+        // Restart button
+        var rbW = cow - 20;  var rbH = 20;
+        var rbX = cox + 10;  var rbY = coy + coh - 30;
+        s.fillRect(rbX, rbY, rbW, rbH, 0xFF1A2B3A);
+        s.drawRect(rbX, rbY, rbW, rbH, 0xFF4488BB);
+        s.drawText(rbX + Math.max(2, (rbW - 160) >> 1), rbY + 6, 'Click here to Restart', Colors.LIGHT_GREY);
       }
 
       // Resize grip: three diagonal lines at bottom-right
