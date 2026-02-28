@@ -3926,45 +3926,98 @@ export function createPageJS(
     set(t: any, k: string, v: any): boolean { t[k] = v; return true; },
   });
 
+  // ── Pre-process script code before execution ─────────────────────────────
+  // Strips constructs that break the with(__s__){} wrapper:
+  //   1. Hashbang  #!...  (first line, only valid at very top of a module/script)
+  //   2. 'use strict' / "use strict" directives — they are expression-statements
+  //      inside a block, but some QuickJS builds treat them unexpectedly when
+  //      combined with `with`.  We gain nothing from them since we don't run in
+  //      actual strict mode anyway; stripping is safe.
+  function _prepareCode(raw: string): string {
+    // Remove leading hashbang
+    var s = raw.replace(/^#!.*/,'');
+    // Remove leading 'use strict' / "use strict" directives (single or double quotes)
+    s = s.replace(/^\s*(?:'use strict'|"use strict")\s*;?\s*/g, '');
+    return s;
+  }
+
   // Compile an inline event-handler string. `event` is the implicit argument
   // injected by addEventListener; all other globals come from _winScope.
   function _makeHandler(code: string): ((e: VEvent) => void) | null {
+    var src = _prepareCode(code);
     try {
       var fn = new Function('__s__', 'event',
-        'with(__s__){' + code + '}') as (s: any, e: VEvent) => void;
+        'with(__s__){' + src + '}') as (s: any, e: VEvent) => void;
       return (e: VEvent) => {
         try { fn(_winScope, e); } catch(err) { cb.log('[JS handler err] ' + String(err)); }
         checkDirty();
       };
     } catch(e) {
-      cb.log('[JS compile err] ' + String(e) + '  code: ' + code.slice(0, 80));
-      return null;
+      // Fallback: compile without with() scope — loses window-property lookup
+      // but at least won't throw SyntaxError for private-field / static-block code
+      try {
+        var fn2 = new Function('event', src) as (e: VEvent) => void;
+        return (e: VEvent) => {
+          try { fn2.call(win, e); } catch(err) { cb.log('[JS handler err] ' + String(err)); }
+          checkDirty();
+        };
+      } catch(e2) {
+        cb.log('[JS compile err] ' + String(e2) + '  code: ' + src.slice(0, 80));
+        return null;
+      }
     }
   }
 
   // ── Execute a script code string in the window context ────────────────────
 
+  function _fireScriptError(e: any): void {
+    cb.log('[JS error] ' + String(e));
+    var onErr = (win as any).onerror;
+    if (typeof onErr === 'function') {
+      try { onErr(String(e), '', 0, 0, e); } catch(_) {}
+    }
+    var errEv = new VEvent('error', { bubbles: false, cancelable: true });
+    (errEv as any).error = e; (errEv as any).message = String(e);
+    try { doc.dispatchEvent(errEv); } catch(_) {}
+  }
+
   function execScript(code: string): void {
+    var src = _prepareCode(code);
+    // Stage 1: run inside with(_winScope) so scripts resolve identifiers through
+    // the window proxy (bare globals, property writes, etc.)
+    var stage1Err: any = null;
     try {
-      // Run inside with(_winScope) so scripts resolve identifiers through the
-      // window proxy: reads find window properties (or JS built-ins as fallback),
-      // and bare writes like `gbar = {}` persist on win for subsequent scripts.
-      // This is much closer to real browser global-scope execution than the old
-      // new Function(...Object.keys(win)) approach and avoids all
-      // "missing formal parameter" / reserved-word parse errors.
       var fn = new Function('__s__',
-        'with(__s__){\n' + code + '\n}') as (s: any) => void;
+        'with(__s__){\n' + src + '\n}') as (s: any) => void;
       fn(_winScope);
+      checkDirty();
+      return;
     } catch (e) {
-      cb.log('[JS error] ' + String(e));
-      // Fire window.onerror and window error event (item 530)
-      var onErr = (win as any).onerror;
-      if (typeof onErr === 'function') {
-        try { onErr(String(e), '', 0, 0, e); } catch(_) {}
+      var msg = String(e);
+      if (msg.indexOf('SyntaxError') === -1) {
+        // Runtime error, not a parse error — report and bail
+        _fireScriptError(e);
+        checkDirty();
+        return;
       }
-      var errEv = new VEvent('error', { bubbles: false, cancelable: true });
-      (errEv as any).error = e; (errEv as any).message = String(e);
-      try { doc.dispatchEvent(errEv); } catch(_) {}
+      stage1Err = e;
+    }
+    // Stage 2: with() wrapper caused a SyntaxError (private fields, decorators,
+    // static blocks, reserved-word destructuring, etc.)  Fall back to running
+    // the code directly without the scope proxy.  `this` is bound to win so
+    // properties assigned to `this` land on the window object; global-scope
+    // identifier resolution falls through to the real global.
+    try {
+      var fn2 = new Function(src) as () => void;
+      fn2.call(win);
+    } catch (e2) {
+      var msg2 = String(e2);
+      if (msg2.indexOf('SyntaxError') !== -1) {
+        // Both attempts failed — log the original with() error
+        _fireScriptError(stage1Err);
+      } else {
+        _fireScriptError(e2);
+      }
     }
     checkDirty();
   }

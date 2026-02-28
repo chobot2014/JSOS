@@ -1899,10 +1899,12 @@ export class BrowserApp implements App {
             if (resp && resp.status === 200) linkSheetsCSS += '\n' + resp.bodyText;
             pending--;
             if (pending === 0 && linkSheetsCSS.trim()) {
-              // Re-parse and re-layout with all sheets (inline + external)
+              // Re-parse and re-layout with all sheets (inline + external).
+              // Update `sheets` in-place so the `rerender` closure (used when JS
+              // mutates the DOM) also sees the external CSS — not just inline rules.
               var extRules = parseStylesheet(linkSheetsCSS);
-              var allSheets = sheets.concat(extRules);
-              var r3 = parseHTML(html, allSheets);
+              sheets = sheets.concat(extRules);
+              var r3 = parseHTML(html, sheets);
               self._forms       = r3.forms;
               self._pageBaseURL = r3.baseURL ? self._resolveHref(r3.baseURL) : '';
               self._layoutPage(r3.nodes as any, r3.widgets as any, r3.title || fallbackTitle || url, url);
