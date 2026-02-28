@@ -90,6 +90,69 @@ export class ShadowRoot {
     this.host = host;
     this.mode = mode;
   }
+
+  /**
+   * [Item 584] Distribute light-DOM children of the host into named / default
+   * <slot> elements declared inside this shadow root.
+   *
+   * Call after setting `innerHTML` and parsing children so that slot elements
+   * are populated before first render.
+   */
+  assignSlots(): void {
+    // Collect all <slot> elements inside this shadow root
+    const slots = collectSlots(this.children);
+    // Distribute host's light-DOM children
+    const lightChildren = this.host.children;
+    for (const slot of slots) {
+      const name = slot.name;
+      if (name) {
+        // Named slot: match children with slot="name"
+        slot._assigned = lightChildren.filter(c => c.getAttribute?.('slot') === name);
+      } else {
+        // Default slot: children without a `slot` attribute
+        slot._assigned = lightChildren.filter(c => !c.getAttribute?.('slot'));
+      }
+    }
+  }
+}
+
+/** [Item 584] Represent a <slot> element inside a shadow tree. */
+export class SlotElement {
+  tagName = 'SLOT';
+  name    = '';            // matches the `name` attribute
+  children: HTMLCustomElement[] = [];
+  /** @internal — populated by ShadowRoot.assignSlots() */
+  _assigned: HTMLCustomElement[] = [];
+
+  getAttribute(attr: string): string | null {
+    if (attr === 'name') return this.name || null;
+    return null;
+  }
+
+  setAttribute(attr: string, value: string): void {
+    if (attr === 'name') this.name = value;
+  }
+
+  /** Returns nodes assigned to this slot (spec: HTMLSlotElement.assignedNodes). */
+  assignedNodes(opts?: { flatten?: boolean }): HTMLCustomElement[] {
+    // flatten=true would recursively expand nested slot fallback content;
+    // for now return direct assigned nodes (enough for most use cases).
+    return this._assigned.length > 0 ? this._assigned : this.children;
+  }
+
+  /** Returns elements assigned to this slot (elements only, no text nodes). */
+  assignedElements(opts?: { flatten?: boolean }): HTMLCustomElement[] {
+    return this.assignedNodes(opts).filter(n => n.tagName !== undefined);
+  }
+}
+
+function collectSlots(children: HTMLCustomElement[]): SlotElement[] {
+  const result: SlotElement[] = [];
+  for (const child of children) {
+    if (child.tagName === 'SLOT') result.push(child as unknown as SlotElement);
+    if (child.children) result.push(...collectSlots(child.children));
+  }
+  return result;
 }
 
 /** Custom Elements Registry */
@@ -629,4 +692,5 @@ export const webPlatform = {
   layoutWorklet,
   imeManager,
   autofillManager,
+  SlotElement,
 };

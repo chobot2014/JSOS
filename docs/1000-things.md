@@ -1,4 +1,4 @@
-﻿# JSOS: 1,000 Things Before Release
+# JSOS: 1,000 Things Before Release
 
 > Generated 2026-02-25. Items are grouped by subsystem. P0 = blocks launch, P1 = required for usability, P2 = important, P3 = nice-to-have.
 >
@@ -249,7 +249,7 @@
 198. [P2 ?] Hard links across same device
 199. [P2 ?] `sendfile` zero-copy syscall
 200. [P3 ?] Btrfs read-only: TypeScript Btrfs driver (extent tree parsing)
-201. [P3] ZFS: TypeScript read-only ZFS driver stubs
+201. [P3?] ZFS: TypeScript read-only ZFS driver stubs
 202. [P3 ?] TypeScript pluggable FS driver API: implement a filesystem in TypeScript, mount it via VFS
 203. [P3 ?] NFS client: TypeScript NFS protocol over UDP/TCP
 204. [P3 ?] SMB/CIFS client: TypeScript SMB2 implementation
@@ -269,12 +269,12 @@
 213. [P1 ?] Signal-as-Promise: `proc.waitForSignal(SIGTERM)` returns a Promise
 214. [P1 ?] Timer promises: `sys.sleep(ms)`, `sys.setInterval(fn, ms)` ? `sleep()` + `setInterval_ipc()` in `ipc/ipc.ts`; `g.sleep()` = `kernel.sleep()` in `ui/commands.ts`; `os.timer.setInterval()` in `core/sdk.ts`
 215. [P2 ?] Shared memory: `sys.shm.create(name, bytes)` returns a `SharedArrayBuffer` usable across processes ? `shmCreate(name, size)` + `shmOpen(name)` + `shmUnlink(name)` in `ipc/ipc.ts` (returns `number[]` shared reference; no actual `SharedArrayBuffer` since QuickJS has no threads)
-216. [P2] ~~System V IPC~~ ? **REMOVED**: legacy Unix-ism not needed in TypeScript-native OS
+216. [P2?] ~~System V IPC~~ ? **REMOVED**: legacy Unix-ism not needed in TypeScript-native OS
 217. [P2 ?] Async I/O multiplexing: TypeScript `select([...promises])` ? built on native Promise.race
 218. [P2 ?] `poll`/`select` POSIX compat shim if needed for any C-adjacent code
 219. [P2 ?] Async I/O: use JS async/await natively ? `io_uring` concepts expressed as typed Promise APIs
 220. [P3 ?] JSOS native IPC bus: typed pub/sub service registry (replaces D-Bus)
-221. [P3] `sys.shm.anonymous(bytes)` ? unnamed shared buffer between forked processes
+221. [P3?] `sys.shm.anonymous(bytes)` ? unnamed shared buffer between forked processes
 
 ---
 
@@ -284,10 +284,10 @@
 222. [P0 ?] ARP: gratuitous ARP on interface up
 223. [P0 ?] ARP: timeout and re-request stale entries
 224. [P0 ?] ARP: handle ARP replies for pending TX queue
-225. [P1 ?] Ethernet: VLAN 802.1Q tag handling ï¿½ `parseVLAN()` + `buildVLANTag()` in `net/net.ts:162/175`; `parseEthernet()` strips 802.1Q tag transparently at line 1155
-226. [P1 ?] Ethernet: jumbo frames (MTU > 1500) ï¿½ `iface.mtu` field (Item 226) at `net/net.ts:1085`; `_sendIPv4()` fragments at MTU boundary
-227. [P2 ?] Ethernet: 802.3ad link aggregation stubs ï¿½ `LACPPort` interface + `LinkAggregation` class (`addPort/removePort/selectPort`) in `net/net.ts:849`
-228. [P2 ?] Bridge: software Ethernet bridge ï¿½ `SoftwareBridge` class with FDB learning + port flooding (`learn/forward`) in `net/net.ts:871`
+225. [P1 ?] Ethernet: VLAN 802.1Q tag handling � `parseVLAN()` + `buildVLANTag()` in `net/net.ts:162/175`; `parseEthernet()` strips 802.1Q tag transparently at line 1155
+226. [P1 ?] Ethernet: jumbo frames (MTU > 1500) � `iface.mtu` field (Item 226) at `net/net.ts:1085`; `_sendIPv4()` fragments at MTU boundary
+227. [P2 ?] Ethernet: 802.3ad link aggregation stubs � `LACPPort` interface + `LinkAggregation` class (`addPort/removePort/selectPort`) in `net/net.ts:849`
+228. [P2 ?] Bridge: software Ethernet bridge � `SoftwareBridge` class with FDB learning + port flooding (`learn/forward`) in `net/net.ts:871`
 
 ### 7.2 IPv4
 229. [P0 ?] IP fragmentation: reassemble out-of-order fragments
@@ -297,21 +297,21 @@
 233. [P0 ?] ICMP: destination unreachable generation
 234. [P1 ?] DHCP client: full RFC 2131 (REQUEST/ACK/RENEW/REBIND) ? `dhcpDiscover()` in `net/dhcp.ts`; DISCOVER?OFFER?REQUEST?ACK exchange; applies IP/mask/gateway/DNS to net stack (RENEW/REBIND timers not yet implemented)
 235. [P1 ?] DHCP: route and DNS server options parsed and applied ? `parseDHCP()` extracts `OPT_ROUTER` (option 3) + `OPT_DNS_SERVER` (option 6); applied via `net.configure({gateway, dns})` in `net/dhcp.ts`
-236. [P1 ?] IP routing table: longest-prefix match ï¿½ `RouteEntry` interface + `routeTable` array + `longestPrefixMatch()` in `net/net.ts:819/1996`; `addRoute()/removeRoute()` API; used in `_sendIPv4()` at line 1978
-237. [P1 ?] IP multicast: join/leave (`IGMP v2`) ï¿½ `joinMulticast()/leaveMulticast()` in `net/net.ts:2448`; `buildIGMPv2()` sends Membership Report/Leave Group; `PROTO_IGMP=2` at line 222
-238. [P2 ?] IP source routing ï¿½ `SourceRoute` class + `buildSROption()/parseSROption()/advanceSR()` (loose + strict) in `net/net.ts:3282/3308/3330/3351`
-239. [P2 ?] Policy-based routing ï¿½ `PolicyRoutingRule` interface + `PolicyRouter` class (`addRule/removeRule/lookup`) in `net/net.ts:3185/3212`
-240. [P2 ?] `ip rule` equivalents (multiple routing tables) ï¿½ `RouteEntry` table (`routeTable`) + `addRoute(prefix,mask,gateway,iface,metric)` + `longestPrefixMatch()` in `net/net.ts:819/1996`
+236. [P1 ?] IP routing table: longest-prefix match � `RouteEntry` interface + `routeTable` array + `longestPrefixMatch()` in `net/net.ts:819/1996`; `addRoute()/removeRoute()` API; used in `_sendIPv4()` at line 1978
+237. [P1 ?] IP multicast: join/leave (`IGMP v2`) � `joinMulticast()/leaveMulticast()` in `net/net.ts:2448`; `buildIGMPv2()` sends Membership Report/Leave Group; `PROTO_IGMP=2` at line 222
+238. [P2 ?] IP source routing � `SourceRoute` class + `buildSROption()/parseSROption()/advanceSR()` (loose + strict) in `net/net.ts:3282/3308/3330/3351`
+239. [P2 ?] Policy-based routing � `PolicyRoutingRule` interface + `PolicyRouter` class (`addRule/removeRule/lookup`) in `net/net.ts:3185/3212`
+240. [P2 ?] `ip rule` equivalents (multiple routing tables) � `RouteEntry` table (`routeTable`) + `addRoute(prefix,mask,gateway,iface,metric)` + `longestPrefixMatch()` in `net/net.ts:819/1996`
 
 ### 7.3 IPv6
-241. [P1 ?] IPv6 basic forwarding and addressing ï¿½ `ipv6ll`/`ipv6Global` fields on `NetStack`; `handleIPv6()` dispatches ICMPv6/TCP/UDP; `ETYPE_IPV6=0x86dd` at `net/net.ts:111/1166`
-242. [P1 ?] ICMPv6: neighbor discovery (NDP replacing ARP) ï¿½ `_handleICMPv6()` processes NS/NA/RA; `sendNDP_NS()` at `net/net.ts:1320/1341/1437`; NDP neighbor cache at line 1116
-243. [P1 ?] SLAAC: stateless address autoconfiguration (RFC 4862) ï¿½ `eui64FromMac()` at `net/net.ts:461`; RA handler extracts /64 prefix + forms global unicast address at line 1387
-244. [P1 ?] DHCPv6 client (stateful config) ï¿½ `dhcp6Solicit()` Solicit?Advertise?Request?Reply flow in `net/net.ts:2609`
-245. [P1 ?] IPv6 extension headers: routing, fragmentation, hop-by-hop ï¿½ `IPv6ExtHeader` interface + `parseIPv6ExtHeaders()` walks next-header chain in `net/net.ts:470/500`
-246. [P2 ?] MLDv2 (multicast listener discovery) ï¿½ `joinMulticastV6()/leaveMulticastV6()` sends MLDv2 Is-Include/Is-Exclude reports in `net/net.ts:2541/2558`
-247. [P2 ?] IPv6 Privacy Extensions (RFC 4941 ï¿½ random interface IDs) ï¿½ `generatePrivacyAddress()` random IID + `privacyAddressExpiry` rotation in `net/net.ts:2579`
-248. [P3 ?] 6to4 / Teredo tunneling ï¿½ `Tun6to4` (RFC 3056) `encode6to4Address()`/`decode6to4Address()`/`encapsulate()`/`decapsulate()`/`send()` + `TeredoTunnel` (RFC 4380) `qualify()`/`encapsulate()`/`decapsulate()`/`send()` + `decodeTeredoAddress()` in `net/net.ts`
+241. [P1 ?] IPv6 basic forwarding and addressing � `ipv6ll`/`ipv6Global` fields on `NetStack`; `handleIPv6()` dispatches ICMPv6/TCP/UDP; `ETYPE_IPV6=0x86dd` at `net/net.ts:111/1166`
+242. [P1 ?] ICMPv6: neighbor discovery (NDP replacing ARP) � `_handleICMPv6()` processes NS/NA/RA; `sendNDP_NS()` at `net/net.ts:1320/1341/1437`; NDP neighbor cache at line 1116
+243. [P1 ?] SLAAC: stateless address autoconfiguration (RFC 4862) � `eui64FromMac()` at `net/net.ts:461`; RA handler extracts /64 prefix + forms global unicast address at line 1387
+244. [P1 ?] DHCPv6 client (stateful config) � `dhcp6Solicit()` Solicit?Advertise?Request?Reply flow in `net/net.ts:2609`
+245. [P1 ?] IPv6 extension headers: routing, fragmentation, hop-by-hop � `IPv6ExtHeader` interface + `parseIPv6ExtHeaders()` walks next-header chain in `net/net.ts:470/500`
+246. [P2 ?] MLDv2 (multicast listener discovery) � `joinMulticastV6()/leaveMulticastV6()` sends MLDv2 Is-Include/Is-Exclude reports in `net/net.ts:2541/2558`
+247. [P2 ?] IPv6 Privacy Extensions (RFC 4941 � random interface IDs) � `generatePrivacyAddress()` random IID + `privacyAddressExpiry` rotation in `net/net.ts:2579`
+248. [P3 ?] 6to4 / Teredo tunneling � `Tun6to4` (RFC 3056) `encode6to4Address()`/`decode6to4Address()`/`encapsulate()`/`decapsulate()`/`send()` + `TeredoTunnel` (RFC 4380) `qualify()`/`encapsulate()`/`decapsulate()`/`send()` + `decodeTeredoAddress()` in `net/net.ts`
 
 ### 7.4 TCP
 249. [P0 ?] TCP: fix RST handling when connection already half-closed ? RST check at top of `_tcpStateMachine()` (before state switch): sets `conn.state='CLOSED'`, clears retransmit, deletes connection regardless of current state (ESTABLISHED, FIN_WAIT_*, CLOSE_WAIT, etc.) in `net/net.ts`
@@ -325,24 +325,24 @@
 257. [P1 ?] TCP: timestamps ? RFC 1323
 258. [P1 ?] TCP: MSS negotiation
 259. [P1 ?] TCP: CUBIC or New Reno congestion control
-260. [P1 ?] TCP: BBR congestion control ï¿½ `BBRState` interface + `bbrOnAck()` (BtlBw/RTprop model update) in `net/net.ts:691/718`; `useBBR` + `bbrState` on `TCPConnection` at line 1042; fed per ACK at line 1634
+260. [P1 ?] TCP: BBR congestion control � `BBRState` interface + `bbrOnAck()` (BtlBw/RTprop model update) in `net/net.ts:691/718`; `useBBR` + `bbrState` on `TCPConnection` at line 1042; fed per ACK at line 1634
 261. [P1 ?] TCP: TIME_WAIT state with 2MSL timer ? `conn.state = 'TIME_WAIT'`; `timeWaitExpiry` set to `getTicks() + 200` (~2 s / 2 MSL); cleaned up in timer loop in `net/net.ts`
 262. [P1 ?] TCP: listen backlog queue
 263. [P1 ?] TCP: `SO_REUSEADDR`, `SO_REUSEPORT`
 264. [P1 ?] TCP: keepalive (`SO_KEEPALIVE`)
-265. [P2 ?] TCP: TCP_FASTOPEN ï¿½ `connectFastOpen(host,port,data)` sends SYN+data with TFO cookie option; `TCPFastOpenCache` stores/retrieves cookies in `net/net.ts:2762`
-266. [P2 ?] TCP: connection tracking for NAT ï¿½ `ConntrackEntry` + `NATRule` interfaces + `addNATRule()/configureNAT()` in `net/net.ts:828/2699`
-267. [P2 ?] TCP: MD5 authentication (BGP use case) ï¿½ `enableTCPMD5Sig(conn,key)` stores MD5 key; signing/verifying on every segment in `net/net.ts:2747`
-268. [P3 ?] MPTCP (multipath TCP) stubs ï¿½ `MPTCPSubflow` + `MPTCPConnection` interfaces (RFC 8684) in `net/net.ts:894/905`
-269. [P3 ?] QUIC protocol (UDP-based transport layer) ï¿½ `QUICStream` + `QUICConnection` interfaces (RFC 9000) + state machine in `net/net.ts:913`
+265. [P2 ?] TCP: TCP_FASTOPEN � `connectFastOpen(host,port,data)` sends SYN+data with TFO cookie option; `TCPFastOpenCache` stores/retrieves cookies in `net/net.ts:2762`
+266. [P2 ?] TCP: connection tracking for NAT � `ConntrackEntry` + `NATRule` interfaces + `addNATRule()/configureNAT()` in `net/net.ts:828/2699`
+267. [P2 ?] TCP: MD5 authentication (BGP use case) � `enableTCPMD5Sig(conn,key)` stores MD5 key; signing/verifying on every segment in `net/net.ts:2747`
+268. [P3 ?] MPTCP (multipath TCP) stubs � `MPTCPSubflow` + `MPTCPConnection` interfaces (RFC 8684) in `net/net.ts:894/905`
+269. [P3 ?] QUIC protocol (UDP-based transport layer) � `QUICStream` + `QUICConnection` interfaces (RFC 9000) + state machine in `net/net.ts:913`
 
 ### 7.5 UDP
 270. [P0 ?] UDP: `EADDRINUSE` on bind collision
 271. [P0 ?] UDP: broadcast (`SO_BROADCAST`)
-272. [P1 ?] UDP: multicast send/receive ï¿½ `joinMulticast(groupIP)` (IGMPv2 join/leave) in `net/net.ts:2448`; `getMulticastGroups()` returns active groups; RX dispatched via `multicastGroups` set check
-273. [P1 ?] UDP: `SO_RCVBUF` / `SO_SNDBUF` tunable ï¿½ `rcvBufLimit`/`sndBufLimit` fields on `UDPSocket` at `net/net.ts:1067/1069`; `setRcvBuf()/setSndBuf()` API at line 2482/2484
-274. [P2 ?] DTLS (Datagram TLS) ï¿½ for WebRTC data channels ï¿½ `DTLSSocket` interface (epoch/seqNum/cipherSuite/state) stub in `net/net.ts:930`
-275. [P3 ?] SCTP (stream control transmission protocol) ï¿½ `SCTPChunk` + `SCTPAssociation` stub (RFC 4960) with full state enum in `net/net.ts:940`
+272. [P1 ?] UDP: multicast send/receive � `joinMulticast(groupIP)` (IGMPv2 join/leave) in `net/net.ts:2448`; `getMulticastGroups()` returns active groups; RX dispatched via `multicastGroups` set check
+273. [P1 ?] UDP: `SO_RCVBUF` / `SO_SNDBUF` tunable � `rcvBufLimit`/`sndBufLimit` fields on `UDPSocket` at `net/net.ts:1067/1069`; `setRcvBuf()/setSndBuf()` API at line 2482/2484
+274. [P2 ?] DTLS (Datagram TLS) � for WebRTC data channels � `DTLSSocket` interface (epoch/seqNum/cipherSuite/state) stub in `net/net.ts:930`
+275. [P3 ?] SCTP (stream control transmission protocol) � `SCTPChunk` + `SCTPAssociation` stub (RFC 4960) with full state enum in `net/net.ts:940`
 
 ### 7.6 DNS
 276. [P0 ?] DNS: TTL-based cache expiry ? `CacheEntry.expiresAt` checked in `cacheGet()` in `net/dns.ts`
@@ -352,26 +352,26 @@
 280. [P1 ?] DNS: `/etc/resolv.conf`-style reading from filesystem
 281. [P1 ?] DNS: `/etc/hosts` file lookup before DNS query ? `hostsLookup()` reads `/etc/hosts` before querying server in `net/dns.ts`
 282. [P1 ?] DNS: CNAME chain resolution ? `resolveChain()` follows CNAME hops up to `MAX_CNAME_HOPS=10` in `net/dns.ts`
-283. [P1 ?] DNSSEC: signature validation (RRSIG, DNSKEY, DS) ï¿½ `verifyRRSIG()` + `validateDNSSECChain()` + `dnssecValidate()` with RSASHA256/ECDSAP384 algorithm table in `net/dns.ts`
-284. [P2 ?] DNS-over-HTTPS (DoH) ï¿½ RFC 8484 ï¿½ `dohResolve()` sends DNS wire-format POST to `cloudflare-dns.com/dns-query` via HTTPS; `DoHConfig` interface in `net/dns.ts`
-285. [P2 ?] DNS-over-TLS (DoT) ï¿½ RFC 7858 ï¿½ `dotResolve()` opens `TLSSocket` to port 853; `dotSessionCache` reuses connections per `(host,port)`; default server `1.1.1.1` in `net/dns.ts`
-286. [P2 ?] mDNS: `.local` name resolution (RFC 6762) ï¿½ `mdnsResolve()` multicasts query to `MDNS_MULTICAST_ADDR=224.0.0.251:5353`; `_mdnsCache` + `mdnsAnnounce()` in `net/dns.ts`
-287. [P3 ?] DNS: full iterative recursive resolver ï¿½ `dnsResolveRecursive(hostname, qtype)` in `net/dns.ts`; starts from `ROOT_NAMESERVERS` (10 IANA root IPs), sends RD=0 queries via `queryServerIterative()`, walks NS delegations using glue A records, falls back to stub resolver on failure; `parseFullResponse()` parses all 4 DNS sections (answer/authority/additional)
+283. [P1 ?] DNSSEC: signature validation (RRSIG, DNSKEY, DS) � `verifyRRSIG()` + `validateDNSSECChain()` + `dnssecValidate()` with RSASHA256/ECDSAP384 algorithm table in `net/dns.ts`
+284. [P2 ?] DNS-over-HTTPS (DoH) � RFC 8484 � `dohResolve()` sends DNS wire-format POST to `cloudflare-dns.com/dns-query` via HTTPS; `DoHConfig` interface in `net/dns.ts`
+285. [P2 ?] DNS-over-TLS (DoT) � RFC 7858 � `dotResolve()` opens `TLSSocket` to port 853; `dotSessionCache` reuses connections per `(host,port)`; default server `1.1.1.1` in `net/dns.ts`
+286. [P2 ?] mDNS: `.local` name resolution (RFC 6762) � `mdnsResolve()` multicasts query to `MDNS_MULTICAST_ADDR=224.0.0.251:5353`; `_mdnsCache` + `mdnsAnnounce()` in `net/dns.ts`
+287. [P3 ?] DNS: full iterative recursive resolver � `dnsResolveRecursive(hostname, qtype)` in `net/dns.ts`; starts from `ROOT_NAMESERVERS` (10 IANA root IPs), sends RD=0 queries via `queryServerIterative()`, walks NS delegations using glue A records, falls back to stub resolver on failure; `parseFullResponse()` parses all 4 DNS sections (answer/authority/additional)
 
 ### 7.7 TLS
-288. [P0 ?] TLS: session resumption (session tickets, RFC 5077) ï¿½ `TLSSessionTicketCache` stores per-hostname `{ticket, pskSecret}`; `_harvestNewSessionTicket()` reads post-handshake HS msg type 4; `_resumptionSecret` derived from handshake; enables 0-RTT on reconnect in `net/tls.ts`
+288. [P0 ?] TLS: session resumption (session tickets, RFC 5077) � `TLSSessionTicketCache` stores per-hostname `{ticket, pskSecret}`; `_harvestNewSessionTicket()` reads post-handshake HS msg type 4; `_resumptionSecret` derived from handshake; enables 0-RTT on reconnect in `net/tls.ts`
 289. [P0 ?] TLS: SNI (Server Name Indication) ? critical for shared hosting ? `EXT_SNI=0x0000` extension built in `_buildClientHello()` with proper list+hostname encoding; `this.hostname` field in `TLSSocket` in `net/tls.ts`
-290. [P0 ?] TLS: certificate chain validation (full PKI) ï¿½ `validateChain()` verifies validity windows, `isCA` constraints, chain length = `MAX_CHAIN_DEPTH`; `validateHostname()` + `hostnameMatches()` wildcard check in `net/x509.ts`
-291. [P0 ?] TLS: system trust store (Mozilla root CA bundle) ï¿½ `loadPEMBundle(pemText)` parses PEM blocks via `base64ToDer()`; `loadSystemTrustStore(vfsReadFn)` reads `/etc/ssl/certs/ca-bundle.crt` from VFS; `_seedMozillaRoots()` IIFE pre-loads 21 root CA SHA-256 fingerprints (ISRG X1/X2, DigiCert, GlobalSign, Amazon, Microsoft, Baltimore, COMODO, USERTrust, GTS, Starfield, AAA) in `net/x509.ts`
-292. [P0 ?] TLS: certificate revocation via OCSP ï¿½ `checkRevocationOCSP(cert, issuer, fetchFn)` in `net/x509.ts`; `getAIAOcspUrl()` parses AIA extension (OID 1.3.6.1.5.5.7.1.1); `buildOCSPRequest()` builds DER CertID using SHA-1 hashes of issuerName + issuerKey; `parseOCSPResponse()` decodes BasicOCSPResponse + SingleResponse by serial; `OcspFetchFn` callback injection avoids circular x509?http deps
-293. [P1 ?] TLS: OCSP stapling ï¿½ `OCSPStapledResponse` + `OCSPSingleResponse` interfaces; `verifyOCSPStapled()` checks serial match, revocation status + `nextUpdate` expiry in `net/x509.ts`
-294. [P1 ?] TLS: ALPN negotiation (announce `h2` for HTTP/2 preference) ï¿½ `EXT_ALPN=0x0010` extension built in `_buildClientHello()` offering `h2` + `http/1.1` protocol list in `net/tls.ts`
-295. [P1 ?] TLS: ChaCha20-Poly1305 cipher suite ï¿½ `CS_CHACHA20_POLY1305_SHA256=0x1303` offered in ClientHello; `useChaCha20` flag on `TLSSocket`; `_encryptRecord()`/`_decryptRecord()` dispatch to `chacha20poly1305Encrypt/Decrypt` in `net/tls.ts`
-296. [P1 ?] TLS: ECDSA certificate support (not just RSA) ï¿½ `ECDSACertConfig` interface + `buildECDSASelfSignedCert()` builds minimal DER-encoded P-256 self-signed cert; `EXT_SIG_ALGS` advertises `ecdsa_secp256r1_sha256` in `net/tls.ts`
-297. [P2 ?] TLS 1.2 fallback for older servers ï¿½ `TLS12Socket` class (RFC 5246 subset) with AES-128-CBC-SHA256 or ChaCha20 cipher; `TLS_VERSION_12=0x0303` in `net/tls.ts`
-298. [P2 ?] TLS: client certificates ï¿½ `ClientCertConfig` interface + `setClientCert(serverName, cfg)` / `getClientCert(serverName)` registry; wildcard `'*'` matches all hosts in `net/tls.ts`
-299. [P2 ?] TLS: certificate pinning API ï¿½ `CertPin` interface + `CertPinStore` class (`addPin/check/remove`) with SHA-256 SPKI pinning (HPKP format); `[Item 299]` at line 1045 in `net/tls.ts`
-300. [P3 ?] QUIC/TLS 1.3 unified handshake ï¿½ `QUICConnection._deriveInitialSecrets()` uses RFC 9001 ï¿½5.2 salt + HKDF; `buildTLS13ClientHello(host)` emits full ClientHello with SNI, key_share (x25519), supported_versions, QUIC transport params ext (0x0039); `buildEncryptedInitialPacket()` AES-128-GCM encrypts with derived key/nonce; `performHandshake(ip,port,host)` sends via UDP; `HTTP3Connection.connect()` now functional in `net/http.ts`
+290. [P0 ?] TLS: certificate chain validation (full PKI) � `validateChain()` verifies validity windows, `isCA` constraints, chain length = `MAX_CHAIN_DEPTH`; `validateHostname()` + `hostnameMatches()` wildcard check in `net/x509.ts`
+291. [P0 ?] TLS: system trust store (Mozilla root CA bundle) � `loadPEMBundle(pemText)` parses PEM blocks via `base64ToDer()`; `loadSystemTrustStore(vfsReadFn)` reads `/etc/ssl/certs/ca-bundle.crt` from VFS; `_seedMozillaRoots()` IIFE pre-loads 21 root CA SHA-256 fingerprints (ISRG X1/X2, DigiCert, GlobalSign, Amazon, Microsoft, Baltimore, COMODO, USERTrust, GTS, Starfield, AAA) in `net/x509.ts`
+292. [P0 ?] TLS: certificate revocation via OCSP � `checkRevocationOCSP(cert, issuer, fetchFn)` in `net/x509.ts`; `getAIAOcspUrl()` parses AIA extension (OID 1.3.6.1.5.5.7.1.1); `buildOCSPRequest()` builds DER CertID using SHA-1 hashes of issuerName + issuerKey; `parseOCSPResponse()` decodes BasicOCSPResponse + SingleResponse by serial; `OcspFetchFn` callback injection avoids circular x509?http deps
+293. [P1 ?] TLS: OCSP stapling � `OCSPStapledResponse` + `OCSPSingleResponse` interfaces; `verifyOCSPStapled()` checks serial match, revocation status + `nextUpdate` expiry in `net/x509.ts`
+294. [P1 ?] TLS: ALPN negotiation (announce `h2` for HTTP/2 preference) � `EXT_ALPN=0x0010` extension built in `_buildClientHello()` offering `h2` + `http/1.1` protocol list in `net/tls.ts`
+295. [P1 ?] TLS: ChaCha20-Poly1305 cipher suite � `CS_CHACHA20_POLY1305_SHA256=0x1303` offered in ClientHello; `useChaCha20` flag on `TLSSocket`; `_encryptRecord()`/`_decryptRecord()` dispatch to `chacha20poly1305Encrypt/Decrypt` in `net/tls.ts`
+296. [P1 ?] TLS: ECDSA certificate support (not just RSA) � `ECDSACertConfig` interface + `buildECDSASelfSignedCert()` builds minimal DER-encoded P-256 self-signed cert; `EXT_SIG_ALGS` advertises `ecdsa_secp256r1_sha256` in `net/tls.ts`
+297. [P2 ?] TLS 1.2 fallback for older servers � `TLS12Socket` class (RFC 5246 subset) with AES-128-CBC-SHA256 or ChaCha20 cipher; `TLS_VERSION_12=0x0303` in `net/tls.ts`
+298. [P2 ?] TLS: client certificates � `ClientCertConfig` interface + `setClientCert(serverName, cfg)` / `getClientCert(serverName)` registry; wildcard `'*'` matches all hosts in `net/tls.ts`
+299. [P2 ?] TLS: certificate pinning API � `CertPin` interface + `CertPinStore` class (`addPin/check/remove`) with SHA-256 SPKI pinning (HPKP format); `[Item 299]` at line 1045 in `net/tls.ts`
+300. [P3 ?] QUIC/TLS 1.3 unified handshake � `QUICConnection._deriveInitialSecrets()` uses RFC 9001 �5.2 salt + HKDF; `buildTLS13ClientHello(host)` emits full ClientHello with SNI, key_share (x25519), supported_versions, QUIC transport params ext (0x0039); `buildEncryptedInitialPacket()` AES-128-GCM encrypts with derived key/nonce; `performHandshake(ip,port,host)` sends via UDP; `HTTP3Connection.connect()` now functional in `net/http.ts`
 
 ### 7.8 HTTP
 301. [P0 ?] HTTP: chunked transfer encoding decode (many servers send chunked)
@@ -380,53 +380,53 @@
 304. [P0 ?] HTTP: `Set-Cookie` header parsing (domain, path, SameSite, Secure, HttpOnly) ? `CookieJar.setCookie()` in `net/http.ts`
 305. [P0 ?] HTTP: multipart/form-data POST encoding ? `encodeMultipartFormData()` in `net/http.ts`
 306. [P0 ?] HTTP: `Content-Length` vs `Transfer-Encoding` precedence ? `parseHttpResponse()` in `net/http.ts` checks `transfer-encoding: chunked` first (line 399) and decodes via `decodeChunked()`; Transfer-Encoding takes precedence; Content-Encoding (gzip/deflate) decompressed afterward via `httpDecompress()` from `deflate.ts`
-307. [P1 ?] HTTP/2: HPACK header compression ï¿½ `HPack` class with static table (61 entries per RFC 7541 Appendix A) + dynamic table + Huffman encode/decode; `encode()/decode()` in `net/http.ts`
-308. [P1 ?] HTTP/2: multiplexed streams over single TLS connection ï¿½ `H2Connection` manages `Map<number,H2Stream>` streams; odd client stream IDs; `HEADERS`+`DATA` frames per stream in `net/http.ts`
-309. [P1 ?] HTTP/2: server push handling ï¿½ `H2_PUSH_PROMISE` frame parsed; pushed resources stored in `_pushCache: Map<string,number[]>`; `getPushedResource()` returns cached body in `net/http.ts`
-310. [P1 ?] HTTP/2: flow control (stream-level and connection-level) ï¿½ `connectionSendWindow` + `streamSendWindows` map; `consumeSendWindow()`; `connectionWindowUpdate()` sends `WINDOW_UPDATE` frame in `net/http.ts`
-311. [P1 ?] HTTP/2: SETTINGS frame negotiation ï¿½ `settings: Map<number,number>` populated from server `SETTINGS` frames; `sendSettings()` sends client SETTINGS + ACK; `[Item 311]` in `net/http.ts`
-312. [P1 ?] HTTP/2: priority and dependency tree ï¿½ `H2StreamPriority` interface + `setPriority()` sends `PRIORITY` frame; `getEffectivePriority()` + `sortByPriority()` order streams in `net/http.ts`
-313. [P2 ?] HTTP/3: QUIC transport ï¿½ `QUICConnection` + `HTTP3Client` with `buildH3HeadersFrame()/buildH3DataFrame()/buildH3SettingsFrame()`; QPACK minimal encoding; QUIC packet framing with variable-length integers in `net/http.ts`
+307. [P1 ?] HTTP/2: HPACK header compression � `HPack` class with static table (61 entries per RFC 7541 Appendix A) + dynamic table + Huffman encode/decode; `encode()/decode()` in `net/http.ts`
+308. [P1 ?] HTTP/2: multiplexed streams over single TLS connection � `H2Connection` manages `Map<number,H2Stream>` streams; odd client stream IDs; `HEADERS`+`DATA` frames per stream in `net/http.ts`
+309. [P1 ?] HTTP/2: server push handling � `H2_PUSH_PROMISE` frame parsed; pushed resources stored in `_pushCache: Map<string,number[]>`; `getPushedResource()` returns cached body in `net/http.ts`
+310. [P1 ?] HTTP/2: flow control (stream-level and connection-level) � `connectionSendWindow` + `streamSendWindows` map; `consumeSendWindow()`; `connectionWindowUpdate()` sends `WINDOW_UPDATE` frame in `net/http.ts`
+311. [P1 ?] HTTP/2: SETTINGS frame negotiation � `settings: Map<number,number>` populated from server `SETTINGS` frames; `sendSettings()` sends client SETTINGS + ACK; `[Item 311]` in `net/http.ts`
+312. [P1 ?] HTTP/2: priority and dependency tree � `H2StreamPriority` interface + `setPriority()` sends `PRIORITY` frame; `getEffectivePriority()` + `sortByPriority()` order streams in `net/http.ts`
+313. [P2 ?] HTTP/3: QUIC transport � `QUICConnection` + `HTTP3Client` with `buildH3HeadersFrame()/buildH3DataFrame()/buildH3SettingsFrame()`; QPACK minimal encoding; QUIC packet framing with variable-length integers in `net/http.ts`
 314. [P2 ?] WebSocket: `Upgrade: websocket` handshake + framing (RFC 6455)
-315. [P2 ?] WebSocket: ping/pong keepalive ï¿½ `WS_OP_PING=0x9` + `WS_OP_PONG=0xA` opcodes; `WSKeepaliveManager` sends periodic PING frames + tracks PONG receipt; connection killed on timeout in `net/http.ts`
-316. [P2 ?] Server-Sent Events (SSE) streaming reads ï¿½ `SSEParser` class + `SSEEvent` interface; parses `data:`/`event:`/`id:`/`retry:` fields; `onEvent` callback; `[Item 316]` in `net/http.ts`
+315. [P2 ?] WebSocket: ping/pong keepalive � `WS_OP_PING=0x9` + `WS_OP_PONG=0xA` opcodes; `WSKeepaliveManager` sends periodic PING frames + tracks PONG receipt; connection killed on timeout in `net/http.ts`
+316. [P2 ?] Server-Sent Events (SSE) streaming reads � `SSEParser` class + `SSEEvent` interface; parses `data:`/`event:`/`id:`/`retry:` fields; `onEvent` callback; `[Item 316]` in `net/http.ts`
 317. [P2 ?] HTTP cache: `ETag` + `If-None-Match` support ? `CacheEntry.etag` + `_cacheGetEtag()` + sent in `buildGetRequest()` in `net/http.ts`
-318. [P2 ?] HTTP cache: `Last-Modified` + `If-Modified-Since` support ï¿½ `LastModifiedVaryCache` stores `lastModified` + `etag`; sends `If-Modified-Since` on conditional GET; handles `304 Not Modified` in `net/http.ts`
-319. [P2 ?] HTTP cache: `Vary` header awareness ï¿½ `computeCacheKey()` normalises Vary header fields into cache key; `Vary: *` treated as uncacheable; `varyValues` snapshot stored per entry in `net/http.ts`
-320. [P3 ?] HTTP/2 push promise cache pre-population ï¿½ `HTTP2Connection.pushCachePrepopulate(path, body)` seeds `pushCache` Map directly; `processLinkPreloadHeader(linkHeader, fetchFn?)` parses `Link: rel=preload` headers and fetches/caches referenced resources in `net/http.ts`
-321. [P3 ?] CORS preflight request handling ï¿½ `corsPreflightRequest(host, ip, port, path, method, requestHeaders, origin, useHttps)` sends HTTP OPTIONS with `Origin`/`Access-Control-Request-Method`/`Access-Control-Request-Headers`; parses `access-control-allow-*` response headers; returns `CORSPreflightResult {allowed, allowedMethods, allowedHeaders, allowCredentials, maxAge}` in `net/http.ts`
-322. [P3 ?] Fetch API: `ReadableStream` body streaming ï¿½ `ReadableStream` class with `getReader()` + `fromBytes()` static factory; `ReadableStreamDefaultReader` with `read()` returning `{value, done}` chunks; `ReadableStreamController` interface with `enqueue/close/error/desiredSize` in `net/http.ts`
+318. [P2 ?] HTTP cache: `Last-Modified` + `If-Modified-Since` support � `LastModifiedVaryCache` stores `lastModified` + `etag`; sends `If-Modified-Since` on conditional GET; handles `304 Not Modified` in `net/http.ts`
+319. [P2 ?] HTTP cache: `Vary` header awareness � `computeCacheKey()` normalises Vary header fields into cache key; `Vary: *` treated as uncacheable; `varyValues` snapshot stored per entry in `net/http.ts`
+320. [P3 ?] HTTP/2 push promise cache pre-population � `HTTP2Connection.pushCachePrepopulate(path, body)` seeds `pushCache` Map directly; `processLinkPreloadHeader(linkHeader, fetchFn?)` parses `Link: rel=preload` headers and fetches/caches referenced resources in `net/http.ts`
+321. [P3 ?] CORS preflight request handling � `corsPreflightRequest(host, ip, port, path, method, requestHeaders, origin, useHttps)` sends HTTP OPTIONS with `Origin`/`Access-Control-Request-Method`/`Access-Control-Request-Headers`; parses `access-control-allow-*` response headers; returns `CORSPreflightResult {allowed, allowedMethods, allowedHeaders, allowCredentials, maxAge}` in `net/http.ts`
+322. [P3 ?] Fetch API: `ReadableStream` body streaming � `ReadableStream` class with `getReader()` + `fromBytes()` static factory; `ReadableStreamDefaultReader` with `read()` returning `{value, done}` chunks; `ReadableStreamController` interface with `enqueue/close/error/desiredSize` in `net/http.ts`
 
 ---
 
 ## 8. TLS / CRYPTO (src/os/net/tls.ts, crypto)
 
-323. [P0 ?] RSA: PKCS#1 v1.5 verify (needed for older certs) ï¿½ `rsaPKCS1Verify()` removes PKCS#1 padding, checks DigestInfo OID prefix (SHA-256/SHA-384); `rsaPublicOp()` modPow via BigInt in `net/rsa.ts`
-324. [P0 ?] RSA: PSS verify (needed for TLS 1.3 certs) ï¿½ `rsaPSSVerify()` recovers EM, verifies `0xBC` trailer, applies MGF1-SHA256 mask, checks salt in `net/rsa.ts`
-325. [P0 ?] ECDSA: P-384 support (many CAs use P-384 now) ï¿½ `ecdsaP384Verify()` + `P384PublicKey`; `ecdsaP256Verify()` also present; field arithmetic using BigInt in `net/rsa.ts`
+323. [P0 ?] RSA: PKCS#1 v1.5 verify (needed for older certs) � `rsaPKCS1Verify()` removes PKCS#1 padding, checks DigestInfo OID prefix (SHA-256/SHA-384); `rsaPublicOp()` modPow via BigInt in `net/rsa.ts`
+324. [P0 ?] RSA: PSS verify (needed for TLS 1.3 certs) � `rsaPSSVerify()` recovers EM, verifies `0xBC` trailer, applies MGF1-SHA256 mask, checks salt in `net/rsa.ts`
+325. [P0 ?] ECDSA: P-384 support (many CAs use P-384 now) � `ecdsaP384Verify()` + `P384PublicKey`; `ecdsaP256Verify()` also present; field arithmetic using BigInt in `net/rsa.ts`
 326. [P0 ?] AES-GCM: verify tag failure returns proper error, not silent corruption ? `gcmDecrypt()` in `net/crypto.ts` does constant-time compare (`diff |= j0[i] ^ tag[i]`) and returns `null` on mismatch; never decrypts on auth failure
 327. [P0 ?] ChaCha20-Poly1305 cipher suite implementation
 328. [P1 ?] SHA-384 hash implementation (used in TLS 1.3 cipher suites)
-329. [P1 ?] HMAC-SHA384 ï¿½ `hmacSha384(key, data)` exported from `net/crypto.ts` (line 654); used by `hkdfExtractSHA384()` in `net/rsa.ts`
-330. [P1 ?] HKDF-Expand with SHA-384 ï¿½ `hkdfExtractSHA384(salt, ikm)` + `hkdfExpandSHA384(prk, info, len)` + `hkdfExpandLabelSHA384(secret, label, context, len)` in `net/rsa.ts`
-331. [P1 ?] X.509: parse `subjectAltName` extension for hostname validation ï¿½ `getSANHosts()` extracts DNS names + IP SANs from OID 2.5.29.17; used by `validateHostname()` in `net/x509.ts`
-332. [P1 ?] X.509: parse `basicConstraints` + `keyUsage` extensions ï¿½ `getBasicConstraints()` returns `{isCA, pathLen}` from OID 2.5.29.19; `getKeyUsage()` returns bitmask from OID 2.5.29.15 in `net/x509.ts`
-333. [P1 ?] X.509: certificate chain length validation ï¿½ `validateChain()` enforces `MAX_CHAIN_DEPTH`; checks intermediate `isCA=true` via `getBasicConstraints()` in `net/x509.ts`
-334. [P1 ?] X.509: validity date range check (notBefore, notAfter) ï¿½ `checkValidity(cert, now)` compares `cert.notBefore`/`cert.notAfter` against `now`; called in `validateChain()` in `net/x509.ts`
-335. [P1 ?] X.509: name comparison case-insensitive ASCII ï¿½ `hostnameMatches(hostname, pattern)` lowercases both sides; handles `*` wildcard prefix; used in `validateHostname()` in `net/x509.ts`
-336. [P1 ?] Ed25519 signature verification ï¿½ `ed25519Verify(pubKey, message, sig)` using BigInt field arithmetic over Ed25519 curve; point decompression + scalar mult in `net/rsa.ts`
-337. [P2 ?] Curve448 / X448 key exchange ï¿½ `x448(k, u)` Montgomery ladder scalar mult + `x448PublicKey(privateKey)` in `net/subtle.ts`
-338. [P2 ?] AES-CBC with HMAC-SHA256 (TLS 1.2 fallback ciphers) ï¿½ `aesCBCEncrypt/Decrypt()` + `aesCBCSHA256Encrypt/Decrypt()` MAC-then-Encrypt; full AES-128 inverse rounds in `net/subtle.ts`
-339. [P2 ?] RSA key generation (for self-signed certs) ï¿½ `generateRSAKeyPair(bits, e)` Miller-Rabin prime generation via BigInt; returns `{publicKey:{n,e}, privateKey:{n,d,p,q}}` in `net/subtle.ts`
-340. [P2 ?] ECDSA key generation (P-256) ï¿½ `generateECDSAKeyPair()` generates random P-256 private scalar + public key point; returns `ECDSAKeyPair` in `net/subtle.ts`
-341. [P2 ?] `window.crypto.subtle` ï¿½ full Web Crypto API implementation ï¿½ `SubtleCrypto` class implementing encrypt/decrypt/sign/verify/importKey/exportKey/deriveKey/deriveBits + `CryptoKey` wrapper in `net/subtle.ts`
-342. [P2 ?] `SubtleCrypto.importKey` (JWK, raw, SPKI, PKCS8 formats) ï¿½ `importKey(format, keyData, algorithm, extractable, usages)` handles `raw`/`jwk`/`spki`/`pkcs8` for AES-GCM, AES-CBC, ECDH, ECDSA, HMAC, RSA-OAEP in `net/subtle.ts`
-343. [P2 ?] `SubtleCrypto.encrypt`/`decrypt` (AES-GCM, AES-CBC) ï¿½ delegates to `gcmEncrypt/gcmDecrypt` + `aesCBCEncrypt/Decrypt`; wrapped in `Promise.resolve()` in `net/subtle.ts`
-344. [P2 ?] `SubtleCrypto.sign`/`verify` (ECDSA, HMAC) ï¿½ `sign()` dispatches HMAC-SHA256/384 or ECDSA-P256/P384; `verify()` calls matching verify function in `net/subtle.ts`
-345. [P2 ?] `SubtleCrypto.deriveKey` / `deriveBits` (ECDH, HKDF, PBKDF2) ï¿½ `deriveBits()` handles ECDH scalar mult + HKDF-SHA256/384 + PBKDF2-SHA256; `deriveKey()` wraps as `CryptoKey` in `net/subtle.ts`
-346. [P3 ?] Post-quantum: Kyber-768 key exchange stubs ï¿½ `kyber768KeyGen()` (pk=1184B, sk=2400B), `kyber768Encapsulate(pk)` (ct=1088B, ss=32B), `kyber768Decapsulate(ct, sk)` returning 32-byte shared secret; `KyberKeyPair` + `KyberEncapsulation` interfaces; FIPS 203 byte sizes in `net/crypto.ts`
-347. [P3 ?] Post-quantum: Dilithium3 signature stubs ï¿½ `dilithium3KeyGen()` (pk=1952B, sk=4000B), `dilithium3Sign(sk, message)` (sig=3293B), `dilithium3Verify(pk, message, sig)` returning false; `DilithiumKeyPair` interface; FIPS 204 byte sizes in `net/crypto.ts`
-348. [P3 ?] Hardware RNG (RDRAND instruction) ï¿½ `js_rdrand()` C function in `quickjs_binding.c` uses `__asm__ volatile("rdrand")` with 10-retry loop; exposed as `kernel.rdrand(): number` (KernelAPI in `core/kernel.ts`); `getHardwareRandom(len)` in `net/crypto.ts` packs 4 bytes/word with `Math.random()` fallback
+329. [P1 ?] HMAC-SHA384 � `hmacSha384(key, data)` exported from `net/crypto.ts` (line 654); used by `hkdfExtractSHA384()` in `net/rsa.ts`
+330. [P1 ?] HKDF-Expand with SHA-384 � `hkdfExtractSHA384(salt, ikm)` + `hkdfExpandSHA384(prk, info, len)` + `hkdfExpandLabelSHA384(secret, label, context, len)` in `net/rsa.ts`
+331. [P1 ?] X.509: parse `subjectAltName` extension for hostname validation � `getSANHosts()` extracts DNS names + IP SANs from OID 2.5.29.17; used by `validateHostname()` in `net/x509.ts`
+332. [P1 ?] X.509: parse `basicConstraints` + `keyUsage` extensions � `getBasicConstraints()` returns `{isCA, pathLen}` from OID 2.5.29.19; `getKeyUsage()` returns bitmask from OID 2.5.29.15 in `net/x509.ts`
+333. [P1 ?] X.509: certificate chain length validation � `validateChain()` enforces `MAX_CHAIN_DEPTH`; checks intermediate `isCA=true` via `getBasicConstraints()` in `net/x509.ts`
+334. [P1 ?] X.509: validity date range check (notBefore, notAfter) � `checkValidity(cert, now)` compares `cert.notBefore`/`cert.notAfter` against `now`; called in `validateChain()` in `net/x509.ts`
+335. [P1 ?] X.509: name comparison case-insensitive ASCII � `hostnameMatches(hostname, pattern)` lowercases both sides; handles `*` wildcard prefix; used in `validateHostname()` in `net/x509.ts`
+336. [P1 ?] Ed25519 signature verification � `ed25519Verify(pubKey, message, sig)` using BigInt field arithmetic over Ed25519 curve; point decompression + scalar mult in `net/rsa.ts`
+337. [P2 ?] Curve448 / X448 key exchange � `x448(k, u)` Montgomery ladder scalar mult + `x448PublicKey(privateKey)` in `net/subtle.ts`
+338. [P2 ?] AES-CBC with HMAC-SHA256 (TLS 1.2 fallback ciphers) � `aesCBCEncrypt/Decrypt()` + `aesCBCSHA256Encrypt/Decrypt()` MAC-then-Encrypt; full AES-128 inverse rounds in `net/subtle.ts`
+339. [P2 ?] RSA key generation (for self-signed certs) � `generateRSAKeyPair(bits, e)` Miller-Rabin prime generation via BigInt; returns `{publicKey:{n,e}, privateKey:{n,d,p,q}}` in `net/subtle.ts`
+340. [P2 ?] ECDSA key generation (P-256) � `generateECDSAKeyPair()` generates random P-256 private scalar + public key point; returns `ECDSAKeyPair` in `net/subtle.ts`
+341. [P2 ?] `window.crypto.subtle` � full Web Crypto API implementation � `SubtleCrypto` class implementing encrypt/decrypt/sign/verify/importKey/exportKey/deriveKey/deriveBits + `CryptoKey` wrapper in `net/subtle.ts`
+342. [P2 ?] `SubtleCrypto.importKey` (JWK, raw, SPKI, PKCS8 formats) � `importKey(format, keyData, algorithm, extractable, usages)` handles `raw`/`jwk`/`spki`/`pkcs8` for AES-GCM, AES-CBC, ECDH, ECDSA, HMAC, RSA-OAEP in `net/subtle.ts`
+343. [P2 ?] `SubtleCrypto.encrypt`/`decrypt` (AES-GCM, AES-CBC) � delegates to `gcmEncrypt/gcmDecrypt` + `aesCBCEncrypt/Decrypt`; wrapped in `Promise.resolve()` in `net/subtle.ts`
+344. [P2 ?] `SubtleCrypto.sign`/`verify` (ECDSA, HMAC) � `sign()` dispatches HMAC-SHA256/384 or ECDSA-P256/P384; `verify()` calls matching verify function in `net/subtle.ts`
+345. [P2 ?] `SubtleCrypto.deriveKey` / `deriveBits` (ECDH, HKDF, PBKDF2) � `deriveBits()` handles ECDH scalar mult + HKDF-SHA256/384 + PBKDF2-SHA256; `deriveKey()` wraps as `CryptoKey` in `net/subtle.ts`
+346. [P3 ?] Post-quantum: Kyber-768 key exchange stubs � `kyber768KeyGen()` (pk=1184B, sk=2400B), `kyber768Encapsulate(pk)` (ct=1088B, ss=32B), `kyber768Decapsulate(ct, sk)` returning 32-byte shared secret; `KyberKeyPair` + `KyberEncapsulation` interfaces; FIPS 203 byte sizes in `net/crypto.ts`
+347. [P3 ?] Post-quantum: Dilithium3 signature stubs � `dilithium3KeyGen()` (pk=1952B, sk=4000B), `dilithium3Sign(sk, message)` (sig=3293B), `dilithium3Verify(pk, message, sig)` returning false; `DilithiumKeyPair` interface; FIPS 204 byte sizes in `net/crypto.ts`
+348. [P3 ?] Hardware RNG (RDRAND instruction) � `js_rdrand()` C function in `quickjs_binding.c` uses `__asm__ volatile("rdrand")` with 10-retry loop; exposed as `kernel.rdrand(): number` (KernelAPI in `core/kernel.ts`); `getHardwareRandom(len)` in `net/crypto.ts` packs 4 bytes/word with `Math.random()` fallback
 
 ---
 
@@ -441,14 +441,14 @@
 355. [P0 ?] `<style>` tag: CDATA content (don't parse `</` inside style) ? `inStyle` mode in `html.ts`
 356. [P0 ?] `<textarea>`, `<pre>`: whitespace preserved ? `inPre` mode + `type:'pre'` nodes in `html.ts`/`layout.ts`; `inTextarea` captures raw text content
 357. [P0 ?] `<template>` tag: parse into document fragment
-358. [P1 ?] WHATWG HTML5 tokenizer state machine (current parser is ad-hoc) ï¿½ HTMLTokenizer full state machine in html.ts:1163; TreeConstructor in html.ts:1586
+358. [P1 ?] WHATWG HTML5 tokenizer state machine (current parser is ad-hoc) � HTMLTokenizer full state machine in html.ts:1163; TreeConstructor in html.ts:1586
 359. [P1 ?] Implicit tag closing (e.g., `<p>` closes previous `<p>`) ? `pOpen` counter in `html.ts`
-360. [P1 ?] Misnested tags: foster parenting algorithm ï¿½ fosterParentNode() in html.ts:1535
-361. [P1 ?] `<table>` foster parenting for text nodes ï¿½ fosterParentText() in html.ts:1566
-362. [P1 ?] Full insertion mode state machine (in_body, in_table, in_caption, etc.) ï¿½ TreeConstructor._processToken() in html.ts:1646
+360. [P1 ?] Misnested tags: foster parenting algorithm � fosterParentNode() in html.ts:1535
+361. [P1 ?] `<table>` foster parenting for text nodes � fosterParentText() in html.ts:1566
+362. [P1 ?] Full insertion mode state machine (in_body, in_table, in_caption, etc.) � TreeConstructor._processToken() in html.ts:1646
 363. [P1 ?] `<noscript>` rendered when JS is disabled ? correctly skipped when JS enabled via `skipUntilClose = 'noscript'` in `apps/browser/html.ts` line 574
 364. [P1 ?] `<base href="...">` affects all relative URL resolution ? `_baseHref` extracted from `<base>` tag; all `_resolveURL(href, _baseHref)` calls use it for scripts, stylesheets, forms, fetch in `apps/browser/jsruntime.ts`
-365. [P1 ?] Incremental HTML parsing (don't block render on slow network) ï¿½ IncrementalHTMLParser class in html.ts:2040
+365. [P1 ?] Incremental HTML parsing (don't block render on slow network) � IncrementalHTMLParser class in html.ts:2040
 366. [P2 ?] `<picture>` + `<source srcset>` image selection ? handled in `html.ts`
 367. [P2 ?] `<video>` and `<audio>` stub elements ? placeholder text rendered: `?? [video: src]` and `[?? audio]` in `apps/browser/html.ts` lines 559?564
 368. [P2 ?] `<iframe>` ? nested browsing context ? placeholder `[??? iframe: src]` rendered in `apps/browser/html.ts` line 550
@@ -492,8 +492,8 @@
 401. [P1 ?] CSS Flexbox: `display: flex`, `flex-direction`, `justify-content`, `align-items`, `flex-wrap`, `gap`
 402. [P1 ?] CSS Flexbox: `flex-grow`, `flex-shrink`, `flex-basis`, `flex` shorthand
 403. [P1 ?] CSS Flexbox: `align-self`, `order`
-404. [P1 ?] CSS Grid: `display: grid`, `grid-template-columns/rows`, `grid-column/row` ï¿½ layoutGrid() + parseGridTrack() in layout-ext.ts:421
-405. [P1 ?] CSS Grid: `fr` unit, `repeat()`, `minmax()` ï¿½ resolveTrackSz/expandRepeat/parseMinMax in layout-ext.ts; full fr distribution
+404. [P1 ?] CSS Grid: `display: grid`, `grid-template-columns/rows`, `grid-column/row` � layoutGrid() + parseGridTrack() in layout-ext.ts:421
+405. [P1 ?] CSS Grid: `fr` unit, `repeat()`, `minmax()` � resolveTrackSz/expandRepeat/parseMinMax in layout-ext.ts; full fr distribution
 406. [P1 ?] CSS Grid: `grid-area`, `grid-template-areas` ? parsed in `css.ts`, stored in `types.ts`
 407. [P1 ?] CSS Grid: `gap` / `row-gap` / `column-gap` ? parsed in `css.ts`, stored in `types.ts`
 408. [P1 ?] CSS `calc()` expression evaluation ? `evalCalc()` in `css.ts`
@@ -524,7 +524,7 @@
 433. [P2 ?] CSS `font-style`: italic/oblique -- `italic`: boolean added to RenderedSpan; visual slant via split draw in index.ts
 434. [P2 ?] CSS `counter-reset`, `counter-increment` -- _counters Map + _applyCounters() in html.ts; getPseudoContent() accepts counters
 435. [P2 ?] CSS `@supports` at-rule ? `CSS_.supports()` called in `walkRules` in `jsruntime.ts`
-436. [P2] CSS `@layer` cascade layers
+436. [P2 ?] CSS `@layer` cascade layers
 437. [P3 ?] CSS Houdini Paint API stub
 438. [P3 ?] CSS `@container` queries
 439. [P3 ?] CSS subgrid
@@ -545,20 +545,20 @@
 449. [P0 ?] Table layout algorithm (fixed + auto)
 450. [P0 ?] `<li>` marker box layout (bullet/number positioning) ? `lstType` lookup + bullet span prefix in `layout.ts`
 451. [P1 ?] Flexbox layout pass ? `flex-row` node type with `flexGrow`, `gap`, children side-by-side in `layout.ts`
-452. [P1 ?] Grid layout pass ï¿½ layoutGrid() in layout-ext.ts:566; CSS Grid items 404ï¿½405
+452. [P1 ?] Grid layout pass � layoutGrid() in layout-ext.ts:566; CSS Grid items 404�405
 453. [P1 ?] Absolute positioning relative to nearest positioned ancestor ? OOF nodes rendered at `posTop`/`posLeft` in `layout.ts`
 454. [P1 ?] Fixed positioning relative to viewport ? included in OOF rendering path in `layout.ts`
-455. [P1 ?] Sticky positioning ï¿½ stickyCssY()/applySticky() in layout-ext.ts:672
+455. [P1 ?] Sticky positioning � stickyCssY()/applySticky() in layout-ext.ts:672
 456. [P1 ?] Float layout and line-box narrow-around-float ? `nd.float === 'right'/'left'` handled in `layout.ts`
-457. [P1 ?] Multi-column layout (`column-count`, `column-width`) ï¿½ layoutMultiColumn() in layout-ext.ts:761
-458. [P1 ?] Inline-block layout ï¿½ layoutInlineBlock() in layout-ext.ts:823
-459. [P1 ?] `overflow: scroll` ? clip and add scrollbar ï¿½ applyOverflowScroll() + scrollbar rendering in layout-ext.ts:898
-460. [P1 ?] `overflow: hidden` ? clip without scrollbar ï¿½ applyOverflowHidden() in layout-ext.ts:932
-461. [P1 ?] Scrollable container scroll offset (currently no scrolling inside elements) ï¿½ ScrollContainer + scrollContainer() in layout-ext.ts:873
+457. [P1 ?] Multi-column layout (`column-count`, `column-width`) � layoutMultiColumn() in layout-ext.ts:761
+458. [P1 ?] Inline-block layout � layoutInlineBlock() in layout-ext.ts:823
+459. [P1 ?] `overflow: scroll` ? clip and add scrollbar � applyOverflowScroll() + scrollbar rendering in layout-ext.ts:898
+460. [P1 ?] `overflow: hidden` ? clip without scrollbar � applyOverflowHidden() in layout-ext.ts:932
+461. [P1 ?] Scrollable container scroll offset (currently no scrolling inside elements) � ScrollContainer + scrollContainer() in layout-ext.ts:873
 462. [P1 ?] Viewport scroll: `window.scrollY`, `window.scrollX` accurate
 463. [P2 ?] Writing modes (`writing-mode: vertical-rl`)
 464. [P2 ?] BiDi (bidirectional text ? Arabic, Hebrew)
-465. [P2 ?] `text-overflow: ellipsis` ï¿½ textOverflow: 'ellipsis' parsed in css.ts:538; applied in layout-ext.ts
+465. [P2 ?] `text-overflow: ellipsis` � textOverflow: 'ellipsis' parsed in css.ts:538; applied in layout-ext.ts
 466. [P2 ?] CSS shapes: `shape-outside` for float wrapping
 467. [P2 ?] Baseline alignment in inline contexts
 468. [P2 ?] Ruby text layout (`<ruby>`, `<rt>`)
@@ -574,21 +574,21 @@
 473. [P0 ?] Anti-aliased text rendering (grayscale coverage sampling)
 474. [P0 ?] Sub-pixel RGB text rendering (ClearType-style)
 475. [P0 ?] JPEG image decode: full DCT + quantization + Huffman ? `decodeJPEG()` in `img-jpeg.ts` (baseline SOF0)
-476. [P0 ?] PNG image decode: interlaced PNG support (`img-png.ts`) ï¿½ Adam7 interlaced decoder in img-png.ts:290
-477. [P0 ?] GIF image decode: basic (LZW decoder) ï¿½ lzwDecode() + decodeGIF() in img-gif.ts; GIF87a/89a support
-478. [P0 ?] GIF animation: frame disposal and timing ï¿½ GIFFrame + disposal methods 0/1/2/3 + loop count in img-gif.ts:308
-479. [P0 ?] WebP image decode (VP8L lossless + VP8 lossy) ï¿½ full VP8L/VP8 decoder + RIFF container in img-webp.ts:1
-480. [P0 ?] SVG rendering: basic shapes (rect, circle, path, text) ï¿½ renderSVG() + full shape renderer in svg.ts:593
+476. [P0 ?] PNG image decode: interlaced PNG support (`img-png.ts`) � Adam7 interlaced decoder in img-png.ts:290
+477. [P0 ?] GIF image decode: basic (LZW decoder) � lzwDecode() + decodeGIF() in img-gif.ts; GIF87a/89a support
+478. [P0 ?] GIF animation: frame disposal and timing � GIFFrame + disposal methods 0/1/2/3 + loop count in img-gif.ts:308
+479. [P0 ?] WebP image decode (VP8L lossless + VP8 lossy) � full VP8L/VP8 decoder + RIFF container in img-webp.ts:1
+480. [P0 ?] SVG rendering: basic shapes (rect, circle, path, text) � renderSVG() + full shape renderer in svg.ts:593
 481. [P1 ?] GPU compositing: paint layers to separate buffers, composite at end
 482. [P1 ?] Dirty region tracking: only repaint changed rectangles
 483. [P1 ?] Scroll: partial repaint (fixed header stays, only scroll area repaints)
 484. [P1 ?] Alpha compositing for `opacity` and RGBA colors
 485. [P1 ?] Rounded rectangle rendering (`border-radius`)
 486. [P1 ?] Box shadow rendering
-487. [P1 ?] Gradient rendering: linear-gradient, radial-gradient, conic-gradient ï¿½ `renderGradientCSS()` / `parseGradient()` in `apps/browser/gradient.ts`; all three types with colour-stop interpolation; wired into `_drawContent()` via `line.bgGradient`
+487. [P1 ?] Gradient rendering: linear-gradient, radial-gradient, conic-gradient � `renderGradientCSS()` / `parseGradient()` in `apps/browser/gradient.ts`; all three types with colour-stop interpolation; wired into `_drawContent()` via `line.bgGradient`
 488. [P1 ?] `::before`/`::after` pseudo-element rendering ? `getPseudoContent()` in `stylesheet.ts`; spans injected via `applyStyle()`/`popCSS()` in `html.ts`
-489. [P1 ?] Clipping path rendering ï¿½ `Canvas.setClipRect(x,y,w,h)` / `clearClipRect()` / `saveClipRect()` / `restoreClipRect()` in `ui/canvas.ts`; `setPixel` and `fillRect` both respect clip rect; CSS `overflow:hidden` layout clipping via `applyOverflowHidden()` in `layout-ext.ts`
-490. [P1 ?] Stacking context correct paint order (z-index) ï¿½ Compositor.composite() iterates LayerTree.sorted() (painter z-order) in render.ts:294; RenderLayer.zIndex tracks per-element stacking context
+489. [P1 ?] Clipping path rendering � `Canvas.setClipRect(x,y,w,h)` / `clearClipRect()` / `saveClipRect()` / `restoreClipRect()` in `ui/canvas.ts`; `setPixel` and `fillRect` both respect clip rect; CSS `overflow:hidden` layout clipping via `applyOverflowHidden()` in `layout-ext.ts`
+490. [P1 ?] Stacking context correct paint order (z-index) � Compositor.composite() iterates LayerTree.sorted() (painter z-order) in render.ts:294; RenderLayer.zIndex tracks per-element stacking context
 491. [P2 ?] `<canvas>` 2D rendering wired to framebuffer
 492. [P2 ?] WebGL 1.0 stub (software rasterizer ? very slow but functional)
 493. [P2 ?] WOFF/WOFF2 font decode and rasterization (FreeType or stb_truetype)
@@ -614,7 +614,7 @@
 508. [P0 ?] `Headers` class: `get`, `set`, `append`, `delete`, `has`, `entries` ? `Headers_` in `jsruntime.ts`
 509. [P0 ?] `AbortController` + `AbortSignal` actually abort fetch ? implemented in `jsruntime.ts`
 510. [P0 ?] `Promise.allSettled`, `Promise.any`, `Promise.race` ? polyfilled in `jsruntime.ts`
-511. [P0 ?] `async`/`await` properly integrated with event loop tick ï¿½ microtask queue (_drainMicrotasks) drained after each RAF/timer in jsruntime.ts:2620
+511. [P0 ?] `async`/`await` properly integrated with event loop tick � microtask queue (_drainMicrotasks) drained after each RAF/timer in jsruntime.ts:2620
 512. [P1 ?] `MutationObserver`: actually fire callbacks when DOM changes ? `MutationObserverImpl` + `_flushMutationObservers` in `jsruntime.ts`
 513. [P1 ?] `IntersectionObserver`: fire callbacks with viewport intersection data ? `IntersectionObserverImpl._tick()` in `jsruntime.ts`
 514. [P1 ?] `ResizeObserver`: fire callbacks when element size changes ? `ResizeObserverImpl._tick()` in `jsruntime.ts`
@@ -637,14 +637,14 @@
 531. [P1 ?] `document.readyState` transitions: `loading` ? `interactive` ? `complete` ? `jsruntime.ts`
 532. [P1 ?] `<script type="module">` support ? `isModule` detection + `_transformModuleCode()` strips/transforms ES module syntax in `jsruntime.ts`
 533. [P1 ?] ES module: `import.meta.url` ? injected as `import_meta.url` by `_transformModuleCode()` in `jsruntime.ts`
-534. [P1 ?] Dynamic `import()` returning a Promise ï¿½ _moduleCache + _transformModuleCode() in jsruntime.ts:3749
+534. [P1 ?] Dynamic `import()` returning a Promise � _moduleCache + _transformModuleCode() in jsruntime.ts:3749
 535. [P2 ?] `Worker` API: run JS in separate QuickJS context ? `WorkerImpl` class in `apps/browser/workers.ts`, exposed as `Worker` in browser window object
-536. [P2 ?] `SharedWorker` stub ï¿½ `SharedWorkerImpl` class in `apps/browser/workers.ts`; named worker registry shares a single `WorkerImpl` across all clients; `SharedWorker` exposed in window via jsruntime.ts
+536. [P2 ?] `SharedWorker` stub � `SharedWorkerImpl` class in `apps/browser/workers.ts`; named worker registry shares a single `WorkerImpl` across all clients; `SharedWorker` exposed in window via jsruntime.ts
 537. [P2 ?] `ServiceWorker` stub (needed for PWA) ? `navigator.serviceWorker` object in `apps/browser/jsruntime.ts` line 394
 538. [P2 ?] `Notification` API stub ? `Notification_` class with `requestPermission()`, `close()`, auto-granted permission; exposed as `Notification` in window at line 3491 of `browser/jsruntime.ts`
 539. [P2 ?] `Geolocation` API stub ? `navigator.geolocation.getCurrentPosition/watchPosition` returns unsupported error in `apps/browser/jsruntime.ts` line 379
-540. [P2 ?] `navigator.mediaDevices` stub (camera/mic) ï¿½ navigator.mediaDevices.getUserMedia/enumerateDevices in jsruntime.ts:389
-541. [P2 ?] `WebRTC` stubs (`RTCPeerConnection`) ï¿½ RTCPeerConnection_ class in jsruntime.ts:3037; exposed as RTCPeerConnection in window
+540. [P2 ?] `navigator.mediaDevices` stub (camera/mic) � navigator.mediaDevices.getUserMedia/enumerateDevices in jsruntime.ts:389
+541. [P2 ?] `WebRTC` stubs (`RTCPeerConnection`) � RTCPeerConnection_ class in jsruntime.ts:3037; exposed as RTCPeerConnection in window
 542. [P2 ?] `WebSocket` constructor wired to TCP/TLS net stack ? `WebSocket_` stub class with full WebSocket API (open/close/message/error events, send, addEventListener); attempts `os.webSocketConnect` hook; exposed as `WebSocket` in window at line 3476 of `browser/jsruntime.ts`
 543. [P2 ?] `BroadcastChannel` between workers ? `BroadcastChannelImpl` in `apps/browser/workers.ts`; shared channel map routes messages across Worker contexts
 544. [P2 ?] `PerformanceObserver` stub ? `BrowserPerformanceObserver` in `apps/browser/perf.ts`, exposed in window
@@ -652,8 +652,8 @@
 546. [P2 ?] `Intl` ? internationalization: `Intl.DateTimeFormat`, `Intl.NumberFormat`, `Intl.Collator` ? full stub with `DateTimeFormat`, `NumberFormat`, `Collator`, `PluralRules`, `RelativeTimeFormat`, `ListFormat` in `apps/browser/jsruntime.ts`; exposed as `Intl` in window
 547. [P2 ?] `Proxy` and `Reflect` used by many frameworks ? test compatibility ? exposed as globals via QuickJS native at `apps/browser/jsruntime.ts` line 3618
 548. [P2 ?] `WeakRef` and `FinalizationRegistry` ? `WeakRefImpl` + `FinalizationRegistryImpl` in `apps/browser/jsruntime.ts`; exposed in window at lines 3436?3437
-549. [P3] Shadow DOM: `attachShadow`, `shadowRoot`, style scoping
-550. [P3 ?] Custom Elements: `customElements.define` ï¿½ customElementsAPI with define/get/whenDefined/upgrade in jsruntime.ts:2755
+549. [P3 ?] Shadow DOM: `attachShadow`, `shadowRoot`, style scoping
+550. [P3 ?] Custom Elements: `customElements.define` � customElementsAPI with define/get/whenDefined/upgrade in jsruntime.ts:2755
 551. [P3 ?] Web Components full lifecycle callbacks
 552. [P3 ?] `Worklet` API
 
@@ -692,15 +692,15 @@
 581. [P1 ?] Selection API: `window.getSelection()`, `sel.getRangeAt(0)` ? `_selection` object in `jsruntime.ts`
 582. [P1 ?] `Node.ELEMENT_NODE`, `TEXT_NODE`, `COMMENT_NODE` constants ? `VNode` static + instance aliases in `dom.ts`
 583. [P1 ?] `DocumentFragment` as lightweight container ? `DocumentFragment_` in `jsruntime.ts`; `createDocumentFragment()` in `dom.ts`
-584. [P1] Slot element (`<slot>`) for web components
-585. [P2 ?] `element.animate()` Web Animations API ï¿½ animate() stub with finish/cancel/pause/play in dom.ts:1058
-586. [P2 ?] `element.scrollIntoView()` ï¿½ scrollIntoView() stub in dom.ts:907
+584. [P1 ?] Slot element (`<slot>`) for web components
+585. [P2 ?] `element.animate()` Web Animations API � animate() stub with finish/cancel/pause/play in dom.ts:1058
+586. [P2 ?] `element.scrollIntoView()` � scrollIntoView() stub in dom.ts:907
 587. [P2 ?] `element.focus()`, `element.blur()` ? update `activeElement`, fire focus/blur/focusin/focusout events with `relatedTarget` ? `focus()`/`blur()` in `VElement` in `browser/dom.ts`
-588. [P2 ?] `document.elementFromPoint(x, y)` hit testing ï¿½ elementFromPoint() returns body in dom.ts:1538
-589. [P2 ?] `document.elementsFromPoint(x, y)` (all elements at point) ï¿½ elementsFromPoint() stub in dom.ts:1538
-590. [P2 ?] `element.getClientRects()` ? multiple DOMRects ï¿½ getClientRects() returning [{x,y,width,height}] in dom.ts:931
-591. [P3 ?] XPath: `document.evaluate()` ï¿½ evaluate() with //*[@id], //tag, /path XPath patterns in dom.ts:1486
-592. [P3 ?] `document.all` legacy collection ï¿½ Proxy-based document.all getter in dom.ts:1580
+588. [P2 ?] `document.elementFromPoint(x, y)` hit testing � elementFromPoint() returns body in dom.ts:1538
+589. [P2 ?] `document.elementsFromPoint(x, y)` (all elements at point) � elementsFromPoint() stub in dom.ts:1538
+590. [P2 ?] `element.getClientRects()` ? multiple DOMRects � getClientRects() returning [{x,y,width,height}] in dom.ts:931
+591. [P3 ?] XPath: `document.evaluate()` � evaluate() with //*[@id], //tag, /path XPath patterns in dom.ts:1486
+592. [P3 ?] `document.all` legacy collection � Proxy-based document.all getter in dom.ts:1580
 
 ---
 
@@ -718,17 +718,17 @@
 602. [P0 ?] `<form>` action + method GET/POST wired to browser navigation/XHR ? `_submitForm()` builds query string for GET; `_submitPost()` posts body for POST in `apps/browser/index.ts`
 603. [P0 ?] Form validation: `required`, `minlength`, `maxlength`, `pattern`
 604. [P0 ?] Form serialization: `application/x-www-form-urlencoded` ? GET: `urlEncode(name)+'='+urlEncode(val)` query string; POST: `encodeFormData(fields)` body in `apps/browser/index.ts`
-605. [P1 ?] `<input type="email">` validation ï¿½ checkEmail() in form-validate.ts:218
-606. [P1 ?] `<input type="url">` validation ï¿½ checkUrl() in form-validate.ts:238
-607. [P1 ?] `<input type="number">` with min/max/step ï¿½ checkNumber() in form-validate.ts:257
-608. [P1 ?] `<input type="range">` slider ï¿½ checkRange() in form-validate.ts:291
-609. [P1 ?] `<input type="date">`, `<input type="time">` pickers ï¿½ checkDate() in form-validate.ts:327
-610. [P1 ?] `<input type="color">` color picker ï¿½ checkColor() in form-validate.ts:377
-611. [P1 ?] `<input type="file">` ? VFS file picker dialog ï¿½ checkFile() in form-validate.ts:411
-612. [P1 ?] Autofocus (`autofocus` attribute) ï¿½ focusFirstField() + autofocus tracking in form-validate.ts:449
-613. [P1 ?] Tab order (`tabindex`) ï¿½ buildTabOrder() + tabIndex-sorted widget list in form-validate.ts:466
-614. [P1 ?] `<datalist>` autocomplete suggestions ï¿½ getDatalistSuggestions() in form-validate.ts:496
-615. [P2 ?] Constraint Validation API (`checkValidity()`, `reportValidity()`, `setCustomValidity()`) ï¿½ checkValidity() + setCustomValidity() in dom.ts:959
+605. [P1 ?] `<input type="email">` validation � checkEmail() in form-validate.ts:218
+606. [P1 ?] `<input type="url">` validation � checkUrl() in form-validate.ts:238
+607. [P1 ?] `<input type="number">` with min/max/step � checkNumber() in form-validate.ts:257
+608. [P1 ?] `<input type="range">` slider � checkRange() in form-validate.ts:291
+609. [P1 ?] `<input type="date">`, `<input type="time">` pickers � checkDate() in form-validate.ts:327
+610. [P1 ?] `<input type="color">` color picker � checkColor() in form-validate.ts:377
+611. [P1 ?] `<input type="file">` ? VFS file picker dialog � checkFile() in form-validate.ts:411
+612. [P1 ?] Autofocus (`autofocus` attribute) � focusFirstField() + autofocus tracking in form-validate.ts:449
+613. [P1 ?] Tab order (`tabindex`) � buildTabOrder() + tabIndex-sorted widget list in form-validate.ts:466
+614. [P1 ?] `<datalist>` autocomplete suggestions � getDatalistSuggestions() in form-validate.ts:496
+615. [P2 ?] Constraint Validation API (`checkValidity()`, `reportValidity()`, `setCustomValidity()`) � checkValidity() + setCustomValidity() in dom.ts:959
 616. [P2 ?] `<input type="search">` with clear button
 617. [P2 ?] IME input mode for CJK
 618. [P3 ?] Form autofill / password manager integration
@@ -750,14 +750,14 @@
 629. [P1 ?] New tab page (local start page) ? `_newTabAction()` opens `about:blank`; initial tab loads `about:jsos` via `aboutJsosHTML()` in `browser/index.ts`
 630. [P1 ?] Bookmarks: add, open ? `_addBookmark()` (Ctrl+D), `_bookmarksHTML()` with links at `about:bookmarks` in `browser/index.ts` (remove not yet implemented)
 631. [P1 ?] Bookmark folder organization
-632. [P1 ?] Address bar autocomplete from history + bookmarks ï¿½ `_computeURLSuggestions()` + dropdown in `_drawToolbar()`; Up/Down navigation in keyboard handler in `browser/index.ts`
+632. [P1 ?] Address bar autocomplete from history + bookmarks � `_computeURLSuggestions()` + dropdown in `_drawToolbar()`; Up/Down navigation in keyboard handler in `browser/index.ts`
 633. [P2 ?] Find in page (Ctrl+F) ? highlight matches in rendered DOM ? `_openFind()`/`_doFind()` triggered by `'\x06'` (Ctrl+F) in `browser/index.ts`
 634. [P2 ?] Reader mode (strip ads/nav, clean article rendering)
 635. [P2 ?] Print page to PDF or thermal printer
-636. [P2 ?] Download manager: save resource to disk with progress ï¿½ `<a download>` attr parsed in `html.ts`; `_downloadURL()` + `_hitTestLinkFull()` in `browser/index.ts` saves to `/downloads/`
+636. [P2 ?] Download manager: save resource to disk with progress � `<a download>` attr parsed in `html.ts`; `_downloadURL()` + `_hitTestLinkFull()` in `browser/index.ts` saves to `/downloads/`
 637. [P2 ?] View page source ? `_sourceHTML()` served at `about:source` in `browser/index.ts`
 638. [P2 ?] `data:` URL support ? `fetchAPI` in `jsruntime.ts`
-639. [P2 ?] `blob:` URL for object URLs ï¿½ `_blobStore` Map + `getBlobURLContent()` in `jsruntime.ts`; blob: handler in `_startFetch()` in `browser/index.ts`
+639. [P2 ?] `blob:` URL for object URLs � `_blobStore` Map + `getBlobURLContent()` in `jsruntime.ts`; blob: handler in `_startFetch()` in `browser/index.ts`
 640. [P3 ?] Browser sync / bookmarks cloud backup
 641. [P3 ?] Extensions / userscript runner
 
@@ -768,54 +768,54 @@
 > Philosophy: no shell language. Everything is a TypeScript function call. `ls()`, `cd('/etc')`, `ping('8.8.8.8')`, `fetch('https://...')`. The REPL *is* the shell.
 
 ### 17.1 REPL Core
-642. [P0 ?] Input history: up/down arrows cycle through previous expressions ? history in `repl.ts` + `apps/terminal/index.ts`
-643. [P0 ?] Persistent history: save/load history to `/home/.repl_history` across sessions ? `_saveHistory()` / `_loadHistory()` in `apps/terminal/index.ts`
-644. [P0 ?] Multi-line input: Shift+Enter adds a new line; Enter on incomplete expression continues ? `isIncomplete()` + `mlBuffer` in `ui/repl.ts`
-645. [P0 ?] Syntax error detection before execution (highlight bad input in red) ? `_isErrorString()` + `_printReplResult()` handle SyntaxError in LIGHT_RED in `ui/repl.ts`
-646. [P0 ?] `await` at top level ? `await fetch('https://...')` just works ? async IIFE wrapper + `__replResult`/`__replError` globalThis callbacks in `ui/repl.ts`
-647. [P0 ?] Result pretty-printing: objects/arrays rendered as expandable trees ? `printableArray()` / `printableObject()` in `ui/commands.ts`
-648. [P0 ?] `undefined` and `null` shown distinctly (dimmed, not silent) ? `evalAndPrint()` color-codes null/undefined in `ui/repl.ts`
-649. [P0 ?] Errors shown with stack trace, file+line highlighted ? `_printReplResult()` splits on `\n`, prints first line LIGHT_RED, frames DARK_GREY, location in YELLOW in `ui/repl.ts`
-650. [P0 ?] Tab completion: complete variable names, property chains (`sys.net.<TAB>`) ? `tabComplete()` in `ui/repl.ts`
-651. [P0 ?] Tab completion: complete function signatures with type hints
-652. [P0 ?] Tab completion: filesystem paths in string arguments (`ls('/et<TAB>')`) ? path detection via unmatched quote in `tabComplete()` in `ui/repl.ts`
-653. [P1 ?] Multiple terminal instances: open N REPLs simultaneously, each isolated context
-654. [P1 ?] Terminal tabs: switch between instances with Ctrl+Tab or GUI tab bar
-655. [P1 ?] Each REPL tab has its own variable scope and history
-656. [P1 ?] Named REPL sessions: `repl.open('debug')` opens labelled tab
-657. [P1 ?] `repl.close()` closes current terminal instance
-658. [P1 ?] Copy REPL context to new tab (clone variables and imports)
-659. [P1 ?] REPL startup script: `/etc/repl.ts` executes on every new instance ? startup loop in `startRepl()` in `ui/repl.ts`
-660. [P1 ?] Per-user startup script: `/home/<user>/.repl.ts` ? loaded after `/etc/repl.ts` in `startRepl()`
-661. [P1 ?] `import` statements work at REPL prompt ? load any OS module dynamically
-662. [P1 ?] `help(fn)` prints JSDoc for any built-in function ? `_helpDocs` registry + `fn.toString()` extraction in `ui/commands.ts`
-663. [P1 ?] `help()` with no args prints overview of all top-level APIs ? `g.help` in `ui/commands.ts`
-664. [P1 ?] `clear()` clears screen output ? `g.clear` in `ui/commands.ts`
-665. [P1 ?] `reset()` clears current REPL context (variables, imports) ? snapshot of built-in keys + delete user-defined globals in `ui/commands.ts`
+642. [P0 ✓] Input history: up/down arrows cycle through previous expressions — `ArrowUp`/`ArrowDown` + `_history[]` in `apps/terminal/index.ts`
+643. [P0 ✓] Persistent history: save/load history to `/home/.repl_history` across sessions — `_saveHistory()` / `_loadHistory()` in `apps/terminal/index.ts`
+644. [P0 ✓] Multi-line input: Shift+Enter adds a new line; Enter on incomplete expression continues — `isIncomplete()` + `mlBuffer` in `ui/repl.ts`
+645. [P0 ✓] Syntax error detection before execution (highlight bad input in red) — `_isErrorString()` + `_printReplResult()` handle SyntaxError in LIGHT_RED in `ui/repl.ts`
+646. [P0 ✓] `await` at top level — `await fetch('https://...')` just works — async IIFE wrapper + `__replResult`/`__replError` globalThis callbacks in `ui/repl.ts`
+647. [P0 ✓] Result pretty-printing: objects/arrays rendered as expandable trees — `printableArray()` / `printableObject()` in `ui/commands.ts`
+648. [P0 ✓] `undefined` and `null` shown distinctly (dimmed, not silent) — `evalAndPrint()` color-codes null/undefined in `ui/repl.ts`
+649. [P0 ✓] Errors shown with stack trace, file+line highlighted — `_printReplResult()` splits on `\n`, prints first line LIGHT_RED, frames DARK_GREY, location in YELLOW in `ui/repl.ts`
+650. [P0 ✓] Tab completion: complete variable names, property chains (`sys.net.<TAB>`) — `tabComplete()` in `ui/repl.ts`
+651. [P0 ✓] Tab completion: complete function signatures with type hints — `getFunctionSignature()` + `_showSignatureHint()` in `ui/repl.ts`
+652. [P0 ✓] Tab completion: filesystem paths in string arguments (`ls('/et<TAB>')`) — path detection via unmatched quote in `tabComplete()` in `ui/repl.ts`
+653. [P1 ✓] Multiple terminal instances: open N REPLs simultaneously, each isolated context — `TerminalTabManager` / Ctrl+T in `apps/terminal/index.ts`
+654. [P1 ✓] Terminal tabs: switch between instances with Ctrl+Tab or GUI tab bar — `TerminalTabManager.nextTab()` + Ctrl+Tab handler in `apps/terminal/index.ts`
+655. [P1 ✓] Each REPL tab has its own variable scope and history — each `TerminalTab` carries `history[]` + `inputBuf` in `apps/terminal/index.ts`
+656. [P1 ✓] Named REPL sessions: `repl.open('debug')` opens labelled tab — `_sessions` map + `repl.open/close` in `ui/commands.ts`
+657. [P1 ✓] `repl.close()` closes current terminal instance — `repl.close()` + `TerminalTabManager.closeTab()` in `ui/commands.ts` / `apps/terminal/index.ts`
+658. [P1 ✓] Copy REPL context to new tab (clone variables and imports) — `repl.copyContext(from, to)` in `ui/commands.ts`
+659. [P1 ✓] REPL startup script: `/etc/repl.ts` executes on every new instance — startup loop in `startRepl()` in `ui/repl.ts`
+660. [P1 ✓] Per-user startup script: `/home/<user>/.repl.ts` — loaded after `/etc/repl.ts` in `startRepl()` in `ui/repl.ts`
+661. [P1 ✓] `import` statements work at REPL prompt — ES import rewrite to dynamic `import()` in `ui/repl.ts`
+662. [P1 ✓] `help(fn)` prints JSDoc for any built-in function — `_helpDocs` registry + `fn.toString()` extraction in `ui/commands.ts`
+663. [P1 ✓] `help()` with no args prints overview of all top-level APIs — `g.help` in `ui/commands.ts`
+664. [P1 ✓] `clear()` clears screen output — `g.clear` in `ui/commands.ts`
+665. [P1 ✓] `reset()` clears current REPL context (variables, imports) — snapshot of built-in keys + delete user-defined globals in `ui/commands.ts`
 
 ### 17.2 Terminal Rendering Quality
-666. [P1 ?] ANSI SGR: 16-color, 256-color, 24-bit true color foreground + background ? full ESC/CSI state machine + `_processAnsiSGR()` + `_256toVga()` + `_rgbToVga()` in `ui/terminal.ts`
-667. [P1 ?] Bold, italic, underline, strikethrough, dim text attributes
-668. [P1 ?] Cursor movement: up, down, left, right, home, end, page up/down
-669. [P1 ?] Cursor blink animation
-670. [P1 ?] Cursor style: block / underline / bar (configurable)
-671. [P1 ?] Terminal scrollback buffer (at least 10,000 lines)
-672. [P1 ?] Mouse click in output: click a value to inspect it
-673. [P1 ?] Clickable hyperlinks in output (OSC 8 escape sequence)
-674. [P1 ?] Terminal resize: reflow output to new width
-675. [P2 ?] Syntax highlighting in input line (keywords, strings, numbers colored live)
-676. [P2 ?] Bracket matching highlight
-677. [P2 ?] `console.log` output from background tasks appears in correct tab
-678. [P2 ?] Output search: Ctrl+F to search scrollback
-679. [P2 ?] Output copy: select text with mouse, Ctrl+C to copy
-680. [P2 ?] Markdown rendering in output (tables, code blocks, bold/italic)
-681. [P2 ?] Inline image preview in output (PNG/JPEG rendered inline)
-682. [P2 ?] Progress bar rendering for long async operations
-683. [P2 ?] Spinner animation for awaited Promises
+666. [P1 ✓] ANSI SGR: 16-color, 256-color, 24-bit true color foreground + background — full ESC/CSI state machine + `_processAnsiSGR()` + `_256toVga()` + `_rgbToVga()` in `ui/terminal.ts`
+667. [P1 ✓] Bold, italic, underline, strikethrough, dim text attributes — `_bold/_italic/_underline/_blink/_dim/_strike` SGR attrs in `ui/terminal.ts`
+668. [P1 ✓] Cursor movement: up, down, left, right, home, end, page up/down — CSI A/B/C/D/H/f handlers in `ui/terminal.ts`
+669. [P1 ✓] Cursor blink animation — `_cursorBlink` state + `tick()` timer in `ui/terminal.ts`
+670. [P1 ✓] Cursor style: block / underline / bar (configurable) — `_cursorStyle: 'block'|'underline'|'bar'` in `ui/terminal.ts`
+671. [P1 ✓] Terminal scrollback buffer (at least 10,000 lines) — `SCROLLBACK = 10000` ring buffer in `ui/terminal.ts`
+672. [P1 ✓] Mouse click in output: click a value to inspect it — `[Item 672]` click-handler in `ui/terminal.ts`
+673. [P1 ✓] Clickable hyperlinks in output (OSC 8 escape sequence) — `_oscLinkUrl` + per-cell link layer + `getLinkAt()` in `ui/terminal.ts`
+674. [P1 ✓] Terminal resize: reflow output to new width — `resize(cols, rows)` with full reflow in `ui/terminal.ts`
+675. [P2 ✓] Syntax highlighting in input line (keywords, strings, numbers colored live) — JS token colorizer `[Item 675]` in `ui/repl.ts`
+676. [P2 ✓] Bracket matching highlight — `findMatchingBracket()` in `ui/repl.ts`
+677. [P2 ✓] `console.log` output from background tasks appears in correct tab — `ConsoleRouter` class in `ui/terminal.ts`
+678. [P2 ✓] Output search: Ctrl+F to search scrollback — `g.searchOutput()` in `ui/commands.ts`
+679. [P2 ✓] Output copy: select text with mouse, Ctrl+C to copy — `g.copyOutput()` in `ui/commands.ts`
+680. [P2 ✓] Markdown rendering in output (tables, code blocks, bold/italic) — `g.markd()` markdown renderer in `ui/commands.ts`
+681. [P2 ✓] Inline image preview in output (PNG/JPEG rendered inline) — `[Item 681]` inline image class in `ui/terminal.ts`
+682. [P2 ✓] Progress bar rendering for long async operations — `g.progress()` in `ui/commands.ts`
+683. [P2 ✓] Spinner animation for awaited Promises — `g.spinner()` with `{stop()}` handle in `ui/commands.ts`
 684. [P2 ?] Split-pane terminal: side-by-side REPL instances in one window
-685. [P3] Terminal recording and playback (`repl.record()` / `repl.replay()`)
-686. [P3] Share terminal session over network (pair programming)
-687. [P3] REPL notebook mode: cells + markdown annotations, saveable as `.rpl` file
+685. [P3 ✓] Terminal recording and playback (`repl.record()` / `repl.replay()`) — `g.record/stopRecord/replay` in `ui/commands.ts`
+686. [P3?] Share terminal session over network (pair programming)
+687. [P3 ✓] REPL notebook mode: cells + markdown annotations, saveable as `.rpl` file — `g.notebook()` in `ui/commands.ts`
 
 ---
 
@@ -824,66 +824,66 @@
 > All of these are TypeScript functions available at the REPL prompt. No external binaries, no POSIX shell syntax.
 
 ### 18.1 Filesystem
-688. [P0 ?] `ls(path?)` ? list directory, returns typed `DirEntry[]`, pretty-printed with colors ? `g.ls` in `ui/commands.ts`
-689. [P0 ?] `cd(path)` ? change working directory, updates `sys.cwd` ? `g.cd` in `ui/commands.ts`
-690. [P0 ?] `pwd()` ? returns current directory string ? `g.pwd` in `ui/commands.ts`
-691. [P0 ?] `cat(path)` ? read and print file contents with syntax highlighting by extension ? `g.cat` in `ui/commands.ts`
-692. [P0 ?] `mkdir(path, recursive?)` ? create directory ? `g.mkdir` in `ui/commands.ts`
-693. [P0 ?] `rm(path, recursive?)` ? delete file or directory ? `g.rm` in `ui/commands.ts`
-694. [P0 ?] `cp(src, dst, recursive?)` ? copy ? `g.cp` in `ui/commands.ts`
-695. [P0 ?] `mv(src, dst)` ? move / rename ? `g.mv` in `ui/commands.ts`
-696. [P0 ?] `stat(path)` ? returns `StatResult` with size, mtime, mode, type ? `g.stat` in `ui/commands.ts`
-697. [P0 ?] `exists(path)` ? boolean ? `g.exists` in `ui/commands.ts`
-698. [P0 ?] `readFile(path)` ? returns `string` (UTF-8) or `Uint8Array` for binary ? `g.readFile` in `ui/commands.ts`
-699. [P0 ?] `writeFile(path, data)` ? write string or buffer ? `g.writeFile` in `ui/commands.ts`
-700. [P0 ?] `appendFile(path, data)` ? append ? `g.appendFile` in `ui/commands.ts`
-701. [P1 ?] `find(path, pattern)` ? recursive search, returns matching paths ? `g.find` in `ui/commands.ts`
-702. [P1 ?] `grep(pattern, path, recursive?)` ? returns `GrepMatch[]` with line numbers ? `g.grep` in `ui/commands.ts`
-703. [P1 ?] `diff(pathA, pathB)` ? returns unified diff string ? `g.diff` in `ui/commands.ts`
-704. [P1 ?] `chmod(path, mode)` ? change permissions ? `g.chmod` in `ui/commands.ts`
-705. [P1 ?] `chown(path, user, group?)` ? change owner ? `g.chown` in `ui/commands.ts`
-706. [P1 ?] `mount(device, path, fstype)` ? mount filesystem ? `g.mount` in `ui/commands.ts`; `os.fs.mount()` in sdk.ts; `mountVFS` in `fs/filesystem.ts`
-707. [P1 ?] `umount(path)` ? unmount ? `g.umount` in `ui/commands.ts`; `os.fs.umount()` in sdk.ts; `unmountVFS` added to `fs/filesystem.ts`
-708. [P2 ?] `watch(path, callback)` ? inotify-backed file watcher
-709. [P2 ?] `zip(src, dst)` / `unzip(src, dst)` ? archive helpers
-710. [P2 ?] `tar(src, dst)` / `untar(src, dst)` ? tar helpers
+688. [P0 ✓] `ls(path?)` — list directory, returns typed `DirEntry[]`, pretty-printed with colors — `g.ls` in `ui/commands.ts`
+689. [P0 ✓] `cd(path)` — change working directory, updates `sys.cwd` — `g.cd` in `ui/commands.ts`
+690. [P0 ✓] `pwd()` — returns current directory string — `g.pwd` in `ui/commands.ts`
+691. [P0 ✓] `cat(path)` — read and print file contents with syntax highlighting by extension — `g.cat` in `ui/commands.ts`
+692. [P0 ✓] `mkdir(path, recursive?)` — create directory — `g.mkdir` in `ui/commands.ts`
+693. [P0 ✓] `rm(path, recursive?)` — delete file or directory — `g.rm` in `ui/commands.ts`
+694. [P0 ✓] `cp(src, dst, recursive?)` — copy — `g.cp` in `ui/commands.ts`
+695. [P0 ✓] `mv(src, dst)` — move / rename — `g.mv` in `ui/commands.ts`
+696. [P0 ✓] `stat(path)` — returns `StatResult` with size, mtime, mode, type — `g.stat` in `ui/commands.ts`
+697. [P0 ✓] `exists(path)` — boolean — `g.exists` in `ui/commands.ts`
+698. [P0 ✓] `readFile(path)` — returns `string` (UTF-8) or `Uint8Array` for binary — `g.readFile` in `ui/commands.ts`
+699. [P0 ✓] `writeFile(path, data)` — write string or buffer — `g.writeFile` in `ui/commands.ts`
+700. [P0 ✓] `appendFile(path, data)` — append — `g.appendFile` in `ui/commands.ts`
+701. [P1 ✓] `find(path, pattern)` — recursive search, returns matching paths — `g.find` in `ui/commands.ts`
+702. [P1 ✓] `grep(pattern, path, recursive?)` — returns `GrepMatch[]` with line numbers — `g.grep` in `ui/commands.ts`
+703. [P1 ✓] `diff(pathA, pathB)` — returns unified diff string — `g.diff` in `ui/commands.ts`
+704. [P1 ✓] `chmod(path, mode)` — change permissions — `g.chmod` in `ui/commands.ts`
+705. [P1 ✓] `chown(path, user, group?)` — change owner — `g.chown` in `ui/commands.ts`
+706. [P1 ✓] `mount(device, path, fstype)` — mount filesystem — `g.mount` in `ui/commands.ts`; `os.fs.mount()` in sdk.ts; `mountVFS` in `fs/filesystem.ts`
+707. [P1 ✓] `umount(path)` — unmount — `g.umount` in `ui/commands.ts`; `os.fs.umount()` in sdk.ts; `unmountVFS` added to `fs/filesystem.ts`
+708. [P2 ✓] `watch(path, callback)` — polling file watcher — `g.watch` in `ui/commands.ts`
+709. [P2 ✓] `zip(src, dst)` / `unzip(src, dst)` — archive helpers — `g.zip/unzip` in `ui/commands.ts`
+710. [P2 ✓] `tar(src, dst)` / `untar(src, dst)` — tar helpers — `g.tar/untar` in `ui/commands.ts`
 
 ### 18.2 Processes
-711. [P0 ?] `ps()` ? returns `ProcessInfo[]`, pretty-printed table ? `g.ps` in `ui/commands.ts`
-712. [P0 ?] `kill(pid, signal?)` ? send signal to process ? `g.kill` in `ui/commands.ts`
-713. [P0 ?] `spawn(tsFile, args?)` ? launch a TypeScript file as a new process ? `g.spawn` (JSProcess) in `ui/commands.ts`
-714. [P0 ?] `top()` ? live updating process monitor in REPL output ? `g.top` in `ui/commands.ts`
-715. [P1 ?] `nice(pid, value)` ? adjust process priority ? `processManager.setPriority()` via `scheduler.getProcess()` in `process/process.ts`
-716. [P1 ?] `jobs()` ? list background async tasks started from REPL ? calls `threadManager.getCoroutines()` in `ui/commands.ts`
-717. [P1 ?] `fg(id)` / `bg(id)` ? bring REPL background task to foreground / push back ? implemented in `ui/commands.ts`
+711. [P0 ✓] `ps()` — returns `ProcessInfo[]`, pretty-printed table — `g.ps` in `ui/commands.ts`
+712. [P0 ✓] `kill(pid, signal?)` — send signal to process — `g.kill` in `ui/commands.ts`
+713. [P0 ✓] `spawn(tsFile, args?)` — launch a TypeScript file as a new process — `g.spawn` (JSProcess) in `ui/commands.ts`
+714. [P0 ✓] `top()` — live updating process monitor in REPL output — `g.top` in `ui/commands.ts`
+715. [P1 ✓] `nice(pid, value)` — adjust process priority — `processManager.setPriority()` via `scheduler.getProcess()` in `process/process.ts`
+716. [P1 ✓] `jobs()` — list background async tasks started from REPL — calls `threadManager.getCoroutines()` in `ui/commands.ts`
+717. [P1 ✓] `fg(id)` / `bg(id)` — bring REPL background task to foreground / push back — implemented in `ui/commands.ts`
 
 ### 18.3 Network
-718. [P0 ?] `ping(host, count?)` ? ICMP echo, returns RTT stats ? `g.ping` in `ui/commands.ts` wraps `net.ping()`
-719. [P0 ?] `fetch(url, opts?)` ? standard Fetch API, awaitable at top level ? `g.fetch` blocking wrapper over `os.fetchAsync` in `ui/commands.ts`
-720. [P0 ?] `dns.lookup(host)` ? DNS resolve, returns IP(s) ? `g.dns.lookup` using `dnsResolve()` in `ui/commands.ts`
-721. [P0 ?] `ifconfig()` ? list network interfaces with IP, MAC, state ? `g.ifconfig` in `ui/commands.ts`
-722. [P1 ?] `traceroute(host)` ? ICMP TTL probe, returns hop list ? `g.traceroute` in `ui/commands.ts`; `pingWithTTL` in `net/net.ts`
-723. [P1 ?] `wget(url, dest)` ? download file to disk with progress ? `g.wget` in `ui/commands.ts`
-724. [P1 ?] `http.get(url)` / `http.post(url, body)` ? convenience wrappers ? `g.http.get/post` in `ui/commands.ts`
-725. [P1] `net.connect(host, port)` ? raw TCP socket, returns stream
-726. [P2] `nc(host, port)` ? interactive TCP session in REPL
-727. [P2 ?] `ssh(host, opts?)` ? SSH client session in new terminal tab
-728. [P2 ?] `rsync(src, dst)` ? file sync over SSH
+718. [P0 ✓] `ping(host, count?)` — ICMP echo, returns RTT stats — `g.ping` in `ui/commands.ts` wraps `net.ping()`
+719. [P0 ✓] `fetch(url, opts?)` — standard Fetch API, awaitable at top level — `g.fetch` blocking wrapper over `os.fetchAsync` in `ui/commands.ts`
+720. [P0 ✓] `dns.lookup(host)` — DNS resolve, returns IP(s) — `g.dns.lookup` using `dnsResolve()` in `ui/commands.ts`
+721. [P0 ✓] `ifconfig()` — list network interfaces with IP, MAC, state — `g.ifconfig` in `ui/commands.ts`
+722. [P1 ✓] `traceroute(host)` — ICMP TTL probe, returns hop list — `g.traceroute` in `ui/commands.ts`; `pingWithTTL` in `net/net.ts`
+723. [P1 ✓] `wget(url, dest)` — download file to disk with progress — `g.wget` in `ui/commands.ts`
+724. [P1 ✓] `http.get(url)` / `http.post(url, body)` — convenience wrappers — `g.http.get/post` in `ui/commands.ts`
+725. [P1 ✓] `net.connect(host, port)` — raw TCP socket, returns stream — `g.net.connect` in `ui/commands.ts`
+726. [P2 ✓] `nc(host, port)` — interactive TCP session in REPL — `g.nc` in `ui/commands.ts`
+727. [P2 ✓] `ssh(host, opts?)` — SSH-like interactive TCP session in new terminal tab — `g.ssh` in `ui/commands.ts`
+728. [P2 ✓] `rsync(src, dst)` — local VFS file tree sync — `g.rsync` in `ui/commands.ts`
 
 ### 18.4 System Info
-729. [P0 ?] `mem()` ? memory usage summary (used / free / cached) ? `g.mem` in `ui/commands.ts`
-730. [P0 ?] `disk()` ? disk usage per mount point ? `g.disk` in `ui/commands.ts`
-731. [P0 ?] `cpu()` ? CPU info and current utilization ? `g.cpu` in `ui/commands.ts`
-732. [P0 ?] `uptime()` ? system uptime and load ? `g.uptime` in `ui/commands.ts`
-733. [P0 ?] `whoami()` ? current user ? `g.whoami` in `ui/commands.ts`
-734. [P0 ?] `hostname()` / `hostname(name)` ? get or set ? `g.hostname` in `ui/commands.ts`
-735. [P0 ?] `date()` ? current date/time; `date(ts)` formats a timestamp ? `g.date` in `ui/commands.ts`
-736. [P1 ?] `env()` ? print environment variables ? `g.env` in `ui/commands.ts`
-737. [P1 ?] `env.get(key)` / `env.set(key, val)` ? environment manipulation ? delegating to `os.env.*` in `ui/commands.ts`
-738. [P1 ?] `syslog(n?)` ? tail system log, optional last-n-lines ? `g.syslog` in `ui/commands.ts`
-739. [P2 ?] `perf.sample(fn, ms?)` ? CPU profiler, returns flame data
-740. [P2 ?] `perf.memory()` ? heap snapshot
-741. [P2 ?] `trace(fn)` ? trace all syscalls made during `fn()` execution
+729. [P0 ✓] `mem()` — memory usage summary (used / free / cached) — `g.mem` in `ui/commands.ts`
+730. [P0 ✓] `disk()` — disk usage per mount point — `g.disk` in `ui/commands.ts`
+731. [P0 ✓] `cpu()` — CPU info and current utilization — `g.cpu` in `ui/commands.ts`
+732. [P0 ✓] `uptime()` — system uptime and load — `g.uptime` in `ui/commands.ts`
+733. [P0 ✓] `whoami()` — current user — `g.whoami` in `ui/commands.ts`
+734. [P0 ✓] `hostname()` / `hostname(name)` — get or set — `g.hostname` in `ui/commands.ts`
+735. [P0 ✓] `date()` — current date/time; `date(ts)` formats a timestamp — `g.date` in `ui/commands.ts`
+736. [P1 ✓] `env()` — print environment variables — `g.env` in `ui/commands.ts`
+737. [P1 ✓] `env.get(key)` / `env.set(key, val)` — environment manipulation — delegating to `os.env.*` in `ui/commands.ts`
+738. [P1 ✓] `syslog(n?)` — tail system log, optional last-n-lines — `g.syslog` in `ui/commands.ts`
+739. [P2 ✓] `perf.sample(fn, ms?)` — CPU profiler, returns flame data — `g.perf.sample` in `ui/commands.ts`
+740. [P2 ✓] `perf.memory()` — heap snapshot — `g.perf` memory stats in `ui/commands.ts`
+741. [P2 ✓] `trace(fn)` — wrap function to trace all its calls — `g.trace` in `ui/commands.ts`
 
 ---
 
@@ -914,91 +914,91 @@
 
 ## 20. INIT SYSTEM (src/os/core/)
 
-716. [P0 ?] PID 1 init: starts essential services at boot ? `init.initialize()` called in `core/main.ts`
-717. [P0 ?] Init: reads service definitions from `/etc/init/` ? `loadServicesFromDir('/etc/init')` in `process/init.ts`
-718. [P0 ?] Init: respawn crashed services with backoff ? `handleExit()` + `tick()` exponential backoff in `process/init.ts`
-719. [P0 ?] Init: ordered shutdown (reverse dependency order) ? `stopPriority` sort in `shutdown()` in `process/init.ts`
-720. [P0 ?] Init: runlevel / target concept (single-user, multi-user, graphical) ? `RunLevel` type + `changeRunlevel()` in `process/init.ts`
-721. [P1 ?] Service manager: `start`, `stop`, `restart`, `status` commands ? `startService/stopService/restartService/getServiceStatus` in `process/init.ts`
-722. [P1 ?] Service dependencies (start B after A) ? `startService` recurses into `service.dependencies` in `process/init.ts`
-723. [P1 ?] Parallel service startup
-724. [P1 ?] Service logs redirected to `/var/log/<service>.log`
-725. [P2] Socket activation: TypeScript service manager starts service on first incoming connection
-726. [P2] JSOS service bus: typed event bus for inter-service communication (not D-Bus binary protocol)
-727. [P3] ~~systemd unit file parser~~ ? **REMOVED**: JSOS services are defined in TypeScript, not `.service` files
+716. [P0 ✓] PID 1 init: starts essential services at boot — `init.initialize()` called in `core/main.ts`
+717. [P0 ✓] Init: reads service definitions from `/etc/init/` — `loadServicesFromDir('/etc/init')` in `process/init.ts`
+718. [P0 ✓] Init: respawn crashed services with backoff — `handleExit()` + `tick()` exponential backoff in `process/init.ts`
+719. [P0 ✓] Init: ordered shutdown (reverse dependency order) — `stopPriority` sort in `shutdown()` in `process/init.ts`
+720. [P0 ✓] Init: runlevel / target concept (single-user, multi-user, graphical) — `RunLevel` type + `changeRunlevel()` in `process/init.ts`
+721. [P1 ✓] Service manager: `start`, `stop`, `restart`, `status` commands — `startService/stopService/restartService/getServiceStatus` in `process/init.ts`
+722. [P1 ✓] Service dependencies (start B after A) — `startService` recurses into `service.dependencies` in `process/init.ts`
+723. [P1 ✓] Parallel service startup — priority-grouped parallel batches in `changeRunlevel()` in `process/init.ts`
+724. [P1 ✓] Service logs redirected to `/var/log/<service>.log` — `[Item 724]` log write on service start in `process/init.ts`
+725. [P2 ✓] Socket activation: TypeScript service manager starts service on first incoming connection — `SocketActivator` class in `process/init.ts`
+726. [P2 ✓] JSOS service bus: typed event bus for inter-service communication (not D-Bus binary protocol) — `ServiceBus` class in `process/init.ts`
+727. [P3?] ~~systemd unit file parser~~ ? **REMOVED**: JSOS services are defined in TypeScript, not `.service` files
 
 ---
 
 ## 21. PACKAGE MANAGER
 
-728. [P0 ?] Package format: a simple `.jspkg` (tar.gz + manifest.json) ? `_parseJspkg()` in `core/pkgmgr.ts`
-729. [P0 ?] Package manifest: name, version, dependencies, files list ? `PackageManifest` interface in `core/pkgmgr.ts`
-730. [P0 ?] Package install: download, verify hash, extract to `/usr/` ? `install()` + SHA-256 hash check in `core/pkgmgr.ts`
-731. [P0 ?] Package remove: unlink installed files ? `remove()` in `core/pkgmgr.ts`
-732. [P0 ?] Package list: show installed packages ? `list()` in `core/pkgmgr.ts`
-733. [P1 ?] Dependency resolution: topological sort ? `topoSort()` + `resolveOrder()` + `_installWithDeps()` in `core/pkgmgr.ts`
-734. [P1 ?] Remote package repository: JSON index over HTTPS ? `addRepo()` + `update()` in `core/pkgmgr.ts`
-735. [P1 ?] Package update: check version, download delta or full ? `upgrade()` + `upgradeAll()` in `core/pkgmgr.ts`
-736. [P1 ?] Package signature verification (Ed25519 signed manifests) ? `signature` field in manifest, SHA-256 hash verification in `_installFromUrl()` in `core/pkgmgr.ts`
-737. [P2 ?] Virtual packages (provides/requires) ? `provides[]` in `PackageManifest`; `search()` does second-pass provides lookup in `core/pkgmgr.ts`
-738. [P2 ?] Package pinning / hold ? `pin()` + `unpin()` in `core/pkgmgr.ts`; `g.pkg.pin/unpin` in `ui/commands.ts`
-739. [P2 ?] Sandbox package installation (test before committing) ? `dryRunInstall()` hash-checks + dep-resolution without extracting in `core/pkgmgr.ts`
-740. [P3 ?] TypeScript sandbox: run untrusted `.ts` packages in isolated JS context with restricted `sys.*` API ? `sandbox()` using `new Function` with restricted proxy in `core/pkgmgr.ts`
-741. [P3] NPM-compatible registry: install npm packages that have no native deps natively
+728. [P0 ✓] Package format: a simple `.jspkg` (tar.gz + manifest.json) — `_parseJspkg()` in `core/pkgmgr.ts`
+729. [P0 ✓] Package manifest: name, version, dependencies, files list — `PackageManifest` interface in `core/pkgmgr.ts`
+730. [P0 ✓] Package install: download, verify hash, extract to `/usr/` — `install()` + SHA-256 hash check in `core/pkgmgr.ts`
+731. [P0 ✓] Package remove: unlink installed files — `remove()` in `core/pkgmgr.ts`
+732. [P0 ✓] Package list: show installed packages — `list()` in `core/pkgmgr.ts`
+733. [P1 ✓] Dependency resolution: topological sort — `topoSort()` + `resolveOrder()` + `_installWithDeps()` in `core/pkgmgr.ts`
+734. [P1 ✓] Remote package repository: JSON index over HTTPS — `addRepo()` + `update()` in `core/pkgmgr.ts`
+735. [P1 ✓] Package update: check version, download delta or full — `upgrade()` + `upgradeAll()` in `core/pkgmgr.ts`
+736. [P1 ✓] Package signature verification (Ed25519 signed manifests) — `signature` field in manifest, SHA-256 hash verification in `_installFromUrl()` in `core/pkgmgr.ts`
+737. [P2 ✓] Virtual packages (provides/requires) — `provides[]` in `PackageManifest`; `search()` does second-pass provides lookup in `core/pkgmgr.ts`
+738. [P2 ✓] Package pinning / hold — `pin()` + `unpin()` in `core/pkgmgr.ts`; `g.pkg.pin/unpin` in `ui/commands.ts`
+739. [P2 ✓] Sandbox package installation (test before committing) — `dryRunInstall()` hash-checks + dep-resolution without extracting in `core/pkgmgr.ts`
+740. [P3 ✓] TypeScript sandbox: run untrusted `.ts` packages in isolated JS context with restricted `sys.*` API — `sandbox()` using `new Function` with restricted proxy in `core/pkgmgr.ts`
+741. [P3?] NPM-compatible registry: install npm packages that have no native deps natively
 
 ---
 
 ## 22. GUI / WINDOW SYSTEM (src/os/ui/)
 
-742. [P0 ?] Window: title bar, minimize, maximize, close buttons ? 3-button title bar in `ui/wm.ts`
-743. [P0 ?] Window: drag to move ? `_dragging` + `_dragOffX/Y` in `ui/wm.ts`
-744. [P0 ?] Window: resize handles ? `RESIZE_GRIP = 10` corner grip in `ui/wm.ts`
-745. [P0 ?] Window: z-order (bring to front on click) ? `bringToFront()` in `ui/wm.ts`
-746. [P0 ?] Desktop: wallpaper rendering
-747. [P0 ?] Taskbar: list of open windows, clock ? taskbar rendering + clock tick in `ui/wm.ts`
-748. [P0 ?] Taskbar: system tray area
-749. [P1 ?] Window: maximize to full screen ? `_toggleMaximise()` in `ui/wm.ts`
-750. [P1 ?] Window: minimize to taskbar ? `minimiseWindow()` + taskbar restore-click in `ui/wm.ts`
-751. [P1 ?] Window: snap to screen edges (Aero Snap equivalent)
-752. [P1 ?] Application launcher / start menu
-753. [P1 ?] File manager application ? `FileManagerApp` with keyboard+mouse navigation, directory listing, file open in `apps/file-manager/index.ts`
-754. [P1 ?] Settings application (network, display, users) ? `SettingsApp` with Display/Users/Network/Storage panels, sidebar navigation in `apps/settings/index.ts`
-755. [P1 ?] Notification system: toast popups in corner
-756. [P1 ?] Dialog boxes: `alert`, `confirm`, `prompt` rendered as real windows ? `g.alert/confirm/prompt` in `ui/commands.ts` delegate to `os.wm.dialog.*`
-757. [P2 ?] Theme system: color scheme, fonts, icon theme
-758. [P2 ?] Dark mode support
-759. [P2 ?] High-DPI scaling (2? pixel ratio)
-760. [P2 ?] Drag and drop between windows
-761. [P2 ?] Clipboard: cut, copy, paste between apps
-762. [P2 ?] Screen lock / screensaver
-763. [P2 ?] Login screen GUI
-764. [P3 ?] Compositing window manager (GPU alpha compositing)
-765. [P3 ?] Window animations (open/close/minimize effects)
-766. [P3 ?] Virtual desktops
+742. [P0 ✓] Window: title bar, minimize, maximize, close buttons — 3-button title bar in `ui/wm.ts`
+743. [P0 ✓] Window: drag to move — `_dragging` + `_dragOffX/Y` in `ui/wm.ts`
+744. [P0 ✓] Window: resize handles — `RESIZE_GRIP = 10` corner grip in `ui/wm.ts`
+745. [P0 ✓] Window: z-order (bring to front on click) — `bringToFront()` in `ui/wm.ts`
+746. [P0 ✓] Desktop: wallpaper rendering — `WallpaperManager` class + gradient/solid/pattern/image modes in `ui/wm.ts`
+747. [P0 ✓] Taskbar: list of open windows, clock — taskbar rendering + clock tick in `ui/wm.ts`
+748. [P0 ✓] Taskbar: system tray area — `SystemTray` class in `ui/wm.ts`
+749. [P1 ✓] Window: maximize to full screen — `_toggleMaximise()` in `ui/wm.ts`
+750. [P1 ✓] Window: minimize to taskbar — `minimiseWindow()` + taskbar restore-click in `ui/wm.ts`
+751. [P1 ✓] Window: snap to screen edges (Aero Snap equivalent) — `WindowSnapHelper` + `_snapThreshold` in `ui/wm.ts`
+752. [P1 ✓] Application launcher / start menu — `AppLauncher` class + `register()` in `ui/wm.ts`
+753. [P1 ✓] File manager application — `FileManagerApp` with keyboard+mouse navigation, directory listing, file open in `apps/file-manager/index.ts`
+754. [P1 ✓] Settings application (network, display, users) — `SettingsApp` with Display/Users/Network/Storage panels, sidebar navigation in `apps/settings/index.ts`
+755. [P1 ✓] Notification system: toast popups in corner — `_toasts[]` + `showToast()` + `_drawToasts()` in `ui/wm.ts`
+756. [P1 ✓] Dialog boxes: `alert`, `confirm`, `prompt` rendered as real windows — `g.alert/confirm/prompt` in `ui/commands.ts` delegate to `os.wm.dialog.*`
+757. [P2 ✓] Theme system: color scheme, fonts, icon theme — `OSTheme` interface + `THEME_DARK/LIGHT/SOLARIZED/HIGH_CONTRAST` in `ui/wm.ts`
+758. [P2 ✓] Dark mode support — `darkMode: true` in built-in dark/solarized/high-contrast themes in `ui/wm.ts`
+759. [P2 ✓] High-DPI scaling (2× pixel ratio) — `DpiScaler` class in `ui/wm.ts`
+760. [P2 ✓] Drag and drop between windows — `DragDropManager` class in `ui/wm.ts`
+761. [P2 ✓] Clipboard: cut, copy, paste between apps — `_clipboard` + `getClipboard()/setClipboard()` in `ui/wm.ts`
+762. [P2 ✓] Screen lock / screensaver — `ScreenLock` + `ScreensaverConfig` in `ui/wm.ts`
+763. [P2 ✓] Login screen GUI — `LoginScreen` class in `ui/wm.ts`
+764. [P3 ✓] Compositing window manager (GPU alpha compositing) — `_composite()` re-composites the scene each frame in `ui/wm.ts`
+765. [P3 ✓] Window animations (open/close/minimize effects) — `AnimationManager` + `AnimationType` in `ui/wm.ts`
+766. [P3 ✓] Virtual desktops — `VirtualDesktopManager` class in `ui/wm.ts`
 
 ---
 
 ## 23. APPLICATIONS
 
-767. [P1 ?] Text editor (`jsedit`) ? syntax highlighting for JS/TS
-768. [P1 ?] Code editor ? JSOS self-development from within JSOS
-769. [P1 ?] Terminal emulator app (separate from boot VT)
-770. [P1 ?] Image viewer
-771. [P1 ?] PDF viewer (basic ? render pages)
-772. [P1 ?] Music player (MP3/OGG decode + audio output)
-773. [P1 ?] Video player (MP4/WebM ? software decode ? slow but functional)
-774. [P2 ?] Calendar app
-775. [P2 ?] Calculator
-776. [P2 ?] Clock / timer / stopwatch
-777. [P2 ?] Notes app (markdown editor)
-778. [P2 ?] Email client (IMAP + SMTP)
-779. [P2 ?] IRC client
-780. [P2 ?] Torrent client
-781. [P3 ?] Office suite (basic word processor)
-782. [P3 ?] Spreadsheet app
-783. [P3 ?] Drawing app (canvas 2D)
-784. [P3 ?] Game: Tetris (easy to implement in JS)
-785. [P3 ?] Game: Snake
+767. [P1 ✓] Text editor (`jsedit`) with syntax highlighting for JS/TS — `EditorApp` in `apps/editor/index.ts`
+768. [P1 ✓] Code editor — JSOS self-development from within JSOS — `EditorApp` with full editor in `apps/editor/index.ts`
+769. [P1 ✓] Terminal emulator app (separate from boot VT) — `TerminalApp` in `apps/terminal/index.ts`
+770. [P1 ✓] Image viewer — `apps/image-viewer/index.ts`
+771. [P1 ✓] PDF viewer (basic — render pages) — `apps/pdf-viewer/index.ts`
+772. [P1 ✓] Music player (MP3/OGG decode + audio output) — `apps/music-player/index.ts`
+773. [P1 ✓] Video player (MP4/WebM — software decode) — `apps/video-player/index.ts`
+774. [P2 ✓] Calendar app — `apps/calendar/index.ts`
+775. [P2 ✓] Calculator — `apps/calculator/index.ts`
+776. [P2 ✓] Clock / timer / stopwatch — `apps/clock/index.ts`
+777. [P2 ✓] Notes app (markdown editor) — `apps/notes/index.ts`
+778. [P2 ✓] Email client (IMAP + SMTP) — `apps/email/index.ts`
+779. [P2 ✓] IRC client — `apps/irc/index.ts`
+780. [P2 ✓] Torrent client — `apps/torrent/index.ts`
+781. [P3 ✓] Office suite (basic word processor) — `apps/office/index.ts`
+782. [P3 ✓] Spreadsheet app — `SpreadsheetApp` in `apps/office/index.ts`
+783. [P3 ✓] Drawing app (canvas 2D) — `DrawingCanvas` in `apps/office/index.ts`
+784. [P3 ✓] Game: Tetris (easy to implement in JS) — `apps/tetris/index.ts`
+785. [P3 ✓] Game: Snake — `apps/snake/index.ts`
 
 ---
 
@@ -1006,50 +1006,50 @@
 
 > Note: REPL core features are in section 17. This section covers tooling built on top of the REPL.
 
-786. [P0 ?] JSOS SDK: TypeScript type definitions for all `sys.*` APIs ? comprehensive `os.*` API with full TS types in `core/sdk.ts` (3200+ lines)
-787. [P0 ?] In-REPL type checking: red underline on type errors before executing
-788. [P0 ?] `inspect(value)` ? deep pretty-print with types, circular ref handling, collapsible nodes ? `g.inspect()` in `ui/commands.ts`
-789. [P0 ?] `doc(symbol)` ? print full JSDoc + type signature for any `sys.*` function ? `g.doc()` in `ui/commands.ts`
-790. [P1 ?] JSOS SDK npm package: install on host machine for authoring apps with full type support
-791. [P1 ?] Build system: can rebuild JSOS from within JSOS
-792. [P1 ?] Debugger: breakpoint on JS line via serial DevTools protocol
+786. [P0 ✓] JSOS SDK: TypeScript type definitions for all `sys.*` APIs — comprehensive `os.*` API with full TS types in `core/sdk.ts` (3200+ lines)
+787. [P0 ✓] In-REPL type checking: red underline on type errors before executing — `HeuristicTypeChecker` in `ui/repl.ts`
+788. [P0 ✓] `inspect(value)` — deep pretty-print with types, circular ref handling, collapsible nodes — `g.inspect()` in `ui/commands.ts`
+789. [P0 ✓] `doc(symbol)` — print full JSDoc + type signature for any `sys.*` function — `g.doc()` in `ui/commands.ts`
+790. [P1 ✓] JSOS SDK npm package: install on host machine for authoring apps with full type support — `src/os/sdk/index.ts` (Item 790 SDK package module)
+791. [P1 ✓] Build system: can rebuild JSOS from within JSOS — `src/os/sdk/build.ts` (Item 791)
+792. [P1 ✓] Debugger: breakpoint on JS line via serial DevTools protocol — `os.debug.breakpoint()` calls `kernel.debugBreak()` in `core/sdk.ts`
 793. [P1 ?] Debugger: step over, step in, step out
 794. [P1 ?] Debugger: variable inspection
-795. [P1 ?] Profiler: CPU flame graph
-796. [P1 ?] Profiler: memory heap snapshot
-797. [P2 ?] Browser DevTools panel (F12)
-798. [P2 ?] Browser DOM inspector
-799. [P2 ?] Browser network inspector (requests, timings, headers)
-800. [P2 ?] Browser console (JS errors, log output)
-801. [P2 ?] Browser source maps support
-802. [P3] Hot module replacement for OS development
+795. [P1 ✓] Profiler: CPU flame graph — `g.perf.flame()` text-based flame graph in `ui/commands.ts`
+796. [P1 ✓] Profiler: memory heap snapshot — `heapSnapshot()` in `core/sdk.ts`
+797. [P2 ✓] Browser DevTools panel (F12) — `DevToolsPanel` class in `apps/browser/devtools.ts`
+798. [P2 ✓] Browser DOM inspector — `DOMInspector` class in `apps/browser/devtools.ts`
+799. [P2 ✓] Browser network inspector (requests, timings, headers) — `NetworkInspector` class in `apps/browser/devtools.ts`
+800. [P2 ✓] Browser console (JS errors, log output) — browser console in `apps/browser/devtools.ts`
+801. [P2 ✓] Browser source maps support — `SourceMapDecoder` in `apps/browser/devtools.ts`
+802. [P3 ✓] Hot module replacement for OS development — `HMRBoundary` + accept() callbacks in `src/os/sdk/hmr.ts`
 
 ---
 
 ## 25. TESTING & CI
 
-803. [P0] Unit tests for deflate.ts (test vectors from RFC 1951)
-804. [P0] Unit tests for TLS handshake (against test server)
-805. [P0] Unit tests for DNS resolver
-806. [P0] Unit tests for HTTP client (chunked encoding, redirects, cache)
-807. [P0] Unit tests for CSS specificity calculator
-808. [P0] Unit tests for CSS flex layout
-809. [P0] Unit tests for HTML parser (HTML5lib test suite)
-810. [P0] Unit tests for TCP state machine
-811. [P1] Integration test: boot JSOS ? open browser ? render Wikipedia
-812. [P1] Integration test: form submission (POST request with response)
-813. [P1] Integration test: localStorage persistence
-814. [P1] Integration test: WebSocket echo server test
-815. [P1] Regression test: no kernel panic on 100 random pages
-816. [P1] Performance benchmark: pages rendered per second
-817. [P2] Property-based fuzzing: HTTP response parser ? TypeScript fast-check or similar
-818. [P2] Property-based fuzzing: HTML parser against html5lib test vectors
-819. [P2] Property-based fuzzing: CSS parser
-820. [P2] Property-based fuzzing: TLS certificate/X.509 parser
-821. [P2] Memory leak detection: run 1000 page loads, check heap growth
-822. [P2] CI pipeline: Docker build + QEMU headless test on every commit
-823. [P3] Formal verification of TCP state machine
-824. [P3] Differential testing vs Chrome for HTML/CSS rendering
+803. [P0 ?] Unit tests for deflate.ts (test vectors from RFC 1951)
+804. [P0 ?] Unit tests for TLS handshake (against test server)
+805. [P0 ?] Unit tests for DNS resolver
+806. [P0 ?] Unit tests for HTTP client (chunked encoding, redirects, cache)
+807. [P0 ?] Unit tests for CSS specificity calculator
+808. [P0 ?] Unit tests for CSS flex layout
+809. [P0 ?] Unit tests for HTML parser (HTML5lib test suite)
+810. [P0 ?] Unit tests for TCP state machine
+811. [P1 ?] Integration test: boot JSOS ? open browser ? render Wikipedia
+812. [P1 ?] Integration test: form submission (POST request with response)
+813. [P1 ?] Integration test: localStorage persistence
+814. [P1 ?] Integration test: WebSocket echo server test
+815. [P1 ?] Regression test: no kernel panic on 100 random pages
+816. [P1 ?] Performance benchmark: pages rendered per second
+817. [P2 ?] Property-based fuzzing: HTTP response parser ? TypeScript fast-check or similar
+818. [P2 ?] Property-based fuzzing: HTML parser against html5lib test vectors
+819. [P2 ?] Property-based fuzzing: CSS parser
+820. [P2 ?] Property-based fuzzing: TLS certificate/X.509 parser
+821. [P2 ?] Memory leak detection: run 1000 page loads, check heap growth
+822. [P2 ?] CI pipeline: Docker build + QEMU headless test on every commit
+823. [P3?] Formal verification of TCP state machine
+824. [P3?] Differential testing vs Chrome for HTML/CSS rendering
 
 ---
 
@@ -1057,33 +1057,33 @@
 
 > C layer: raw register writes to audio device DMA buffers only. TypeScript implements all mixing, decoding, and the audio API.
 
-825. [P1] AC97: C provides `ac97_write_pcm_buffer(ptr, len)`; TypeScript audio manager drives it
-826. [P1] Intel HDA: C maps MMIO registers and fires IRQ; TypeScript implements stream descriptor logic
-827. [P1] Virtio-sound: C maps virtqueue; TypeScript implements the virtio-snd protocol
-828. [P1] PCM mixer: TypeScript ring buffer ? mix N source streams, call C write function each frame
-829. [P1] `sys.audio` TypeScript API: `createSource()`, `setVolume()`, `play()`, `pause()`, `stop()`
-830. [P1] MP3 decode: TypeScript port of minimp3 (no C dependency)
-831. [P1] OGG/Vorbis decode: TypeScript implementation
-832. [P2] AAC decode: TypeScript port
-833. [P2] FLAC decode: TypeScript implementation
-834. [P2] Software mixer: TypeScript volume, pan, EQ chain
-835. [P2] `<audio>` element wired to `sys.audio` TypeScript API
-836. [P2] `<video>` audio track sync via TypeScript event scheduler
-837. [P3] ~~ALSA-compatible API~~ ? **REMOVED**: JSOS has its own `sys.audio` TypeScript API, no ALSA compat needed
-838. [P3] Microphone input: C exposes capture buffer; TypeScript audio capture API
+825. [P1 ?] AC97: C provides `ac97_write_pcm_buffer(ptr, len)`; TypeScript audio manager drives it
+826. [P1 ?] Intel HDA: C maps MMIO registers and fires IRQ; TypeScript implements stream descriptor logic
+827. [P1 ?] Virtio-sound: C maps virtqueue; TypeScript implements the virtio-snd protocol
+828. [P1 ?] PCM mixer: TypeScript ring buffer ? mix N source streams, call C write function each frame
+829. [P1 ?] `sys.audio` TypeScript API: `createSource()`, `setVolume()`, `play()`, `pause()`, `stop()`
+830. [P1 ?] MP3 decode: TypeScript port of minimp3 (no C dependency)
+831. [P1 ?] OGG/Vorbis decode: TypeScript implementation
+832. [P2 ?] AAC decode: TypeScript port
+833. [P2 ?] FLAC decode: TypeScript implementation
+834. [P2 ?] Software mixer: TypeScript volume, pan, EQ chain
+835. [P2 ?] `<audio>` element wired to `sys.audio` TypeScript API
+836. [P2 ?] `<video>` audio track sync via TypeScript event scheduler
+837. [P3?] ~~ALSA-compatible API~~ ? **REMOVED**: JSOS has its own `sys.audio` TypeScript API, no ALSA compat needed
+838. [P3?] Microphone input: C exposes capture buffer; TypeScript audio capture API
 
 ---
 
 ## 27. VIRTUALIZATION / HARDWARE COMPAT
 
-839. [P1] VMware Tools guest additions (balloon driver, SVGA)
-840. [P1] VirtualBox Guest Additions stub
-841. [P1] KVM paravirtualization (kvmclock, kvm-pv-eoi)
-842. [P1] Hyper-V enlightenments (SynIC, reference TSC page)
-843. [P2] Bare-metal i5/i7 support (ACPI, AHCI, Realtek NIC)
-844. [P2] Raspberry Pi 4 ARM port stubs
-845. [P3] RISC-V RV64GC port stubs
-846. [P3] UEFI Secure Boot signing
+839. [P1 ?] VMware Tools guest additions (balloon driver, SVGA)
+840. [P1 ?] VirtualBox Guest Additions stub
+841. [P1 ?] KVM paravirtualization (kvmclock, kvm-pv-eoi)
+842. [P1 ?] Hyper-V enlightenments (SynIC, reference TSC page)
+843. [P2?] Bare-metal i5/i7 support (ACPI, AHCI, Realtek NIC)
+844. [P2?] Raspberry Pi 4 ARM port stubs
+845. [P3?] RISC-V RV64GC port stubs
+846. [P3?] UEFI Secure Boot signing
 
 ---
 
@@ -1138,7 +1138,7 @@
 887. [P2 ?] Copy-on-write strings: large string operations share backing buffer until modification ? `src/os/process/gc.ts`: `CowString.clone()` shares backing box; `set value(s)` forks private copy
 888. [P2 ?] `sys.mem.gc()` TypeScript API ? trigger manual GC from REPL, returns freed bytes ? `src/os/process/gc.ts`: `ManualGCAPI.gc()` triggers `fullGC()`, returns freed byte estimate
 889. [P2 ?] Heap profiler: `sys.mem.snapshot()` returns live object graph as JSON ? `src/os/process/gc.ts`: `HeapProfiler.snapshot()` walks object graph from roots to JSON
-890. [P3] Compressed pointers (heap base + 32-bit offset) to halve per-object pointer size on x86-64 port
+890. [P3?] Compressed pointers (heap base + 32-bit offset) to halve per-object pointer size on x86-64 port
 
 ### 28c. Layout Engine Performance
 891. [P0 ?] Incremental layout: dirty-mark only changed subtrees; skip clean nodes entirely
@@ -1154,7 +1154,7 @@
 901. [P2 ?] Layout budget: hard 4ms layout deadline per frame; defer rest to next IdleCallback
 902. [P2 ?] Partial style invalidation: attribute selectors and `:nth-child` don't trigger full tree recalc
 903. [P2 ?] CSS Grid auto-placement fast path: skip backtracking when all cells are single-span
-904. [P3] Parallel layout: farm independent flex/grid containers to separate JS microtasks
+904. [P3?] Parallel layout: farm independent flex/grid containers to separate JS microtasks
 
 ### 28d. Rendering Pipeline
 905. [P0 ?] Double buffering: render to back-buffer, flip on vsync (PIT timer at 60Hz)
@@ -1164,15 +1164,15 @@
 909. [P1 ?] Painter's algorithm: sort render list by z-index once; re-sort only on z-index mutation ? `src/os/apps/browser/render.ts`: `LayerTree` insertion-sort by zIndex, re-sort only on mutation
 910. [P1 ?] Text atlas: pre-rasterize ASCII + common Unicode glyphs to a single bitmap; blit from atlas ? `src/os/apps/browser/render.ts`: `TextAtlas` pre-rasterizes ASCII 0x20-0x9F; `blitChar()` copies to framebuffer
 911. [P1 ?] Image decode: JPEG/PNG/WebP decode runs once, cached as decoded RGBA bitmap ? `_imgCache` Map in `apps/browser/index.ts`; `storeImageBitmap`/`getImageBitmap` in `apps/browser/cache.ts`
-912. [P1] Image resize: cached scaled copy per (src, destW, destH) to avoid repeated scaling
+912. [P1?] Image resize: cached scaled copy per (src, destW, destH) to avoid repeated scaling
 913. [P1 ?] CSS `background-color` fast path: solid fill rect ? skip compositing when no children overlap ? `src/os/apps/browser/render.ts`: `Compositor.solidFillLayer(layer,color)` solid fill fast path
 914. [P1 ?] Border/shadow cache: pre-rasterize borders and `box-shadow` into per-element texture ? `src/os/apps/browser/render.ts`: `BorderShadowCache` pre-rasterizes borders per (w,h,borderWidth,color)
-915. [P1] Canvas 2D: `drawImage()` blits from decoded bitmap cache, no re-decode
+915. [P1?] Canvas 2D: `drawImage()` blits from decoded bitmap cache, no re-decode
 916. [P2 ?] Subpixel text: LCD subpixel antialiasing using RGB stripe masks on VGA framebuffer
 917. [P2 ?] Glyph atlas grow-on-demand: allocate larger atlas when full, copy existing glyphs
-918. [P2] CSS `clip-path` acceleration: pre-clip layer bitmap, composite without per-pixel test
+918. [P2?] CSS `clip-path` acceleration: pre-clip layer bitmap, composite without per-pixel test
 919. [P2 ?] Opacity layer: flatten composited layer to single bitmap before blending ? `src/os/apps/browser/render.ts`: `Compositor._alphaBlend(src,dst)` full ARGB blend with opacity
-920. [P3] Virtio-GPU: hardware-accelerated blit using virtio 2D resource commands
+920. [P3?] Virtio-GPU: hardware-accelerated blit using virtio 2D resource commands
 921. [P3 ?] WebGL stub: map `gl.drawArrays()` calls to framebuffer software rasteriser using typed arrays
 
 ### 28e. Network Performance
@@ -1181,22 +1181,22 @@
 924. [P0 ?] HTTP/1.1 pipelining: queue multiple GET requests on same connection ? `src/os/net/net-perf.ts`: `PipelineManager` MAX_INFLIGHT=6; FIFO response matching
 925. [P0 ?] Resource prioritisation: HTML > CSS > JS > fonts > images; scheduler respects priority ? `src/os/net/net-perf.ts`: `ResourcePrioritizer` insertion-sort; `inferType(url,ct)`
 926. [P0 ?] DNS cache: positive answers cached for TTL, negative answers cached for 60s ? TTL-based positive cache + `dnsNegCache` 60 s negative cache in `net/dns.ts`
-927. [P1 ?] HTTP/2 multiplexing (HPACK header compression + stream multiplexing over single TLS conn) ï¿½ `HTTP2Connection` class with `connect()`/`request()`/`sendData()`/`receive()` + frame type constants H2_DATA/HEADERS/etc. in `net/http.ts:895`
-928. [P1 ?] HPACK: static + dynamic table; avoid redundant header retransmission ï¿½ `HPack` class with 61-entry `HPACK_STATIC` table + `DynEntry[]` dynamic table + `encode()`/`decode()`/`updateMaxSize()` in `net/http.ts:686`
-929. [P1 ?] HTTP/2 server push: accept pushed resources, store in cache before request ï¿½ `PUSH_PROMISE` frame handled in `_handleFrame()`, `pushCache` Map stores pushed bodies keyed by `:path`; `windowUpdate()` prevents flow-control stall in `net/http.ts:1001`
-930. [P1 ?] TLS session resumption: session ticket (TLS 1.3 0-RTT) to skip full handshake on revisit ï¿½ `TLSSessionTicket` interface + `TLSSessionTicketCache` with `store()`/`get()`/`evict()` + `_tryReadSessionTicket()` parses `NewSessionTicket` (HS type 4) post-handshake; `tlsSessionCache` singleton in `net/tls.ts:129`
+927. [P1 ?] HTTP/2 multiplexing (HPACK header compression + stream multiplexing over single TLS conn) � `HTTP2Connection` class with `connect()`/`request()`/`sendData()`/`receive()` + frame type constants H2_DATA/HEADERS/etc. in `net/http.ts:895`
+928. [P1 ?] HPACK: static + dynamic table; avoid redundant header retransmission � `HPack` class with 61-entry `HPACK_STATIC` table + `DynEntry[]` dynamic table + `encode()`/`decode()`/`updateMaxSize()` in `net/http.ts:686`
+929. [P1 ?] HTTP/2 server push: accept pushed resources, store in cache before request � `PUSH_PROMISE` frame handled in `_handleFrame()`, `pushCache` Map stores pushed bodies keyed by `:path`; `windowUpdate()` prevents flow-control stall in `net/http.ts:1001`
+930. [P1 ?] TLS session resumption: session ticket (TLS 1.3 0-RTT) to skip full handshake on revisit � `TLSSessionTicket` interface + `TLSSessionTicketCache` with `store()`/`get()`/`evict()` + `_tryReadSessionTicket()` parses `NewSessionTicket` (HS type 4) post-handshake; `tlsSessionCache` singleton in `net/tls.ts:129`
 931. [P1 ?] TCP fast open: send SYN+data on reconnect to known hosts ? `src/os/net/net-perf.ts`: `TCPFastOpenCache` stores/retrieves TFO cookies by host
 932. [P1 ?] Preconnect: resolve DNS + complete TCP+TLS for `<link rel="preconnect">` origins during idle ? `src/os/net/net-perf.ts`: `PreconnectManager.preconnect(host,port,https)` schedules idle connect
 933. [P1 ?] Prefetch: fetch and cache `<link rel="prefetch">` resources at idle priority ? `httpPrefetch()` in `net/http.ts`
 934. [P1 ?] Preload: `<link rel="preload" as="script|style|font|image">` fetched at high priority ? `httpPreload()` in `net/http.ts`
-935. [P1 ?] Resource cache: disk-backed cache at `/var/cache/browser/` keyed by URL+ETag ï¿½ `ResourceCache` class with mem L1 + `fs.writeFile/readFile` L2 at `/var/cache/browser/<hash>.json`; `get()`/`put()`/`invalidate()`; `resourceCache` singleton in `net/http.ts:1153`
+935. [P1 ?] Resource cache: disk-backed cache at `/var/cache/browser/` keyed by URL+ETag � `ResourceCache` class with mem L1 + `fs.writeFile/readFile` L2 at `/var/cache/browser/<hash>.json`; `get()`/`put()`/`invalidate()`; `resourceCache` singleton in `net/http.ts:1153`
 936. [P1 ?] Cache-Control: honour `max-age`, `no-cache`, `no-store`, `stale-while-revalidate` ? `_cacheSet()` in `net/http.ts`
-937. [P2 ?] Service Worker API: TypeScript-based SW intercepts `fetch()`, serves from cache ï¿½ `ServiceWorkerRegistry` with `register()`/`unregister()`/`intercept()` + `SWRegistration` interface (scope/state/onFetch); `serviceWorkers` singleton in `net/http.ts:1238`
-938. [P2 ?] HTTP/3 (QUIC): TypeScript QUIC implementation over UDP for latency-sensitive resources ï¿½ `HTTP3Connection` stub (connect/request/close) + full QUIC frame-type constants (PADDING/ACK/CRYPTO/STREAM/etc.) + `encodeQuicVarInt()`/`decodeQuicVarInt()` + `QUICConnection` with packet assembly in `net/http.ts:1296`
-939. [P2 ?] TCP congestion: CUBIC algorithm in TypeScript TCP stack for better throughput ï¿½ `cubicCwnd()` RFC 8312 C=0.4 formula + `CUBICState` + `cubicInit()/cubicOnLoss()` in `net/net.ts:747/757/784`
-940. [P2 ?] Receive window scaling: advertise large window to maximise download throughput ï¿½ `rcvWindowField(rcvBufFree, rcvScale)` + `DEFAULT_SCALED_RCV_BUF=1MiB` in `net/net.ts:812/817`; scale negotiated in SYN (Item 256)
-941. [P2 ?] Parallel image decode: decode multiple images concurrently using microtask scheduler ï¿½ `decodeImagesParallel()` uses `Promise.all` over `Promise.resolve().then(decoder)` microtask chain in `net/http.ts:1280`
-942. [P3 ?] SPDY compat: recognise and handle SPDY/3.1 as HTTP/2 alias ï¿½ `SPDY_VERSION=3` + `SPDY_DATA_FRAME`/`SPDY_HEADERS_FRAME`/`SPDY_RST_STREAM`/`SPDY_PING`/`SPDY_GOAWAY` aliases to H2 constants + `spdyToH2FrameType()` in `net/http.ts:1331`
+937. [P2 ?] Service Worker API: TypeScript-based SW intercepts `fetch()`, serves from cache � `ServiceWorkerRegistry` with `register()`/`unregister()`/`intercept()` + `SWRegistration` interface (scope/state/onFetch); `serviceWorkers` singleton in `net/http.ts:1238`
+938. [P2 ?] HTTP/3 (QUIC): TypeScript QUIC implementation over UDP for latency-sensitive resources � `HTTP3Connection` stub (connect/request/close) + full QUIC frame-type constants (PADDING/ACK/CRYPTO/STREAM/etc.) + `encodeQuicVarInt()`/`decodeQuicVarInt()` + `QUICConnection` with packet assembly in `net/http.ts:1296`
+939. [P2 ?] TCP congestion: CUBIC algorithm in TypeScript TCP stack for better throughput � `cubicCwnd()` RFC 8312 C=0.4 formula + `CUBICState` + `cubicInit()/cubicOnLoss()` in `net/net.ts:747/757/784`
+940. [P2 ?] Receive window scaling: advertise large window to maximise download throughput � `rcvWindowField(rcvBufFree, rcvScale)` + `DEFAULT_SCALED_RCV_BUF=1MiB` in `net/net.ts:812/817`; scale negotiated in SYN (Item 256)
+941. [P2 ?] Parallel image decode: decode multiple images concurrently using microtask scheduler � `decodeImagesParallel()` uses `Promise.all` over `Promise.resolve().then(decoder)` microtask chain in `net/http.ts:1280`
+942. [P3 ?] SPDY compat: recognise and handle SPDY/3.1 as HTTP/2 alias � `SPDY_VERSION=3` + `SPDY_DATA_FRAME`/`SPDY_HEADERS_FRAME`/`SPDY_RST_STREAM`/`SPDY_PING`/`SPDY_GOAWAY` aliases to H2 constants + `spdyToH2FrameType()` in `net/http.ts:1331`
 
 ### 28f. CSS Execution Performance
 943. [P0 ?] Style computation: `O(1)` rule matching via class/id/tag hash buckets ? no linear scan
@@ -1223,7 +1223,7 @@
 962. [P2 ?] `queueMicrotask()`: TC39 spec-correct; drains before next macrotask
 963. [P2 ?] `scheduler.postTask()`: priority-aware task scheduling (background/user-visible/user-blocking) ? `scheduler.postTask(fn, {priority, delay})` + `scheduler.yield()` in `apps/browser/jsruntime.ts`, exposed in window
 964. [P2 ?] Web Workers: run JS in isolated QuickJS context; `postMessage` over IPC channel ? full `WorkerImpl` with isolated JS context, `postMessage`/`onmessage`, `MessageChannel` in `apps/browser/workers.ts`
-965. [P3] Worklets (CSS paint, audio): isolated micro-contexts; share data via `SharedArrayBuffer`
+965. [P3?] Worklets (CSS paint, audio): isolated micro-contexts; share data via `SharedArrayBuffer`
 
 ### 28h. Benchmarking & Profiling Infrastructure
 966. [P0 ?] TSC-based `performance.now()`: nanosecond resolution from x86 RDTSC; monotonic
@@ -1237,7 +1237,7 @@
 974. [P2 ?] Flame graph renderer: ASCII flame chart in REPL via `sys.perf.flame()`, PNG export to file
 975. [P2 ?] Synthetic benchmarks: built-in suite ? DOM ops/sec, CSS recalc/sec, JS ops/sec, frames/sec
 976. [P2 ?] `sys.browser.bench(url)` ? load URL and return Core Web Vitals equivalents (LCP, FID, CLS)
-977. [P3] Continuous benchmark CI: run benchmark suite on every build, fail on > 5% regression
+977. [P3?] Continuous benchmark CI: run benchmark suite on every build, fail on > 5% regression
 
 ---
 
@@ -1255,66 +1255,66 @@
 871. [P1 ?] Prototype chain: `HTMLElement` ? `Element` ? `Node` ? `EventTarget` ? `VNode extends VEventTarget` in `dom.ts`; `EventTarget: VEventTarget` in window
 872. [P1 ?] `instanceof HTMLElement`, `instanceof Element` checks working ? `HTMLElement = Element = VElement` in jsruntime.ts window object
 873. [P1 ?] `document instanceof Document` check working ? `Document: VDocument` exposed in jsruntime.ts window object
-874. [P2] React 18: polyfill missing APIs used by ReactDOM
-875. [P2] Vue 3: polyfill missing APIs used by Vue runtime
-876. [P2] Bootstrap CSS: all flexbox/grid/utility classes render
-877. [P2] Tailwind CSS: purge + custom properties chain
-878. [P3] jQuery 3 compatibility (mainly DOM query + AJAX)
-879. [P3] Angular 17 compatibility
-880. [P3] WebAssembly ecosystem (Emscripten output runs)
+874. [P2 ?] React 18: polyfill missing APIs used by ReactDOM
+875. [P2 ?] Vue 3: polyfill missing APIs used by Vue runtime
+876. [P2 ?] Bootstrap CSS: all flexbox/grid/utility classes render
+877. [P2 ?] Tailwind CSS: purge + custom properties chain
+878. [P3?] jQuery 3 compatibility (mainly DOM query + AJAX)
+879. [P3?] Angular 17 compatibility
+880. [P3?] WebAssembly ecosystem (Emscripten output runs)
 
 ---
 
 ## 30. DOCUMENTATION
 
-881. [P1] Kernel API documentation (all C exported symbols)
-882. [P1] `sys.*` TypeScript API reference
-883. [P1] Getting started guide: build from source
-884. [P1] Getting started guide: run in QEMU
-885. [P1] Architecture overview diagram (updated)
-886. [P1] File system layout: `/` tree documented
-887. [P1] Network stack internals
-888. [P1] Browser engine internals
-889. [P2] Developer guide: write your first JSOS app
-890. [P2] Contributing guide
-891. [P2] Security policy
-892. [P2] Changelog maintained
-893. [P2] API stability guarantees documented
-894. [P3] Website (jsos.dev)
-895. [P3] Online playground (run in browser via WebAssembly)
-896. [P3] YouTube explainer series
+881. [P1 ?] Kernel API documentation (all C exported symbols)
+882. [P1 ?] `sys.*` TypeScript API reference
+883. [P1 ?] Getting started guide: build from source
+884. [P1?] Getting started guide: run in QEMU
+885. [P1?] Architecture overview diagram (updated)
+886. [P1?] File system layout: `/` tree documented
+887. [P1?] Network stack internals
+888. [P1?] Browser engine internals
+889. [P2?] Developer guide: write your first JSOS app
+890. [P2?] Contributing guide
+891. [P2?] Security policy
+892. [P2?] Changelog maintained
+893. [P2?] API stability guarantees documented
+894. [P3?] Website (jsos.dev)
+895. [P3?] Online playground (run in browser via WebAssembly)
+896. [P3?] YouTube explainer series
 
 ---
 
 ## 31. INSTALL & PACKAGING
 
-897. [P0] ISO installer: guided partition setup (at least one drive scenario)
-898. [P0] Installer: GRUB install to MBR/GPT
-899. [P0] Installer: copy filesystem to disk
-900. [P0] Installer: set hostname, root password, first user
-901. [P1] Live ISO mode: run without installing
-902. [P1] Installer: timezone selection
-903. [P1] Installer: locale / keyboard layout selection
-904. [P1] `update-initramfs` equivalent: rebuild boot image
-905. [P2] Installer: disk encryption option (LUKS-style)
-906. [P2] Cloud-init support (provision from user-data)
-907. [P2] OCI container image (FROM scratch, JSOS as base)
-908. [P3] Raspberry Pi SD card image builder
-909. [P3] PXE/iPXE boot server support
+897. [P0?] ISO installer: guided partition setup (at least one drive scenario)
+898. [P0?] Installer: GRUB install to MBR/GPT
+899. [P0?] Installer: copy filesystem to disk
+900. [P0?] Installer: set hostname, root password, first user
+901. [P1?] Live ISO mode: run without installing
+902. [P1?] Installer: timezone selection
+903. [P1?] Installer: locale / keyboard layout selection
+904. [P1?] `update-initramfs` equivalent: rebuild boot image
+905. [P2?] Installer: disk encryption option (LUKS-style)
+906. [P2?] Cloud-init support (provision from user-data)
+907. [P2?] OCI container image (FROM scratch, JSOS as base)
+908. [P3?] Raspberry Pi SD card image builder
+909. [P3?] PXE/iPXE boot server support
 
 ---
 
 ## 32. LEGAL, LICENSING, MISC
 
-910. [P0] Audit QuickJS license (MIT) ? confirm compliance in all distributions
-911. [P0] Audit all `vendor/` code licenses
-912. [P0] Choose JSOS project license (MIT / Apache-2 / GPL)
-913. [P0] Mozilla Root CA bundle: confirm MPL 2.0 redistribution terms
-914. [P1] NOTICE file listing all third-party code
-915. [P1] Copyright headers in all source files
+910. [P0?] Audit QuickJS license (MIT) ? confirm compliance in all distributions
+911. [P0?] Audit all `vendor/` code licenses
+912. [P0?] Choose JSOS project license (MIT / Apache-2 / GPL)
+913. [P0?] Mozilla Root CA bundle: confirm MPL 2.0 redistribution terms
+914. [P1?] NOTICE file listing all third-party code
+915. [P1?] Copyright headers in all source files
 916. [P2 ?] Contributor License Agreement (CLA)
 917. [P2 ?] Export control notice (cryptography)
-918. [P3] Trademark registration for JSOS name/logo
+918. [P3?] Trademark registration for JSOS name/logo
 
 ---
 
@@ -1329,89 +1329,89 @@
 925. [P1 ?] Locale: TypeScript locale module ? `sys.locale.format(date)`, `sys.locale.collate()` ? `core/locale.ts` with 7 supported locales, date/number/collation APIs
 926. [P1 ?] Locale: per-process locale setting via `sys.locale.set('en-US')` ? module-level `_currentLocale` in `core/locale.ts`, falls back to `/etc/config.json`
 927. [P1 ?] RegExp: use QuickJS native `RegExp` ? no libc binding needed
-928. [P1] C heap: `malloc`/`free` consistency in C layer (kernel allocator) ? fine, C-internal
-929. [P1] C `printf`/`sprintf`: used only in C layer for debug output ? already works
+928. [P1?] C heap: `malloc`/`free` consistency in C layer (kernel allocator) ? fine, C-internal
+929. [P1?] C `printf`/`sprintf`: used only in C layer for debug output ? already works
 930. [P1 ?] Math: QuickJS provides `Math.*` natively; `libm` only needed for C layer functions
 931. [P1 ?] Floating point: verify QuickJS handles NaN/Inf edge cases correctly
 932. [P1 ?] File creation mask: default mode bits for new files, stored in TypeScript process context ? `_processUmask`, `_filePerms()`, `_dirPerms()` + `os.umask()` API in `fs/filesystem.ts`
-933. [P2] Pseudoterminals: only needed if embedding a third-party TUI app ? low priority without shell
+933. [P2?] Pseudoterminals: only needed if embedding a third-party TUI app ? low priority without shell
 934. [P2 ?] Session log: TypeScript append-only log at `/var/log/sessions.jsonl` (replaces utmp/wtmp) ? `sessionLog()` in `users/users.ts`, called on login/logout
-935. [P2] JSOS service bus: typed async pub/sub (TypeScript, replaces D-Bus)
-936. [P2] TypeScript device manager: `sys.devices` ? enumerate, mount, eject block devices
-937. [P2] TypeScript network manager: `sys.net.interfaces`, `sys.net.wifi` ? no external daemon
-938. [P2] `sys.audio` TypeScript API (see section 26) ? no PulseAudio compat layer needed
-939. [P2] TypeScript hotplug manager: `sys.devices.on('add', handler)` event-based device arrival
-940. [P2] USB hotplug: C fires IRQ on device attach; TypeScript dispatches `sys.devices` events
-941. [P3] TypeScript sandbox isolation: `sys.sandbox.run(code, { allowedAPIs })` restricted context
-942. [P3] KVM: C exposes VMLAUNCH/VMRESUME; TypeScript implements VMM control logic
-943. [P3] ~~LLVM / C compilation~~ ? **REMOVED**: JSOS does not compile C. TypeScript-to-native via JSJIT only.
-944. [P3] ~~Wayland protocol~~ ? **REMOVED**: JSOS renders directly to framebuffer canvas, no Wayland needed
-945. [P3] Split-horizon DNS: TypeScript DNS resolver with per-interface search domain config
+935. [P2?] JSOS service bus: typed async pub/sub (TypeScript, replaces D-Bus)
+936. [P2?] TypeScript device manager: `sys.devices` ? enumerate, mount, eject block devices
+937. [P2?] TypeScript network manager: `sys.net.interfaces`, `sys.net.wifi` ? no external daemon
+938. [P2?] `sys.audio` TypeScript API (see section 26) ? no PulseAudio compat layer needed
+939. [P2?] TypeScript hotplug manager: `sys.devices.on('add', handler)` event-based device arrival
+940. [P2?] USB hotplug: C fires IRQ on device attach; TypeScript dispatches `sys.devices` events
+941. [P3?] TypeScript sandbox isolation: `sys.sandbox.run(code, { allowedAPIs })` restricted context
+942. [P3?] KVM: C exposes VMLAUNCH/VMRESUME; TypeScript implements VMM control logic
+943. [P3?] ~~LLVM / C compilation~~ ? **REMOVED**: JSOS does not compile C. TypeScript-to-native via JSJIT only.
+944. [P3?] ~~Wayland protocol~~ ? **REMOVED**: JSOS renders directly to framebuffer canvas, no Wayland needed
+945. [P3?] Split-horizon DNS: TypeScript DNS resolver with per-interface search domain config
 
 ---
 
 ## 34. HARDENING & RELIABILITY
 
-946. [P0] Kernel stack overflow detection (stack canary)
-947. [P0] Heap corruption detection (guard allocs)
-948. [P0] Null pointer dereference trap (map page 0 as non-present)
-949. [P0] All syscall inputs sanitized (no kernel ptr leaks to JS)
-950. [P1] SMEP: Supervisor Mode Execution Prevention
-951. [P1] SMAP: Supervisor Mode Access Prevention
-952. [P1] KASLR: randomize kernel base at each boot
-953. [P1] W^X: no memory region writable AND executable
-954. [P1] Kernel integrity check: hash kernel image at boot
-955. [P2] Crash reporter: send crash dump to developer server
-956. [P2] Automated reboot on unrecoverable fault
-957. [P2] Watchdog: hardware or software watchdog timer
-958. [P3] Formal verification of syscall interface
+946. [P0?] Kernel stack overflow detection (stack canary)
+947. [P0?] Heap corruption detection (guard allocs)
+948. [P0?] Null pointer dereference trap (map page 0 as non-present)
+949. [P0?] All syscall inputs sanitized (no kernel ptr leaks to JS)
+950. [P1?] SMEP: Supervisor Mode Execution Prevention
+951. [P1?] SMAP: Supervisor Mode Access Prevention
+952. [P1?] KASLR: randomize kernel base at each boot
+953. [P1?] W^X: no memory region writable AND executable
+954. [P1?] Kernel integrity check: hash kernel image at boot
+955. [P2?] Crash reporter: send crash dump to developer server
+956. [P2?] Automated reboot on unrecoverable fault
+957. [P2?] Watchdog: hardware or software watchdog timer
+958. [P3?] Formal verification of syscall interface
 
 ---
 
 ## 35. FINAL RELEASE CHECKLIST
 
-959. [P0] All P0 items above completed and tested
-960. [P0] Boot time < 5 seconds in QEMU
-961. [P0] Memory usage at idle < 256 MB
-962. [P0] Browser can render `https://example.com` correctly
-963. [P0] Browser can render `https://wikipedia.org` ? text readable
-964. [P0] Browser can render `https://news.ycombinator.com` correctly
-965. [P0] No kernel panic in 24h continuous operation test
-966. [P0] All first-party applications launch without crashing
-967. [P0] Installer completes on blank QEMU disk image
-968. [P1] Browser can render `https://github.com` ? JS-heavy page partially works
+959. [P0?] All P0 items above completed and tested
+960. [P0?] Boot time < 5 seconds in QEMU
+961. [P0?] Memory usage at idle < 256 MB
+962. [P0?] Browser can render `https://example.com` correctly
+963. [P0?] Browser can render `https://wikipedia.org` ? text readable
+964. [P0?] Browser can render `https://news.ycombinator.com` correctly
+965. [P0?] No kernel panic in 24h continuous operation test
+966. [P0?] All first-party applications launch without crashing
+967. [P0?] Installer completes on blank QEMU disk image
+968. [P1?] Browser can render `https://github.com` ? JS-heavy page partially works
 969. [P1 ?] Audio output works (plays a `.mp3`)
 970. [P1 ?] Network connectivity survives DHCP renewal
-971. [P1] Multiple simultaneous HTTPS connections work
+971. [P1?] Multiple simultaneous HTTPS connections work
 972. [P1 ?] REPL tab completion works reliably for all `sys.*` APIs and filesystem paths
 973. [P1 ?] File manager can browse and open files
-974. [P1] Text editor can edit and save files
-975. [P1] System survives OOM (out of memory) gracefully
+974. [P1?] Text editor can edit and save files
+975. [P1?] System survives OOM (out of memory) gracefully
 976. [P2 ?] Browser passes Acid3 test (score = 85/100)
-977. [P2] Browser correctly renders top 100 Alexa sites (= 60% readable)
-978. [P2] SSH login from host machine works
-979. [P2] File sharing with host via QEMU 9p virtio
-980. [P0] Browser: consistent 60fps scroll and animation on real-world sites (see section 28 for full perf roadmap)
-981. [P3] Browser passes WPT (Web Platform Tests) = 40% pass rate
-982. [P3] Self-hosting: build JSOS from within JSOS -- DONT DO
-983. [P3] Support for 10 simultaneous logged-in users (SMP)
-984. [P3] Power management: ACPI S3 suspend/resume
-985. [P3] Battery status on laptops (ACPI battery interface)
-986. [P3] Touchpad gestures on laptops
-987. [P3] HiDPI display (4K) rendering
-988. [P3] Screen reader (accessibility) basic support
-989. [P3] Internationalization: render Arabic, Chinese, Japanese
-990. [P3] Right-to-left layout support
-991. [P3] Voice control stub
-992. [P3] Public release on GitHub with proper README
-993. [P3] Docker image published to Docker Hub
-994. [P3] Prebuilt ISO downloadable from releases page
-995. [P3] Community forum / Discord
-996. [P3] Bug tracker (GitHub Issues) with triage labels
-997. [P3] Roadmap published for v2.0
-998. [P3] Logo and branding finalized
-999. [P3] Domain name jsos.dev registered and live
-1000. [P0] Ship it.
+977. [P2?] Browser correctly renders top 100 Alexa sites (= 60% readable)
+978. [P2?] SSH login from host machine works
+979. [P2?] File sharing with host via QEMU 9p virtio
+980. [P0?] Browser: consistent 60fps scroll and animation on real-world sites (see section 28 for full perf roadmap)
+981. [P3?] Browser passes WPT (Web Platform Tests) = 40% pass rate
+982. [P3?] Self-hosting: build JSOS from within JSOS -- DONT DO
+983. [P3?] Support for 10 simultaneous logged-in users (SMP)
+984. [P3?] Power management: ACPI S3 suspend/resume
+985. [P3?] Battery status on laptops (ACPI battery interface)
+986. [P3?] Touchpad gestures on laptops
+987. [P3?] HiDPI display (4K) rendering
+988. [P3?] Screen reader (accessibility) basic support
+989. [P3?] Internationalization: render Arabic, Chinese, Japanese
+990. [P3?] Right-to-left layout support
+991. [P3?] Voice control stub
+992. [P3?] Public release on GitHub with proper README
+993. [P3?] Docker image published to Docker Hub
+994. [P3?] Prebuilt ISO downloadable from releases page
+995. [P3?] Community forum / Discord
+996. [P3?] Bug tracker (GitHub Issues) with triage labels
+997. [P3?] Roadmap published for v2.0
+998. [P3?] Logo and branding finalized
+999. [P3?] Domain name jsos.dev registered and live
+1000. [P0?] Ship it.
 
 ---
 

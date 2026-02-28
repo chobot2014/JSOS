@@ -1915,9 +1915,31 @@ export function createPageJS(
           var inner5 = new CSSStyleSheet_(); inner5._parseText(body2); ctr2.cssRules = inner5.cssRules;
           this.cssRules.push(ctr2);
         } else if (lhdr.startsWith('@layer')) {
-          // @layer — flatten inner rules into current sheet
-          var inner4 = new CSSStyleSheet_(); inner4._parseText(body2);
-          for (var lri = 0; lri < inner4.cssRules.length; lri++) this.cssRules.push(inner4.cssRules[lri]);
+          // [Item 436] @layer cascade layers — proper layer-order tracking
+          // Spec: unlayered styles win; among layers, later wins over earlier;
+          // within a layer, later declaration wins.
+          var layerName436 = lhdr.replace('@layer', '').trim();
+          // Statement form: "@layer reset, base, theme;" (no body)
+          if (!body2 || body2.trim() === '') {
+            // Layer ordering declaration — register names in order
+            layerName436.split(',').map((n: string) => n.trim()).filter(Boolean).forEach((n: string) => {
+              if (!this._layerOrder) this._layerOrder = [];
+              if (!this._layerOrder.includes(n)) this._layerOrder.push(n);
+            });
+          } else {
+            // Block form: "@layer theme { ... }"
+            if (!this._layerOrder) this._layerOrder = [];
+            var lname = layerName436 || `__anon_${this._layerOrder.length}__`;
+            if (!this._layerOrder.includes(lname)) this._layerOrder.push(lname);
+            var innerLayer = new CSSStyleSheet_(); innerLayer._parseText(body2);
+            var layerIdx = this._layerOrder.indexOf(lname);
+            // Tag each inner rule with layerIndex for cascade resolution
+            for (var lri = 0; lri < innerLayer.cssRules.length; lri++) {
+              var lr = innerLayer.cssRules[lri] as any;
+              lr._layerIndex = layerIdx;   // lower index = earlier layer = lower priority
+              this.cssRules.push(lr);
+            }
+          }
         } else if (lhdr.startsWith('@font-face')) {
           var ffr2 = new CSSFontFaceRule_(body2.trim()); ffr2.parentStyleSheet = this; this.cssRules.push(ffr2);
           // Register font family so document.fonts is aware of it (item 430)
@@ -2477,12 +2499,14 @@ export function createPageJS(
     if (_csHit && _csHit.gen === _csGen) return _csHit.proxy;
     // ── Full computation below ──────────────────────────────────────────────────
     // Collect all matching rules with specificity for proper cascade ordering
-    // Each entry: { specificity, sourceOrder, style, important: Set<string> }
-    var matched: Array<{ spec: number; order: number; style: any; important: Set<string> | undefined }> = [];
+    // Each entry: { specificity, sourceOrder, layerIndex, style, important: Set<string> }
+    var matched: Array<{ spec: number; order: number; layerIdx: number; style: any; important: Set<string> | undefined }> = [];
     var order = 0;
 
     function collectRule(rule: any, spec: number): void {
-      matched.push({ spec, order: order++, style: rule.style, important: rule.important as Set<string> | undefined });
+      // [Item 436] _layerIndex: undefined / -1 means "unlayered" (highest cascade priority)
+      var lIdx: number = (rule._layerIndex !== undefined && rule._layerIndex >= 0) ? rule._layerIndex : 0x7FFFFFFF;
+      matched.push({ spec, order: order++, layerIdx: lIdx, style: rule.style, important: rule.important as Set<string> | undefined });
     }
 
     function walkRules(rules: Array<any>): void {
@@ -2564,8 +2588,12 @@ export function createPageJS(
       }
     }
 
-    // Sort: normal rules by specificity then source order LOW→HIGH (later/higher wins)
-    matched.sort((a, b2) => a.spec !== b2.spec ? a.spec - b2.spec : a.order - b2.order);
+    // Sort: normal rules by layer (earlier layers first), then specificity, then source order
+    // [Item 436] unlayered rules (layerIdx=0x7FFFFFFF) sort last = highest cascade priority
+    matched.sort((a, b2) => {
+      if (a.layerIdx !== b2.layerIdx) return a.layerIdx - b2.layerIdx;
+      return a.spec !== b2.spec ? a.spec - b2.spec : a.order - b2.order;
+    });
 
     // Apply matched rules in cascade order; !important props tracked separately
     var merged = new Map<string, string>();
