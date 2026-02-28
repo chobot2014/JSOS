@@ -26,7 +26,8 @@
 import { _Emit } from './jit.js';
 import {
   OPCODE_SIZE, JIT_SUPPORTED_OPCODES,
-  OP_push_i32, OP_push_false, OP_push_true, OP_null, OP_undefined,
+  OP_push_i32, OP_push_const,
+  OP_push_false, OP_push_true, OP_null, OP_undefined,
   OP_get_loc,  OP_put_loc,  OP_set_loc,
   OP_get_loc0, OP_get_loc1, OP_get_loc2, OP_get_loc3,
   OP_put_loc0, OP_put_loc1, OP_put_loc2, OP_put_loc3,
@@ -39,10 +40,12 @@ import {
   OP_lt,  OP_lte, OP_gt, OP_gte,
   OP_inc_loc, OP_dec_loc, OP_inc_loc8, OP_dec_loc8,
   OP_add_loc, OP_add_loc8,
-  OP_drop, OP_dup, OP_dup2, OP_nip, OP_swap,
+  OP_drop, OP_dup, OP_dup1, OP_dup2, OP_dup3, OP_nip, OP_nip1, OP_swap,
+  OP_rot3l, OP_rot3r,
+  OP_post_inc, OP_post_dec,
   OP_if_true8, OP_if_false8, OP_if_true, OP_if_false,
   OP_goto, OP_goto8, OP_goto16,
-  OP_return_val, OP_return_undef, OP_nop,
+  OP_return_val, OP_return_undef, OP_nop, OP_label,
   // IC / devirtualize / array opcodes (items 848, 849, 858, 852)
   OP_get_field, OP_put_field,
   OP_get_array_el, OP_put_array_el,
@@ -78,6 +81,9 @@ export const JIT_THRESHOLD = 100;
 
 /** Maximum allowed deoptimisations before a function is blacklisted. */
 export const MAX_DEOPTS = 3;
+
+/** Maximum consecutive compile failures before a function is permanently blacklisted. */
+export const MAX_BAILS = 3;
 
 /** Maximum bytecode length the JIT will attempt to compile. */
 export const MAX_BC_LEN = 4096;
@@ -137,8 +143,11 @@ export class QJSBytecodeReader {
   readonly argCount: number;
   readonly varCount: number;
   readonly stackSize: number;
+  readonly cpoolPtr:   number;  /** physical address of the constant pool array (JSValue[]) */
+  readonly cpoolCount: number;  /** number of constant pool entries */
   private readonly _bytes: ArrayBuffer;
   private readonly _view:  DataView;
+  private readonly _cpoolView: DataView | null;
 
   constructor(bcStructAddr: number, offsets: QJSOffsets) {
     // Read fields from the live JSFunctionBytecode struct via physical memory
@@ -152,6 +161,9 @@ export class QJSBytecodeReader {
     this.stackSize = mv.getUint16(offsets.stackSize, true);
     this.bcBuf     = bcBufPtr;
     this.bcLen     = bcLen;
+    // Constant pool
+    this.cpoolPtr   = mv.getUint32(offsets.cpoolPtr,   true);
+    this.cpoolCount = mv.getUint16(offsets.cpoolCount, true);
     if (bcLen === 0 || bcLen > MAX_BC_LEN) {
       throw new Error(`QJSBytecodeReader: invalid bcLen ${bcLen}`);
     }
@@ -159,6 +171,13 @@ export class QJSBytecodeReader {
     if (!bytes) throw new Error('QJSBytecodeReader: cannot read bytecode');
     this._bytes = bytes;
     this._view  = new DataView(bytes);
+    // Read constant pool upfront (JSValue = 8 bytes each: [u32 data | i32 tag])
+    if (this.cpoolCount > 0 && this.cpoolPtr) {
+      const cpoolBuf = kernel.readPhysMem(this.cpoolPtr, this.cpoolCount * 8);
+      this._cpoolView = cpoolBuf ? new DataView(cpoolBuf) : null;
+    } else {
+      this._cpoolView = null;
+    }
   }
 
   u8(offset: number):  number { return this._view.getUint8(offset); }
@@ -167,6 +186,22 @@ export class QJSBytecodeReader {
   i16(offset: number): number { return this._view.getInt16(offset, true); }
   i32(offset: number): number { return this._view.getInt32(offset, true); }
   u32(offset: number): number { return this._view.getUint32(offset, true); }
+
+  /**
+   * Return the JSValue tag of constant pool entry idx.
+   * JS_TAG_INT=0, JS_TAG_BOOL=1, JS_TAG_NULL=2, JS_TAG_UNDEFINED=3, JS_TAG_FLOAT64=7, etc.
+   * Returns -99 on out-of-range or missing cpool data.
+   */
+  cpoolTag(idx: number): number {
+    if (!this._cpoolView || idx < 0 || idx >= this.cpoolCount) return -99;
+    return this._cpoolView.getInt32(idx * 8 + 4, true);
+  }
+
+  /** Return the int32 data word of constant pool entry idx (valid when cpoolTag===JS_TAG_INT). */
+  cpoolInt(idx: number): number {
+    if (!this._cpoolView || idx < 0 || idx >= this.cpoolCount) return 0;
+    return this._cpoolView.getInt32(idx * 8 + 0, true);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -723,7 +758,89 @@ export class QJSJITCompiler {
         // ── No-op ────────────────────────────────────────────────────────
         case OP_nop: { pc++; break; }
 
-        default: return null; // unsupported — bail out
+        // ── Pseudo-op: label (no runtime effect, just a 5-byte marker) ──
+        case OP_label: { pc += 5; break; }
+
+        // ── Constant pool push (integer fast path) ────────────────────────
+        // OP_push_const: push constant pool entry at index idx.
+        // We only JIT the integer case (tag == JS_TAG_INT = 0) and the boolean
+        // case (tag == JS_TAG_BOOL = 1).  All other tags bail.
+        case OP_push_const: {
+          const idx = bc.u32(pc + 1);
+          const tag = bc.cpoolTag(idx);
+          if (tag === JS_TAG_INT) {
+            const val = bc.cpoolInt(idx);
+            e.immEax(val >>> 0);
+            e.pushEax();
+          } else if (tag === JS_TAG_BOOL) {
+            const val = bc.cpoolInt(idx);
+            e.immEax(val ? 1 : 0);
+            e.pushEax();
+          } else {
+            return null;  // non-integer constant (string, object, float) — bail
+          }
+          pc += 5; break;
+        }
+
+        // ── Extended stack manipulation ───────────────────────────────────
+
+        // OP_dup1: duplicate TOS-1 (second from top). [a b] → [a b a]
+        case OP_dup1: { e.peekN(1); e.pushEax(); pc++; break; }
+
+        // OP_dup3: duplicate TOS-3. [a b c d] → [a b c d a]
+        case OP_dup3: { e.peekN(3); e.pushEax(); pc++; break; }
+
+        // OP_nip1: remove TOS-2, keep TOS and TOS-1. [a b c] → [a c]
+        case OP_nip1: {
+          e.popEcx();    // ECX = c (TOS)
+          e.addEsp(4);   // discard b (TOS-1 = second from top)
+          e.pushEcx();   // restore c as new TOS
+          pc++; break;
+        }
+
+        // OP_rot3l: rotate top 3 left. [a b c] (c=TOS) → [b c a] (a=new TOS)
+        // In memory: [ESP]=c [ESP+4]=b [ESP+8]=a → want [ESP]=a [ESP+4]=c [ESP+8]=b
+        case OP_rot3l: {
+          e.peekN(0);           // EAX = c
+          e.movEspDispEcx(4);   // ECX = b
+          e.storeEspEax(4);     // [ESP+4] = c ✓
+          e.peekN(2);           // EAX = a (now [ESP+8])
+          e.storeEspEcx(8);     // [ESP+8] = b ✓  (ECX still = b)
+          e.storeEspEax(0);     // [ESP] = a ✓
+          pc++; break;
+        }
+
+        // OP_rot3r: rotate top 3 right. [a b c] (c=TOS) → [c a b] (b=new TOS)
+        // In memory: [ESP]=c [ESP+4]=b [ESP+8]=a → want [ESP]=b [ESP+4]=a [ESP+8]=c
+        case OP_rot3r: {
+          e.peekN(2);           // EAX = a (from [ESP+8])
+          e.movEspDispEcx(0);   // ECX = c (TOS)
+          e.storeEspEcx(8);     // [ESP+8] = c ✓
+          e.movEspDispEcx(4);   // ECX = b (from [ESP+4])
+          e.storeEspEax(4);     // [ESP+4] = a ✓
+          e.storeEspEcx(0);     // [ESP] = b ✓
+          pc++; break;
+        }
+
+        // ── Post-increment / post-decrement ──────────────────────────────
+        // Semantics: val = TOS; TOS = val±1; push val_old (net +1).
+        // After: [... val+1, val_old]  where val_old = new TOS (expression result).
+        // A following put_loc/put_arg will store val+1 and leave val_old on stack.
+        case OP_post_inc: {
+          e.peekTOS();        // EAX = val_old
+          e.pushEax();        // push copy of val_old  → [ESP]=val [ESP+4]=val
+          e.addEaxImm32(1);   // EAX = val+1
+          e.storeEspEax(4);   // [ESP+4] = val+1  (replace deeper slot with incremented value)
+          // Stack: [ESP]=val_old (expression result), [ESP+4]=val+1 (will be stored to variable)
+          pc++; break;
+        }
+        case OP_post_dec: {
+          e.peekTOS();        // EAX = val_old
+          e.pushEax();        // push copy
+          e.addEaxImm32(-1);  // EAX = val-1
+          e.storeEspEax(4);   // [ESP+4] = val-1
+          pc++; break;
+        }
       }
     }
 
@@ -752,6 +869,7 @@ interface FuncEntry {
   nativeAddr: number;     // 0 = not yet compiled
   deoptCount: number;
   blacklisted: boolean;
+  bailCount:  number;     // consecutive compile failures; blacklisted after MAX_BAILS
   speculator:  TypeSpeculator;
   /** kernel.getTicks() at last hook invocation — used for LRU pool GC. */
   lastAccess:  number;
@@ -804,7 +922,7 @@ export class QJSJITHook {
     let entry = this._funcs.get(bcAddr);
     if (!entry) {
       entry = {
-        bcAddr, nativeAddr: 0, deoptCount: 0, blacklisted: false,
+        bcAddr, nativeAddr: 0, deoptCount: 0, blacklisted: false, bailCount: 0,
         speculator: new TypeSpeculator(argc),
         lastAccess: 0,
       };
@@ -913,7 +1031,10 @@ export class QJSJITHook {
     const compiler = new QJSJITCompiler(bc, icTable, regAlloc, deoptLogAddr);
     const native   = compiler.compile(entry.bcAddr, argTypes);
     if (!native) {
-      entry.blacklisted = true;
+      entry.bailCount++;
+      if (entry.bailCount >= MAX_BAILS) {
+        entry.blacklisted = true;
+      }
       this._bailed++;
       return 0;
     }
@@ -940,6 +1061,7 @@ export class QJSJITHook {
     kernel.jitWrite(nativeAddr, ab);
     kernel.setJITNative(entry.bcAddr, nativeAddr);
     entry.nativeAddr = nativeAddr;
+    entry.bailCount  = 0;   // reset on success
     this._compiled++;
 
     // Save to code cache (item 867)

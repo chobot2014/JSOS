@@ -621,6 +621,7 @@ export const OPCODE_STACK_EFFECT: Record<number, number | undefined> = {
  */
 export const JIT_SUPPORTED_OPCODES = new Set<number>([
   OP_push_i32,
+  OP_push_const,   // integer constants from the constant pool (non-int values bail in compile())
   OP_push_false, OP_push_true, OP_null, OP_undefined,
   OP_get_loc, OP_put_loc, OP_set_loc,
   OP_get_loc0, OP_get_loc1, OP_get_loc2, OP_get_loc3,
@@ -634,10 +635,14 @@ export const JIT_SUPPORTED_OPCODES = new Set<number>([
   OP_or, OP_and, OP_xor, OP_shl, OP_sar, OP_shr,
   OP_inc_loc, OP_dec_loc, OP_inc_loc8, OP_dec_loc8,
   OP_add_loc, OP_add_loc8,
-  // Stack manipulation: dup/dup2/nip/swap extend the set of compilable functions
-  OP_drop, OP_dup, OP_dup2, OP_nip, OP_swap,
+  // Stack manipulation — extended set
+  OP_drop, OP_dup, OP_dup1, OP_dup2, OP_dup3, OP_nip, OP_nip1, OP_swap,
+  OP_rot3l, OP_rot3r,
+  // Post-increment / decrement (common in for-loops)
+  OP_post_inc, OP_post_dec,
   OP_if_true8, OP_if_false8, OP_if_true, OP_if_false,
   OP_goto, OP_goto8, OP_goto16,
   OP_return_val, OP_return_undef,
   OP_nop,
+  OP_label,        // pseudo-op — no runtime effect, just advances PC
 ]);

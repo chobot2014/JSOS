@@ -748,6 +748,26 @@ export class _Emit {
       this._w(0x8B); this._w(0x8C); this._w(0x24); this._u32(disp); // MOV ECX, [ESP+disp32]
     }
   }
+  /** MOV [ESP + disp_bytes], EAX — write EAX to eval-stack slot N below TOS. */
+  storeEspEax(disp: number): void {
+    if (disp === 0) {
+      this._w(0x89); this._w(0x04); this._w(0x24);            // MOV [ESP], EAX
+    } else if (disp <= 127) {
+      this._w(0x89); this._w(0x44); this._w(0x24); this._w(disp); // MOV [ESP+disp8], EAX
+    } else {
+      this._w(0x89); this._w(0x84); this._w(0x24); this._u32(disp); // MOV [ESP+disp32], EAX
+    }
+  }
+  /** MOV [ESP + disp_bytes], ECX — write ECX to eval-stack slot N below TOS. */
+  storeEspEcx(disp: number): void {
+    if (disp === 0) {
+      this._w(0x89); this._w(0x0C); this._w(0x24);            // MOV [ESP], ECX
+    } else if (disp <= 127) {
+      this._w(0x89); this._w(0x4C); this._w(0x24); this._w(disp); // MOV [ESP+disp8], ECX
+    } else {
+      this._w(0x89); this._w(0x8C); this._w(0x24); this._u32(disp); // MOV [ESP+disp32], ECX
+    }
+  }
   movEaxEcxDisp(disp: number): void {                                // MOV EAX, [ECX + disp]
     if (disp === 0) { this._w(0x8B); this._w(0x01); }
     else if (disp >= -128 && disp <= 127) { this._w(0x8B); this._w(0x41); this._w(disp & 0xFF); }
