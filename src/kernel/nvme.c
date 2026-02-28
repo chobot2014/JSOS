@@ -51,23 +51,23 @@ int nvme_init(void) {
     for (uint8_t bus = 0u; bus < 255u && !found; bus++) {
         for (uint8_t d = 0u; d < 32u && !found; d++) {
             for (uint8_t fn = 0u; fn < 8u; fn++) {
-                uint32_t id = pci_config_read(bus, d, fn, 0u);
+                uint32_t id = pci_cfg_read32(bus, d, fn, 0u);
                 if ((id & 0xFFFFu) == 0xFFFFu) { if (!fn) break; continue; }
-                uint32_t class = pci_config_read(bus, d, fn, 0x08u);
+                uint32_t class = pci_cfg_read32(bus, d, fn, 0x08u);
                 /* class byte=31:24, sub=23:16, prog=15:8 */
                 if ((class >> 8u) == 0x010802u) {
                     dev.bus = bus; dev.dev = d; dev.fn = fn;
-                    dev.vendor = id & 0xFFFFu;
-                    dev.device = id >> 16u;
+                    dev.vendor_id = id & 0xFFFFu;
+                    dev.device_id = id >> 16u;
                     /* Read BAR0 (32-bit; for 64-bit we would also read BAR1) */
-                    uint32_t bar0 = pci_config_read(bus, d, fn, 0x10u);
+                    uint32_t bar0 = pci_cfg_read32(bus, d, fn, 0x10u);
                     /* BAR0 for NVMe is always MMIO */
                     _nvme_bar0_addr = bar0 & 0xFFFFFFF0u;
                     _nvme_bar0 = (volatile uint32_t *)_nvme_bar0_addr;
                     /* Check BAR[2:1]=00 → 32-bit; or =10 → 64-bit */
                     if ((bar0 & 0x6u) == 0x4u) {
                         /* 64-bit BAR: combine with BAR1 */
-                        uint32_t bar1 = pci_config_read(bus, d, fn, 0x14u);
+                        uint32_t bar1 = pci_cfg_read32(bus, d, fn, 0x14u);
                         (void)bar1; /* upper 32 bits; use only lower 32 on 32-bit OS */
                     }
                     pci_enable_busmaster(&dev);
@@ -76,7 +76,7 @@ int nvme_init(void) {
                     break;
                 }
                 /* Check for multi-function via header type bit 7 */
-                uint32_t hdr = pci_config_read(bus, d, fn, 0x0Cu);
+                uint32_t hdr = pci_cfg_read32(bus, d, fn, 0x0Cu);
                 if (!(hdr & 0x800000u) && fn == 0u) break;
             }
         }
@@ -106,7 +106,7 @@ int nvme_controller_reset(void) {
     uint32_t ms = 0u;
     while (ms < NVME_TIMEOUT_MS) {
         if (!(nvme_read32(NVME_REG_CSTS) & NVME_CSTS_RDY)) break;
-        timer_sleep_ms(1u);
+        timer_sleep(1u);
         ms++;
     }
     if (ms >= NVME_TIMEOUT_MS) return -1;
@@ -125,7 +125,7 @@ int nvme_enable(void) {
         uint32_t csts = nvme_read32(NVME_REG_CSTS);
         if (csts & NVME_CSTS_CFS) return -1;   /* fatal error */
         if (csts & NVME_CSTS_RDY) break;
-        timer_sleep_ms(1u);
+        timer_sleep(1u);
         ms++;
     }
     return (ms < NVME_TIMEOUT_MS) ? 0 : -1;

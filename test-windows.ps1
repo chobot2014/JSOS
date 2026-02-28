@@ -157,6 +157,7 @@ if ($Headless) {
         -boot order=d `
         -m 4G `
         -no-reboot `
+        -display sdl `
         -vga std `
         -serial "file:test-output/serial.log" `
         -netdev "user,id=n0" `

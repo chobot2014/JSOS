@@ -46,14 +46,14 @@ int ahci_init(void) {
     for (uint8_t bus = 0u; bus < 255u && !_present; bus++) {
         for (uint8_t dev = 0u; dev < 32u && !_present; dev++) {
             for (uint8_t fn = 0u; fn < 8u; fn++) {
-                uint32_t id = pci_config_read(bus, dev, fn, 0u);
+                uint32_t id = pci_cfg_read32(bus, dev, fn, 0u);
                 if ((id & 0xFFFFu) == 0xFFFFu) { if (!fn) break; continue; }
-                uint32_t class = pci_config_read(bus, dev, fn, 0x08u);
+                uint32_t class = pci_cfg_read32(bus, dev, fn, 0x08u);
                 /* Check class 01, sub 06, prog-if 01 */
                 if ((class >> 8u) != AHCI_PCI_CLASS_AHCI) {
                     /* Some AHCI controllers use sub=06 prog-if=00; also check */
                     if ((class >> 8u) != 0x010600u) {
-                        uint8_t hdr = (uint8_t)(pci_config_read(bus, dev, fn, 0x0Cu) >> 16u);
+                        uint8_t hdr = (uint8_t)(pci_cfg_read32(bus, dev, fn, 0x0Cu) >> 16u);
                         if (!(hdr & 0x80u) && fn == 0u) break;
                         continue;
                     }
@@ -62,7 +62,7 @@ int ahci_init(void) {
                 pci_device_t pdev = { bus, dev, fn,
                     (uint16_t)(id & 0xFFFFu), (uint16_t)(id >> 16u),
                     {0,0,0,0,0,0}, 0, 0 };
-                uint32_t bar5 = pci_config_read(bus, dev, fn, 0x24u);
+                uint32_t bar5 = pci_cfg_read32(bus, dev, fn, 0x24u);
                 _hba_phys = bar5 & 0xFFFFF000u;
                 _hba      = (volatile uint32_t *)_hba_phys;
                 pci_enable_busmaster(&pdev);

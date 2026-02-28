@@ -83,9 +83,9 @@ int selftest_timer(void) {
     ASSERT(lo | hi, "timer.tsc nonzero");
 
     /* 2: Tick counter advances after 2 ms */
-    uint32_t t0 = timer_ticks_ms();
-    timer_sleep_ms(2u);
-    uint32_t t1 = timer_ticks_ms();
+    uint32_t t0 = timer_get_ms();
+    timer_sleep(2u);
+    uint32_t t1 = timer_get_ms();
     ASSERT(t1 > t0, "timer.ticks advance after sleep");
 
     /* 3: timer_gettime_ns is non-zero */
@@ -125,7 +125,7 @@ int selftest_pci(void) {
     int before = (int)_total_fail;
 
     /* Bus 0 device 0 should return a valid vendor ID (QEMU: 8086 or 1234) */
-    uint32_t id = pci_config_read(0u, 0u, 0u, 0u);
+    uint32_t id = pci_cfg_read32(0u, 0u, 0u, 0u);
     ASSERT((id & 0xFFFFu) != 0xFFFFu, "pci.bus0_dev0_vendor_valid");
 
     return _total_fail - before;

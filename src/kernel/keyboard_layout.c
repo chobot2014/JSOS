@@ -148,16 +148,16 @@ static const uint8_t _qwertz_shifted[256] = {
 /* Only a sparse table; we use a flat 256-entry array per dead key.        */
 /* For brevity, only the ^-vowel compositions for AZERTY are provided.    */
 static const uint16_t _azerty_circumflex[256] = {
-    ['a']=0xE2,[  /* â */
-    'e']=0xEA,   /* ê */
-    'i']=0xEE,   /* î */
-    'o']=0xF4,   /* ô */
-    'u']=0xFB,   /* û */
-    'A']=0xC2,   /* Â */
-    'E']=0xCA,   /* Ê */
-    'I']=0xCE,   /* Î */
-    'O']=0xD4,   /* Ô */
-    'U']=0xDB,   /* Û */
+    ['a']=0xE2,  /* â */
+    ['e']=0xEA,  /* ê */
+    ['i']=0xEE,  /* î */
+    ['o']=0xF4,  /* ô */
+    ['u']=0xFB,  /* û */
+    ['A']=0xC2,  /* Â */
+    ['E']=0xCA,  /* Ê */
+    ['I']=0xCE,  /* Î */
+    ['O']=0xD4,  /* Ô */
+    ['U']=0xDB,  /* Û */
 };
 static const uint8_t _azerty_dead_keys[1] = { 0x1Au };
 

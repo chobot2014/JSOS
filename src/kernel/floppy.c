@@ -46,9 +46,9 @@ static void _fdc_send(uint8_t cmd) {
 int floppy_init(void) {
     /* Reset FDC */
     outb(FDC_BASE + FDC_DOR, 0x00);          /* assert RESET */
-    timer_sleep_ms(2);
+    timer_sleep(2);
     outb(FDC_BASE + FDC_DOR, DOR_RESET_N | DOR_DMA_EN); /* deassert */
-    timer_sleep_ms(2);
+    timer_sleep(2);
 
     /* Sense interrupt (×4 for four drives) to clear reset state */
     for (int i = 0; i < 4; i++) {
@@ -80,7 +80,7 @@ int floppy_present(void) { return _present; }
 void floppy_motor_on(uint8_t drive) {
     (void)drive;
     outb(FDC_BASE + FDC_DOR, DOR_RESET_N | DOR_DMA_EN | DOR_MOTOR_A | DOR_SEL_A);
-    timer_sleep_ms(300);  /* Motor spin-up */
+    timer_sleep(300);  /* Motor spin-up */
 }
 
 void floppy_motor_off(uint8_t drive) {

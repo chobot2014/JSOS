@@ -18,11 +18,11 @@ int sd_init(void) {
     int found = 0;
     for (uint8_t bus = 0; bus < 8 && !found; bus++) {
         for (uint8_t d = 0; d < 32 && !found; d++) {
-            uint32_t id = pci_config_read(bus, d, 0, 0);
+            uint32_t id = pci_cfg_read32(bus, d, 0, 0);
             if ((id & 0xFFFF) == 0xFFFF) continue;
-            uint32_t cls = pci_config_read(bus, d, 0, 0x08) >> 8;
+            uint32_t cls = pci_cfg_read32(bus, d, 0, 0x08) >> 8;
             if ((cls & 0xFFFFFF) == SDHCI_PCI_CLASS) {
-                dev.bus = bus; dev.device = d; dev.function = 0;
+                dev.bus = bus; dev.dev = d; dev.fn = 0;
                 found = 1;
             }
         }

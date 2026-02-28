@@ -5,14 +5,14 @@
  * Organised into categories that match help() output.
  *
  * Two APIs for everything:
- *   Convenience functions  (ls, ps, mem â€¦)
- *     â€” auto-pretty-print as a REPL top-level expression
- *     â€” return a real Array / plain object so scripting still works:
- *         ls('/bin').filter(f => f.name.endsWith('.js'))   â†’ plain Array
- *         mem().free                                        â†’ number
+ *   Convenience functions  (ls, ps, mem …)
+ *     — auto-pretty-print as a REPL top-level expression
+ *     — return a real Array / plain object so scripting still works:
+ *         ls('/bin').filter(f => f.name.endsWith('.js'))   → plain Array
+ *         mem().free                                        → number
  *
  *   Raw-data APIs  (fs.*, sys.*, net.*, disk.*, users.*, ipc.*)
- *     â€” always return plain values, never print anything
+ *     — always return plain values, never print anything
  */
 
 import terminal from './terminal.js';
@@ -54,10 +54,10 @@ import { pkgmgr } from '../core/pkgmgr.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
-// â”€â”€ Printable result helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Printable result helpers ──────────────────────────────────────────────────
 // A printableArray / printableObject carries a hidden __jsos_print__ method.
 // The REPL's evalAndPrint calls it when the value is a top-level expression
-// result, giving pretty output.  Chaining (map, filter, spread, â€¦) returns
+// result, giving pretty output.  Chaining (map, filter, spread, …) returns
 // a plain value without the sentinel so JSON output is used instead.
 
 export function printableArray<T>(items: T[], printer: (arr: T[]) => void): T[] {
@@ -76,20 +76,20 @@ export function printableObject<T extends object>(data: T, printer: (obj: T) => 
   return obj as T;
 }
 
-// â”€â”€ Formatting helpers (private) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Formatting helpers (private) ──────────────────────────────────────────────
 
 function pad(s: string, w: number): string { while (s.length < w) s += ' '; return s; }
 function lpad(s: string, w: number): string { while (s.length < w) s = ' ' + s; return s; }
 
-// â”€â”€ Register all REPL commands onto globalThis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Register all REPL commands onto globalThis ────────────────────────────────
 
 export function registerCommands(g: any): void {
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
   // 1.  RAW SCRIPTING APIs  (return plain data, never print)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
 
-  // terminal â€” direct access for user scripts
+  // terminal — direct access for user scripts
   g.terminal = terminal;
 
   // OS subsystems
@@ -255,7 +255,7 @@ export function registerCommands(g: any): void {
       return globalFDTable.ioctl(fd, request, arg);
     },
     exec(path: string, args?: string[]) { return syscalls.exec(path, args || []); },
-    // â”€â”€ [Item 969] JIT profiler TypeScript API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── [Item 969] JIT profiler TypeScript API ──────────────────────────────
     jit: {
       /** Return JIT compiler statistics (compiled count, pool usage, deopt events). */
       stats() {
@@ -266,7 +266,7 @@ export function registerCommands(g: any): void {
         return os.system.jitStats();
       },
     },
-    // â”€â”€ [Item 970] GC memory stats TypeScript API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── [Item 970] GC memory stats TypeScript API ────────────────────────────
     gc: {
       /** Run a GC cycle and return current heap stats. */
       run() {
@@ -285,9 +285,9 @@ export function registerCommands(g: any): void {
   // Print shorthand
   g.print = function(s: any) { terminal.println(String(s)); };
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
   // 2.  FILESYSTEM COMMANDS  (pretty-print AND return chainable values)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
 
   g.ls = function(path?: string) {
     var target = path || fs.cwd();
@@ -348,20 +348,20 @@ export function registerCommands(g: any): void {
 
   g.cp = function(src: string, dst: string) {
     if (!src || !dst) { terminal.println('usage: cp(src, dst)'); return; }
-    if (fs.cp(src, dst)) terminal.colorPrintln('copied: ' + src + ' â†’ ' + dst, Color.LIGHT_GREEN);
+    if (fs.cp(src, dst)) terminal.colorPrintln('copied: ' + src + ' → ' + dst, Color.LIGHT_GREEN);
     else terminal.println('cp: ' + src + ': failed');
   };
 
   g.mv = function(src: string, dst: string) {
     if (!src || !dst) { terminal.println('usage: mv(src, dst)'); return; }
-    if (fs.mv(src, dst)) terminal.colorPrintln('moved: ' + src + ' â†’ ' + dst, Color.LIGHT_GREEN);
+    if (fs.mv(src, dst)) terminal.colorPrintln('moved: ' + src + ' → ' + dst, Color.LIGHT_GREEN);
     else terminal.println('mv: ' + src + ': failed');
   };
 
-  // item 706: mount â€” attach a VFS provider to a mount point
+  // item 706: mount — attach a VFS provider to a mount point
   g.mount = function(mountpoint: string, vfs?: any) {
     if (!mountpoint) {
-      // No args â†’ list current mounts
+      // No args → list current mounts
       var mpts = os.fs.mounts();
       if (mpts.length === 0) { terminal.colorPrintln('(no VFS mounts)', Color.DARK_GREY); return; }
       for (var i = 0; i < mpts.length; i++)
@@ -373,7 +373,7 @@ export function registerCommands(g: any): void {
     terminal.colorPrintln('mounted: ' + mountpoint, Color.LIGHT_GREEN);
   };
 
-  // item 707: umount â€” detach a VFS mount point
+  // item 707: umount — detach a VFS mount point
   g.umount = function(mountpoint: string) {
     if (!mountpoint) { terminal.println('usage: umount(mountpoint)'); return; }
     if (os.fs.umount(mountpoint))
@@ -385,14 +385,14 @@ export function registerCommands(g: any): void {
   g.write = function(path: string, content: string) {
     if (!path) { terminal.println('usage: write(path, content)'); return; }
     if (fs.writeFile(path, content || ''))
-      terminal.colorPrintln('wrote ' + (content || '').length + 'B â†’ ' + path, Color.LIGHT_GREEN);
+      terminal.colorPrintln('wrote ' + (content || '').length + 'B → ' + path, Color.LIGHT_GREEN);
     else terminal.println('write: ' + path + ': failed');
   };
 
   g.append = function(path: string, content: string) {
     if (!path) { terminal.println('usage: append(path, content)'); return; }
     if (fs.appendFile(path, content || ''))
-      terminal.colorPrintln('appended ' + (content || '').length + 'B â†’ ' + path, Color.LIGHT_GREEN);
+      terminal.colorPrintln('appended ' + (content || '').length + 'B → ' + path, Color.LIGHT_GREEN);
     else terminal.println('append: ' + path + ': failed');
   };
 
@@ -419,7 +419,7 @@ export function registerCommands(g: any): void {
     });
   };
 
-  // [Item 709] zip â€” create a JSOS archive containing one or more files/directories
+  // [Item 709] zip — create a JSOS archive containing one or more files/directories
   g.zip = function(outPath: string) {
     var paths: string[] = Array.prototype.slice.call(arguments, 1);
     if (!outPath || paths.length === 0) { terminal.println('usage: zip(outPath, path1, path2, ...)'); return; }
@@ -447,11 +447,11 @@ export function registerCommands(g: any): void {
     }
     var archive = 'JSZIP/1.0\n' + JSON.stringify(entries);
     if (fs.writeFile(outPath, archive))
-      terminal.colorPrintln('zip: ' + entries.length + ' file(s) â†’ ' + outPath, Color.LIGHT_GREEN);
+      terminal.colorPrintln('zip: ' + entries.length + ' file(s) → ' + outPath, Color.LIGHT_GREEN);
     else terminal.println('zip: failed to write ' + outPath);
   };
 
-  // [Item 709] unzip â€” extract a JSOS archive
+  // [Item 709] unzip — extract a JSOS archive
   g.unzip = function(zipPath: string, destDir?: string) {
     if (!zipPath) { terminal.println('usage: unzip(zipPath[, destDir])'); return; }
     var raw = fs.readFile(zipPath);
@@ -470,7 +470,7 @@ export function registerCommands(g: any): void {
     terminal.colorPrintln('unzip: ' + entries.length + ' file(s) extracted', Color.LIGHT_GREEN);
   };
 
-  // [Item 710] tar â€” create a JSOS tar archive (directories preserved)
+  // [Item 710] tar — create a JSOS tar archive (directories preserved)
   g.tar = function(outPath: string) {
     var paths: string[] = Array.prototype.slice.call(arguments, 1);
     if (!outPath || paths.length === 0) { terminal.println('usage: tar(outPath, path1, path2, ...)'); return; }
@@ -500,11 +500,11 @@ export function registerCommands(g: any): void {
     }
     var archive = 'JSTAR/1.0\n' + JSON.stringify(entries);
     if (fs.writeFile(outPath, archive))
-      terminal.colorPrintln('tar: ' + entries.length + ' item(s) â†’ ' + outPath, Color.LIGHT_GREEN);
+      terminal.colorPrintln('tar: ' + entries.length + ' item(s) → ' + outPath, Color.LIGHT_GREEN);
     else terminal.println('tar: failed to write ' + outPath);
   };
 
-  // [Item 710] untar â€” extract a JSOS tar archive
+  // [Item 710] untar — extract a JSOS tar archive
   g.untar = function(tarPath: string, destDir?: string) {
     if (!tarPath) { terminal.println('usage: untar(tarPath[, destDir])'); return; }
     var raw = fs.readFile(tarPath);
@@ -578,9 +578,9 @@ export function registerCommands(g: any): void {
     terminal.println(cmd + ': not found');
   };
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
   // 3.  SYSTEM / PROCESS COMMANDS
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
 
   g.ps = function() {
     var results: any[] = [];
@@ -620,15 +620,15 @@ export function registerCommands(g: any): void {
     else terminal.println('kill: PID ' + pid + ': not found or protected');
   };
 
-  // item 715: nice â€” adjust process priority
+  // item 715: nice — adjust process priority
   g.nice = function(pid: number, value: number) {
     if (pid === undefined || value === undefined) { terminal.println('usage: nice(pid, value)'); return; }
     if (processManager.setPriority && processManager.setPriority(pid, value))
-      terminal.colorPrintln('nice: PID ' + pid + ' priority â†’ ' + value, Color.LIGHT_GREEN);
+      terminal.colorPrintln('nice: PID ' + pid + ' priority → ' + value, Color.LIGHT_GREEN);
     else terminal.colorPrintln('nice: PID ' + pid + ' not found or priority not adjustable', Color.YELLOW);
   };
 
-  // item 716: jobs â€” list background async coroutines started from the REPL
+  // item 716: jobs — list background async coroutines started from the REPL
   g.jobs = function() {
     var coros = threadManager.getCoroutines();
     if (coros.length === 0) { terminal.colorPrintln('No active background jobs.', Color.DARK_GREY); return; }
@@ -641,7 +641,7 @@ export function registerCommands(g: any): void {
     });
   };
 
-  // item 717: fg / bg â€” foreground / background job control
+  // item 717: fg / bg — foreground / background job control
   // In JSOS single-threaded REPL there is no True background, so fg() is a no-op
   // (coroutines run at each REPL tick) and bg() cancels blocking via cancel().
   g.fg = function(id: number) {
@@ -858,9 +858,9 @@ export function registerCommands(g: any): void {
   (g.env as any).delete = function(key: string): void                { os.env.delete(key); };
   (g.env as any).expand = function(s: string): string               { return os.env.expand(s); };
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
   // 4.  TERMINAL / DISPLAY COMMANDS
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
 
   g.colors = function() {
     var names = ['BLACK','BLUE','GREEN','CYAN','RED','MAGENTA','BROWN','LT_GREY',
@@ -880,7 +880,7 @@ export function registerCommands(g: any): void {
   g.halt   = function() { kernel.halt(); };
   g.reboot = function() { kernel.reboot(); };
 
-  // item 665: reset â€” remove all user-defined globals from this REPL session
+  // item 665: reset — remove all user-defined globals from this REPL session
   // Snapshot the built-in keys right after registerCommands finishes.
   var _builtinKeys: Set<string> | null = null;
   g.reset = function() {
@@ -901,25 +901,25 @@ export function registerCommands(g: any): void {
     });
   }
 
-  /** shutdown â€” friendly alias for halt() */
+  /** shutdown — friendly alias for halt() */
   g.shutdown = function() {
     terminal.println('Shutting down...');
     kernel.sleep(300);
     kernel.halt();
   };
 
-  /** motd â€” display the message of the day (/etc/motd) */
+  /** motd — display the message of the day (/etc/motd) */
   g.motd = function() {
     var m = fs.readFile('/etc/motd');
     if (m) terminal.print(m);
   };
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
   // 5.  USER / IDENTITY COMMANDS
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
 
   g.hostname = function(name?: string) {
-    if (name) { fs.writeFile('/etc/hostname', name); terminal.colorPrintln('hostname â†’ ' + name, Color.LIGHT_GREEN); }
+    if (name) { fs.writeFile('/etc/hostname', name); terminal.colorPrintln('hostname → ' + name, Color.LIGHT_GREEN); }
     else terminal.println(fs.readFile('/etc/hostname') || 'jsos');
   };
 
@@ -963,9 +963,9 @@ export function registerCommands(g: any): void {
     else terminal.println('passwd: user not found');
   };
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
   // 6.  NETWORKING COMMANDS
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
 
   g.ifconfig = function() { terminal.print(net.ifconfig()); };
 
@@ -990,10 +990,10 @@ export function registerCommands(g: any): void {
     }
   };
 
-  // [Item 725] net.connect(host, port) â€” high-level TCP stream factory
+  // [Item 725] net.connect(host, port) — high-level TCP stream factory
   g.connect = async function(host: string, port: number) {
     if (!host || !port) { terminal.println('usage: connect(host, port)'); return; }
-    terminal.colorPrint('connecting to ' + host + ':' + port + 'â€¦ ', Color.DARK_GREY);
+    terminal.colorPrint('connecting to ' + host + ':' + port + '… ', Color.DARK_GREY);
     try {
       var sock = net.createSocket("tcp") as any /* connectTcp placeholder */;
       terminal.colorPrintln('connected', Color.LIGHT_GREEN);
@@ -1007,10 +1007,10 @@ export function registerCommands(g: any): void {
     }
   };
 
-  // [Item 726] nc(host, port) â€” interactive TCP session in REPL
+  // [Item 726] nc(host, port) — interactive TCP session in REPL
   g.nc = async function(host: string, port: number) {
     if (!host || !port) { terminal.println('usage: nc(host, port)'); return; }
-    terminal.colorPrint('nc: connecting to ' + host + ':' + port + 'â€¦ ', Color.DARK_GREY);
+    terminal.colorPrint('nc: connecting to ' + host + ':' + port + '… ', Color.DARK_GREY);
     var sock: any;
     try { sock = net.createSocket("tcp") as any /* connectTcp placeholder */; }
     catch (e) { terminal.colorPrintln('failed: ' + e, Color.LIGHT_RED); return; }
@@ -1035,11 +1035,11 @@ export function registerCommands(g: any): void {
     terminal.colorPrintln('nc: disconnected', Color.DARK_GREY);
   };
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
   // 7.  LOW-LEVEL / POWER-USER COMMANDS
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
 
-  /** test() â€” run built-in OS self-tests */
+  /** test() — run built-in OS self-tests */
   g.test = function() {
     terminal.colorPrintln('Running JSOS self-tests...', Color.WHITE);
     terminal.colorPrintln(pad('', 42).replace(/ /g, '-'), Color.DARK_GREY);
@@ -1177,7 +1177,7 @@ export function registerCommands(g: any): void {
 
   /**
    * Execute raw x86 machine code from a hex string.
-   * Usage:  __asm("B8 2A 00 00 00 C3")  // mov eax, 42; ret  â†’ returns 42
+   * Usage:  __asm("B8 2A 00 00 00 C3")  // mov eax, 42; ret  → returns 42
    * Also available as a tagged template: __asm`B8 2A 00 00 00 C3`
    */
   g.__asm = function(hexOrStrings: TemplateStringsArray | string, ...vals: any[]): number {
@@ -1194,19 +1194,19 @@ export function registerCommands(g: any): void {
     return kernel.volatileAsm(hex);
   };
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
   // 10.  MULTI-PROCESS
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
 
   // Make JSProcess available as a global constructor for scripts
   g.JSProcess = JSProcess;
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // 11.  SDK â€” unified OS abstraction layer
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
+  // 11.  SDK — unified OS abstraction layer
+  // ──────────────────────────────────────────────────────────────────────────
 
   /**
-   * The JSOS Application SDK â€” the recommended API for all app and script code.
+   * The JSOS Application SDK — the recommended API for all app and script code.
    * os.fs, os.fetchAsync, os.spawn, os.cancel, os.system,
    * os.process, os.ipc, os.users
    */
@@ -1222,7 +1222,7 @@ export function registerCommands(g: any): void {
    *   var arr = new Float32Array(openSharedBuffer(id));
    *   arr[0] = 3.14;
    *   // Pass id to child via message, child reads same bytes:
-   *   // kernel.sharedBufferOpen(id) â†’ same physical memory
+   *   // kernel.sharedBufferOpen(id) → same physical memory
    */
   g.createSharedBuffer = function(size?: number): number {
     return kernel.sharedBufferCreate(size || 4096);
@@ -1243,15 +1243,15 @@ export function registerCommands(g: any): void {
    * Returns a JSProcess handle for IPC and lifecycle management.
    *
    * Child runtime API (available as `kernel` inside spawned code):
-   *   kernel.postMessage(JSON.stringify(data))  â†’ sends to parent
-   *   kernel.pollMessage()                      â†’ receives from parent (null if empty)
-   *   kernel.sharedBufferOpen(id)               â†’ zero-copy ArrayBuffer view
+   *   kernel.postMessage(JSON.stringify(data))  → sends to parent
+   *   kernel.pollMessage()                      → receives from parent (null if empty)
+   *   kernel.sharedBufferOpen(id)               → zero-copy ArrayBuffer view
    *   kernel.serialPut(s)   kernel.getTicks()   kernel.sleep(ms)
    *
    * Example:
    *   var p = spawn('kernel.postMessage(JSON.stringify({hi:42}))');
-   *   p.recv()          // â†’ {hi: 42}
-   *   p.send({x: 1});   p.eval('kernel.pollMessage()')   // â†’ '{"x":1}'
+   *   p.recv()          // → {hi: 42}
+   *   p.send({x: 1});   p.eval('kernel.pollMessage()')   // → '{"x":1}'
    *   p.terminate()
    */
   g.spawn = function(code: string, name?: string) {
@@ -1262,7 +1262,7 @@ export function registerCommands(g: any): void {
         terminal.colorPrint('JSProcess ', Color.LIGHT_CYAN);
         terminal.colorPrint('#' + p.id + ' ', Color.YELLOW);
         terminal.colorPrint('(' + p.name + ')', Color.DARK_GREY);
-        terminal.colorPrintln(' spawned âœ“', Color.LIGHT_GREEN);
+        terminal.colorPrintln(' spawned ✓', Color.LIGHT_GREEN);
         terminal.colorPrintln('  .eval(code)   .send(msg)   .recv()   .tick()   .terminate()', Color.DARK_GREY);
       },
       enumerable: false, configurable: true,
@@ -1289,17 +1289,17 @@ export function registerCommands(g: any): void {
     });
   };
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
   // 8A.  ADDITIONAL FILESYSTEM COMMANDS (items 697-710)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
 
-  // item 697: exists(path) â†’ boolean
+  // item 697: exists(path) → boolean
   g.exists = function(path: string): boolean {
     if (!path) { terminal.println('usage: exists(path)'); return false; }
     return fs.exists(path);
   };
 
-  // item 698: readFile(path) â†’ string | null (does not print, returns value)
+  // item 698: readFile(path) → string | null (does not print, returns value)
   g.readFile = function(path: string): string | null {
     if (!path) { terminal.println('usage: readFile(path)'); return null; }
     var c = fs.readFile(path);
@@ -1307,7 +1307,7 @@ export function registerCommands(g: any): void {
     return c;
   };
 
-  // item 699: writeFile(path, data) â€” convenience alias
+  // item 699: writeFile(path, data) — convenience alias
   g.writeFile = function(path: string, data: string): boolean {
     if (!path) { terminal.println('usage: writeFile(path, data)'); return false; }
     var ok = fs.writeFile(path, data !== undefined ? data : '');
@@ -1315,7 +1315,7 @@ export function registerCommands(g: any): void {
     return ok;
   };
 
-  // item 700: appendFile(path, data) â€” convenience alias
+  // item 700: appendFile(path, data) — convenience alias
   g.appendFile = function(path: string, data: string): boolean {
     if (!path) { terminal.println('usage: appendFile(path, data)'); return false; }
     var ok = fs.appendFile(path, data !== undefined ? data : '');
@@ -1323,7 +1323,7 @@ export function registerCommands(g: any): void {
     return ok;
   };
 
-  // item 703: diff(pathA, pathB) â€” unified diff between two files
+  // item 703: diff(pathA, pathB) — unified diff between two files
   g.diff = function(pathA: string, pathB: string) {
     if (!pathA || !pathB) { terminal.println('usage: diff(pathA, pathB)'); return; }
     var a = fs.readFile(pathA);
@@ -1357,7 +1357,7 @@ export function registerCommands(g: any): void {
     });
   };
 
-  // item 704: chmod(path, mode) â€” change file permissions (stored in filesystem stat)
+  // item 704: chmod(path, mode) — change file permissions (stored in filesystem stat)
   g.chmod = function(path: string, mode: number | string): boolean {
     if (!path || mode === undefined) { terminal.println('usage: chmod(path, mode)  e.g. chmod("/bin/foo", 0o755)'); return false; }
     if (!fs.exists(path)) { terminal.println('chmod: ' + path + ': not found'); return false; }
@@ -1369,7 +1369,7 @@ export function registerCommands(g: any): void {
     return ok !== false;
   };
 
-  // item 705: chown â€” change file owner
+  // item 705: chown — change file owner
   g.chown = function(path: string, user: string, group?: string): boolean {
     if (!path || !user) { terminal.println('usage: chown(path, user, group?)'); return false; }
     if (!fs.exists(path)) { terminal.println('chown: ' + path + ': not found'); return false; }
@@ -1378,11 +1378,11 @@ export function registerCommands(g: any): void {
     return true;
   };
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // 8B.  NETWORKING COMMANDS (items 718â€“728)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
+  // 8B.  NETWORKING COMMANDS (items 718–728)
+  // ──────────────────────────────────────────────────────────────────────────
 
-  // item 718: ping(host, count?) â€” ICMP echo with RTT stats
+  // item 718: ping(host, count?) — ICMP echo with RTT stats
   g.ping = function(host: string, count?: number) {
     if (!host) { terminal.println('usage: ping(host, count?)'); return; }
     var n = (count !== undefined && count > 0) ? count : 4;
@@ -1410,7 +1410,7 @@ export function registerCommands(g: any): void {
     return printableArray(rtts, function() {});
   };
 
-  // item 722: traceroute(host, maxHops?) â€” ICMP TTL probe, returns hop list
+  // item 722: traceroute(host, maxHops?) — ICMP TTL probe, returns hop list
   g.traceroute = function(host: string, maxHops?: number) {
     if (!host) { terminal.println('usage: traceroute(host, maxHops?)'); return; }
     var hops  = (maxHops !== undefined && maxHops > 0) ? Math.min(maxHops, 30) : 30;
@@ -1449,7 +1449,7 @@ export function registerCommands(g: any): void {
     return printableArray(hopResults, function() {});
   };
 
-  // item 719: fetch(url, opts?) â€” blocking fetch, returns FetchResponse
+  // item 719: fetch(url, opts?) — blocking fetch, returns FetchResponse
   g.fetch = function(url: string, opts?: any) {
     if (!url) { terminal.println('usage: fetch(url, opts?)'); return null; }
     var done = false;
@@ -1489,13 +1489,13 @@ export function registerCommands(g: any): void {
     });
   };
 
-  // item 720: dns.lookup(host) â€” DNS A record lookup
+  // item 720: dns.lookup(host) — DNS A record lookup
   g.dns = {
     lookup: function(host: string): string | null {
       if (!host) { terminal.println('usage: dns.lookup(host)'); return null; }
       if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
         // Already an IP address
-        terminal.colorPrintln(host + ' â†’ ' + host, Color.LIGHT_GREEN);
+        terminal.colorPrintln(host + ' → ' + host, Color.LIGHT_GREEN);
         return host;
       }
       terminal.colorPrint('Resolving ' + host + '... ', Color.DARK_GREY);
@@ -1512,7 +1512,7 @@ export function registerCommands(g: any): void {
     },
   };
 
-  // item 723: wget(url, dest) â€” download URL to file with progress
+  // item 723: wget(url, dest) — download URL to file with progress
   g.wget = function(url: string, dest?: string) {
     if (!url) { terminal.println('usage: wget(url, dest?)'); return; }
     var filename = dest || url.split('/').pop() || 'index.html';
@@ -1520,7 +1520,7 @@ export function registerCommands(g: any): void {
       // strip query string
       filename = filename.split('?')[0] || 'index.html';
     }
-    terminal.println('Downloading ' + url + ' â†’ ' + filename);
+    terminal.println('Downloading ' + url + ' → ' + filename);
     var done = false;
     var result: any = null;
     var fetchErr: string | undefined;
@@ -1562,11 +1562,11 @@ export function registerCommands(g: any): void {
     },
   };
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
   // 8C.  SYSTEM INFO COMMANDS (items 729-741)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
 
-  // item 730: disk() â€” disk usage per mount point
+  // item 730: disk() — disk usage per mount point
   g.disk = function() {
     var diskFS = (g._diskFS as any);
     var diskStats = diskFS && diskFS.getStats ? diskFS.getStats() : null;
@@ -1600,7 +1600,7 @@ export function registerCommands(g: any): void {
     });
   };
 
-  // item 731: cpu() â€” CPU info and utilization
+  // item 731: cpu() — CPU info and utilization
   g.cpu = function() {
     var ticks  = kernel.getTicks();
     var upMs   = kernel.getUptime();
@@ -1635,7 +1635,7 @@ export function registerCommands(g: any): void {
     });
   };
 
-  // item 738: syslog(n?) â€” tail system log
+  // item 738: syslog(n?) — tail system log
   g.syslog = function(n?: number) {
     var lines = n !== undefined ? n : 50;
     var logPath = '/var/log/syslog';
@@ -1653,23 +1653,23 @@ export function registerCommands(g: any): void {
     });
   };
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // 8D.  PACKAGE MANAGER COMMANDS (items 728â€“740)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
+  // 8D.  PACKAGE MANAGER COMMANDS (items 728–740)
+  // ──────────────────────────────────────────────────────────────────────────
 
   /**
-   * g.pkg â€” package manager API
-   *   g.pkg.install('name')    â€” download, verify, extract to /usr/
-   *   g.pkg.remove('name')     â€” unlink installed files
-   *   g.pkg.list()             â€” list installed packages
-   *   g.pkg.search('name')     â€” search remote index
-   *   g.pkg.update()           â€” refresh package index from repos
-   *   g.pkg.upgrade('name')    â€” update a package to latest version
-   *   g.pkg.upgradeAll()       â€” upgrade all non-pinned packages
-   *   g.pkg.addRepo(url)       â€” add a repository
-   *   g.pkg.pin('name')        â€” pin / hold a package
-   *   g.pkg.unpin('name')      â€” unpin a package
-   *   g.pkg.sandbox('name')    â€” run package in isolated JS context
+   * g.pkg — package manager API
+   *   g.pkg.install('name')    — download, verify, extract to /usr/
+   *   g.pkg.remove('name')     — unlink installed files
+   *   g.pkg.list()             — list installed packages
+   *   g.pkg.search('name')     — search remote index
+   *   g.pkg.update()           — refresh package index from repos
+   *   g.pkg.upgrade('name')    — update a package to latest version
+   *   g.pkg.upgradeAll()       — upgrade all non-pinned packages
+   *   g.pkg.addRepo(url)       — add a repository
+   *   g.pkg.pin('name')        — pin / hold a package
+   *   g.pkg.unpin('name')      — unpin a package
+   *   g.pkg.sandbox('name')    — run package in isolated JS context
    */
   g.pkg = {
     install: function(name: string) {
@@ -1748,9 +1748,9 @@ export function registerCommands(g: any): void {
     },
   };
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
   // 8.  REPL UTILITIES
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ──────────────────────────────────────────────────────────────────────────
 
   g.echo = function() {
     var parts: string[] = [];
@@ -1765,7 +1765,7 @@ export function registerCommands(g: any): void {
   };
 
   /**
-   * g.inspect(value) â€” deep pretty-print with types and circular-ref detection (item 788)
+   * g.inspect(value) — deep pretty-print with types and circular-ref detection (item 788)
    * Displays the full object tree with type annotations.
    */
   g.inspect = function(value: any, maxDepth?: number): void {
@@ -1794,7 +1794,7 @@ export function registerCommands(g: any): void {
       if (t === 'number')    { terminal.colorPrintln(indent + String(v) + ' <number>', colorForType(t)); return; }
       if (t === 'boolean')   { terminal.colorPrintln(indent + String(v) + ' <boolean>', colorForType(t)); return; }
       if (t === 'string') {
-        var display = v.length > 80 ? JSON.stringify(v.slice(0, 80)) + 'â€¦' : JSON.stringify(v);
+        var display = v.length > 80 ? JSON.stringify(v.slice(0, 80)) + '…' : JSON.stringify(v);
         terminal.colorPrintln(indent + display + ' <string, ' + v.length + ' chars>', colorForType(t));
         return;
       }
@@ -1805,7 +1805,7 @@ export function registerCommands(g: any): void {
       }
       if (typeof v === 'object') {
         if (seen.has(v)) { terminal.colorPrintln(indent + '[Circular]', Color.LIGHT_RED); return; }
-        if (currentDepth >= depth) { terminal.colorPrintln(indent + '[Object â€¦]', Color.DARK_GREY); return; }
+        if (currentDepth >= depth) { terminal.colorPrintln(indent + '[Object …]', Color.DARK_GREY); return; }
         seen.add(v);
         var keys = Object.keys(v);
         if (Array.isArray(v)) {
@@ -1813,7 +1813,7 @@ export function registerCommands(g: any): void {
           for (var i = 0; i < Math.min(v.length, 20); i++) {
             printValue(v[i], indent + '  ', currentDepth + 1);
           }
-          if (v.length > 20) terminal.colorPrintln(indent + '  â€¦ ' + (v.length - 20) + ' more', Color.DARK_GREY);
+          if (v.length > 20) terminal.colorPrintln(indent + '  … ' + (v.length - 20) + ' more', Color.DARK_GREY);
           terminal.colorPrintln(indent + ']', Color.LIGHT_CYAN);
         } else {
           terminal.colorPrintln(indent + '{', Color.WHITE);
@@ -1821,7 +1821,7 @@ export function registerCommands(g: any): void {
             terminal.colorPrint(indent + '  ' + keys[ki] + ': ', Color.CYAN);
             printValue(v[keys[ki]], '', currentDepth + 1);
           }
-          if (keys.length > 30) terminal.colorPrintln(indent + '  â€¦ ' + (keys.length - 30) + ' more keys', Color.DARK_GREY);
+          if (keys.length > 30) terminal.colorPrintln(indent + '  … ' + (keys.length - 30) + ' more keys', Color.DARK_GREY);
           terminal.colorPrintln(indent + '}', Color.WHITE);
         }
         seen.delete(v);
@@ -1832,7 +1832,7 @@ export function registerCommands(g: any): void {
   };
 
   /**
-   * g.doc(symbol) â€” print JSDoc + type signature for any function or object (item 789)
+   * g.doc(symbol) — print JSDoc + type signature for any function or object (item 789)
    * Usage: doc(fs.readFile)  or  doc('fs.readFile')
    */
   g.doc = function(symbol: any): void {
@@ -1856,7 +1856,7 @@ export function registerCommands(g: any): void {
       // Print the signature (first line)
       var firstLine = src.split('\n')[0];
       terminal.colorPrintln('  ' + firstLine, Color.CYAN);
-      // Try to extract JSDoc comment â€” not available at runtime, show param names
+      // Try to extract JSDoc comment — not available at runtime, show param names
       var match = src.match(/\(([^)]*)\)/);
       if (match) terminal.colorPrintln('  Params: (' + match[1] + ')', Color.DARK_GREY);
     } else if (typeof symbol === 'object' && symbol !== null) {
@@ -1868,9 +1868,9 @@ export function registerCommands(g: any): void {
     }
   };
 
-  // â”€â”€ App registry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── App registry ─────────────────────────────────────────────────────────
 
-  /** Built-in app registry: name â†’ factory that returns an App instance. */
+  /** Built-in app registry: name → factory that returns an App instance. */
   var _appRegistry: Record<string, { factory: () => App; defaultWidth: number; defaultHeight: number }> = {
     'editor':         { factory: () => new EditorApp(),   defaultWidth: 720,  defaultHeight: 480 },
     'file-manager':   { factory: () => fileManagerApp,    defaultWidth: 640,  defaultHeight: 480 },
@@ -1927,7 +1927,7 @@ export function registerCommands(g: any): void {
     wm.createWindow({ title: 'Settings', width: 560, height: 440, app: settingsApp, closeable: true });
   };
 
-  // Text editor â€” opens windowed EditorApp in WM mode, VGA editor in text mode
+  // Text editor — opens windowed EditorApp in WM mode, VGA editor in text mode
   g.edit = function(path?: string) {
     if (wm !== null) {
       var app = new EditorApp(path);
@@ -1938,7 +1938,7 @@ export function registerCommands(g: any): void {
     }
   };
 
-  // â”€â”€ help(fn) registry (item 662) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── help(fn) registry (item 662) ─────────────────────────────────────────
   // Short descriptions for all REPL shell commands.
   // help(fn) will first check this registry, then fall back to fn.toString().
   var _helpDocs: Record<string, string> = {
@@ -1971,7 +1971,7 @@ export function registerCommands(g: any): void {
     hostname:  'hostname(name?)\n  Show or set the hostname.',
     env:       'env()\n  Print environment variables.  env.get(key) / env.set(key, val).',
     ping:      'ping(host, count?)\n  ICMP echo to host.',
-    traceroute: 'traceroute(host, maxHops?)\n  ICMP TTL probe â€” prints hop-by-hop path. maxHops default 30.',
+    traceroute: 'traceroute(host, maxHops?)\n  ICMP TTL probe — prints hop-by-hop path. maxHops default 30.',
     dns:       'dns(host)\n  DNS lookup for a hostname.',
     http:      'http(url)\n  Fetch a URL and print the response body.',
     curl:      'curl(url)\n  Alias for http().',
@@ -1988,8 +1988,8 @@ export function registerCommands(g: any): void {
     spinner:   'spinner(msg?)\n  Show an animated spinner. Returns {stop()} to stop it.',
     connect:   'connect(host, port)\n  Open a TCP connection. Returns {write, read, close}.',
     nc:        'nc(host, port)\n  Interactive TCP session (like netcat).',
-    perf:      'perf.sample(fn, ms?) â€” benchmark fn for ms milliseconds.\n  perf.memory() â€” show heap / GC stats.',
-    calc:      'calc()\n  Open the interactive calculator app. Supports arithmetic,\n  Math functions (sqrt, sin, cos, logâ€¦) and constants (pi, e).',
+    perf:      'perf.sample(fn, ms?) — benchmark fn for ms milliseconds.\n  perf.memory() — show heap / GC stats.',
+    calc:      'calc()\n  Open the interactive calculator app. Supports arithmetic,\n  Math functions (sqrt, sin, cos, log…) and constants (pi, e).',
     clock:     "clock(mode?, seconds?)\n  Open the clock app.  mode: 'clock'|'stopwatch'|'countdown'.\n  seconds: countdown duration (for countdown mode).",
     stopwatch: 'stopwatch()\n  Shortcut to open the stopwatch app.',
     countdown: 'countdown(seconds)\n  Shortcut to start a countdown timer.',
@@ -2005,8 +2005,9 @@ export function registerCommands(g: any): void {
     watch:     'watch(path, cb, ms?)\n  Poll a file for changes every ms (default 500ms).\n  cb(event, path) called on create/change/delete. Returns {stop()}.',
     trace:     'trace(fn, label?)\n  Wrap fn to log every call with args, return value and duration.',
     'sys.jit': 'sys.jit.stats()\n  JIT compiler stats: compiled/bailed/deopt counts, pool usage KB.',
-    'sys.gc':  'sys.gc.run()\n  Force GC then return heap stats.\n  sys.gc.stats() â€” heap stats without forcing GC.',
+    'sys.gc':  'sys.gc.run()\n  Force GC then return heap stats.\n  sys.gc.stats() — heap stats without forcing GC.',
   };
+  (g as any)._helpDocs = _helpDocs;  // expose to globalThis so later subscript writes work
 
   // [Item 682] progress bar utility
   g.progress = function(val: number, max: number, width?: number) {
@@ -2020,11 +2021,11 @@ export function registerCommands(g: any): void {
     terminal.println('[' + bar + '] ' + pctStr + '  (' + val + '/' + max + ')');
   };
 
-  // [Item 683] spinner animation â€” returns {stop()} handle
+  // [Item 683] spinner animation — returns {stop()} handle
   g.spinner = function(msg?: string) {
     var frames = ['\u280b', '\u2819', '\u2839', '\u2838', '\u283c', '\u2834', '\u2826', '\u2827', '\u2807', '\u280f'];
     var fi = 0;
-    var label = msg || 'workingâ€¦';
+    var label = msg || 'working…';
     var active = true;
     var interval = setInterval(function() {
       if (!active) return;
@@ -2041,7 +2042,7 @@ export function registerCommands(g: any): void {
     };
   };
 
-  // [Item 738/739] perf â€” micro-benchmarking and memory stats
+  // [Item 738/739] perf — micro-benchmarking and memory stats
   g.perf = {
     /** Run fn repeatedly for ms milliseconds and report ops/sec */
     sample(fn: () => void, ms?: number) {
@@ -2088,7 +2089,7 @@ export function registerCommands(g: any): void {
       return { totalBytes: total, usedBytes: used, freeBytes: free };
     },
 
-    // ── [Item 974/795] flame(fn?, label?) — text-based call-frequency flame graph ──
+    // -- [Item 974/795] flame(fn?, label?) � text-based call-frequency flame graph --
     /**
      * Sample `fn` intensively and render a textual flame graph showing the
      * relative "hot" regions of the tight loop.  When called without a
@@ -2100,7 +2101,7 @@ export function registerCommands(g: any): void {
       var WIDTH    = 60;
       var ROWS     = 8;
 
-      // ── collect samples ──────────────────────────────────────────────────
+      // -- collect samples --------------------------------------------------
       var buckets: number[] = new Array(WIDTH).fill(0);
       var totalSamples = 0;
 
@@ -2110,7 +2111,7 @@ export function registerCommands(g: any): void {
           var t0 = Date.now();
           fn();
           var dt = Date.now() - t0;
-          // map elapsed time → width bucket (log scale)
+          // map elapsed time ? width bucket (log scale)
           var slot = Math.floor((dt / (duration / WIDTH)) * WIDTH);
           slot = Math.max(0, Math.min(WIDTH - 1, slot));
           buckets[slot]++;
@@ -2127,7 +2128,7 @@ export function registerCommands(g: any): void {
         }
       }
 
-      // ── normalise to ROWS ────────────────────────────────────────────────
+      // -- normalise to ROWS ------------------------------------------------
       var maxCount = Math.max(1, ...buckets);
 
       terminal.println('');
@@ -2138,18 +2139,18 @@ export function registerCommands(g: any): void {
         '  ' + totalSamples + ' samples  |  ' + WIDTH + ' buckets  |  height=' + ROWS,
         Color.DARK_GREY);
 
-      // Render top → bottom (row 0 = tallest bar)
+      // Render top ? bottom (row 0 = tallest bar)
       for (var row = ROWS - 1; row >= 0; row--) {
         var threshold = (row / ROWS);
         var line = '  ';
         for (var col = 0; col < WIDTH; col++) {
           var norm = buckets[col] / maxCount;
           if (norm > threshold) {
-            // heatmap colouring: cold→warm
-            if      (norm > 0.80) line += '\u2588'; // █ red/hot
-            else if (norm > 0.55) line += '\u2593'; // ▓
-            else if (norm > 0.30) line += '\u2592'; // ▒
-            else                  line += '\u2591'; // ░ blue/cold
+            // heatmap colouring: cold?warm
+            if      (norm > 0.80) line += '\u2588'; // � red/hot
+            else if (norm > 0.55) line += '\u2593'; // �
+            else if (norm > 0.30) line += '\u2592'; // �
+            else                  line += '\u2591'; // � blue/cold
           } else {
             line += ' ';
           }
@@ -2171,7 +2172,7 @@ export function registerCommands(g: any): void {
     }
   };
 
-  // â”€â”€ [Item 708] watch(path, callback) â€” polling file watcher â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── [Item 708] watch(path, callback) — polling file watcher ─────────────
   g.watch = function(path: string, callback: (event: string, p: string) => void, ms?: number) {
     var interval = ms || 500;
     var last = fs.exists(path) ? (fs.stat(path)?.modified ?? -1) : -2;
@@ -2195,7 +2196,7 @@ export function registerCommands(g: any): void {
     return { stop() { clearInterval(id); terminal.println('[watch] stopped'); } };
   };
 
-  // â”€â”€ [Item 741] trace(fn) â€” wrap a function to trace all its calls â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── [Item 741] trace(fn) — wrap a function to trace all its calls ─────────
   g.trace = function(fn: (...args: any[]) => any, label?: string) {
     var name = label || (fn as any).name || 'fn';
     var callCount = 0;
@@ -2215,36 +2216,36 @@ export function registerCommands(g: any): void {
       } finally {
         if (!threw) {
           var dur = kernel.getUptime() - t0;
-          terminal.println('[trace #' + callCount + '] â†’ ' + JSON.stringify(result) + ' (' + dur + 'ms)');
+          terminal.println('[trace #' + callCount + '] → ' + JSON.stringify(result) + ' (' + dur + 'ms)');
         }
       }
       return result;
     };
     (traced as any).calls = function() { return callCount; };
     (traced as any).original = fn;
-    terminal.println('[trace] wrapping ' + name + '  â€” call .calls() for count, .original for original fn');
+    terminal.println('[trace] wrapping ' + name + '  — call .calls() for count, .original for original fn');
     return traced;
   };
 
-  // â”€â”€ [Item 775] Calculator app â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── [Item 775] Calculator app ──────────────────────────────────────────────
   g.calc = function() {
     launchCalculator(terminal);
   };
 
-  // â”€â”€ [Item 776] Clock / stopwatch / countdown app â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── [Item 776] Clock / stopwatch / countdown app ─────────────────────────────
   g.clock = function(mode?: 'clock'|'stopwatch'|'countdown', seconds?: number) {
     launchClock(terminal, mode ?? 'clock', seconds);
   };
   g.stopwatch = function() { launchClock(terminal, 'stopwatch'); };
   g.countdown = function(seconds: number) { launchClock(terminal, 'countdown', seconds); };
 
-  // â”€â”€ [Item 777] notes â€” simple line-buffer text editor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── [Item 777] notes — simple line-buffer text editor ──────────────────────
   g.notes = function(path?: string) { launchNotes(terminal, path); };
 
-  // â”€â”€ [Item 784] tetris â€” classic falling-blocks game â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── [Item 784] tetris — classic falling-blocks game ───────────────────────
   g.tetris = function() { launchTetris(terminal); };
 
-  // â”€â”€ [Item 785] snake â€” classic snake game â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── [Item 785] snake — classic snake game ─────────────────────────────────
   g.snake = function() { launchSnake(terminal); };
   // -- [Item 770] imgview -- ASCII/block-art image viewer
   g.imgview = function(path) { launchImageViewer(terminal, path); };
@@ -2376,9 +2377,9 @@ export function registerCommands(g: any): void {
     }
   };
 
-  // ── [Items 655-658] REPL Sessions ────────────────────────────────────────
+  // -- [Items 655-658] REPL Sessions ----------------------------------------
   (function() {
-    // Map of named REPL contexts:  name → { vars: Record<string,any>, history: string[] }
+    // Map of named REPL contexts:  name ? { vars: Record<string,any>, history: string[] }
     var _sessions: Record<string, { vars: Record<string, any>; history: string[] }> = {};
     var _current: string | null = null;
 
@@ -2410,7 +2411,7 @@ export function registerCommands(g: any): void {
         names.forEach(function(n) {
           var s = _sessions[n];
           var varCount = Object.keys(s.vars).length;
-          var marker = n === _current ? ' ← current' : '';
+          var marker = n === _current ? ' ? current' : '';
           terminal.colorPrintln('  ' + n + '  ' + varCount + ' vars, ' + s.history.length + ' history entries' + marker,
             n === _current ? Color.LIGHT_CYAN : Color.WHITE);
         });
@@ -2452,7 +2453,7 @@ export function registerCommands(g: any): void {
     };
   })();
 
-  // ── [Item 678] Terminal output search ─────────────────────────────────────
+  // -- [Item 678] Terminal output search -------------------------------------
   g.searchOutput = function(pattern: string) {
     if (!pattern) { terminal.colorPrintln('Usage: searchOutput(pattern)', Color.YELLOW); return []; }
     var re: RegExp;
@@ -2480,9 +2481,9 @@ export function registerCommands(g: any): void {
     if (matches.length > 40) terminal.colorPrintln('  ... (' + (matches.length - 40) + ' more)', Color.DARK_GREY);
     return matches;
   };
-  (g as any)._helpDocs['searchOutput'] = 'searchOutput(pattern) — search terminal scrollback for lines matching regex pattern. Returns array of {line, text} matches.';
+  (g as any)._helpDocs['searchOutput'] = 'searchOutput(pattern) � search terminal scrollback for lines matching regex pattern. Returns array of {line, text} matches.';
 
-  // ── [Item 679] Terminal output copy ───────────────────────────────────────
+  // -- [Item 679] Terminal output copy ---------------------------------------
   g.copyOutput = function(lines?: number) {
     var n = lines ?? 50;
     var scrollback: string[] = (terminal as any)._scrollback || (terminal as any)._lines || [];
@@ -2496,14 +2497,14 @@ export function registerCommands(g: any): void {
     terminal.colorPrintln('[copy] ' + slice.length + ' lines copied.', Color.LIGHT_GREEN);
     return text;
   };
-  (g as any)._helpDocs['copyOutput'] = 'copyOutput(lines?) — copy last N lines (default 50) of terminal scrollback to clipboard. Returns copied text.';
+  (g as any)._helpDocs['copyOutput'] = 'copyOutput(lines?) � copy last N lines (default 50) of terminal scrollback to clipboard. Returns copied text.';
 
-  // ── [Items 975/976] Built-in benchmarks ───────────────────────────────────
+  // -- [Items 975/976] Built-in benchmarks -----------------------------------
   g.bench = {
     /** [Item 975] Run the full synthetic benchmark suite. */
     run(verbose?: boolean) {
       terminal.colorPrintln('JSOS Synthetic Benchmark Suite', Color.WHITE);
-      terminal.colorPrintln('━'.repeat(44), Color.DARK_GREY);
+      terminal.colorPrintln('?'.repeat(44), Color.DARK_GREY);
       var results: Record<string, number> = {};
 
       function run1(name: string, fn: () => void, iters: number = 100_000) {
@@ -2555,8 +2556,8 @@ export function registerCommands(g: any): void {
     /** [Item 976] Measure Core Web Vitals equivalents for a JSOS browser page. */
     browser(url: string) {
       if (!url) { terminal.colorPrintln('Usage: bench.browser(url)', Color.YELLOW); return null; }
-      terminal.colorPrintln('JSOS Core Web Vitals — ' + url, Color.WHITE);
-      terminal.colorPrintln('─'.repeat(44), Color.DARK_GREY);
+      terminal.colorPrintln('JSOS Core Web Vitals � ' + url, Color.WHITE);
+      terminal.colorPrintln('-'.repeat(44), Color.DARK_GREY);
       var t0 = kernel.getTicks();
 
       // Simulate the stages a browser performs
@@ -2587,10 +2588,10 @@ export function registerCommands(g: any): void {
       return { ttfb, fcp, lcp, tbt, cls, score };
     },
   };
-  /** [Item 977] CI benchmark threshold check — fails if regression > threshold% (default 5%). */
+  /** [Item 977] CI benchmark threshold check � fails if regression > threshold% (default 5%). */
   g.bench.ci = function(thresholdPct: number = 5) {
     terminal.colorPrintln('JSOS CI Benchmark Gate (threshold: ' + thresholdPct + '%)', Color.WHITE);
-    terminal.colorPrintln('─'.repeat(44), Color.DARK_GREY);
+    terminal.colorPrintln('-'.repeat(44), Color.DARK_GREY);
     var baseline: Record<string, number> = {};
     try {
       var stored = (kernel as any).fs?.readFile?.('/tmp/.bench-baseline.json');
@@ -2608,14 +2609,14 @@ export function registerCommands(g: any): void {
       var pct = (base - cur) / base * 100;
       var status: string;
       if (pct > thresholdPct) {
-        status = '✗ REGRESSION ' + pct.toFixed(1) + '%';
+        status = '? REGRESSION ' + pct.toFixed(1) + '%';
         failures.push(name + ': ' + pct.toFixed(1) + '% slower');
         terminal.colorPrint('  ' + name.padEnd(28), Color.RED);
       } else if (pct < -2) {
-        status = '↑ IMPROVEMENT ' + (-pct).toFixed(1) + '%';
+        status = '? IMPROVEMENT ' + (-pct).toFixed(1) + '%';
         terminal.colorPrint('  ' + name.padEnd(28), Color.LIGHT_GREEN);
       } else {
-        status = '✓ OK';
+        status = '? OK';
         terminal.colorPrint('  ' + name.padEnd(28), Color.LIGHT_CYAN);
       }
       terminal.println(status);
@@ -2630,16 +2631,16 @@ export function registerCommands(g: any): void {
     if (!hadBaseline) {
       terminal.colorPrintln('Baseline saved. Run again to compare.', Color.YELLOW);
     } else if (failures.length === 0) {
-      terminal.colorPrintln('CI PASS — all benchmarks within threshold.', Color.LIGHT_GREEN);
+      terminal.colorPrintln('CI PASS � all benchmarks within threshold.', Color.LIGHT_GREEN);
     } else {
-      terminal.colorPrintln('CI FAIL — ' + failures.length + ' regression(s):', Color.RED);
+      terminal.colorPrintln('CI FAIL � ' + failures.length + ' regression(s):', Color.RED);
       failures.forEach(function(f) { terminal.colorPrintln('  ' + f, Color.RED); });
       return false;
     }
     return true;
   };
 
-  (g as any)._helpDocs['bench'] = 'bench.run()  — full synthetic benchmark suite\nbench.micro(fn, iters?, label?)  — micro-benchmark\nbench.browser(url)  — Core Web Vitals style page benchmark\nbench.ci(threshold?)  — CI regression gate (default 5%)';
+  (g as any)._helpDocs['bench'] = 'bench.run()  � full synthetic benchmark suite\nbench.micro(fn, iters?, label?)  � micro-benchmark\nbench.browser(url)  � Core Web Vitals style page benchmark\nbench.ci(threshold?)  � CI regression gate (default 5%)';
 
   // [Item 685] Terminal session recorder: g.record() / g.stopRecord() / g.replay(name)
   (function() {
@@ -2711,9 +2712,9 @@ export function registerCommands(g: any): void {
       step(0);
     };
   })();
-  (g as any)._helpDocs['record']     = 'record(name?)  — start recording terminal session to /home/<name>.trec';
-  (g as any)._helpDocs['stopRecord'] = 'stopRecord()  — stop recording and save the session file';
-  (g as any)._helpDocs['replay']     = 'replay(nameOrPath, speed?)  — replay a recorded terminal session';
+  (g as any)._helpDocs['record']     = 'record(name?)  � start recording terminal session to /home/<name>.trec';
+  (g as any)._helpDocs['stopRecord'] = 'stopRecord()  � stop recording and save the session file';
+  (g as any)._helpDocs['replay']     = 'replay(nameOrPath, speed?)  � replay a recorded terminal session';
 
   // [Item 687] REPL notebook mode: g.notebook(name?)
   g.notebook = function(name?: string) {
@@ -2722,7 +2723,7 @@ export function registerCommands(g: any): void {
       : '/home/notebook.rpl';
 
     terminal.colorPrintln('REPL Notebook: ' + path, Color.YELLOW);
-    terminal.colorPrintln('─'.repeat(44), Color.DARK_GREY);
+    terminal.colorPrintln('-'.repeat(44), Color.DARK_GREY);
 
     var source = '';
     try {
@@ -2774,10 +2775,10 @@ export function registerCommands(g: any): void {
     terminal.colorPrintln('Notebook complete.', Color.LIGHT_GREEN);
     return path;
   };
-  (g as any)._helpDocs['notebook'] = 'notebook(name?)  — run a .rpl REPL notebook file from /home/<name>.rpl';
+  (g as any)._helpDocs['notebook'] = 'notebook(name?)  � run a .rpl REPL notebook file from /home/<name>.rpl';
 
   g.help = function(fn?: unknown) {
-    // â”€â”€ help(fn) mode: show docs for a single function (item 662) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── help(fn) mode: show docs for a single function (item 662) ──────────
     if (fn !== undefined) {
       var fname = typeof fn === 'function'
         ? (fn as any).name as string || '(anonymous)'
@@ -2789,7 +2790,7 @@ export function registerCommands(g: any): void {
         for (var li = 1; li < lines.length; li++) terminal.colorPrintln(lines[li], Color.LIGHT_GREY);
         return;
       }
-      // Fall back to fn.toString() â€” show first block comment and signature
+      // Fall back to fn.toString() — show first block comment and signature
       if (typeof fn === 'function') {
         var src: string = (fn as any).toString() as string;
         // Extract leading JSDoc comment if present
@@ -2813,9 +2814,9 @@ export function registerCommands(g: any): void {
       return;
     }
 
-    // â”€â”€ Default: show full command reference â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Default: show full command reference ────────────────────────────────
     terminal.println('');
-    terminal.colorPrintln('JSOS  â€”  everything is JavaScript', Color.WHITE);
+    terminal.colorPrintln('JSOS  —  everything is JavaScript', Color.WHITE);
     terminal.colorPrintln('QuickJS ES2023 on bare-metal i686', Color.DARK_GREY);
     terminal.println('');
 
@@ -2862,7 +2863,7 @@ export function registerCommands(g: any): void {
     terminal.println('');
 
     terminal.colorPrintln('Multi-process:', Color.YELLOW);
-    terminal.println('  spawn(code, name?)        spawn isolated JS runtime â†’ JSProcess');
+    terminal.println('  spawn(code, name?)        spawn isolated JS runtime → JSProcess');
     terminal.println('  procs()                   list live child processes');
     terminal.println('  p.eval(code)              run code in child process');
     terminal.println('  p.evalSlice(code, ms?)    time-limited eval (default 10ms max)');
@@ -2871,17 +2872,17 @@ export function registerCommands(g: any): void {
     terminal.println('  p.onMessage(cb)           callback fired by tick() on new messages');
     terminal.println('  p.offMessage(cb)          remove a callback');
     terminal.println('  p.tick()                  pump child async/Promise job queue');
-    terminal.println('  p.recvAll()               drain all pending messages â†’ array');
+    terminal.println('  p.recvAll()               drain all pending messages → array');
     terminal.println('  p.stats()                 queue depths + alive status');
     terminal.println('  p.terminate()             kill process, free runtime');
-    terminal.println('  createSharedBuffer(size?) allocate BSS slab â†’ id  (max 256 KB)');
-    terminal.println('  openSharedBuffer(id)      â†’ ArrayBuffer (zero-copy, any runtime)');
+    terminal.println('  createSharedBuffer(size?) allocate BSS slab → id  (max 256 KB)');
+    terminal.println('  openSharedBuffer(id)      → ArrayBuffer (zero-copy, any runtime)');
     terminal.println('  releaseSharedBuffer(id)   free the slot');
     terminal.println('');
     terminal.colorPrintln('  Child kernel API (inside spawned code):', Color.DARK_GREY);
     terminal.println('    kernel.postMessage(s)        push string to parent outbox');
     terminal.println('    kernel.pollMessage()         pop string from parent inbox');
-    terminal.println('    kernel.sharedBufferOpen(id)  zero-copy ArrayBuffer â€” no stringify');
+    terminal.println('    kernel.sharedBufferOpen(id)  zero-copy ArrayBuffer — no stringify');
     terminal.println('    kernel.serialPut(s)  kernel.sleep(ms)  kernel.getTicks()');
     terminal.println('');
 
@@ -2946,9 +2947,9 @@ export function registerCommands(g: any): void {
     terminal.colorPrint('  os.fs', Color.LIGHT_CYAN);
     terminal.println('              .read .write .readBytes .list .mkdir .exists .cd .cwd .rm');
     terminal.colorPrint('  os.fetchAsync', Color.LIGHT_CYAN);
-    terminal.println('       (url, cb, opts?)  non-blocking HTTP/HTTPS â†’ FetchResponse');
+    terminal.println('       (url, cb, opts?)  non-blocking HTTP/HTTPS → FetchResponse');
     terminal.colorPrint('  os.process', Color.LIGHT_CYAN);
-    terminal.println('          .spawn(code, name?)  .list()  â†’ isolated JSProcess');
+    terminal.println('          .spawn(code, name?)  .list()  → isolated JSProcess');
     terminal.colorPrint('  os.ipc', Color.LIGHT_CYAN);
     terminal.println('             .pipe()  .signals.handle/send  .mq.send/recv');
     terminal.colorPrint('  os.users', Color.LIGHT_CYAN);

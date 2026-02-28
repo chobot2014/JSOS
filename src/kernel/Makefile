@@ -1,6 +1,6 @@
 CC = i686-elf-gcc
-CFLAGS = -ffreestanding -O2 -Wall -Wextra -std=c11 -DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK
-LDFLAGS = -ffreestanding -O2 -nostartfiles -lgcc -lc -lnosys -lm
+CFLAGS = -ffreestanding -O2 -Wall -Wextra -std=c11 -DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK -fno-stack-protector
+LDFLAGS = -ffreestanding -O2 -nostartfiles -lgcc -lc -lnosys -lm -Wl,--allow-multiple-definition
 QUICKJS_DIR = /opt/quickjs
 
 # QuickJS source files (compiled separately for different warning settings)
@@ -46,7 +46,7 @@ $(QJS_OBJECTS): $(QJS_SOURCES)
 	$(CC) -ffreestanding -O2 -std=c11 -DCONFIG_VERSION=\"2025.09\" \
 	  -D_GNU_SOURCE -fwrapv -Dasm=__asm__ -Dalloca=__builtin_alloca \
 	  -D'PRId64="lld"' -D'PRIi64="lli"' -D'PRIu64="llu"' -D'PRIx64="llx"' \
-	  -DJSOS_JIT_HOOK \
+	  -DJSOS_JIT_HOOK -fno-stack-protector \
 	  -w -I$(QUICKJS_DIR) -c $(QUICKJS_DIR)/$(patsubst %.o,%.c,$@) -o $@
 
 %.o: %.s

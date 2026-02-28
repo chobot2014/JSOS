@@ -210,7 +210,11 @@ function startPeriodicSync(intervalSeconds: number = 3600): void {
   stopPeriodicSync();
   function doSync() {
     sync();
-    _resyncTimer = setTimeout(doSync, intervalSeconds * 1000);
+    // setTimeout is only available in child JS processes, not the main kernel
+    // context which uses a cooperative scheduler. Guard to avoid TypeError.
+    if (typeof setTimeout === 'function') {
+      _resyncTimer = (setTimeout as any)(doSync, intervalSeconds * 1000);
+    }
   }
   doSync();
 }
@@ -218,7 +222,9 @@ function startPeriodicSync(intervalSeconds: number = 3600): void {
 /** Stop periodic NTP re-sync. */
 function stopPeriodicSync(): void {
   if (_resyncTimer !== null) {
-    clearTimeout(_resyncTimer);
+    if (typeof clearTimeout === 'function') {
+      (clearTimeout as any)(_resyncTimer);
+    }
     _resyncTimer = null;
   }
 }

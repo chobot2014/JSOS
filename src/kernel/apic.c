@@ -14,7 +14,7 @@
 
 #include "apic.h"
 #include "io.h"
-#include "timer.h"          /* timer_sleep_ms() for calibration */
+#include "timer.h"          /* timer_sleep() for calibration */
 #include <stdint.h>
 
 /* ── LAPIC MMIO base ─────────────────────────────────────────────────────── */
@@ -98,7 +98,7 @@ void apic_timer_calibrate(void)
     _lapic_wr(LAPIC_TIMER_ICR, 0xFFFFFFFFu);
 
     /* Wait for calibration window using existing PIT-based sleep */
-    timer_sleep_ms(APIC_CAL_MS);
+    timer_sleep(APIC_CAL_MS);
 
     /* Read remaining count */
     uint32_t remaining = _lapic_rd(LAPIC_TIMER_CCR);

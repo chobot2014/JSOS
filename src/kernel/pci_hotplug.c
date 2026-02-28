@@ -29,9 +29,9 @@ static void *_hp_cb_user        = NULL;
 
 /* Walk PCI capability list looking for PCIe capability. */
 static uint8_t _find_pcie_cap(uint8_t bus, uint8_t dev, uint8_t fn) {
-    uint8_t cap_ptr = (uint8_t)(pci_config_read(bus, dev, fn, 0x34) & 0xFC);
+    uint8_t cap_ptr = (uint8_t)(pci_cfg_read32(bus, dev, fn, 0x34) & 0xFC);
     while (cap_ptr) {
-        uint32_t cap = pci_config_read(bus, dev, fn, cap_ptr);
+        uint32_t cap = pci_cfg_read32(bus, dev, fn, cap_ptr);
         if ((cap & 0xFF) == PCI_CAP_PCIE) return cap_ptr;
         cap_ptr = (uint8_t)((cap >> 8) & 0xFC);
     }
@@ -44,13 +44,13 @@ int pci_hotplug_init(void) {
 
     for (uint8_t bus = 0; bus < 16; bus++) {
         for (uint8_t dev = 0; dev < 32; dev++) {
-            uint32_t id = pci_config_read(bus, dev, 0, 0);
+            uint32_t id = pci_cfg_read32(bus, dev, 0, 0);
             if ((id & 0xFFFF) == 0xFFFF) continue;
 
             uint8_t cap = _find_pcie_cap(bus, dev, 0);
             if (!cap) continue;
 
-            uint32_t slotcap = pci_config_read(bus, dev, 0, cap + PCIE_SLOTCAP_OFF);
+            uint32_t slotcap = pci_cfg_read32(bus, dev, 0, cap + PCIE_SLOTCAP_OFF);
             if (!(slotcap & PCIE_SLOTCAP_HPC)) continue;
             if (_hp_slot_count >= MAX_HP_SLOTS) break;
 
@@ -95,9 +95,9 @@ static int _tbt_present = 0;
 int thunderbolt_init(void) {
     for (uint8_t bus = 0; bus < 8; bus++) {
         for (uint8_t dev = 0; dev < 32; dev++) {
-            uint32_t id = pci_config_read(bus, dev, 0, 0);
+            uint32_t id = pci_cfg_read32(bus, dev, 0, 0);
             if ((id & 0xFFFF) == 0xFFFF) continue;
-            uint32_t cls = pci_config_read(bus, dev, 0, 0x08) >> 8;
+            uint32_t cls = pci_cfg_read32(bus, dev, 0, 0x08) >> 8;
             if ((cls & 0xFFFFFF) == TBT_PCI_CLASS) {
                 _tbt_present = 1;
                 platform_boot_print("[TBT] Thunderbolt/USB4 host controller found\n");
