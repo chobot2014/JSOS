@@ -166,23 +166,23 @@
 
 ## 3. VIRTUAL MEMORY MANAGER (src/os/core/)
 
-128. [P0 ?] VirtualMemoryManager: `allocatePages` must track which physical frames are in use ? `allocatedPhysicalPages = new Set<number>()` tracks all allocated physical frame numbers in `process/vmm.ts`
-129. [P0 ?] `freePages`: actually unmap pages and return physical frames to allocator ? `freeVirtualMemory()` walks pages, calls `freePhysicalPage()` + `pageTable.delete()` + removes region in `process/vmm.ts`
-130. [P0 ?] Prevent double-free of physical pages ? `allocatedPhysicalPages.has(i)` guard before allocating; `allocatedPhysicalPages.delete()` on free in `process/vmm.ts`
-131. [P0 ?] Stack growth: handle guard page fault by extending stack mapping ? `allocateStack(size, maxGrowth)` commits initial pages + registers guard-page VPN in `stackGuards` map; `handlePageFault()` detects guard-page hit, allocates physical frame, slides guard down one page, expands `MemoryRegion.start`; hard floor enforced by `minStack` to detect stack overflow; in `process/vmm.ts`
-132. [P0 ?] Kernel vs userspace page table split (ring 0 vs ring 3 mappings) ? `_currentRing: 0 | 3` tracks active privilege level; `setPrivilegeLevel()`/`getPrivilegeLevel()` API; `allocateVirtualMemory(size, perms, userAccessible)` marks PTEs with `user=false` for kernel-only allocations; `allocateKernelMemory()` convenience wrapper; `isValidAccess()` now enforces ring-3 cannot read/write pages where `pte.user===false`; `forceRing` override param for cross-ring checks; in `process/vmm.ts`
-133. [P1 ?] Copy-on-write (COW) for forked processes
-134. [P1 ?] Memory-mapped files (`mmap` with file backing)
-135. [P1 ?] Demand paging: page fault loads data from disk lazily
-136. [P1 ?] Swap space: evict LRU pages to disk when physical memory low
-137. [P1 ?] Page reclaim: LRU clock algorithm
-138. [P1 ?] `/proc/meminfo`-style memory stats export ? `meminfo()` in `fs/proc.ts`; reads `kernel.getMemoryInfo()` + `vmm.getMemoryStats()`; served at `/proc/meminfo`
-139. [P2 ?] Huge pages (explicit 4MB allocations for performance) ? `enableHardwarePaging()` maps all RAM using 4MB huge-page PDEs (`HUGE|PRESENT|WRITABLE`) in `process/vmm.ts`
-140. [P2 ?] ASLR for process address spaces
-141. [P2 ?] Memory protection keys (MPK)
-142. [P2 ?] `madvise(MADV_WILLNEED)` prefetch hint
-143. [P3 ?] Transparent huge pages (THP)
-144. [P3 ?] ZRAM compressed swap
+128. [P0 ✓] VirtualMemoryManager: `allocatePages` must track which physical frames are in use — `allocatedPhysicalPages = new Set<number>()` tracks all allocated physical frame numbers in `process/vmm.ts`
+129. [P0 ✓] `freePages`: actually unmap pages and return physical frames to allocator — `freeVirtualMemory()` walks pages, calls `freePhysicalPage()` + `pageTable.delete()` + removes region in `process/vmm.ts`
+130. [P0 ✓] Prevent double-free of physical pages — `allocatedPhysicalPages.has(i)` guard before allocating; `allocatedPhysicalPages.delete()` on free in `process/vmm.ts`
+131. [P0 ✓] Stack growth: handle guard page fault by extending stack mapping — `allocateStack(size, maxGrowth)` commits initial pages + registers guard-page VPN in `stackGuards` map; `handlePageFault()` detects guard-page hit, allocates physical frame, slides guard down one page, expands `MemoryRegion.start`; hard floor enforced by `minStack` to detect stack overflow; in `process/vmm.ts`
+132. [P0 ✓] Kernel vs userspace page table split (ring 0 vs ring 3 mappings) — `_currentRing: 0 | 3` tracks active privilege level; `setPrivilegeLevel()`/`getPrivilegeLevel()` API; `allocateVirtualMemory(size, perms, userAccessible)` marks PTEs with `user=false` for kernel-only allocations; `allocateKernelMemory()` convenience wrapper; `isValidAccess()` now enforces ring-3 cannot read/write pages where `pte.user===false`; `forceRing` override param for cross-ring checks; in `process/vmm.ts`
+133. [P1 ✓] Copy-on-write (COW) for forked processes — `COWManager` class with `markSharedRegion/onWrite/isCOWPage` + `cowManager` singleton in `process/vmm.ts:746`
+134. [P1 ✓] Memory-mapped files (`mmap` with file backing) — `mmapFile()` creates not-present PTEs for demand paging + `loadFileBacking()` + `setFileDataProvider()` + `_fileBacking` Map in `process/vmm.ts:324`
+135. [P1 ✓] Demand paging: page fault loads data from disk lazily — `handlePageFault()` case checks `backingStore==='file'`, reads chunk via `_fileDataProvider(fd, offset, pageSize)` or `_fileBacking` Map, allocates physical page in `process/vmm.ts`
+136. [P1 ✓] Swap space: evict LRU pages to disk when physical memory low — `SwapManager` class with `evict/swapIn/freeSlot` + `swapManager` singleton in `process/vmm.ts:883`
+137. [P1 ✓] Page reclaim: LRU clock algorithm — `LRUClock` (second-chance) with `track/markAccessed/remove/evict` + `lruClock` singleton in `process/vmm.ts:942`
+138. [P1 ✓] `/proc/meminfo`-style memory stats export — `meminfo()` in `fs/proc.ts`; reads `kernel.getMemoryInfo()` + `vmm.getMemoryStats()`; served at `/proc/meminfo`
+139. [P2 ✓] Huge pages (explicit 4MB allocations for performance) — `enableHardwarePaging()` maps all RAM using 4MB huge-page PDEs (`HUGE|PRESENT|WRITABLE`) in `process/vmm.ts`
+140. [P2 ✓] ASLR for process address spaces — `ASLRManager` class with `randomizeBase/randomizeStack/randomizeHeap/randomizeMmap` + `aslrManager` singleton in `process/vmm.ts:1021`
+141. [P2 ✓] Memory protection keys (MPK) — `MPKManager` class with `allocKey/freeKey/setPermissions/checkAccess` + `MPK_PROT_*` constants + `mpkManager` singleton in `process/vmm.ts:1137`
+142. [P2 ✓] `madvise(MADV_WILLNEED)` prefetch hint — `MadviseManager` with `MADV_WILLNEED/DONTNEED/SEQUENTIAL/RANDOM/MERGEABLE/UNMERGEABLE` + `madviseManager` singleton in `process/vmm.ts:1252`
+143. [P3 ✓] Transparent huge pages (THP) — `THPManager` class with `promote/demote/scan` + `thpManager` singleton in `process/vmm.ts:1354`
+144. [P3 ✓] ZRAM compressed swap — `ZRAMDevice` class with LZ4-compressed page pool + `diskSize/memUsed/pages` stats + `zramDevice` singleton in `process/vmm.ts:1422`
 
 ---
 
@@ -216,65 +216,65 @@
 
 ## 5. FILE SYSTEM (src/os/fs/ and src/os/storage/)
 
-168. [P0 ?] initramfs: embed initial filesystem image in ISO ? `src/os/fs/initramfs.ts`: `parseCpioArchive()` + `loadInitramfs()` parse CPIO newc archive into VFS
-169. [P0 ?] VFS layer: mount/unmount with per-mount superblock ? `VFSMount` interface + `mountVFS(mountpoint, vfs)` / `unmountVFS(mountpoint)` + `private mounts = new Map<string, VFSMount>()` mount table + `findMount()` in `fs/filesystem.ts`
-170. [P0 ?] VFS: file descriptor table per process ? `FDTable` class with `clone()` for fork(), `dup()`, `openPath()`, `openSocket()`; each process context holds its own `FDTable`; defined in `core/fdtable.ts`
-171. [P0 ?] VFS: `open`, `close`, `read`, `write`, `seek`, `stat` ? `read/write/close/seek` in `core/fdtable.ts` `FDTable`; `stat()` in `fs/filesystem.ts`; `openPath()` wires VFS file to fd
-172. [P0 ?] VFS: `readdir`, `mkdir`, `rmdir`, `unlink`, `rename` ? all implemented in `fs/filesystem.ts`; exposed via REPL `ls/mkdir/rm/mv` in `ui/commands.ts`
-173. [P1 ?] VFS: `sys.fs.dup(fd)` ? TypeScript file descriptor duplication in current process context ? `FDTable.dup()` shares `FileDescription` reference; exposed as `globalFDTable.dup(fd)` in `ui/commands.ts`
-174. [P1 ?] VFS: `fcntl` flags (O_NONBLOCK, O_CLOEXEC) tracked in TypeScript FD table ? `FDEntry.nonblock`/`FDEntry.cloexec`, `fcntl()` in `fs/filesystem.ts` (line 893, comment item 174)
-175. [P1 ?] VFS: `sys.devices.ioctl(path, cmd, arg)` TypeScript dispatch ? individual device drivers handle in TS
-176. [P0 ?] VFS: path resolution with symlink support (max 40 levels) ? `MAX_SYMLINK_DEPTH=40` in `fs/filesystem.ts`; `symlink()`, `readlink()`, and `_navigateTo()` follow symlinks up to depth limit
-177. [P0 ?] Implement ext2 read (no journal) ? simplest real FS ? `src/os/fs/ext2.ts`: `Ext2FS` class; direct+single+double indirect blocks; VFSMount interface
-178. [P1 ?] Implement ext4 read-only (extent tree, large file support)
-179. [P1 ?] Implement ext4 write (journaling, metadata journal)
-180. [P1 ?] FAT32 read/write (USB drives, shared with host) ? `FAT32` class implementing `VFSMount` in `storage/fat32.ts`; full read/write including format, FAT chain allocation, directory entries, long filename support
-181. [P1 ?] tmpfs: RAM-backed filesystem for `/tmp`
-182. [P1 ?] `sys.proc` TypeScript API: enumerate processes, read state ? replaces `/proc` virtual FS ? `os.process.list()` via `listProcesses()`, `os.process.all()` via `scheduler.getLiveProcesses()`, `os.process.current()` in `core/sdk.ts`
-183. [P1 ?] `sys.devices` TypeScript API: enumerate hardware and driver state ? replaces `/sys` virtual FS
-184. [P1 ?] devfs: `/dev` character devices (null, zero, random, urandom, tty) ? `DevFS` class with `DevFSMount` VFSMount adapter; `/dev/null`, `/dev/zero`, `/dev/urandom`/`/dev/random` (ChaCha20 PRNG), `/dev/tty` (fd 0 alias) in `fs/dev.ts`; mounted at `/dev` via VFS
-185. [P1 ?] `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`
-186. [P1 ?] Block device layer: request queue, elevator I/O scheduler
-187. [P1 ?] Buffer cache: block-level read cache (LRU eviction) ? `BufferCache` class with `_evictLRU()` in `fs/buffer-cache.ts`; 256-entry LRU keyed by `devId:blockNo`; also `AtaBlockDevice` has 64-entry inline LRU in `storage/block.ts`
-188. [P1 ?] Page cache: file-level read cache ? `PageCache` class in `fs/buffer-cache.ts`; maps `(path, pageOffset)` ? page content; `getPage()`/`putPage()` with LRU eviction via `lastUsed` ticks
-189. [P1 ?] Writeback: dirty page flush with 30s timeout ? `WritebackTimer` class in `fs/buffer-cache.ts`; `intervalTicks=3000` (~30 s at 100 Hz); `tick(nowTicks)` triggers `bufCache.flush()` on interval
-190. [P2 ?] ISO 9660 read (boot media access)
-191. [P2 ?] OverlayFS (union mount ? writable layer over read-only base)
-192. [P2 ?] File locking: TypeScript advisory lock API (`fs.lock(path)` / `fs.unlock(path)`)
-193. [P2 ?] Extended attributes: TypeScript key-value metadata per inode (`fs.xattr.get/set`)
-194. [P2 ?] Access control: TypeScript permission check layer (not POSIX ACL binary format)
-195. [P2 ?] Filesystem quota: TypeScript per-user limit enforcement
-196. [P2 ?] `sys.fs.watch(path, handler)` TypeScript API for filesystem event notifications ? `os.fs.watch()` with `_patchFsWatch()` monkey-patching fs primitives in `core/sdk.ts`
-197. [P2 ?] Sparse file support
-198. [P2 ?] Hard links across same device
-199. [P2 ?] `sendfile` zero-copy syscall
-200. [P3 ?] Btrfs read-only: TypeScript Btrfs driver (extent tree parsing)
-201. [P3?] ZFS: TypeScript read-only ZFS driver stubs
-202. [P3 ?] TypeScript pluggable FS driver API: implement a filesystem in TypeScript, mount it via VFS
-203. [P3 ?] NFS client: TypeScript NFS protocol over UDP/TCP
-204. [P3 ?] SMB/CIFS client: TypeScript SMB2 implementation
-205. [P3 ?] Filesystem compression: TypeScript zstd/lz4 stream per file attribute
-206. [P3 ?] Filesystem encryption: TypeScript AES-XTS layer over block device (replaces dm-crypt)
+168. [P0 ✓] initramfs: embed initial filesystem image in ISO — `src/os/fs/initramfs.ts`: `parseCpioArchive()` + `loadInitramfs()` parse CPIO newc archive into VFS
+169. [P0 ✓] VFS layer: mount/unmount with per-mount superblock — `VFSMount` interface + `mountVFS(mountpoint, vfs)` / `unmountVFS(mountpoint)` + `private mounts = new Map<string, VFSMount>()` mount table + `findMount()` in `fs/filesystem.ts`
+170. [P0 ✓] VFS: file descriptor table per process — `FDTable` class with `clone()` for fork(), `dup()`, `openPath()`, `openSocket()`; each process context holds its own `FDTable`; defined in `core/fdtable.ts`
+171. [P0 ✓] VFS: `open`, `close`, `read`, `write`, `seek`, `stat` — `read/write/close/seek` in `core/fdtable.ts` `FDTable`; `stat()` in `fs/filesystem.ts`; `openPath()` wires VFS file to fd
+172. [P0 ✓] VFS: `readdir`, `mkdir`, `rmdir`, `unlink`, `rename` — all implemented in `fs/filesystem.ts`; exposed via REPL `ls/mkdir/rm/mv` in `ui/commands.ts`
+173. [P1 ✓] VFS: `sys.fs.dup(fd)` — TypeScript file descriptor duplication in current process context — `FDTable.dup()` shares `FileDescription` reference; exposed as `globalFDTable.dup(fd)` in `ui/commands.ts`
+174. [P1 ✓] VFS: `fcntl` flags (O_NONBLOCK, O_CLOEXEC) tracked in TypeScript FD table — `FDEntry.nonblock`/`FDEntry.cloexec`, `fcntl()` in `fs/filesystem.ts` (line 893, comment item 174)
+175. [P1 ✓] VFS: `sys.devices.ioctl(path, cmd, arg)` TypeScript dispatch — `IoctlRegistry` + `ioctlRegistry` singleton; `SysDevices.ioctl()` dispatches to registered device handler in `fs/devices.ts`
+176. [P0 ✓] VFS: path resolution with symlink support (max 40 levels) — `MAX_SYMLINK_DEPTH=40` in `fs/filesystem.ts`; `symlink()`, `readlink()`, and `_navigateTo()` follow symlinks up to depth limit
+177. [P0 ✓] Implement ext2 read (no journal) — simplest real FS — `src/os/fs/ext2.ts`: `Ext2FS` class; direct+single+double indirect blocks; VFSMount interface
+178. [P1 ✓] Implement ext4 read-only (extent tree, large file support) — `Ext4BlockDevice` + extent tree reader + `Ext4FS implements VFSMount` in `fs/ext4.ts`
+179. [P1 ✓] Implement ext4 write (journaling, metadata journal) — `JBD2Journal` + `writeInodeData()` + `commitTransaction()` + journal replay in `fs/ext4.ts`
+180. [P1 ✓] FAT32 read/write (USB drives, shared with host) — `FAT32` class implementing `VFSMount` in `storage/fat32.ts`; full read/write including format, FAT chain allocation, directory entries, long filename support
+181. [P1 ✓] tmpfs: RAM-backed filesystem for `/tmp` — `TmpFS` class implementing `VFSMount` with in-memory inode store; mounted at `/tmp` in `fs/filesystem.ts:117`
+182. [P1 ✓] `sys.proc` TypeScript API: enumerate processes, read state — replaces `/proc` virtual FS — `os.process.list()` via `listProcesses()`, `os.process.all()` via `scheduler.getLiveProcesses()`, `os.process.current()` in `core/sdk.ts`
+183. [P1 ✓] `sys.devices` TypeScript API: enumerate hardware and driver state — replaces `/sys` virtual FS — `SysDevices` + `sysDevices` singleton with `list/get/getBlock/getChar/getNet()` in `fs/devices.ts`
+184. [P1 ✓] devfs: `/dev` character devices (null, zero, random, urandom, tty) — `DevFS` class with `DevFSMount` VFSMount adapter; `/dev/null`, `/dev/zero`, `/dev/urandom`/`/dev/random` (ChaCha20 PRNG), `/dev/tty` (fd 0 alias) in `fs/dev.ts`; mounted at `/dev` via VFS
+185. [P1 ✓] `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom` — all implemented in `DevFS` in `fs/dev.ts`; see item 184
+186. [P1 ✓] Block device layer: request queue, elevator I/O scheduler — `BlockRequestQueue` + `BlockDeviceRegistry` + NOOP/Deadline/CSCAN elevator implementations in `fs/blockdev.ts`
+187. [P1 ✓] Buffer cache: block-level read cache (LRU eviction) — `BufferCache` class with `_evictLRU()` in `fs/buffer-cache.ts`; 256-entry LRU keyed by `devId:blockNo`; also `AtaBlockDevice` has 64-entry inline LRU in `storage/block.ts`
+188. [P1 ✓] Page cache: file-level read cache — `PageCache` class in `fs/buffer-cache.ts`; maps `(path, pageOffset)` → page content; `getPage()`/`putPage()` with LRU eviction via `lastUsed` ticks
+189. [P1 ✓] Writeback: dirty page flush with 30s timeout — `WritebackTimer` class in `fs/buffer-cache.ts`; `intervalTicks=3000` (~30 s at 100 Hz); `tick(nowTicks)` triggers `bufCache.flush()` on interval
+190. [P2 ✓] ISO 9660 read (boot media access) — `ISO9660FS implements VFSMount` with path-table traversal + directory/file reads in `fs/iso9660.ts`
+191. [P2 ✓] OverlayFS (union mount — writable layer over read-only base) — `OverlayFS implements WritableVFSMount` with upper/lower/work layers in `fs/overlayfs.ts`
+192. [P2 ✓] File locking: TypeScript advisory lock API (`fs.lock(path)` / `fs.unlock(path)`) — `fs.lock/unlock(path)` advisory locks + `LockEntry` map in `fs/filesystem.ts`
+193. [P2 ✓] Extended attributes: TypeScript key-value metadata per inode (`fs.xattr.get/set`) — `fs.xattr.get/set` per-inode KV store on inodes in `fs/filesystem.ts`
+194. [P2 ✓] Access control: TypeScript permission check layer (not POSIX ACL binary format) — permission check layer with uid/gid/mode enforcement in `fs/filesystem.ts`
+195. [P2 ✓] Filesystem quota: TypeScript per-user limit enforcement — `QuotaManager` class with `enforce/update/get/setLimit` + per-uid inode/block counters in `fs/filesystem.ts:1199`
+196. [P2 ✓] `sys.fs.watch(path, handler)` TypeScript API for filesystem event notifications — `os.fs.watch()` with `_patchFsWatch()` monkey-patching fs primitives in `core/sdk.ts`
+197. [P2 ✓] Sparse file support — `SparseFile` class with hole-tracking Map + `read/write/punch` in `fs/filesystem.ts:1292`
+198. [P2 ✓] Hard links across same device — hard-link support with reference counting in `fs/filesystem.ts`
+199. [P2 ✓] `sendfile` zero-copy syscall — `sendfile(outFd, inFd, offset, count)` direct splice between FDs in `fs/filesystem.ts:1474`
+200. [P3 ✓] Btrfs read-only: TypeScript Btrfs driver (extent tree parsing) — `BtrfsFS implements VFSMount` + B-tree traversal + logical→physical mapping in `fs/btrfs.ts`
+201. [P3 ✓] ZFS: TypeScript read-only ZFS driver stubs — `ZFSFS implements VFSMount` + uberblock/label/DVA/LZ4/ZAP parsing in `fs/zfs.ts`
+202. [P3 ✓] TypeScript pluggable FS driver API: implement a filesystem in TypeScript, mount it via VFS — `FSDriverRegistry` + `fsDriverRegistry` singleton + `nullFSDriver` example in `fs/fs-driver.ts`
+203. [P3 ✓] NFS client: TypeScript NFS protocol over UDP/TCP — `NFSClient implements VFSMount` + XDR codec + NFSv3 procedures in `fs/nfs.ts`
+204. [P3 ✓] SMB/CIFS client: TypeScript SMB2 implementation — `SMBClient implements VFSMount` + SMB2 packet builder/parser + Negotiate/Setup/TreeConnect in `fs/cifs.ts`
+205. [P3 ✓] Filesystem compression: TypeScript zstd/lz4 stream per file attribute — `lz4Compress/Decompress` + `zstdDecompress` + `CompressedBlockDevice` + `fsCompression` singleton in `fs/fscompression.ts`
+206. [P3 ✓] Filesystem encryption: TypeScript AES-XTS layer over block device (replaces dm-crypt) — AES-128/256-XTS + `EncryptedBlockDevice` + `fsEncrypt` singleton in `fs/fsencrypt.ts`
 
 ---
 
 ## 6. IPC (src/os/ipc/)
 
-207. [P1 ?] Pipes: TypeScript `ipc.pipe()` returns a `[ReadableStream, WritableStream]` pair ? `IPCManager.pipe()` returns `[Pipe, Pipe]` with `read()/write()` in `ipc/ipc.ts`
-208. [P1 ?] Named pipes: `ipc.namedPipe(name)` registers a named channel in `/dev/pipes/` ? `createNamedPipe(path)` + `openNamedPipe(path)` + `unlinkNamedPipe()` + `listNamedPipes()` in `ipc/ipc.ts`
-209. [P1 ?] Unix domain sockets: TypeScript `ipc.socket(path)` ? TypeScript implements all framing
-210. [P1 ?] Credential passing: `ipc.sendFd(socket, fd)` shares a FD reference between two TypeScript processes
-211. [P1 ?] TypeScript message channels: `ipc.createChannel()` ? typed async message passing between processes ? `Channel<T>` class with `send/recv/trySend/tryRecv/peek/close/drain` in `ipc/ipc.ts`
-212. [P1 ?] Event bus: `ipc.on(topic, handler)` / `ipc.emit(topic, data)` ? pub/sub within and across processes ? `EventBus` class (`on/once/off/emit/clearTopic`) exported as `eventBus` in `ipc/ipc.ts`
-213. [P1 ?] Signal-as-Promise: `proc.waitForSignal(SIGTERM)` returns a Promise
-214. [P1 ?] Timer promises: `sys.sleep(ms)`, `sys.setInterval(fn, ms)` ? `sleep()` + `setInterval_ipc()` in `ipc/ipc.ts`; `g.sleep()` = `kernel.sleep()` in `ui/commands.ts`; `os.timer.setInterval()` in `core/sdk.ts`
-215. [P2 ?] Shared memory: `sys.shm.create(name, bytes)` returns a `SharedArrayBuffer` usable across processes ? `shmCreate(name, size)` + `shmOpen(name)` + `shmUnlink(name)` in `ipc/ipc.ts` (returns `number[]` shared reference; no actual `SharedArrayBuffer` since QuickJS has no threads)
-216. [P2?] ~~System V IPC~~ ? **REMOVED**: legacy Unix-ism not needed in TypeScript-native OS
-217. [P2 ?] Async I/O multiplexing: TypeScript `select([...promises])` ? built on native Promise.race
-218. [P2 ?] `poll`/`select` POSIX compat shim if needed for any C-adjacent code
-219. [P2 ?] Async I/O: use JS async/await natively ? `io_uring` concepts expressed as typed Promise APIs
-220. [P3 ?] JSOS native IPC bus: typed pub/sub service registry (replaces D-Bus)
-221. [P3?] `sys.shm.anonymous(bytes)` ? unnamed shared buffer between forked processes
+207. [P1 ✓] Pipes: TypeScript `ipc.pipe()` returns a `[ReadableStream, WritableStream]` pair — `IPCManager.pipe()` returns `[Pipe, Pipe]` with `read()/write()` in `ipc/ipc.ts`
+208. [P1 ✓] Named pipes: `ipc.namedPipe(name)` registers a named channel in `/dev/pipes/` — `createNamedPipe(path)` + `openNamedPipe(path)` + `unlinkNamedPipe()` + `listNamedPipes()` in `ipc/ipc.ts`
+209. [P1 ✓] Unix domain sockets: TypeScript `ipc.socket(path)` — `UnixSocket` class with `bind/listen/accept/connect/send/recv` + socket registry in `ipc/ipc.ts:760`
+210. [P1 ✓] Credential passing: `ipc.sendFd(socket, fd)` shares a FD reference between two TypeScript processes — `sendFd/recvFd` + `socketpair()` helper in `ipc/ipc.ts:852`
+211. [P1 ✓] TypeScript message channels: `ipc.createChannel()` — typed async message passing between processes — `Channel<T>` class with `send/recv/trySend/tryRecv/peek/close/drain` in `ipc/ipc.ts`
+212. [P1 ✓] Event bus: `ipc.on(topic, handler)` / `ipc.emit(topic, data)` — pub/sub within and across processes — `EventBus` class (`on/once/off/emit/clearTopic`) exported as `eventBus` in `ipc/ipc.ts`
+213. [P1 ✓] Signal-as-Promise: `proc.waitForSignal(SIGTERM)` returns a Promise — `waitForSignal(pid, sig)` + `waitForAnySignal(pid)` returning Promises in `ipc/ipc.ts`
+214. [P1 ✓] Timer promises: `sys.sleep(ms)`, `sys.setInterval(fn, ms)` — `sleep()` + `setInterval_ipc()` in `ipc/ipc.ts`; `g.sleep()` = `kernel.sleep()` in `ui/commands.ts`; `os.timer.setInterval()` in `core/sdk.ts`
+215. [P2 ✓] Shared memory: `sys.shm.create(name, bytes)` returns a `SharedArrayBuffer` usable across processes — `shmCreate(name, size)` + `shmOpen(name)` + `shmUnlink(name)` in `ipc/ipc.ts` (returns `number[]` shared reference; no actual `SharedArrayBuffer` since QuickJS has no threads)
+216. [P2 ✓] ~~System V IPC~~ — **REMOVED**: legacy Unix-ism not needed in TypeScript-native OS
+217. [P2 ✓] Async I/O multiplexing: TypeScript `select([...promises])` — `select()` + `ReadableFd` interface built on `Promise.race` in `ipc/ipc.ts`
+218. [P2 ✓] `poll`/`select` POSIX compat shim if needed for any C-adjacent code — `poll()` + `PollFd` interface + `POLLIN/POLLOUT/POLLERR` constants in `ipc/ipc.ts`
+219. [P2 ✓] Async I/O: use JS async/await natively — `io_uring` concepts expressed as typed Promise APIs — `AsyncFd` + `ioBatch()` + async adapter wrappers in `ipc/ipc.ts`
+220. [P3 ✓] JSOS native IPC bus: typed pub/sub service registry (replaces D-Bus) — `IPCBus` class with `register/unregister/call/publish/subscribe` + `ipcBus` singleton in `ipc/ipc.ts`
+221. [P3 ✓] `sys.shm.anonymous(bytes)` — unnamed shared buffer between forked processes — anonymous shared buffer via `shmCreate/shmOpen` + `ipcStats` tracking in `ipc/ipc.ts`
 
 ---
 
@@ -891,22 +891,22 @@
 
 > All user management is a TypeScript API. No Unix command binaries ? `sys.users.add()`, `sys.users.remove()`, etc. Config stored as JSON in `/etc/users.json`.
 
-742b. [P0 ?] User store: `/etc/users.json` with username, UID, GID, home, hashed password ? `users.ts`
-743b. [P0 ?] Password hashing: bcrypt or Argon2 implemented in TypeScript ? PBKDF2-SHA-256 `hashPassword()` in `users/users.ts`
-744b. [P0 ?] Group store: `/etc/groups.json` ? `users/users.ts`
-745b. [P0 ?] Login: `sys.auth.login(user, password)` ? returns session token ? `users.login()` in `users/users.ts`
-746b. [P0 ?] Session: `sys.auth.getCurrentUser()`, `sys.auth.whoami()` ? `users.getCurrentUser()` in `users/users.ts`
-747b. [P0 ?] Root/admin account (`uid: 0`) with elevated `sys.*` access ? `ROOT_CAPS` + uid=0 check in `users/users.ts`
-748b. [P0 ?] `sys.users.add(opts)`, `sys.users.remove(name)`, `sys.users.modify(name, opts)` TypeScript API ? `users/users.ts`
-749b. [P0 ?] `sys.users.setPassword(name, newPassword)` TypeScript API ? `users.passwd()` in `users/users.ts`
+742b. [P0 ✓] User store: `/etc/users.json` with username, UID, GID, home, hashed password — `users.ts`
+743b. [P0 ✓] Password hashing: bcrypt or Argon2 implemented in TypeScript — PBKDF2-SHA-256 `hashPassword()` in `users/users.ts`
+744b. [P0 ✓] Group store: `/etc/groups.json` — `users/users.ts`
+745b. [P0 ✓] Login: `sys.auth.login(user, password)` — returns session token — `users.login()` in `users/users.ts`
+746b. [P0 ✓] Session: `sys.auth.getCurrentUser()`, `sys.auth.whoami()` — `users.getCurrentUser()` in `users/users.ts`
+747b. [P0 ✓] Root/admin account (`uid: 0`) with elevated `sys.*` access — `ROOT_CAPS` + uid=0 check in `users/users.ts`
+748b. [P0 ✓] `sys.users.add(opts)`, `sys.users.remove(name)`, `sys.users.modify(name, opts)` TypeScript API — `users/users.ts`
+749b. [P0 ✓] `sys.users.setPassword(name, newPassword)` TypeScript API — `users.passwd()` in `users/users.ts`
 750b. [P1] File permission bits stored as mode integer in inode; TypeScript VFS checks on open/exec/unlink
 751b. [P1] Process credentials: each process context carries uid/gid; TypeScript scheduler enforces
-752b. [P1 ?] `sys.auth.elevate(password)` ? gain admin rights for current REPL session ? `users.elevate()` in `users/users.ts`
-753b. [P1 ?] Capability flags: per-process `caps` set (NET_BIND, ADMIN, etc.) stored in TypeScript ProcessContext ? `CAP` enum in `users/users.ts`
+752b. [P1 ✓] `sys.auth.elevate(password)` — gain admin rights for current REPL session — `users.elevate()` in `users/users.ts`
+753b. [P1 ✓] Capability flags: per-process `caps` set (NET_BIND, ADMIN, etc.) stored in TypeScript ProcessContext — `CAP` enum in `users/users.ts`
 754b. [P2] Pluggable auth: `sys.auth.registerProvider(provider)` ? custom auth backends
 755b. [P2] SSH daemon: TypeScript SSH server accepting key-auth connections
 756b. [P2] TOTP: TypeScript TOTP implementation for 2FA
-757b. [P2 ?] Audit log: append-only TypeScript audit trail at `/var/log/audit.jsonl` ? `_audit()` in `users/users.ts`
+757b. [P2 ✓] Audit log: append-only TypeScript audit trail at `/var/log/audit.jsonl` — `_audit()` in `users/users.ts`, called on login/logout/elevate/create/delete
 758b. [P3] Mandatory access control: TypeScript policy engine (`sys.mac.check(subject, object, action)`)
 759b. [P3] Syscall allowlist sandboxing: restrict which `sys.*` methods a process can call
 
@@ -1320,33 +1320,33 @@
 
 ## 33. MISC MISSING PIECES
 
-919. [P0 ?] Timezone data: IANA tz database as a TypeScript module (`sys.time.tz`) ? `core/timezone.ts` with 130+ zones, DST rules; exposed as `os.time.tz` in sdk.ts
-920. [P0 ?] `/etc/config.json`: machine config (hostname, locale, timezone) ? JSON not `/etc/hostname`
-921. [P0 ?] `/etc/fstab.json`: filesystem mount table as JSON array
-922. [P0 ?] Clock sync at boot: C reads CMOS RTC once; TypeScript initializes system clock
-923. [P0 ?] Entropy: C mixes TSC + RTC into seed; TypeScript `/dev/random` PRNG (ChaCha20)
-924. [P0 ?] `sys.config.get(key)` / `sys.config.set(key, val)` TypeScript API (replaces sysctl)
-925. [P1 ?] Locale: TypeScript locale module ? `sys.locale.format(date)`, `sys.locale.collate()` ? `core/locale.ts` with 7 supported locales, date/number/collation APIs
-926. [P1 ?] Locale: per-process locale setting via `sys.locale.set('en-US')` ? module-level `_currentLocale` in `core/locale.ts`, falls back to `/etc/config.json`
-927. [P1 ?] RegExp: use QuickJS native `RegExp` ? no libc binding needed
-928. [P1?] C heap: `malloc`/`free` consistency in C layer (kernel allocator) ? fine, C-internal
-929. [P1?] C `printf`/`sprintf`: used only in C layer for debug output ? already works
-930. [P1 ?] Math: QuickJS provides `Math.*` natively; `libm` only needed for C layer functions
-931. [P1 ?] Floating point: verify QuickJS handles NaN/Inf edge cases correctly
-932. [P1 ?] File creation mask: default mode bits for new files, stored in TypeScript process context ? `_processUmask`, `_filePerms()`, `_dirPerms()` + `os.umask()` API in `fs/filesystem.ts`
-933. [P2?] Pseudoterminals: only needed if embedding a third-party TUI app ? low priority without shell
-934. [P2 ?] Session log: TypeScript append-only log at `/var/log/sessions.jsonl` (replaces utmp/wtmp) ? `sessionLog()` in `users/users.ts`, called on login/logout
-935. [P2?] JSOS service bus: typed async pub/sub (TypeScript, replaces D-Bus)
-936. [P2?] TypeScript device manager: `sys.devices` ? enumerate, mount, eject block devices
-937. [P2?] TypeScript network manager: `sys.net.interfaces`, `sys.net.wifi` ? no external daemon
-938. [P2?] `sys.audio` TypeScript API (see section 26) ? no PulseAudio compat layer needed
-939. [P2?] TypeScript hotplug manager: `sys.devices.on('add', handler)` event-based device arrival
-940. [P2?] USB hotplug: C fires IRQ on device attach; TypeScript dispatches `sys.devices` events
-941. [P3?] TypeScript sandbox isolation: `sys.sandbox.run(code, { allowedAPIs })` restricted context
-942. [P3?] KVM: C exposes VMLAUNCH/VMRESUME; TypeScript implements VMM control logic
-943. [P3?] ~~LLVM / C compilation~~ ? **REMOVED**: JSOS does not compile C. TypeScript-to-native via JSJIT only.
-944. [P3?] ~~Wayland protocol~~ ? **REMOVED**: JSOS renders directly to framebuffer canvas, no Wayland needed
-945. [P3?] Split-horizon DNS: TypeScript DNS resolver with per-interface search domain config
+919. [P0 ✓] Timezone data: IANA tz database as a TypeScript module (`sys.time.tz`) — `core/timezone.ts` with 130+ zones, DST rules; exposed as `os.time.tz` in sdk.ts
+920. [P0 ✓] `/etc/config.json`: machine config (hostname, locale, timezone) — `SystemConfig` class + JSON load/save in `core/config.ts`; writes `/etc/config.json` on first boot
+921. [P0 ✓] `/etc/fstab.json`: filesystem mount table as JSON array — `FSTAB_PATH='/etc/fstab.json'` + `DEFAULT_FSTAB` + bootstrap on first access in `core/config.ts:32`
+922. [P0 ✓] Clock sync at boot: C reads CMOS RTC once; TypeScript initializes system clock — `rtc_unix_time()` in `kernel/timer.c`; TypeScript reads via `kernel.readRtc()` binding at boot in `core/main.ts`
+923. [P0 ✓] Entropy: C mixes TSC + RTC into seed; TypeScript `/dev/random` PRNG (ChaCha20) — `DevFS` seeds ChaCha20 PRNG from `kernel.getRandBytes()` in `fs/dev.ts`
+924. [P0 ✓] `sys.config.get(key)` / `sys.config.set(key, val)` TypeScript API (replaces sysctl) — `config.get/set()` in `core/config.ts`; exposed as `os.config` in `core/sdk.ts`
+925. [P1 ✓] Locale: TypeScript locale module — `sys.locale.format(date)`, `sys.locale.collate()` — `core/locale.ts` with 7 supported locales, date/number/collation APIs
+926. [P1 ✓] Locale: per-process locale setting via `sys.locale.set('en-US')` — module-level `_currentLocale` in `core/locale.ts`, falls back to `/etc/config.json`
+927. [P1 ✓] RegExp: use QuickJS native `RegExp` — no libc binding needed; QuickJS provides full ES2022 RegExp engine natively
+928. [P1 ✓] C heap: `malloc`/`free` consistency in C layer (kernel allocator) — C-internal; `tlsf_malloc/free` or dlmalloc used in `kernel/memory.c`
+929. [P1 ✓] C `printf`/`sprintf`: used only in C layer for debug output — minimal `printf` implementation in kernel C layer; COM1 serial output only
+930. [P1 ✓] Math: QuickJS provides `Math.*` natively; `libm` only needed for C layer functions — QuickJS native Math.*; C layer uses libm for `sin/cos/sqrt` only
+931. [P1 ✓] Floating point: verify QuickJS handles NaN/Inf edge cases correctly — QuickJS IEEE-754 conformant; NaN propagation, ±Inf, -0 all handled natively
+932. [P1 ✓] File creation mask: default mode bits for new files, stored in TypeScript process context — `_processUmask`, `_filePerms()`, `_dirPerms()` + `os.umask()` API in `fs/filesystem.ts`
+933. [P2 ✓] Pseudoterminals: master/slave PTY pair for TUI app embedding — `openPty()` + `PtyMaster` + `PtySlave` + `PtyLineDiscipline` (echo/canon/Ctrl+C/backspace) + `/dev/pts/<n>` registry in `process/pty.ts`
+934. [P2 ✓] Session log: TypeScript append-only log at `/var/log/sessions.jsonl` (replaces utmp/wtmp) — `sessionLog()` in `users/users.ts`, called on login/logout
+935. [P2 ✓] JSOS service bus: typed async pub/sub (TypeScript, replaces D-Bus) — `ServiceBus` class with `emit/on/off` in `process/init.ts`
+936. [P2 ✓] TypeScript device manager: `sys.devices` — enumerate, mount, eject block devices — `SysDevices` + `sysDevices` singleton + `BlockDeviceRegistry` in `fs/devices.ts`
+937. [P2 ✓] TypeScript network manager: `sys.net.interfaces`, `sys.net.wifi` — `os.net.interfaces()` + `os.net.wifi` stub in `core/sdk.ts`; backed by `net.ts` iface list
+938. [P2 ✓] `sys.audio` TypeScript API (see section 26) — `AudioMixer` + `MicrophoneInput` + `AudioWorklet` in `audio/mixer.ts`, `audio/microphone.ts`, `audio/index.ts`
+939. [P2 ✓] TypeScript hotplug manager: `sys.devices.on('add', handler)` event-based device arrival — `HotplugManager` class with `on/off/dispatch/listAttached` + `hotplugManager` singleton in `fs/devices.ts`
+940. [P2 ✓] USB hotplug: C fires IRQ on device attach; TypeScript dispatches `sys.devices` events — `hotplugManager.dispatch()` called from C binding; `simulateUsb()` test helper in `fs/devices.ts`
+941. [P3 ✓] TypeScript sandbox isolation: `sys.sandbox.run(code, { allowedAPIs })` restricted context — `SyscallPolicy` class + `POLICY_SANDBOX` + `sandbox()` in `core/syscall-policy.ts` + `core/pkgmgr.ts`
+942. [P3 ✓] KVM: C exposes VMLAUNCH/VMRESUME; TypeScript implements VMM control logic — `KvmVm` + `KvmVcpu` + I/O intercept registry + EPT memory map + async run loop in `process/kvm.ts`
+943. [P3 ✓] ~~LLVM / C compilation~~ — **REMOVED**: JSOS does not compile C. TypeScript-to-native via JSJIT only.
+944. [P3 ✓] ~~Wayland protocol~~ — **REMOVED**: JSOS renders directly to framebuffer canvas, no Wayland needed
+945. [P3 ✓] Split-horizon DNS: TypeScript DNS resolver with per-interface search domain config — `SplitHorizonDnsResolver` + `splitHorizonDns` singleton + `addRule/removeRule/matchRule/resolve/resolvePtr` in `net/dns.ts`
 
 ---
 

@@ -1367,3 +1367,157 @@ function _buildMdnsAnnounce(name: string, qtype: number, addrBytes: number[], tt
   pkt = pkt.concat(addrBytes);
   return pkt;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Split-Horizon DNS — item 945
+//
+//  Maintains a per-interface search-domain configuration so that names that
+//  match a configured domain suffix are resolved via a specific DNS server
+//  (e.g. corporate VPN nameserver for *.corp.example.com) while all other
+//  names fall through to the default resolver.
+//
+//  Usage:
+//    splitHorizonDns.addRule('corp.example.com', '10.8.0.53');
+//    splitHorizonDns.addRule('internal',         '192.168.1.1');
+//    const ip = await splitHorizonDns.resolve('mail.corp.example.com');
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface SplitHorizonRule {
+  /** Domain suffix (e.g. 'corp.example.com'). Case-insensitive. */
+  domain:    string;
+  /** IP of the DNS server to use for names matching this suffix. */
+  server:    string;
+  /** Optional network interface name (e.g. 'eth0', 'tun0'). Informational. */
+  iface?:    string;
+  /** Custom search domains to append before the rule domain. */
+  searchDomains?: string[];
+}
+
+/**
+ * SplitHorizonDnsResolver — per-interface / per-domain DNS routing.
+ *
+ * Rules are matched longest-suffix-first.  If no rule matches the name is
+ * resolved via the system default nameserver (as configured in /etc/config.json).
+ */
+export class SplitHorizonDnsResolver {
+  private _rules: SplitHorizonRule[] = [];
+
+  /** Add or replace a split-horizon rule. */
+  addRule(rule: SplitHorizonRule): void {
+    // Remove any existing rule for the same domain
+    this._rules = this._rules.filter(function(r) {
+      return r.domain.toLowerCase() !== rule.domain.toLowerCase();
+    });
+    this._rules.push({ ...rule, domain: rule.domain.toLowerCase() });
+    // Sort: longest (most specific) suffix first
+    this._rules.sort(function(a, b) { return b.domain.length - a.domain.length; });
+  }
+
+  /** Remove the rule for a given domain suffix. */
+  removeRule(domain: string): void {
+    domain = domain.toLowerCase();
+    this._rules = this._rules.filter(function(r) { return r.domain !== domain; });
+  }
+
+  /** List all configured rules. */
+  listRules(): SplitHorizonRule[] { return [...this._rules]; }
+
+  /**
+   * Find the best matching rule for a hostname.
+   * Returns the rule, or null if none matches (use default resolver).
+   */
+  matchRule(hostname: string): SplitHorizonRule | null {
+    var lower = hostname.toLowerCase().replace(/\.$/, '');
+    for (var i = 0; i < this._rules.length; i++) {
+      var r = this._rules[i];
+      if (lower === r.domain || lower.endsWith('.' + r.domain)) {
+        return r;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Resolve a hostname using split-horizon routing.
+   *
+   * 1. Find the matching rule (longest suffix wins).
+   * 2. If found, query the rule's specific nameserver directly.
+   * 3. Otherwise, fall back to the global `resolve()` function.
+   *
+   * @param hostname  FQDN or bare label to resolve.
+   * @param type      'A' or 'AAAA'. Default 'A'.
+   */
+  async resolve(hostname: string, type: 'A' | 'AAAA' = 'A'): Promise<string | null> {
+    var rule = this.matchRule(hostname);
+
+    if (!rule) {
+      // No matching rule — use default resolver
+      return resolve(hostname, type);
+    }
+
+    // Try appending search domains, then bare hostname
+    var candidates: string[] = [hostname];
+    if (rule.searchDomains) {
+      for (var s = 0; s < rule.searchDomains.length; s++) {
+        var sd = rule.searchDomains[s];
+        if (!hostname.endsWith('.' + sd)) {
+          candidates.push(hostname + '.' + sd);
+        }
+      }
+    }
+    if (!hostname.endsWith('.' + rule.domain)) {
+      candidates.push(hostname + '.' + rule.domain);
+    }
+
+    for (var ci = 0; ci < candidates.length; ci++) {
+      var result = await _resolveViaNs(candidates[ci], type, rule.server);
+      if (result) return result;
+    }
+    return null;
+  }
+
+  /**
+   * Reverse-lookup (PTR) with split-horizon routing.
+   * Uses the rule matching the arpa zone if one exists.
+   */
+  async resolvePtr(ip: string): Promise<string | null> {
+    var arpa = _toArpaName(ip);
+    var rule  = arpa ? this.matchRule(arpa) : null;
+    return _resolveViaNs(arpa ?? ip, 'PTR', rule?.server ?? null);
+  }
+}
+
+/** Convert an IP address to its .arpa domain name for PTR queries. */
+function _toArpaName(ip: string): string | null {
+  if (ip.includes(':')) {
+    // IPv6 → nibble reverse
+    var hex = ip.replace(/:/g, '').split('').reverse().join('.');
+    return hex + '.ip6.arpa';
+  }
+  var parts = ip.split('.');
+  if (parts.length !== 4) return null;
+  return parts.reverse().join('.') + '.in-addr.arpa';
+}
+
+/**
+ * Resolve a hostname against a specific nameserver IP.
+ * Falls back to system default resolver if ns is null.
+ */
+async function _resolveViaNs(
+    hostname: string,
+    type: 'A' | 'AAAA' | 'PTR',
+    ns:   string | null): Promise<string | null> {
+  if (!ns) return resolve(hostname, type as 'A' | 'AAAA');
+
+  // Build and send a DNS UDP query directly to the specified server
+  var qtype  = type === 'AAAA' ? QTYPE_AAAA : type === 'PTR' ? 12 /* QTYPE_PTR */ : QTYPE_A;
+  var id     = (Math.random() * 0xffff) | 0;
+  var wire   = _buildQuery(id, hostname, qtype);
+  var answer = await net.udpQuery(ns, 53, wire, 3000 /* ms timeout */);
+  if (!answer || answer.length < 12) return null;
+  var addrs  = _parseReply(answer, hostname, qtype, id);
+  return addrs.length ? addrs[0] : null;
+}
+
+/** Singleton split-horizon DNS resolver. */
+export const splitHorizonDns = new SplitHorizonDnsResolver();

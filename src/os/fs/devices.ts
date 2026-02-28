@@ -331,3 +331,109 @@ export function blockRead(sector: number, count: number): Promise<Uint8Array> {
 export function blockWrite(sector: number, data: Uint8Array): Promise<number> {
   return blockQueue.enqueue('write', sector, Math.ceil(data.length / 512), data);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  HotplugManager — items 939 & 940
+//  TypeScript hotplug manager: event-based device arrival / departure.
+//  C fires an IRQ on USB/PCI device attach; kernel.hotplugEvent() calls
+//  HotplugManager.dispatch() to fan out to registered TypeScript handlers.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type HotplugEvent = 'add' | 'remove' | 'change';
+
+export interface HotplugDevice {
+  /** Bus-qualified identifier (e.g. 'usb:1-2.3', 'pci:0:3:0'). */
+  id:          string;
+  /** Human-readable name. */
+  name:        string;
+  /** Device class (same as DeviceDescriptor.class). */
+  class:       DeviceClass;
+  /** Kernel driver bound to the device (may be empty if none). */
+  driver:      string;
+  /** Extra key-value properties reported by the kernel at attachment time. */
+  properties:  Map<string, string>;
+}
+
+type HotplugHandler = (event: HotplugEvent, device: HotplugDevice) => void;
+
+/**
+ * HotplugManager — singleton that tracks device arrival and departure events.
+ *
+ * Usage:
+ *   hotplugManager.on('add',    (ev, dev) => { ... });
+ *   hotplugManager.on('remove', (ev, dev) => { ... });
+ *
+ * The C kernel fires `kernel.hotplugDispatch(eventStr, { id, name, ... })`
+ * which is bound to `hotplugManager.dispatch()` via the kernel init hook.
+ */
+export class HotplugManager {
+  private _handlers = new Map<HotplugEvent | '*', HotplugHandler[]>();
+  private _devices  = new Map<string, HotplugDevice>();
+
+  /** Register a handler for a specific event type, or '*' for all events. */
+  on(event: HotplugEvent | '*', handler: HotplugHandler): void {
+    var list = this._handlers.get(event);
+    if (!list) { list = []; this._handlers.set(event, list); }
+    list.push(handler);
+  }
+
+  /** Remove a previously registered handler. */
+  off(event: HotplugEvent | '*', handler: HotplugHandler): void {
+    var list = this._handlers.get(event);
+    if (!list) return;
+    var idx = list.indexOf(handler);
+    if (idx !== -1) list.splice(idx, 1);
+  }
+
+  /** Return all currently attached devices (snapshot). */
+  listAttached(): HotplugDevice[] {
+    return Array.from(this._devices.values());
+  }
+
+  /** Return the attached device with the given id, or null. */
+  getDevice(id: string): HotplugDevice | null {
+    return this._devices.get(id) ?? null;
+  }
+
+  /**
+   * Dispatch a hotplug event.  Called from the C kernel binding
+   * `kernel.hotplugDispatch(event, id, name, class, driver, props)`.
+   */
+  dispatch(event: HotplugEvent, device: HotplugDevice): void {
+    if (event === 'add') {
+      this._devices.set(device.id, device);
+      // Also register with sysDevices if class is known
+      sysDevices.registerDevice({
+        id:         device.id,
+        name:       device.name,
+        class:      device.class,
+        driver:     device.driver,
+        state:      'bound',
+        vendorId:   0, deviceId: 0, irq: 0, mmioBase: 0, ioBase: 0,
+        properties: device.properties,
+      });
+    } else if (event === 'remove') {
+      this._devices.delete(device.id);
+    }
+
+    // Fan-out to specific-event handlers, then '*' handlers
+    var specific = this._handlers.get(event);
+    if (specific) { for (var i = 0; i < specific.length; i++) specific[i](event, device); }
+    var all = this._handlers.get('*');
+    if (all) { for (var j = 0; j < all.length; j++) all[j](event, device); }
+  }
+
+  /**
+   * Simulate USB device arrival (for testing / manual trigger).
+   * Mirrors what the C USB IRQ handler would supply.
+   */
+  simulateUsb(event: HotplugEvent, usbPath: string, name: string,
+              driver: string = 'usb-generic',
+              props: Record<string, string> = {}): void {
+    var propMap = new Map<string, string>(Object.entries(props));
+    this.dispatch(event, { id: 'usb:' + usbPath, name, class: 'char', driver, properties: propMap });
+  }
+}
+
+/** Singleton hotplug manager. */
+export const hotplugManager = new HotplugManager();
