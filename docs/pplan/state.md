@@ -1,6 +1,6 @@
 ﻿# Audit State Tracker
 
-**Last updated:** 2026-02-28 (Session 14 — items 372/427/430/491/496/640/641/771/772/773/915/918/920/965 implemented; 548→562 ✓)  
+**Last updated:** 2026-02-28 (Session 15 — items 134/135/160/222/223/291/292/348/426/428/471/651 implemented+re-audited; 562→574 ✓)  
 **Audit target:** `docs/1000-things.md` (1430 lines, ~1130 items)
 
 ---
@@ -9,8 +9,8 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 562 |
-| Items confirmed ✗ (not implemented, do not re-check) | 178 |
+| Items confirmed ✓ (marked this audit) | 574 |
+| Items confirmed ✗ (not implemented, do not re-check) | 166 |
 | Items not yet investigated | ~475 |
 
 ---
@@ -429,17 +429,17 @@
 
 | Item | Description | Evidence |
 |------|-------------|----------|
-| 160 | `proc.setScheduler()` real-time policy exposed | `setAlgorithm()` internal only; no syscall |
+| 160 | `proc.setScheduler()` real-time policy exposed | NOW ✓ — `setScheduler(pid, policy)` + `getScheduler(pid)` per-process scheduling policy in `process/scheduler.ts:560` (Session 15 re-audit) |
 | 181 | tmpfs | NOW ✓ — `TmpFS` class in `fs/filesystem.ts:117` (re-audited Session 6) |
-| 222 | ARP cache TTL/aging | simple `Map`, no expiry logic |
-| 223 | ARP cache timeout | same |
+| 222 | ARP cache TTL/aging | NOW ✓ — `arpTimestamps: Map<IPv4Address, number>` + 30 000-tick TTL eviction in `tcpTick()` in `net/net.ts:1094+2831` (Session 15 re-audit) |
+| 223 | ARP cache timeout | NOW ✓ — same as 222; entries for local IP and loopback are never evicted (Session 15 re-audit) |
 | 224 | ARP pending TX queue | NOW ✓ — `arpPendingTx` Map + flush in `handleARP()` reply handler in `net/net.ts` (Session 10 re-audit) |
 | 229 | IP fragmentation | NOW ✓ — `ipFragments` Map + `_reassembleIP()` in `net/net.ts` (Session 10 re-audit) |
 | 230 | IP TTL-exceeded ICMP | NOW ✓ — TTL ≤ 1 check → `_sendICMPError(ip, 11, 0)` in `net/net.ts` (Session 10 re-audit) |
 | 288 | TLS session resumption | confirmed absent at `tls.ts` header comment |
 | 290 | TLS cert chain validation | "No certificate validation" in `tls.ts` header |
-| 291 | TLS trust store | same |
-| 292 | TLS revocation check (OCSP/CRL) | same |
+| 291 | TLS trust store | NOW ✓ — `TrustStore` class + `systemTrustStore` singleton + `loadSystemTrustStore()` + `loadDefaultTrustAnchors()` in `net/x509.ts:345` (Session 15 re-audit) |
+| 292 | TLS revocation check (OCSP/CRL) | NOW ✓ — `getAIAOcspUrl()` + `buildOCSPRequest()` + `parseOCSPResponse()` + SHA-1 CertID in `net/x509.ts:489` (Session 15 re-audit) |
 | 323 | RSA PKCS#1.5 | NOW ✓ — `rsaPKCS1Verify()` in `net/rsa.ts` (Session 10 re-audit) |
 | 324 | RSA-PSS | NOW ✓ — `rsaPSSVerify()` + MGF1-SHA256 in `net/rsa.ts` (Session 10 re-audit) |
 | 325 | ECDSA P-384 verify | NOW ✓ — `ecdsaP384Verify()` + P384 curve arithmetic in `net/rsa.ts` (Session 10 re-audit) |
@@ -549,7 +549,7 @@
 | 345 | `SubtleCrypto.deriveKey`/`deriveBits` | NOW ✓ — ECDH + HKDF-SHA256/384 + PBKDF2-SHA256 in `net/subtle.ts` |
 | 346 | Post-quantum Kyber-768 key exchange | NOW ✓ — `Kyber768` class + `kyberKeyGen768/Encapsulate768/Decapsulate768()` in `net/post-quantum.ts` (Session 12) |
 | 347 | Post-quantum Dilithium3 signatures | NOW ✓ — `Dilithium3` class + `dilithiumKeyGen3/Sign3/Verify3()` in `net/post-quantum.ts` (Session 12) |
-| 348 | Hardware RNG (RDRAND) replacing Math.random | `cpuid_features.rdrand` flag exists but no `kernel.rdrand()` binding or use in random generation |
+| 348 | Hardware RNG (RDRAND) replacing Math.random | NOW ✓ — `getHardwareRandom(len)` using `kernel.rdrand()` 32-bit word loop in `net/crypto.ts:828`; used by TLS Client Hello + post-quantum stubs (Session 15 re-audit) |
 | **Agent E2 additions (HTML parser / CSS engine)** | | |
 
 
@@ -562,9 +562,9 @@
 | 423 | CSS `filter`: blur/brightness/contrast | NOW ✓ — `parseCSSFilters()` + `applyFiltersToPixel()` + `applyBlur()` (Gaussian) in `apps/browser/advanced-css.ts` (Session 13) |
 | 424 | CSS `backdrop-filter` | NOW ✓ — `applyBackdropFilter()` (blur + filter chain on backdrop) in `apps/browser/advanced-css.ts` (Session 13) |
 | 425 | CSS `mix-blend-mode` | NOW ✓ — `blendPixel()` with 12 blend modes (multiply/screen/overlay/darken/lighten/color-dodge/burn/hard-light/soft-light/difference/exclusion) in `apps/browser/advanced-css.ts` (Session 13) |
-| 426 | CSS `appearance` property | not rendered |
+| 426 | CSS `appearance` property | NOW ✓ — `AppearanceRenderer.render()` + `renderNativeButton/Textfield/Checkbox/Radio/Menulist/ProgressBar/Range()` RGBA framebuffer renderers + `appearanceRenderer` singleton in `apps/browser/appearance.ts` (Session 15) |
 | 427 | CSS `resize` property | NOW ✓ — `parseCSSResize()` + `ResizeHandle` (mouse drag with min/max constraints) in `apps/browser/css-extras.ts` (Session 14) |
-| 428 | CSS `will-change` (GPU planning hint) | parsed in `css.ts`; no layer promotion logic in `index.ts` |
+| 428 | CSS `will-change` (GPU planning hint) | NOW ✓ — `LayerPromotionReason` includes `'will-change'`; `CompositorLayerTree.applyStyle()` promotes on `will-change: transform/opacity` in `apps/browser/layout.ts:831` (Session 15 re-audit) |
 | 429 | CSS `contain` | NOW ✓ — `parseContain()` returning `ContainContext` (layout/paint/size/style flags) in `apps/browser/advanced-css.ts` (Session 13) |
 | 430 | CSS `@font-face` | NOW ✓ — `FontFaceRegistry` (`parseFontFace()`/`loadFontFace()`/`loadAll()`) in `apps/browser/css-extras.ts` (Session 14) |
 | 432 | CSS `font-weight` 100–900 mapped to rendering | `fontScale` uses one size; no bold variant | [NOW ✓ — see Agent E continuation above] |
@@ -586,7 +586,7 @@
 | 469 | Subpixel layout (fractional pixel positions) | NOW ✓ — `snapToSubpixel()` + `snapRectToSubpixel()` rounding to device pixel boundaries in `apps/browser/advanced-css.ts` (Session 13) |
 | 470 | CSS regions / page-break layout for printing | NOW ✓ — `getPageBreaks()` + `PageBreakInfo` with before/after/inside policies in `apps/browser/advanced-css.ts` (Session 13) |
 | **Agent E3 additions (Rendering §12)** | | |
-| 471 | Render bitmap font at multiple sizes (not just 8×8) | fixed-size font only in `apps/browser/index.ts` |
+| 471 | Render bitmap font at multiple sizes (not just 8×8) | NOW ✓ — `fontScale` field on spans (0.75/1/2/3) + `cw = CHAR_W * fontScale` / `ch = CHAR_H * fontScale` in `apps/browser/render.ts:649` (Session 15 re-audit) |
 | 472 | Font metrics: character width table for proportional fonts | NOW ✓ — `getCharEMWidth()` (Unicode-block keyed table) + `measureText()` in `apps/browser/advanced-css.ts` (Session 13) |
 | 473 | Anti-aliased text rendering (grayscale) | NOW ✓ — `renderGlyphGrayscale()` with alpha coverage blending in `apps/browser/advanced-css.ts` (Session 13) |
 | 474 | Sub-pixel RGB text (ClearType-style) | NOW ✓ — `renderGlyphClearType()` with separate R/G/B sub-pixel weights in `apps/browser/advanced-css.ts` (Session 13) |
@@ -656,7 +656,7 @@
 | 976 | sys.browser.bench(url) Core Web Vitals | NOW ✓ — g.bench.browser(url) in ui/commands.ts (Session 8) |
 | 977 | Continuous benchmark CI: fail on > 5% regression | NOW ✓ — `g.bench.ci(threshold?)` in `ui/commands.ts` (Session 9) |
 | **Agent F additions (REPL / Terminal / Built-in APIs / Init / GUI / Apps / DevTools)** | | |
-| 651 | Tab completion with function signatures + type hints | `tabComplete()` completes names/paths but no type hints |
+| 651 | Tab completion with function signatures + type hints | NOW ✓ — `getFunctionSignature(fn)` + signature hint display on `(` detection in `ui/repl.ts:104` (Session 15 re-audit) |
 | 653 | Multiple terminal instances: N REPLs simultaneously | NOW ✓ — `ReplManager` with `open/close/list/switch` in `ui/repl.ts` (Session 10 re-audit) |
 | 654 | Terminal tabs: Ctrl+Tab switch | NOW ✓ — `TerminalTabManager` + `terminalTabManager` singleton in `apps/terminal/index.ts` (Session 10) |
 | 655 | REPL tab has own variable scope + history | NOW ✓ — g.repl session object in ui/commands.ts (Session 8) |
@@ -753,8 +753,8 @@
 | 802 | Hot module replacement for OS development | NOW ✓ — `HMREngine` + `FileWatcher` (polling) + `ModuleRegistry` (BFS invalidation) + `HMRContext` (accept/dispose/data) in `sdk/hmr.ts` (Session 12) |
 | **Agent G additions (VMM / Filesystem / IPC)** | | |
 | 133 | Copy-on-write (COW) for forked processes | NOW ✓ — COWManager at vmm.ts:598 (re-audited Session 7) |
-| 134 | Memory-mapped files (`mmap` with file backing) | `mmapFile()` allocates anonymous memory only; no file data loaded in `process/vmm.ts` |
-| 135 | Demand paging: page fault loads from disk lazily | `handlePageFault()` just marks present=true; no disk read in `process/vmm.ts` |
+| 134 | Memory-mapped files (`mmap` with file backing) | NOW ✓ — `mmapFile()` creates not-present PTEs for demand paging + `loadFileBacking()` + `setFileDataProvider()` + `_fileBacking` Map in `process/vmm.ts` (Session 15) |
+| 135 | Demand paging: page fault loads from disk lazily | NOW ✓ — `handlePageFault()` case 2 checks `backingStore==='file'`, reads chunk via `_fileDataProvider(fd, offset, pageSize)` or `_fileBacking` Map, allocates physical page in `process/vmm.ts` (Session 15) |
 | 136 | Swap space: evict LRU pages to disk | NOW ✓ — `SwapManager` + `swapManager` singleton in `process/vmm.ts:719` (Session 11 re-audit) |
 | 137 | Page reclaim: LRU clock algorithm | NOW ✓ — `LRUClock` (second-chance) + `lruClock` singleton in `process/vmm.ts:779` (Session 11 re-audit) |
 | 140 | ASLR for process address spaces | NOW ✓ — ASLRManager at vmm.ts:859 (re-audited Session 7) |
