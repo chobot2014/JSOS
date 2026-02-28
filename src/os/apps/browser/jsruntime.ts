@@ -3926,25 +3926,79 @@ export function createPageJS(
     set(t: any, k: string, v: any): boolean { t[k] = v; return true; },
   });
 
-  // ── Pre-process script code before execution ─────────────────────────────
-  // Strips constructs that break the with(__s__){} wrapper:
-  //   1. Hashbang  #!...  (first line, only valid at very top of a module/script)
-  //   2. 'use strict' / "use strict" directives — they are expression-statements
-  //      inside a block, but some QuickJS builds treat them unexpectedly when
-  //      combined with `with`.  We gain nothing from them since we don't run in
-  //      actual strict mode anyway; stripping is safe.
-  function _prepareCode(raw: string): string {
-    // Remove leading hashbang
-    var s = raw.replace(/^#!.*/,'');
-    // Remove leading 'use strict' / "use strict" directives (single or double quotes)
-    s = s.replace(/^\s*(?:'use strict'|"use strict")\s*;?\s*/g, '');
+  // ── Stage-2 global bridge ─────────────────────────────────────────────────
+  // QJS rejects class declarations (static blocks, extends, private fields,
+  // any class body) inside with() blocks. When stage-1 falls through to stage-2
+  // we run `new Function(code).call(win)`, where `this` = win but bare identifier
+  // lookups still go through globalThis — NOT win.
+  //
+  // To fix this we define configurable getters/setters on QJS's globalThis for
+  // every win property not already present there.  After bridging:
+  //   • bare `document` resolves to win.document ✓
+  //   • bare `console` resolves to win.console ✓
+  //   • bare `fetch` resolves to win.fetch ✓
+  //   • bare `window.foo = bar` → sets on win ✓ (window getter returns win)
+  //   • Existing QJS builtins (Math, Array, Promise …) are left intact ✓
+  //
+  // Bindings are removed in dispose() so they don't outlive the page.
+  var _bridgedKeys: string[] = [];
+  (function _bridgeToGlobal() {
+    var winKeys = Object.keys(win);
+    for (var _bi = 0; _bi < winKeys.length; _bi++) {
+      var _bk = winKeys[_bi];
+      // Skip keys already on QJS globalThis (builtins: Math, Array, Promise…)
+      if (_bk in (globalThis as any)) continue;
+      try {
+        (function(key: string) {
+          Object.defineProperty(globalThis as any, key, {
+            get(): unknown  { return (win as any)[key]; },
+            set(v: unknown): void { (win as any)[key] = v; },
+            configurable: true,
+            enumerable:   false,
+          });
+        })(_bk);
+        _bridgedKeys.push(_bk);
+      } catch(_) {}
+    }
+  })();
+  function _unbridgeFromGlobal(): void {
+    for (var _ui = 0; _ui < _bridgedKeys.length; _ui++) {
+      try { delete (globalThis as any)[_bridgedKeys[_ui]]; } catch(_) {}
+    }
+    _bridgedKeys = [];
+  }
+
+  // ── JS source prep for `with()` execution wrapper ────────────────────────
+  //
+  // QuickJS 2025-09-13 supports all ES2022/2023 syntax natively (static blocks,
+  // ergonomic brand checks, reserved-word property keys, private fields, etc.).
+  // We must NOT try to "fix" valid syntax – transforming it only introduces bugs.
+  //
+  // The ONLY preparation needed for the with(__s__){} wrapper is:
+  //   1. Strip hashbang (#!) – QJS allows it in top-level scripts but not inside
+  //      a function body (which is what new Function() creates).
+  //   2. Strip `'use strict'` / `"use strict"` directives – with() is forbidden
+  //      in strict-mode code.  Inside the with(){} block the directive is just an
+  //      expression statement so it never activates strict mode anyway; stripping
+  //      it prevents edge-cases where the engine sees it as a directive.
+  //
+  // Scripts that still fail stage-1 parsing (e.g. class static-init blocks
+  // inside with() which QJS rejects at the parser level) fall through to stage-2
+  // which runs the RAW untouched code without any wrapper.
+
+  function _prepareForWith(raw: string): string {
+    // Strip hashbang
+    var s = (raw.charCodeAt(0) === 35 && raw.charCodeAt(1) === 33)
+      ? raw.replace(/^#!.*/, '') : raw;
+    // Strip leading 'use strict' directive
+    s = s.replace(/^\s*(?:'use strict'|"use strict")\s*;?/, '');
     return s;
   }
 
   // Compile an inline event-handler string. `event` is the implicit argument
   // injected by addEventListener; all other globals come from _winScope.
   function _makeHandler(code: string): ((e: VEvent) => void) | null {
-    var src = _prepareCode(code);
+    var src = _prepareForWith(code);
     try {
       var fn = new Function('__s__', 'event',
         'with(__s__){' + src + '}') as (s: any, e: VEvent) => void;
@@ -3953,10 +4007,11 @@ export function createPageJS(
         checkDirty();
       };
     } catch(e) {
-      // Fallback: compile without with() scope — loses window-property lookup
-      // but at least won't throw SyntaxError for private-field / static-block code
+      // with() failed (e.g. class body inside handler) — run without scope proxy
       try {
-        var fn2 = new Function('event', src) as (e: VEvent) => void;
+        var raw2 = code.charCodeAt(0) === 35 && code.charCodeAt(1) === 33
+          ? code.replace(/^#!.*/, '') : code;
+        var fn2 = new Function('event', raw2) as (e: VEvent) => void;
         return (e: VEvent) => {
           try { fn2.call(win, e); } catch(err) { cb.log('[JS handler err] ' + String(err)); }
           checkDirty();
@@ -3982,45 +4037,55 @@ export function createPageJS(
   }
 
   function execScript(code: string): void {
-    var src = _prepareCode(code);
     // Stage 1: run inside with(_winScope) so scripts resolve identifiers through
     // the window proxy (bare globals, property writes, etc.)
+    // We strip hashbang and 'use strict' because:
+    //  - hashbang is not valid inside a function body
+    //  - 'use strict' would make the function strict, and with() is illegal in strict mode
+    var src1 = _prepareForWith(code);
     var stage1Err: any = null;
     try {
       var fn = new Function('__s__',
-        'with(__s__){\n' + src + '\n}') as (s: any) => void;
+        'with(__s__){\n' + src1 + '\n}') as (s: any) => void;
       fn(_winScope);
       checkDirty();
       return;
     } catch (e) {
       var msg = String(e);
       if (msg.indexOf('SyntaxError') === -1) {
-        // Runtime error, not a parse error — report and bail
+        // Runtime error — report and return. No point retrying with raw code.
         _fireScriptError(e);
         checkDirty();
         return;
       }
       stage1Err = e;
     }
-    // Stage 2: with() wrapper caused a SyntaxError (private fields, decorators,
-    // static blocks, reserved-word destructuring, etc.)  Fall back to running
-    // the code directly without the scope proxy.  `this` is bound to win so
-    // properties assigned to `this` land on the window object; global-scope
-    // identifier resolution falls through to the real global.
+    // Stage 2: with() wrapper caused a SyntaxError.
+    // This happens when the script contains syntax that QJS rejects inside a
+    // with() block (e.g. class static-init blocks, class declarations).
+    // Fall back to running the RAW code directly — no transforms, no scope proxy.
+    // `this` is bound to win so `this.foo = bar` persists as window.foo.
+    // The globalThis bridge (set up at runtime init) makes bare names like
+    // `document`, `console`, `fetch` etc. resolve to win's properties.
+    var raw2 = (code.charCodeAt(0) === 35 && code.charCodeAt(1) === 33)
+      ? code.replace(/^#!.*/, '') : code;
     try {
-      var fn2 = new Function(src) as () => void;
+      var fn2 = new Function(raw2) as () => void;
       fn2.call(win);
     } catch (e2) {
       var msg2 = String(e2);
       if (msg2.indexOf('SyntaxError') !== -1) {
-        // Both attempts failed — log the original with() error
-        _fireScriptError(stage1Err);
+        // Both stage 1 and stage 2 failed with SyntaxErrors.
+        // Report the stage-2 error (raw code) since it's more meaningful —
+        // stage-1 error includes the with() wrapper noise.
+        _fireScriptError(e2);
       } else {
         _fireScriptError(e2);
       }
     }
     checkDirty();
   }
+
 
   // ── Load external scripts synchronously via fetchAsync ───────────────────
 
@@ -4265,6 +4330,7 @@ export function createPageJS(
     },
     dispose(): void {
       disposed = true;
+      _unbridgeFromGlobal();
       timers = []; rafCallbacks = [];
       // fire beforeunload
       try { var ev = new VEvent('beforeunload'); doc.dispatchEvent(ev); } catch(_) {}

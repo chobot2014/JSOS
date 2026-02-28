@@ -41,7 +41,7 @@ import { parseStylesheet, buildSheetIndex, type CSSRule, type RuleIndex, resetCS
 import { decodePNG }    from './img-png.js';
 import { decodeJPEG }   from './img-jpeg.js';
 import { layoutNodes }  from './layout.js';
-import { aboutJsosHTML, errorHTML, jsonViewerHTML } from './pages.js';
+import { aboutJsosHTML, aboutJstestHTML, errorHTML, jsonViewerHTML } from './pages.js';
 import { createPageJS, getBlobURLContent, type PageJS } from './jsruntime.js';
 import { flushAllCaches } from './cache.js';
 import { renderGradientCSS } from './gradient.js';
@@ -83,7 +83,7 @@ export class BrowserApp implements App {
   readonly name = 'Browser';
 
   private _win:           WMWindow | null = null;
-  private _urlInput       = 'about:jsos';
+  private _urlInput       = 'about:jstest';
   private _urlBarFocus    = true;
   private _urlCursorPos   = 0;
   private _urlScrollOff   = 0;
@@ -97,7 +97,7 @@ export class BrowserApp implements App {
   private _bookmarks:     HistoryEntry[] = [];
 
   private _pageTitle   = 'JSOS Browser';
-  private _pageURL     = 'about:jsos';
+  private _pageURL     = 'about:jstest';
   private _pageSource  = '';
   private _pageBaseURL = '';    // from <base href> in current page
   private _pageLines:  RenderedLine[] = [];
@@ -225,10 +225,10 @@ export class BrowserApp implements App {
   onMount(win: WMWindow): void {
     this._win = win;
     // Initialize first tab
-    this._tabs = [this._makeBlankTab('about:jsos')];
+    this._tabs = [this._makeBlankTab('about:jstest')];
     this._curTab = 0;
     this._loadTab(0);
-    this._navigate('about:jsos');
+    this._navigate('about:jstest');
   }
 
   onUnmount(): void {
@@ -1575,6 +1575,7 @@ export class BrowserApp implements App {
       switch (parsed.path) {
         case 'blank':     pg = '';                      break;
         case 'jsos':      pg = aboutJsosHTML();         break;
+        case 'jstest':    pg = aboutJstestHTML();        break;
         case 'history':   pg = this._historyHTML();     break;
         case 'bookmarks': pg = this._bookmarksHTML();   break;
         case 'source':    pg = this._sourceHTML();      break;
