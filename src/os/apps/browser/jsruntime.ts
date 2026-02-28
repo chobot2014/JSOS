@@ -3116,6 +3116,76 @@ export function createPageJS(
   if (typeof structuredClone === 'undefined') {
     (globalThis as any).structuredClone = (v: unknown) => JSON.parse(JSON.stringify(v));
   }
+  // String.prototype.trimStart / trimEnd (ES2019) – belt-and-suspenders
+  if (typeof (String.prototype as any).trimStart !== 'function') {
+    (String.prototype as any).trimStart = function(this: string) { return this.replace(/^\s+/, ''); };
+    (String.prototype as any).trimEnd   = function(this: string) { return this.replace(/\s+$/, ''); };
+  }
+  // Array.prototype.toReversed / toSorted / toSpliced / with (ES2023 non-mutating)
+  if (typeof (Array.prototype as any).toReversed !== 'function') {
+    (Array.prototype as any).toReversed = function(this: unknown[]) { return this.slice().reverse(); };
+  }
+  if (typeof (Array.prototype as any).toSorted !== 'function') {
+    (Array.prototype as any).toSorted = function(this: unknown[], compareFn?: (a: unknown, b: unknown) => number) { return this.slice().sort(compareFn); };
+  }
+  if (typeof (Array.prototype as any).toSpliced !== 'function') {
+    (Array.prototype as any).toSpliced = function(this: unknown[], start: number, deleteCount?: number, ...items: unknown[]) {
+      var copy = this.slice(); copy.splice(start, deleteCount ?? copy.length - start, ...items); return copy;
+    };
+  }
+  if (typeof (Array.prototype as any).with !== 'function') {
+    (Array.prototype as any).with = function(this: unknown[], index: number, value: unknown) {
+      var copy = this.slice(); copy[index < 0 ? this.length + index : index] = value; return copy;
+    };
+  }
+  // TypedArray.prototype.at (ES2022) – applies to all typed array prototypes
+  (function() {
+    var _typedProtos = [
+      Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
+      Int32Array, Uint32Array, Float32Array, Float64Array,
+    ];
+    for (var i = 0; i < _typedProtos.length; i++) {
+      if (typeof (_typedProtos[i].prototype as any).at !== 'function') {
+        (_typedProtos[i].prototype as any).at = function(this: { length: number; [k: number]: unknown }, n: number) {
+          var idx = n < 0 ? this.length + n : n; return this[idx];
+        };
+      }
+    }
+  })();
+  // Array.prototype.group / Object.groupBy (Chrome 117 / ES2024)
+  if (typeof (Object as any).groupBy !== 'function') {
+    (Object as any).groupBy = function<T>(iterable: Iterable<T>, keyFn: (v: T) => PropertyKey): Record<PropertyKey, T[]> {
+      var result: Record<PropertyKey, T[]> = Object.create(null);
+      for (var item of iterable) { var key = keyFn(item); (result[key] = result[key] || []).push(item); }
+      return result;
+    };
+    (Map as any).groupBy = function<T>(iterable: Iterable<T>, keyFn: (v: T) => unknown): Map<unknown, T[]> {
+      var result = new Map<unknown, T[]>();
+      for (var item of iterable) { var key = keyFn(item); if (!result.has(key)) result.set(key, []); result.get(key)!.push(item); }
+      return result;
+    };
+  }
+  // Promise.any (ES2021) — in case QJS build is missing it
+  if (typeof Promise.any !== 'function') {
+    (Promise as any).any = function<T>(promises: Iterable<Promise<T>>): Promise<T> {
+      var arr = Array.from(promises);
+      return new Promise<T>((resolve, reject) => {
+        var errs: unknown[] = []; var remaining = arr.length;
+        if (remaining === 0) { reject(new (AggregateError_ as any)([], 'All promises were rejected')); return; }
+        arr.forEach((p, i) => Promise.resolve(p).then(resolve, (e) => { errs[i] = e; if (--remaining === 0) reject(new (AggregateError_ as any)(errs, 'All promises were rejected')); }));
+      });
+    };
+  }
+  // Error.cause support (ES2022) — QJS 2021 may not pass it through
+  if (typeof Error !== 'undefined' && !(new Error('', { cause: 'x' } as any) as any).cause) {
+    var _OrigError = Error;
+    (globalThis as any).Error = function Error(msg?: string, opts?: { cause?: unknown }) {
+      var e = new _OrigError(msg);
+      if (opts && 'cause' in opts) (e as any).cause = opts.cause;
+      return e;
+    };
+    (globalThis as any).Error.prototype = _OrigError.prototype;
+  }
 
   // ── RTCPeerConnection stub (item 541) ─────────────────────────────────────
 
@@ -3750,8 +3820,11 @@ export function createPageJS(
     addEventListener:    (t: string, fn: (e: VEvent) => void) => doc.addEventListener(t, fn),
     removeEventListener: (t: string, fn: (e: VEvent) => void) => doc.removeEventListener(t, fn),
 
-    // Standard JS globals (in case scripts shadow these)
-    undefined, null: null, NaN, Infinity, isFinite, isNaN, parseFloat, parseInt,
+    // Standard JS globals (in case scripts shadow these).
+    // Note: 'null' is intentionally omitted — it is a language literal and
+    // including it as a window key causes "missing formal parameter" errors
+    // in new Function() because the string "null" is a reserved word.
+    undefined, NaN, Infinity, isFinite, isNaN, parseFloat, parseInt,
     encodeURIComponent, decodeURIComponent, encodeURI, decodeURI,
     Intl: Intl_,
     JSON, Math, Date, RegExp, Error, TypeError, RangeError, SyntaxError, ReferenceError,
@@ -3816,7 +3889,7 @@ export function createPageJS(
 
   // ── Wire on* attribute handlers ───────────────────────────────────────────
 
-  function wireHandlers(root: VElement, ctx: Record<string, unknown>): void {
+  function wireHandlers(root: VElement, _ctx: Record<string, unknown>): void {
     _walk(root, el => {
       var onAttrs = ['onclick','onchange','oninput','onsubmit','onkeydown','onkeyup',
                      'onfocus','onblur','onmouseover','onmouseout','onmouseenter','onmouseleave',
@@ -3824,7 +3897,7 @@ export function createPageJS(
       for (var attr of onAttrs) {
         var code = el.getAttribute(attr); if (!code) continue;
         (function(evName: string, evCode: string, elem: VElement) {
-          var handler = _makeHandler(evCode, ctx);
+          var handler = _makeHandler(evCode);
           if (handler) {
             var evType = evName.slice(2); // strip 'on'
             elem.addEventListener(evType, handler);
@@ -3834,18 +3907,33 @@ export function createPageJS(
     });
   }
 
-  // Only allow valid JS identifier names as function parameters to avoid
-  // "missing formal parameter" errors from names like "my-id", "0", "gbar.logger"
-  function _isValidIdent(k: string): boolean {
-    return /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(k);
-  }
+  // ── Page-script execution scope ────────────────────────────────────────────
+  // A Proxy over `win` that simulates a browser's global object for page scripts.
+  //
+  //  • has()  → always true: `with(_winScope)` channels ALL identifier lookups
+  //              through here first, mirroring how real browsers resolve globals.
+  //  • get()  → return win[key] if present, else fall back to the QJS global
+  //              (Math, Promise, ArrayBuffer, …) so built-ins remain accessible.
+  //  • set()  → write directly to win so bare `gbar = {}` persists as window.gbar
+  //              across subsequent scripts — exactly like a real browser's global.
+  //
+  // Using with(Proxy) instead of new Function(...Object.keys(win)) eliminates the
+  // "missing formal parameter" class of errors (reserved words, dotted names, …)
+  // and makes dynamically-added window properties visible without re-enumeration.
+  var _winScope: any = new Proxy(win as any, {
+    has(_t: any, _k: any): boolean { return true; },
+    get(t: any, k: string): any    { return (k in t) ? t[k] : (globalThis as any)[k]; },
+    set(t: any, k: string, v: any): boolean { t[k] = v; return true; },
+  });
 
-  function _makeHandler(code: string, ctx: Record<string, unknown>): ((e: VEvent) => void) | null {
+  // Compile an inline event-handler string. `event` is the implicit argument
+  // injected by addEventListener; all other globals come from _winScope.
+  function _makeHandler(code: string): ((e: VEvent) => void) | null {
     try {
-      var validKeys = Object.keys(ctx).filter(_isValidIdent);
-      var fn = new Function(...validKeys, 'event', code);
+      var fn = new Function('__s__', 'event',
+        'with(__s__){' + code + '}') as (s: any, e: VEvent) => void;
       return (e: VEvent) => {
-        try { fn(...validKeys.map(k => ctx[k]), e); } catch(err) { cb.log('[JS handler err] ' + String(err)); }
+        try { fn(_winScope, e); } catch(err) { cb.log('[JS handler err] ' + String(err)); }
         checkDirty();
       };
     } catch(e) {
@@ -3858,12 +3946,15 @@ export function createPageJS(
 
   function execScript(code: string): void {
     try {
-      // Build a function with all window properties as named parameters.
-      // Filter to valid JS identifiers only — invalid names (hyphenated DOM IDs,
-      // numeric keys, dotted names) cause "missing formal parameter" in the parser.
-      var keys = Object.keys(win).filter(_isValidIdent);
-      var fn   = new Function(...keys, '"use strict";\n' + code);
-      fn(...keys.map(k => win[k]));
+      // Run inside with(_winScope) so scripts resolve identifiers through the
+      // window proxy: reads find window properties (or JS built-ins as fallback),
+      // and bare writes like `gbar = {}` persist on win for subsequent scripts.
+      // This is much closer to real browser global-scope execution than the old
+      // new Function(...Object.keys(win)) approach and avoids all
+      // "missing formal parameter" / reserved-word parse errors.
+      var fn = new Function('__s__',
+        'with(__s__){\n' + code + '\n}') as (s: any) => void;
+      fn(_winScope);
     } catch (e) {
       cb.log('[JS error] ' + String(e));
       // Fire window.onerror and window error event (item 530)
