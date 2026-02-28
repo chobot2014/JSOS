@@ -809,22 +809,26 @@ export class Canvas {
 
   /**
    * Double-buffer flip: send the entire canvas to the physical framebuffer.
-   * [Item 905] When hardware double-buffering is available, waits for vsync
-   * before swapping front/back buffers to eliminate tearing.
+   * [Item 905] Wait for vertical blank BEFORE the blit so the write lands
+   * during the non-visible period, eliminating tearing.
+   *
+   * NOTE: fbBlit() writes directly to the physical framebuffer.  fbFlip()
+   * copies the C-side back-buffer → physical FB, which would overwrite the
+   * just-blitted frame with stale (zeroed) data and cause a black flash every
+   * frame.  fbFlip() is therefore intentionally NOT called here.
    */
   flip(): void {
     /* External-buffer canvases are owned by the WM render slab; don't blit. */
     if (this._external) return;
     // Init double-buffer once on the first real flip.
     if (!Canvas._dbInit) Canvas._initDoubleBuffer();
+    // [Item 905] Wait for vertical blank before writing to avoid tearing.
+    if (Canvas._dbEnabled) {
+      try { (kernel as any).vsyncWait?.(); } catch (_) {}
+    }
     // Zero-copy fast path: pass the Uint32Array's backing ArrayBuffer directly.
     // C side detects it via JS_GetArrayBuffer() and calls a single memcpy.
     (kernel.fbBlit as any)(this._buf.buffer, this._fb_x, this._fb_y, this.width, this.height);
-    if (Canvas._dbEnabled) {
-      // [Item 905] Wait for vsync then swap front/back buffers.
-      try { (kernel as any).vsyncWait?.(); } catch (_) {}
-      try { (kernel as any).fbFlip?.();    } catch (_) {}
-    }
   }
 
   /**

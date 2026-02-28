@@ -104,6 +104,13 @@ class CanvasTerminal {
     this._canvas.fillRect(0, (this._rows - 1) * rowPixels, cw, rowPixels, this._bgColor);
     this._row = this._rows - 1;
   }
+
+  /** Draw (show=true) or erase (show=false) a 2-px underline cursor at the current position. */
+  drawCursor(show: boolean): void {
+    var cx = this._col * CHAR_W;
+    var cy = this._row * CHAR_H + CHAR_H - 2;
+    this._canvas.fillRect(cx, cy, CHAR_W, 2, show ? Colors.LIGHT_GREY : this._bgColor);
+  }
 }
 
 // VGA colour-index (0-15) → ARGB pixel colour for CanvasTerminal
@@ -122,6 +129,9 @@ export class TerminalApp implements App {
   private _win:  WMWindow | null = null;
   private _inputBuf = '';
   private _dirty = true;   // track whether canvas has been modified
+  private _blinkMs  = 0;   // accumulated ms since last cursor phase change
+  private _blinkOn  = true; // current cursor visibility state
+  private _lastTick = 0;   // kernel.getTicks() at last render call
 
   // ── Input history (items 642–644) ─────────────────────────────────────────
   private _history:    string[] = [];   // oldest at index 0
@@ -147,7 +157,9 @@ export class TerminalApp implements App {
     var ch  = event.ch;
     var key = event.key;
     this._dirty = true;
-    terminal.resetBlink(); // [Item 669] reset blink on any keystroke
+    // Reset cursor blink phase on keystroke so cursor is immediately visible
+    this._blinkMs = 0;
+    this._blinkOn = true;
 
     // ── History navigation (items 642–643) ─────────────────────────────────
     if (key === 'ArrowUp') {
@@ -244,12 +256,21 @@ export class TerminalApp implements App {
   }
 
   render(_canvas: Canvas): boolean {
-    // [Item 669] Tick cursor blink on every render frame (~16ms @ 60fps)
-    terminal.tick(16);
-    // Terminal writes directly into win.canvas during onKey() / print().
-    // Here we just signal whether it's been modified since the last frame.
+    // Cursor blink using kernel ticks (1000 Hz = 1 ms/tick); no VGA I/O in
+    // graphic mode. Toggle cursor every 500 ms and mark dirty so the WM
+    // composites a new frame even when no keys have been pressed.
+    var now = kernel.getTicks();
+    if (this._lastTick === 0) this._lastTick = now;
+    this._blinkMs += now - this._lastTick;
+    this._lastTick = now;
+    if (this._blinkMs >= 500) {
+      this._blinkMs = 0;
+      this._blinkOn = !this._blinkOn;
+      this._dirty = true;
+    }
     if (!this._dirty) return false;
     this._dirty = false;
+    if (this._term) this._term.drawCursor(this._blinkOn);
     return true;
   }
 
