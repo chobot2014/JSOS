@@ -373,6 +373,14 @@ export interface KernelAPI {
    * (canvas pixel buffers, audio, etc.) without a copy.
    */
   physAddrOf(ab: ArrayBuffer): number;
+  /**
+   * Return uint32 physical addresses of C helper functions callable from JIT'd x86 code.
+   * The returned addresses can be loaded into ECX and invoked via `CALL ECX` (cdecl).
+   * - `getPropI32`: jit_js_getprop_i32(obj_ptr: uint32, atom: uint32) → int32
+   * - `setPropI32`: jit_js_setprop_i32(obj_ptr: uint32, atom: uint32, val: int32)
+   * - `callFn`:    jit_js_call_fn(fn_ptr: uint32, a0..a3: int32, argc: int32) → int32
+   */
+  jitHelperAddrs(): { getPropI32: number; setPropI32: number; callFn: number };
 
   // ─ Step 3: QuickJS internal struct offsets ─────────────────────────────────
   /**

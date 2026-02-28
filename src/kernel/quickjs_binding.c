@@ -1868,6 +1868,96 @@ static JSValue js_physaddr_of(JSContext *c, JSValueConst this_val,
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+ * JIT runtime helpers — cdecl int32 functions called directly from JIT'd x86.
+ * These use the static `ctx` global so they need no context argument.
+ * Addresses are exposed to TypeScript via kernel.jitHelperAddrs().
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * jit_js_getprop_i32(obj_ptr, atom_val) → int32
+ * Read an integer property from a JSObject.  Called from OP_get_field slow path.
+ * obj_ptr = raw JSObject* passed as int32 from the JIT eval stack (via fixed _JARG).
+ * atom_val = JSAtom (property name identifier).
+ */
+static int32_t jit_js_getprop_i32(uint32_t obj_ptr, uint32_t atom_val)
+{
+    if (!ctx || !obj_ptr) return 0;
+    JSValue obj = JS_MKPTR(JS_TAG_OBJECT, (void *)(uintptr_t)obj_ptr);
+    JSValue val = JS_GetProperty(ctx, obj, (JSAtom)atom_val);
+    int32_t r = 0;
+    if (!JS_IsException(val)) {
+        if (JS_VALUE_GET_TAG(val) == JS_TAG_INT)
+            r = JS_VALUE_GET_INT(val);
+        else
+            JS_ToInt32(ctx, &r, val);
+    }
+    JS_FreeValue(ctx, val);
+    return r;
+}
+
+/*
+ * jit_js_setprop_i32(obj_ptr, atom_val, ival) → void
+ * Write an int32 value to a JSObject property.  Called from OP_put_field slow path.
+ */
+static void jit_js_setprop_i32(uint32_t obj_ptr, uint32_t atom_val, int32_t ival)
+{
+    if (!ctx || !obj_ptr) return;
+    JSValue obj = JS_MKPTR(JS_TAG_OBJECT, (void *)(uintptr_t)obj_ptr);
+    JS_SetProperty(ctx, obj, (JSAtom)atom_val, JS_NewInt32(ctx, ival));
+}
+
+/*
+ * jit_js_call_fn(fn_ptr, a0, a1, a2, a3, argc) → int32
+ * Call a JS function from JIT'd code.  Used by OP_call / OP_call0 slow path.
+ * fn_ptr = raw JSObject* of the callee (function).
+ * a0..a3 = int32 arguments (pass 0 for unused slots).
+ * argc   = actual argument count (0–4).
+ * Returns int32 result, or 0 on exception / non-integer result.
+ */
+static int32_t jit_js_call_fn(uint32_t fn_ptr,
+                               int32_t a0, int32_t a1, int32_t a2, int32_t a3,
+                               int32_t argc)
+{
+    if (!ctx || !fn_ptr || argc < 0 || argc > 4) return 0;
+    JSValue fn = JS_MKPTR(JS_TAG_OBJECT, (void *)(uintptr_t)fn_ptr);
+    JSValue args[4] = {
+        JS_NewInt32(ctx, a0), JS_NewInt32(ctx, a1),
+        JS_NewInt32(ctx, a2), JS_NewInt32(ctx, a3)
+    };
+    JSValue res = JS_Call(ctx, fn, JS_UNDEFINED, (int)argc, args);
+    int32_t r = 0;
+    if (!JS_IsException(res)) {
+        if (JS_VALUE_GET_TAG(res) == JS_TAG_INT)
+            r = JS_VALUE_GET_INT(res);
+        else
+            JS_ToInt32(ctx, &r, res);
+    }
+    JS_FreeValue(ctx, res);
+    for (int i = 0; i < 4; i++) JS_FreeValue(ctx, args[i]);
+    return r;
+}
+
+/*
+ * kernel.jitHelperAddrs() → {getPropI32, setPropI32, callFn}
+ * Returns an object containing the uint32 physical addresses of the three
+ * JIT runtime helper functions above.  JIT'd x86 code loads these addresses
+ * into ECX and executes CALL ECX to invoke the helper in cdecl fashion.
+ */
+static JSValue js_jit_get_helper_addrs(JSContext *c, JSValueConst this_val,
+                                        int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    JSValue o = JS_NewObject(c);
+    JS_SetPropertyStr(c, o, "getPropI32",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_getprop_i32));
+    JS_SetPropertyStr(c, o, "setPropI32",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_setprop_i32));
+    JS_SetPropertyStr(c, o, "callFn",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_call_fn));
+    return o;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
  * Step 5: QJS JIT hook — callback dispatch + per-process JIT management
  *
  * Compile-time gate: define JSOS_JIT_HOOK once quickjs.c has been patched
@@ -3131,6 +3221,7 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("jitUsedBytes",   0, js_jit_used_bytes),
     JS_CFUNC_DEF("jitMainReset",   0, js_jit_main_reset),
     JS_CFUNC_DEF("physAddrOf",   1, js_physaddr_of),
+    JS_CFUNC_DEF("jitHelperAddrs", 0, js_jit_get_helper_addrs),
     /* Step 5: QJS JIT hook + per-process JIT management */
     JS_CFUNC_DEF("setJITHook",    1, js_set_jit_hook),
     JS_CFUNC_DEF("setJITNative",  2, js_set_jit_native),

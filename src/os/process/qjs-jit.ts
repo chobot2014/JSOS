@@ -51,6 +51,8 @@ import {
   OP_get_array_el, OP_put_array_el,
   OP_typeof,
   OP_call_method,
+  // Call opcodes for slow-path helper dispatch
+  OP_call, OP_call0,
 } from './qjs-opcodes.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
@@ -208,7 +210,7 @@ export class QJSBytecodeReader {
 //  TypeSpeculator — accumulate type observations for a function's entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const enum ArgType { Unknown = 0, Int32 = 1, Bool = 2, Float64 = 3, Any = 255 }
+export const enum ArgType { Unknown = 0, Int32 = 1, Bool = 2, Float64 = 3, Object = 4, Any = 255 }
 
 export class TypeSpeculator {
   private _argTypes: ArgType[]  = [];
@@ -233,6 +235,7 @@ export class TypeSpeculator {
       const obs: ArgType = tag === JS_TAG_INT     ? ArgType.Int32
                           : tag === JS_TAG_BOOL    ? ArgType.Bool
                           : tag === JS_TAG_FLOAT64 ? ArgType.Float64
+                          : tag === JS_TAG_OBJECT  ? ArgType.Object
                           : ArgType.Any;
       const prev = this._argTypes[i];
       if (prev === ArgType.Unknown) {
@@ -262,7 +265,7 @@ export class TypeSpeculator {
   allIntegerLike(): boolean {
     for (let i = 0; i < this._maxArgs; i++) {
       const t = this._argTypes[i];
-      if (t !== ArgType.Int32 && t !== ArgType.Bool && t !== ArgType.Unknown)
+      if (t !== ArgType.Int32 && t !== ArgType.Bool && t !== ArgType.Unknown && t !== ArgType.Object)
         return false;
     }
     return true;
@@ -313,13 +316,21 @@ export class QJSJITCompiler {
   protected _regAlloc: RegAllocInfo | null = null;
   /** Address of deopt-log page — written on IC miss to trigger trampoline (item 864). */
   protected _deoptLogAddr: number = 0;
+  /**
+   * Addresses of C helper functions used by property-access and call slow paths.
+   * Set via constructor helperAddrs parameter; 0 = not available (bail on slow path).
+   */
+  protected _helperGetPropI32: number = 0;
+  protected _helperSetPropI32: number = 0;
+  protected _helperCallFn:     number = 0;
   /** OSR entry-point map: bcOffset → nativeOffset.  Populated during compile (item 856). */
   readonly osrEntries: Map<number, number> = new Map();
 
   constructor(bc: QJSBytecodeReader,
               icTable?: InlineCacheTable,
               regAlloc?: RegAllocInfo,
-              deoptLogAddr?: number) {
+              deoptLogAddr?: number,
+              helperAddrs?: { getPropI32: number; setPropI32: number; callFn: number }) {
     this._e    = new _Emit();
     this._bc   = bc;
     this._argN = bc.argCount;
@@ -327,6 +338,11 @@ export class QJSJITCompiler {
     if (icTable)     this._icTable     = icTable;
     if (regAlloc)    this._regAlloc    = regAlloc;
     if (deoptLogAddr) this._deoptLogAddr = deoptLogAddr;
+    if (helperAddrs) {
+      this._helperGetPropI32 = helperAddrs.getPropI32;
+      this._helperSetPropI32 = helperAddrs.setPropI32;
+      this._helperCallFn     = helperAddrs.callFn;
+    }
   }
 
   // Returns offset of arg i inside stack frame.
@@ -369,8 +385,10 @@ export class QJSJITCompiler {
     const locals = this._argN + this._varN;
     const localBytes = (locals + 8) * 4;  // locals + extra eval-stack space
 
-    // IC-backed opcodes that we accept in addition to JIT_SUPPORTED_OPCODES (items 848/849/852/858)
-    const IC_OPCODES = new Set([OP_get_field, OP_put_field, OP_get_array_el, OP_put_array_el, OP_typeof]);
+    // IC-backed / slow-path opcodes accepted in addition to JIT_SUPPORTED_OPCODES
+    // (items 848/849/852/858 + OP_call/OP_call0 via C helper slow path)
+    const IC_OPCODES = new Set([OP_get_field, OP_put_field, OP_get_array_el, OP_put_array_el, OP_typeof,
+                                 OP_call, OP_call0]);
 
     // Prologue — save EBX for reg-alloc path (item 855)
     if (this._regAlloc) {
@@ -662,8 +680,18 @@ export class QJSJITCompiler {
             e.xorEaxEax();
             e.patch(doneFixup, e.here());
             e.pushEax();
+          } else if (this._helperGetPropI32) {
+            // Slow path: call jit_js_getprop_i32(obj_ptr, atom) via C helper.
+            // cdecl: push atom first (rightmost), then obj_ptr (leftmost).
+            e.popEax();                       // EAX = obj_ptr (TOS)
+            e.pushImm32(atomId);              // PUSH atom (arg1, rightmost)
+            e.pushEax();                      // PUSH obj_ptr (arg0, leftmost)
+            e.immEcx(this._helperGetPropI32);
+            e.callEcx();
+            e.addEsp(8);                      // clean 2 args
+            e.pushEax();                      // push int32 result
           } else {
-            return null;  // no IC data → bail (will retry after profiling)
+            return null;  // no IC data and no helper → bail (will retry after profiling)
           }
           pc += 5; break;
         }
@@ -690,6 +718,18 @@ export class QJSJITCompiler {
             e.addEsp(4);           // discard saved value on miss
             if (this._deoptLogAddr) e.movByteAbsImm(this._deoptLogAddr, 1);
             e.patch(doneW, e.here());
+          } else if (this._helperSetPropI32) {
+            // Slow path: call jit_js_setprop_i32(obj_ptr, atom, val) via C helper.
+            // Stack: [obj_ptr, val] where val=TOS, obj_ptr is below.
+            // cdecl: push val first (rightmost), then atom, then obj_ptr (leftmost).
+            e.popEax();                       // EAX = val (TOS)
+            e.popEcx();                       // ECX = obj_ptr
+            e.pushEax();                      // PUSH val (arg2, rightmost)
+            e.pushImm32(atomId);              // PUSH atom (arg1)
+            e.pushEcx();                      // PUSH obj_ptr (arg0, leftmost)
+            e.immEcx(this._helperSetPropI32);
+            e.callEcx();
+            e.addEsp(12);                     // clean 3 args
           } else {
             return null;
           }
@@ -731,6 +771,56 @@ export class QJSJITCompiler {
             return null;
           }
           pc++; break;
+        }
+
+        // ── Function calls via C helper slow path ─────────────────────────
+        // OP_call0 (0x42) / OP_call (0x43): [fn, a0..a_{argc-1}] → [result]
+        // u16 argc operand at pc+1.  Supported argc: 0–4 (bail on > 4 or no helper).
+        // Calls jit_js_call_fn(fn_ptr, a0, a1, a2, a3, argc) via C helper.
+        case OP_call0:
+        case OP_call: {
+          const callArgc = bc.u16(pc + 1);
+          if (!this._helperCallFn || callArgc > 4) return null;
+
+          // Build cdecl frame for jit_js_call_fn(fn, a0, a1, a2, a3, argc).
+          // Current eval stack TOS..bottom: [a_{callArgc-1}, ..., a_0, fn_ptr]
+          // cdecl push order = rightmost arg first:
+          //   argc, a3, a2, a1 (or 0), a0 (or 0), fn_ptr
+
+          // Step 1: PUSH argc (rightmost arg → deepest in cdecl frame)
+          e.pushImm32(callArgc);
+
+          // Step 2: push zero-padding for unused arg slots (i=3 downto callArgc)
+          for (let i = 3; i >= callArgc; i--) e.pushImm32(0);
+
+          // Step 3: push actual args from eval stack.
+          // After steps 1+2 we pushed (5-callArgc) bytes-of-4 items.
+          // The k-th iteration (0-indexed) pushes a_{callArgc-1-k}.
+          // Peek offset for a_{callArgc-1-k}: (5-callArgc + 2*k) slots = [ESP+(5-N+2k)*4]
+          for (let k = 0; k < callArgc; k++) {
+            e.peekN(5 - callArgc + 2 * k);  // MOV EAX, [ESP + offset]
+            e.pushEax();
+          }
+
+          // Step 4: push fn_ptr (leftmost arg → on top = closest to return addr).
+          // After all pushes fn_ptr is at peekN(5 + callArgc).
+          e.peekN(5 + callArgc);  // MOV EAX, [ESP + (5+N)*4]
+          e.pushEax();
+
+          // Step 5: CALL helper
+          e.immEcx(this._helperCallFn);
+          e.callEcx();
+
+          // Step 6: clean cdecl frame (6 params × 4 bytes = 24)
+          e.addEsp(24);
+
+          // Step 7: clean original eval stack items (fn_ptr + callArgc args)
+          e.addEsp((callArgc + 1) * 4);
+
+          // Step 8: push int32 result
+          e.pushEax();
+
+          pc += 3; break;
         }
 
         // ── typeof short-circuit when type is statically known (item 852) ─
@@ -897,6 +987,11 @@ export class QJSJITHook {
   private _pgiManager:  PGIManager     = new PGIManager();
   private _jitCache:    JITCodeCache   = new JITCodeCache();
   private _deoptLog:    DeoptTrampoline | null = null;
+  /**
+   * Cached addresses of C JIT helper functions (getprop, setprop, call).
+   * Loaded lazily on first compile via kernel.jitHelperAddrs().
+   */
+  private _helperAddrs: { getPropI32: number; setPropI32: number; callFn: number } | null = null;
 
   constructor() {
     this._offsets = initOffsets();
@@ -915,6 +1010,19 @@ export class QJSJITHook {
       this._deoptLog.init();
     }
     return this._deoptLog.logAddr;
+  }
+
+  /** Load C helper addresses once from kernel.jitHelperAddrs() and cache. */
+  private _ensureHelperAddrs(): { getPropI32: number; setPropI32: number; callFn: number } | null {
+    if (this._helperAddrs) return this._helperAddrs;
+    if (typeof kernel !== 'undefined' && typeof (kernel as any).jitHelperAddrs === 'function') {
+      const h = (kernel as any).jitHelperAddrs() as { getPropI32: number; setPropI32: number; callFn: number };
+      if (h && h.getPropI32 && h.callFn) {
+        this._helperAddrs = h;
+        return h;
+      }
+    }
+    return null;
   }
 
   private _onHook(bcAddr: number, spAddr: number, argc: number): number {
@@ -1028,7 +1136,7 @@ export class QJSJITHook {
     const argTypes: ArgType[] = [];
     for (let i = 0; i < bc.argCount; i++) argTypes.push(entry.speculator.argType(i));
 
-    const compiler = new QJSJITCompiler(bc, icTable, regAlloc, deoptLogAddr);
+    const compiler = new QJSJITCompiler(bc, icTable, regAlloc, deoptLogAddr, this._ensureHelperAddrs() ?? undefined);
     let native = compiler.compile(entry.bcAddr, argTypes);
     if (!native) {
       // Distinguish "IC data not yet available" from a hard opcode bail.

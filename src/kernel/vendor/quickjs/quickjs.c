@@ -17487,7 +17487,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
 #define _JARG(i) ((i) < argc ? \
             (JS_VALUE_GET_TAG(argv[i]) == JS_TAG_INT \
                 ? (int32_t)JS_VALUE_GET_INT(argv[i]) \
-                : (int32_t)(uint32_t)JS_VALUE_GET_FLOAT64(argv[i])) \
+                : JS_VALUE_GET_TAG(argv[i]) == (int)(JS_TAG_OBJECT) \
+                    ? (int32_t)(uintptr_t)JS_VALUE_GET_PTR(argv[i]) \
+                    : JS_VALUE_GET_TAG(argv[i]) == JS_TAG_BOOL \
+                        ? (int32_t)JS_VALUE_GET_INT(argv[i]) \
+                        : (int32_t)(uint32_t)JS_VALUE_GET_FLOAT64(argv[i])) \
             : 0)
         int32_t _jit_ret;
         if (argc <= 4)
