@@ -34,6 +34,8 @@ import { QJSJITHook } from '../process/qjs-jit.js';
 import { JITOSKernels } from '../process/jit-os.js';
 import { _registerJITStats } from './sdk.js';
 import { writebackTimer } from '../fs/buffer-cache.js';
+import { ntp } from '../net/ntp.js';
+import { detectHypervisor } from '../process/guest-addons.js';
 
 declare var kernel: import('./kernel.js').KernelAPI; // kernel.js is in core/
 
@@ -138,6 +140,10 @@ function main(): void {
   registerCommands(globalThis as any);
   printBanner();
 
+  // ── Phase 3.5: Hypervisor / guest-addons detection ─────────────────────
+  var hvInfo = detectHypervisor();
+  kernel.serialPut('[hypervisor] detected: ' + hvInfo.hypervisor + '\n');
+
   // ── Phase 4: Physical memory manager + hardware paging ───────────────────
   physAlloc.init();
   var totalMB = physAlloc.totalMB();
@@ -221,6 +227,10 @@ function main(): void {
     var dhcpConf = dhcpDiscover();
     if (dhcpConf) {
       kernel.serialPut('DHCP: acquired ' + dhcpConf.ip + '/24 gw ' + dhcpConf.gateway + '\n');
+
+      // NTP
+      ntp.startPeriodicSync();
+      kernel.serialPut('[ntp] periodic sync started\n');
 
       // DNS
       var exampleIP = dnsResolve('example.com');

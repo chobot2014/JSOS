@@ -23,6 +23,7 @@ import { BrowserPerformance, BrowserPerformanceObserver } from './perf.js';
 import { WorkerImpl, SharedWorkerImpl, MessageChannel, BroadcastChannelImpl, tickAllWorkers } from './workers.js';
 import { cookieJar } from '../../net/http.js';
 import { getCachedStyle, setCachedStyle, bumpStyleGeneration, currentStyleGeneration } from './cache.js';
+import { JSAudioElement, JSVideoElement } from './audio-element.js';
 
 // ── Script record (collected by html.ts during parsing) ───────────────────────
 
@@ -3561,8 +3562,8 @@ export function createPageJS(
     HTMLUListElement:    VElement,
     HTMLOListElement:    VElement,
     HTMLPreElement:      VElement,
-    HTMLVideoElement:    VElement,
-    HTMLAudioElement:    VElement,
+    HTMLVideoElement:    JSVideoElement,
+    HTMLAudioElement:    JSAudioElement,
     HTMLCanvasElement2:  VElement,
     Node:                VNode,        // base class for Element, Document, Text, etc.
     Element:             VElement,

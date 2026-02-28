@@ -42,6 +42,7 @@ import { JSProcess, listProcesses } from '../process/jsprocess.js';
 import { ProcessSupervisor, supervisor as _defaultSupervisor } from '../process/supervisor.js';
 import { ipc, Pipe } from '../ipc/ipc.js';
 import { users } from '../users/users.js';
+import { audio as _pcmAudio } from '../audio/index.js';
 import { wm, type App, type WMWindow, type KeyEvent, type MouseEvent, type MenuItem } from '../ui/wm.js';
 import { Canvas } from '../ui/canvas.js';
 import { Mutex, Condvar, Semaphore } from '../process/sync.js';
@@ -2820,6 +2821,35 @@ const sdk = {
         }
         return 'pending';
       });
+    },
+
+    /**
+     * Full HDA/AC97/VirtioSound PCM audio subsystem.
+     * Supports MP3, OGG, AAC, FLAC, and raw PCM decoding and mixing.
+     *
+     * Example:
+     *   const src = os.audio.pcm.load('mp3', mp3Data);
+     *   os.audio.pcm.setVolume(src, 0.8);
+     *   os.audio.pcm.play(src);
+     */
+    pcm: {
+      /** Returns true if the HDA/PCM audio subsystem initialised successfully. */
+      isAvailable(): boolean {
+        try { _pcmAudio.init(); return true; } catch (_) { return false; }
+      },
+      /** Decode and buffer audio data. Returns an AudioSource handle. */
+      load(format: 'mp3'|'ogg'|'aac'|'flac'|'pcm', data: Uint8Array) {
+        return _pcmAudio.loadDecoded(format, data);
+      },
+      play(src: any): void   { _pcmAudio.play(src); },
+      pause(src: any): void  { _pcmAudio.pause(src); },
+      stop(src: any): void   { _pcmAudio.stop(src); },
+      seek(src: any, seconds: number): void { _pcmAudio.seek(src, seconds); },
+      setVolume(src: any, vol: number): void       { _pcmAudio.setVolume(src, vol); },
+      setPan(src: any, pan: number): void          { _pcmAudio.setPan(src, pan); },
+      setMasterVolume(vol: number): void           { _pcmAudio.setMasterVolume(vol); },
+      setBass(gain: number): void                  { _pcmAudio.setBass(gain); },
+      setTreble(gain: number): void                { _pcmAudio.setTreble(gain); },
     },
   },
 
