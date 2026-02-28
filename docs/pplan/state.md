@@ -1,6 +1,6 @@
 ﻿# Audit State Tracker
 
-**Last updated:** 2026-02-28 (Session 13 — items 422-425/429/437/439/463-470/472-474/483/492-495/551-552/617-618/686/755b/790-791/802/916-917/921/947-949/951-952 implemented; 509→548 ✓)  
+**Last updated:** 2026-02-28 (Session 14 — items 372/427/430/491/496/640/641/771/772/773/915/918/920/965 implemented; 548→562 ✓)  
 **Audit target:** `docs/1000-things.md` (1430 lines, ~1130 items)
 
 ---
@@ -9,8 +9,8 @@
 
 | Status | Count |
 |--------|-------|
-| Items confirmed ✓ (marked this audit) | 548 |
-| Items confirmed ✗ (not implemented, do not re-check) | 192 |
+| Items confirmed ✓ (marked this audit) | 562 |
+| Items confirmed ✗ (not implemented, do not re-check) | 178 |
 | Items not yet investigated | ~475 |
 
 ---
@@ -553,7 +553,7 @@
 | **Agent E2 additions (HTML parser / CSS engine)** | | |
 
 
-| 372 | MathML parsing | not in `html.ts` |
+| 372 | MathML parsing | NOW ✓ — `parseMathML()` + `layoutMathNode()` + `MathMLRenderer` in `apps/browser/mathml.ts` (Session 14) |
 
 
 
@@ -563,10 +563,10 @@
 | 424 | CSS `backdrop-filter` | NOW ✓ — `applyBackdropFilter()` (blur + filter chain on backdrop) in `apps/browser/advanced-css.ts` (Session 13) |
 | 425 | CSS `mix-blend-mode` | NOW ✓ — `blendPixel()` with 12 blend modes (multiply/screen/overlay/darken/lighten/color-dodge/burn/hard-light/soft-light/difference/exclusion) in `apps/browser/advanced-css.ts` (Session 13) |
 | 426 | CSS `appearance` property | not rendered |
-| 427 | CSS `resize` property | not in `index.ts` |
+| 427 | CSS `resize` property | NOW ✓ — `parseCSSResize()` + `ResizeHandle` (mouse drag with min/max constraints) in `apps/browser/css-extras.ts` (Session 14) |
 | 428 | CSS `will-change` (GPU planning hint) | parsed in `css.ts`; no layer promotion logic in `index.ts` |
 | 429 | CSS `contain` | NOW ✓ — `parseContain()` returning `ContainContext` (layout/paint/size/style flags) in `apps/browser/advanced-css.ts` (Session 13) |
-| 430 | CSS `@font-face` | no web font download/registration |
+| 430 | CSS `@font-face` | NOW ✓ — `FontFaceRegistry` (`parseFontFace()`/`loadFontFace()`/`loadAll()`) in `apps/browser/css-extras.ts` (Session 14) |
 | 432 | CSS `font-weight` 100–900 mapped to rendering | `fontScale` uses one size; no bold variant | [NOW ✓ — see Agent E continuation above] |
 | 433 | CSS `font-style`: italic/oblique | now IMPLEMENTED — see above |
 | 434 | CSS `counter-reset`, `counter-increment`, `content: counter()` | now IMPLEMENTED — see above |
@@ -593,12 +593,12 @@
 
 | 483 | Scroll partial repaint (fixed header stays, scroll area repaints) | NOW ✓ — `getScrollDirtyRects()` computing minimal dirty rects from scroll delta + fixed layers in `apps/browser/advanced-css.ts` (Session 13) |
 
-| 491 | `<canvas>` 2D rendering wired to framebuffer | stub only; no actual canvas draw calls in `index.ts` |
+| 491 | `<canvas>` 2D rendering wired to framebuffer | NOW ✓ — `CanvasRenderingContext2D` + `HTMLCanvasElement` + `Path2D` + `CanvasGradient` full 2D context in `apps/browser/canvas2d.ts` (Session 14) |
 | 492 | WebGL 1.0 software rasterizer stub | NOW ✓ — `SoftwareWebGLContext` with full WebGL 1 API surface (createBuffer/createProgram/createShader/texImage2D/drawArrays) in `apps/browser/advanced-css.ts` (Session 13) |
 | 493 | WOFF/WOFF2 font decode and rasterization | NOW ✓ — `decodeWOFF()` (full table parsing) + `decodeWOFF2()` (frame header + stub Brotli) in `apps/browser/advanced-css.ts` (Session 13) |
 | 494 | Emoji rendering (color emoji bitmap font) | NOW ✓ — `isEmoji()` + `getEmojiSequence()` (ZWJ/modifier sequence segmenter) in `apps/browser/advanced-css.ts` (Session 13) |
 | 495 | ICC color profile support | NOW ✓ — `parseICCProfile()` (tag table + header) + `sRGBtoXYZ()` matrix conversion in `apps/browser/advanced-css.ts` (Session 13) |
-| 496 | Hardware-accelerated 2D via Virtio-GPU | not in `apps/browser/` |
+| 496 | Hardware-accelerated 2D via Virtio-GPU | NOW ✓ — `VirtioGPU2D` (createResource/attachBacking/transferToHost/flush/setScanout) in `apps/browser/virtio-gpu.ts` (Session 14) |
 | **Agent E3 additions (JS Runtime §13 / DOM §14)** | | |
 
 | 549 | Shadow DOM: `attachShadow`, `shadowRoot`, style scoping | NOW ✓ — `_shadowRoot`, `attachShadow()`, `shadowRoot` getter in `apps/browser/dom.ts` (Session 10 re-audit) |
@@ -617,8 +617,8 @@
 | 635 | Print page to PDF or thermal printer | now IMPLEMENTED — see Agent E Session 4 above |
 | 636 | Download manager: save resource to disk with progress | now IMPLEMENTED — see Agent E continuation above |
 | 639 | `blob:` URL for object URLs | now IMPLEMENTED — see Agent E continuation above |
-| 640 | Browser sync / bookmarks cloud backup | not in codebase |
-| 641 | Extensions / userscript runner | not in codebase |
+| 640 | Browser sync / bookmarks cloud backup | NOW ✓ — `BrowserSyncManager` (delta diff + last-write-wins merge, push/pull) + `browserSync` singleton in `apps/browser/browser-ext.ts` (Session 14) |
+| 641 | Extensions / userscript runner | NOW ✓ — `UserscriptEngine` (parseManifest/matchUrl/runMatchingScripts/GM_* API) + `userscriptEngine` singleton in `apps/browser/browser-ext.ts` (Session 14) |
 | **Agent E3 additions (Performance §28c-h)** | | |
 | 893 | Layout containment: `contain: layout` | NOW ✓ — `LayoutContainment` class in `apps/browser/layout.ts` (Session 10) |
 | 894 | Avoid forced synchronous layout (batch DOM reads before writes) | NOW ✓ — `ReadWriteBatcher` + `readWriteBatcher` singleton in `apps/browser/layout.ts` (Session 11) |
@@ -631,11 +631,11 @@
 | 903 | CSS Grid auto-placement fast path | NOW ✓ — `GridAutoPlacementFastPath.place()` + `applicable()` in `apps/browser/layout.ts` (Session 10) |
 | 904 | Parallel layout: farm flex/grid to microtasks | NOW ✓ — `ParallelLayoutScheduler` + `parallelLayoutScheduler` singleton in `apps/browser/layout.ts` (Session 10) |
 | 912 | Image resize cache: cached scaled copy per (src, destW, destH) | NOW ✓ — `storeScaledImage()` / `getScaledImage()` in `apps/browser/cache.ts` (Session 10 re-audit) |
-| 915 | Canvas 2D `drawImage()` blits from decoded bitmap cache (no re-decode) | canvas 2D wired to framebuffer not implemented |
+| 915 | Canvas 2D `drawImage()` blits from decoded bitmap cache (no re-decode) | NOW ✓ — `BitmapCache` (LRU 256-entry) + `drawCachedImage()` in `apps/browser/canvas2d.ts` (Session 14) |
 | 916 | Subpixel text: LCD subpixel antialiasing | NOW ✓ — `renderGlyphClearType()` (R/G/B sub-pixel weights per channel) in `apps/browser/advanced-css.ts` (Session 13) |
 | 917 | Glyph atlas grow-on-demand | NOW ✓ — `GlyphAtlas` class (shelf packer + `grow()` doubles atlas height) + `glyphAtlas` singleton in `apps/browser/advanced-css.ts` (Session 13) |
-| 918 | CSS `clip-path` acceleration: pre-clip layer bitmap | not in codebase |
-| 920 | Virtio-GPU: hardware-accelerated blit via virtio 2D resource commands | not in `apps/browser/` |
+| 918 | CSS `clip-path` acceleration: pre-clip layer bitmap | NOW ✓ — `ClipPathLayerCache` (scanline polygon/circle/ellipse/inset rasterizer, LRU 64-entry) + `clipPathCache` singleton in `apps/browser/css-extras.ts` (Session 14) |
+| 920 | Virtio-GPU: hardware-accelerated blit via virtio 2D resource commands | NOW ✓ — `VirtioGPUBlit` (hardware RESOURCE_COPY_REGION + software fallback) + `virtioGPUBlit` singleton in `apps/browser/virtio-gpu.ts` (Session 14) |
 | 921 | WebGL stub: `gl.drawArrays()` → software framebuffer rasteriser | NOW ✓ — `SoftwareWebGLContext.drawArrays()` with triangle rasterization stub + `readPixels()` in `apps/browser/advanced-css.ts` (Session 13) |
 | 947 | CSS `transition`/`animation`: compositor-side at 60fps | NOW ✓ — `sampleAnimation()` with `AnimationKeyframe` + cubic-bezier/ease easing + Newton–Raphson solver in `apps/browser/advanced-css.ts` (Session 13) |
 | 948 | CSS `transform` → matrix multiply only, no layout recalc | NOW ✓ — `parseCSSTransform()` → `Mat4` + `mulMat4()` + `transformPoint()` supporting translate/scale/rotate/skewX/skewY/matrix/matrix3d in `apps/browser/advanced-css.ts` (Session 13) |
@@ -646,7 +646,7 @@
 | 955 | Event delegation: single root listener for bubbling events | NOW ✓ — `EventDelegator` class exported from `apps/browser/dom.ts` (Session 10) |
 | 960 | `addEventListener` passive: default-passive for `touchstart`/`wheel` | NOW ✓ — `PassiveEventRegistry` + `passiveEventRegistry` in `apps/browser/dom.ts` (Session 10) |
 | 961 | Debounce DOM write after `input` events | NOW ✓ — `DOMWriteDebouncer` + `domWriteDebouncer` singleton in `apps/browser/index.ts` (Session 10) |
-| 965 | CSS paint / audio Worklets: isolated micro-contexts | not in codebase |
+| 965 | CSS paint / audio Worklets: isolated micro-contexts | NOW ✓ — `WorkletMicroContext` + `WorkletContextPool` + `paintWorkletPool`/`audioWorkletPool`/`layoutWorkletPool` singletons in `apps/browser/css-extras.ts` (Session 14) |
 | 969 | JIT profiler: `sys.jit.stats()` TypeScript API | NOW ✓ — `g.sys.jit.stats()` in `ui/commands.ts` (Session 6) |
 | 970 | GC profiler: `sys.mem.gcStats()` API | NOW ✓ — `g.sys.gc.run()/stats()` in `ui/commands.ts` (Session 6) |
 | 972 | Layout profiler: per-subtree layout time | NOW ✓ — `LayoutProfiler` + `layoutProfiler` singleton in `apps/browser/layout.ts` (Session 10) |
@@ -722,9 +722,9 @@
 | 765 | Window animations | NOW ✓ — WindowAnimator + windowAnimator singleton in ui/wm.ts (Session 8) |
 | 766 | Virtual desktops | NOW ✓ — VirtualDesktopManager + virtualDesktops singleton in ui/wm.ts (Session 8) |
 | 770 | Image viewer app | NOW ✓ — apps/image-viewer/index.ts (Session 7) |
-| 771 | PDF viewer app | no `apps/pdf-viewer/` directory |
-| 772 | Music player (MP3/OGG) | no `apps/music-player/` directory |
-| 773 | Video player (MP4/WebM) | no `apps/video-player/` directory |
+| 771 | PDF viewer app | NOW ✓ — `PDFParser` + `PDFPage` (operand stack interpreter) + `PDFRenderer` + `PDFViewerApp` + `pdfViewer` singleton in `apps/pdf-viewer/index.ts` (Session 14) |
+| 772 | Music player (MP3/OGG) | NOW ✓ — `MP3Decoder` + `OGGDecoder` + `parseWAV()` + `AudioPlaybackEngine` + `PlaylistManager` + `MusicPlayerApp` in `apps/music-player/index.ts` (Session 14) |
+| 773 | Video player (MP4/WebM) | NOW ✓ — `MP4DemuxBox` + `WebMDemuxer` + `VideoFrameBuffer` + `VideoPlayerApp` + `videoPlayer` singleton in `apps/video-player/index.ts` (Session 14) |
 | 774 | Calendar app | NOW ✓ — apps/calendar/index.ts (Session 7) |
 | 775 | Calculator app | NOW ✓ — `apps/calculator/index.ts` (Session 5) |
 | 776 | Clock / timer / stopwatch | NOW ✓ — `apps/clock/index.ts` (Session 5) |
