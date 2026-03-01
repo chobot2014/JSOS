@@ -402,9 +402,12 @@ export function createPageJS(
       query(_desc: { name: string }): Promise<{ state: string }> { return Promise.resolve({ state: 'denied', addEventListener() {}, removeEventListener() {} } as any); },
     },
     mediaDevices: {
-      getUserMedia(_c: unknown): Promise<unknown> { return Promise.reject(new Error('NotSupportedError')); },
+      getUserMedia(_c: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError')); },
+      getDisplayMedia(_c?: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError')); },
       enumerateDevices(): Promise<unknown[]> { return Promise.resolve([]); },
       getSupportedConstraints(): object { return {}; },
+      addEventListener(_t: string, _fn: unknown): void {},
+      removeEventListener(_t: string, _fn: unknown): void {},
     },
     serviceWorker: {
       register(_url: string): Promise<unknown> { return Promise.reject(new Error('Not supported')); },
@@ -431,6 +434,8 @@ export function createPageJS(
       estimate(): Promise<{quota: number; usage: number}> { return Promise.resolve({ quota: 1024 * 1024 * 50, usage: 0 }); },
       persist(): Promise<boolean> { return Promise.resolve(false); },
       persisted(): Promise<boolean> { return Promise.resolve(false); },
+      // Origin Private File System (OPFS) (Chrome 86+)
+      getDirectory(): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'OPFS not supported')); },
     },
     locks: {
       request(_name: string, fnOrOpts: unknown, fn?: unknown): Promise<unknown> {
@@ -505,12 +510,46 @@ export function createPageJS(
     wakeLock: {
       request(_type?: string): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError')); },
     },
+    // User Activation API (Chrome 72+)
+    userActivation: { hasBeenActive: false, isActive: false },
+    hasStorageAccess(): Promise<boolean> { return Promise.resolve(true); },
+    requestStorageAccess(): Promise<void> { return Promise.resolve(); },
+    // Battery Status API (Chrome 38+)
+    getBattery(): Promise<unknown> {
+      return Promise.resolve({
+        charging: true, chargingTime: 0, dischargingTime: Infinity, level: 1.0,
+        onchargingchange: null, onchargingtimechange: null, ondischargingtimechange: null, onlevelchange: null,
+        addEventListener(_t: string, _fn: unknown): void {},
+        removeEventListener(_t: string, _fn: unknown): void {},
+      });
+    },
+    // App Badge API (Chrome 81+)
+    setAppBadge(_count?: number): Promise<void> { return Promise.resolve(); },
+    clearAppBadge(): Promise<void> { return Promise.resolve(); },
+    // Related Apps API (Chrome 80+)
+    getInstalledRelatedApps(): Promise<unknown[]> { return Promise.resolve([]); },
+    // Media Session API (Chrome 57+)
+    mediaSession: {
+      metadata: null as any,
+      playbackState: 'none' as string,
+      setActionHandler(_action: string, _handler: unknown): void {},
+      setPositionState(_state?: unknown): void {},
+      setMicrophoneActive(_active: boolean): void {},
+      setCameraActive(_active: boolean): void {},
+    },
+    // WebGPU Device API (Chrome 113+) -- stub for feature detection
+    gpu: {
+      requestAdapter(_opts?: unknown): Promise<null> { return Promise.resolve(null); },
+      getPreferredCanvasFormat(): string { return 'bgra8unorm'; },
+      wgslLanguageFeatures: new Set<string>(),
+    },
   };
 
   // ── window.screen ─────────────────────────────────────────────────────────
 
   var screen = {
     width: 1024, height: 768, availWidth: 1024, availHeight: 768,
+    availLeft: 0, availTop: 0,
     colorDepth: 32, pixelDepth: 32,
     // Screen Orientation API
     orientation: {
@@ -722,6 +761,183 @@ export function createPageJS(
     constructor(type: string, init?: any) { super(type, init); Object.assign(this, init ?? {}); }
   }
 
+  // â”€â”€ ToggleEvent (Chrome 120+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class ToggleEvent extends VEvent {
+    oldState: string; newState: string;
+    constructor(type: string, init?: { oldState?: string; newState?: string; bubbles?: boolean; cancelable?: boolean }) {
+      super(type, init); this.oldState = init?.oldState ?? ''; this.newState = init?.newState ?? '';
+    }
+  }
+
+  // â”€â”€ Highlight API (Chrome 105+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class Highlight_ extends Set<unknown> {
+    priority: number = 0;
+    type: string = 'highlight';
+  }
+
+  // â”€â”€ CloseWatcher (Chrome 120+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class CloseWatcher_ extends VEventTarget {
+    onclose: ((e: VEvent) => void) | null = null;
+    oncancel: ((e: VEvent) => void) | null = null;
+    requestClose(): void { var e = new VEvent('close'); if (this.onclose) this.onclose(e); }
+    close(): void { this.requestClose(); }
+    destroy(): void {}
+  }
+
+  // â”€â”€ EyeDropper (Chrome 95+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class EyeDropper_ {
+    open(_signal?: unknown): Promise<{ sRGBHex: string }> {
+      return Promise.reject(new DOMException('NotSupportedError', 'EyeDropper not supported'));
+    }
+  }
+
+  // â”€â”€ MediaStreamTrack (stub) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class MediaStreamTrack_ extends VEventTarget {
+    kind: string = 'video'; id: string = ''; label: string = '';
+    enabled: boolean = true; muted: boolean = false; readyState: string = 'ended';
+    contentHint: string = '';
+    onmute: ((e: VEvent) => void) | null = null;
+    onunmute: ((e: VEvent) => void) | null = null;
+    onended: ((e: VEvent) => void) | null = null;
+    stop(): void { this.readyState = 'ended'; }
+    getSettings(): object { return {}; }
+    getCapabilities(): object { return {}; }
+    getConstraints(): object { return {}; }
+    applyConstraints(_c?: unknown): Promise<void> { return Promise.resolve(); }
+    clone(): MediaStreamTrack_ { return new MediaStreamTrack_(); }
+  }
+
+  // â”€â”€ MediaStream (stub) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class MediaStream_ extends VEventTarget {
+    id: string = Math.random().toString(36).slice(2);
+    active: boolean = false;
+    _tracks: MediaStreamTrack_[] = [];
+    constructor(tracks?: MediaStreamTrack_[]) { super(); if (tracks) this._tracks = [...tracks]; }
+    getTracks(): MediaStreamTrack_[] { return [...this._tracks]; }
+    getAudioTracks(): MediaStreamTrack_[] { return this._tracks.filter(t => t.kind === 'audio'); }
+    getVideoTracks(): MediaStreamTrack_[] { return this._tracks.filter(t => t.kind === 'video'); }
+    getTrackById(id: string): MediaStreamTrack_ | null { return this._tracks.find(t => t.id === id) ?? null; }
+    addTrack(t: MediaStreamTrack_): void { if (!this._tracks.includes(t)) this._tracks.push(t); }
+    removeTrack(t: MediaStreamTrack_): void { this._tracks = this._tracks.filter(x => x !== t); }
+    clone(): MediaStream_ { return new MediaStream_(this._tracks.map(t => t.clone())); }
+  }
+
+  // â”€â”€ MediaRecorder (stub) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class MediaRecorder_ extends VEventTarget {
+    state: string = 'inactive'; mimeType: string = '';
+    videoBitsPerSecond: number = 0; audioBitsPerSecond: number = 0;
+    stream: MediaStream_; ondataavailable: ((e: unknown) => void) | null = null;
+    onstop: ((e: VEvent) => void) | null = null;
+    onstart: ((e: VEvent) => void) | null = null;
+    onerror: ((e: unknown) => void) | null = null;
+    onpause: ((e: VEvent) => void) | null = null;
+    onresume: ((e: VEvent) => void) | null = null;
+    constructor(stream: MediaStream_, _opts?: unknown) { super(); this.stream = stream; }
+    start(_timeslice?: number): void { this.state = 'recording'; }
+    stop(): void { this.state = 'inactive'; }
+    pause(): void { this.state = 'paused'; }
+    resume(): void { this.state = 'recording'; }
+    requestData(): void {}
+    static isTypeSupported(_mime: string): boolean { return false; }
+  }
+
+  // â”€â”€ WebTransport (stub) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class WebTransport_ {
+    readonly ready: Promise<void>;
+    readonly closed: Promise<{ closeCode: number; reason: string }>;
+    constructor(_url: string, _opts?: unknown) {
+      this.ready = Promise.reject(new DOMException('NotSupportedError', 'WebTransport not supported'));
+      this.closed = Promise.reject(new DOMException('NotSupportedError', 'WebTransport not supported'));
+    }
+    close(_info?: unknown): void {}
+    createBidirectionalStream(): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError')); }
+    createUnidirectionalStream(): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError')); }
+  }
+
+  // â”€â”€ SpeechRecognition (stub) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class SpeechRecognition_ extends VEventTarget {
+    lang: string = ''; continuous: boolean = false; interimResults: boolean = false;
+    maxAlternatives: number = 1; grammars: any = null;
+    onresult: ((e: unknown) => void) | null = null;
+    onerror: ((e: unknown) => void) | null = null;
+    onend: ((e: VEvent) => void) | null = null;
+    onstart: ((e: VEvent) => void) | null = null;
+    onnomatch: ((e: unknown) => void) | null = null;
+    start(): void {
+      setTimeout_(() => {
+        if (this.onerror) this.onerror({ error: 'not-allowed', message: 'Speech recognition not supported' });
+        if (this.onend) this.onend(new VEvent('end'));
+      }, 0);
+    }
+    stop(): void {} abort(): void {}
+  }
+
+  // â”€â”€ SpeechGrammar / SpeechGrammarList (stubs) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class SpeechGrammar_ { src: string = ''; weight: number = 1; }
+  class SpeechGrammarList_ {
+    _list: SpeechGrammar_[] = [];
+    get length(): number { return this._list.length; }
+    item(idx: number): SpeechGrammar_ { return this._list[idx]; }
+    addFromURI(_src: string, _weight?: number): void {}
+    addFromString(_str: string, _weight?: number): void {}
+  }
+
+  // â”€â”€ MediaMetadata (Chrome 57+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class MediaMetadata_ {
+    title: string; artist: string; album: string; artwork: unknown[];
+    constructor(init?: { title?: string; artist?: string; album?: string; artwork?: unknown[] }) {
+      this.title = init?.title ?? ''; this.artist = init?.artist ?? '';
+      this.album = init?.album ?? ''; this.artwork = init?.artwork ?? [];
+    }
+  }
+  // â”€â”€ PromiseRejectionEvent (Chrome 49+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // URLPattern (Chrome 95+)
+  class URLPattern_ {
+    hash: string = '*'; hostname: string = '*'; password: string = '*';
+    pathname: string = '*'; port: string = '*'; protocol: string = '*';
+    search: string = '*'; username: string = '*';
+    constructor(input?: string | Record<string,string>, _basePath?: string) {
+      if (typeof input === 'object' && input) { Object.assign(this, input); }
+    }
+    test(_input?: string | Record<string,string>): boolean { return false; }
+    exec(_input?: string | Record<string,string>): unknown { return null; }
+  }
+
+  class PromiseRejectionEvent extends VEvent {
+    promise: Promise<unknown>; reason: unknown;
+    constructor(type: string, init: { promise: Promise<unknown>; reason: unknown; bubbles?: boolean; cancelable?: boolean }) {
+      super(type, init); this.promise = init.promise; this.reason = init.reason;
+    }
+  }
+
+  // â”€â”€ FormDataEvent (Chrome 77+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class FormDataEvent extends VEvent {
+    formData: FormData_;
+    constructor(type: string, init: { formData: FormData_; bubbles?: boolean; cancelable?: boolean }) {
+      super(type, init); this.formData = init.formData;
+    }
+  }
+
+  // â”€â”€ DeviceMotionEvent / DeviceOrientationEvent (sensor APIs) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class DeviceMotionEvent extends VEvent {
+    acceleration: unknown = null; accelerationIncludingGravity: unknown = null;
+    rotationRate: unknown = null; interval: number = 0;
+    constructor(type: string, init?: any) { super(type, init); Object.assign(this, init ?? {}); }
+    static requestPermission(): Promise<string> { return Promise.resolve('denied'); }
+  }
+  class DeviceOrientationEvent extends VEvent {
+    alpha: number | null = null; beta: number | null = null; gamma: number | null = null; absolute: boolean = false;
+    constructor(type: string, init?: any) { super(type, init); Object.assign(this, init ?? {}); }
+    static requestPermission(): Promise<string> { return Promise.resolve('denied'); }
+  }
+
+  // â”€â”€ ViewTransition (Chrome 111+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class ViewTransition_ {
+    ready: Promise<void> = Promise.resolve();
+    finished: Promise<void> = Promise.resolve();
+    updateCallbackDone: Promise<void> = Promise.resolve();
+    skipTransition(): void {}
+  }
   class EventTarget_ {
     _listeners: Map<string, Array<(e: VEvent) => void>> = new Map();
     addEventListener(type: string, fn: (e: VEvent) => void): void {
@@ -1629,7 +1845,7 @@ export function createPageJS(
     }
     static timeout(ms: number): AbortSignalImpl {
       var s = new AbortSignalImpl();
-      setTimeout(() => s._abort(new Error('TimeoutError')), ms);
+      setTimeout_(() => s._abort(new DOMException('TimeoutError', 'TimeoutError')), ms);
       return s;
     }
     static abort(reason?: unknown): AbortSignalImpl {
@@ -2195,6 +2411,21 @@ export function createPageJS(
     cancelAndHoldAtCurrentValue(): this { return this; }
   }
 
+  // -- OfflineAudioContext stub -----------------------------------------------
+  class OfflineAudioContext_ extends AudioNode_ {
+    length: number; numberOfChannels: number; sampleRate: number;
+    constructor(channelsOrOpts: number | { numberOfChannels: number; length: number; sampleRate: number }, length?: number, sampleRate?: number) {
+      super();
+      if (typeof channelsOrOpts === 'object') {
+        this.numberOfChannels = channelsOrOpts.numberOfChannels; this.length = channelsOrOpts.length; this.sampleRate = channelsOrOpts.sampleRate;
+      } else { this.numberOfChannels = channelsOrOpts; this.length = length ?? 0; this.sampleRate = sampleRate ?? 44100; }
+    }
+    startRendering(): Promise<unknown> { return Promise.resolve(null); }
+    resume(): Promise<void> { return Promise.resolve(); }
+    suspend(_sec: number): Promise<void> { return Promise.resolve(); }
+    createBuffer(_ch: number, _len: number, _sr: number): unknown { return null; }
+  }
+
   class AudioContext_ extends AudioNode_ {
     state: 'suspended' | 'running' | 'closed' = 'suspended';
     sampleRate = 44100;
@@ -2230,6 +2461,8 @@ export function createPageJS(
     suspend(): Promise<void> { this.state = 'suspended'; return Promise.resolve(); }
     close(): Promise<void> { this.state = 'closed'; return Promise.resolve(); }
     getOutputTimestamp(): { contextTime: number; performanceTime: number } { return { contextTime: 0, performanceTime: 0 }; }
+    // Audio Worklet (Chrome 66+)
+    audioWorklet = { addModule(_url: string): Promise<void> { return Promise.resolve(); } };
   }
 
   // ── speech synthesis stub ─────────────────────────────────────────────────
@@ -2762,8 +2995,41 @@ export function createPageJS(
     yield(): Promise<void> {
       return new Promise<void>(resolve => setTimeout_(resolve, 0));
     },
+    // scheduler.wait(ms) -- Chrome 124+
+    wait(ms: number): Promise<void> {
+      return new Promise<void>(resolve => setTimeout_(resolve, ms));
+    },
   };
 
+  // -- TaskController / TaskSignal (Prioritized Task Scheduling API) ---------
+  class TaskController_ {
+    _priority: string;
+    signal: any;
+    constructor(opts?: { priority?: string }) {
+      this._priority = opts?.priority ?? 'user-visible';
+      var self2 = this;
+      this.signal = {
+        get priority() { return self2._priority; },
+        aborted: false,
+        onprioritychange: null as any,
+        addEventListener(_t: string, _fn: unknown): void {},
+        removeEventListener(_t: string, _fn: unknown): void {},
+      };
+    }
+    setPriority(priority: string): void { this._priority = priority; }
+    abort(_reason?: unknown): void { this.signal.aborted = true; }
+  }
+
+  // -- documentPictureInPicture (Chrome 116+) --------------------------------
+  var documentPictureInPicture = {
+    requestWindow(_opts?: { width?: number; height?: number }): Promise<unknown> {
+      return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError'));
+    },
+    window: null as unknown,
+    onenter: null as unknown,
+    addEventListener(_t: string, _fn: unknown): void {},
+    removeEventListener(_t: string, _fn: unknown): void {},
+  };
   // ── requestIdleCallback / cancelIdleCallback (item 545) ───────────────────
   var _idleCbs = new Map<number, number>(); var _idleCbNext = 1;
   function requestIdleCallback(fn: (deadline: { timeRemaining(): number; didTimeout: boolean }) => void, opts?: { timeout?: number }): number {
@@ -2896,6 +3162,19 @@ export function createPageJS(
     get closed(): Promise<void> { return Promise.resolve(); }
   }
 
+  // -- ReadableStreamBYOBReader (stub) --------------------------------
+  class ReadableStreamBYOBReader_ {
+    _reader: ReadableStreamDefaultReader_;
+    constructor(stream: ReadableStream_) {
+      this._reader = (stream as any).getReader ? (stream as any).getReader() : new ReadableStreamDefaultReader_(stream);
+    }
+    read(_view: ArrayBufferView): Promise<{ done: boolean; value: ArrayBufferView | undefined }> {
+      return this._reader.read() as any;
+    }
+    cancel(_reason?: unknown): Promise<void> { return this._reader.cancel(_reason); }
+    releaseLock(): void { this._reader.releaseLock(); }
+    get closed(): Promise<void> { return this._reader.closed; }
+  }
   class ReadableStream_ {
     locked = false;
     _chunks: unknown[] = [];
@@ -3207,7 +3486,34 @@ export function createPageJS(
       });
     };
   }
-  // Error.cause support (ES2022) — QJS 2021 may not pass it through
+  // Promise.allSettled (ES2020) polyfill
+  if (typeof Promise.allSettled !== 'function') {
+    (Promise as any).allSettled = function<T>(promises: Iterable<Promise<T>>) {
+      var arr = Array.from(promises);
+      return Promise.all(arr.map((p: Promise<T>) => Promise.resolve(p).then(
+        (value: T) => ({ status: 'fulfilled' as const, value }),
+        (reason: unknown) => ({ status: 'rejected' as const, reason })
+      )));
+    };
+  }
+  // Array.fromAsync (ES2024) polyfill
+  if (typeof (Array as any).fromAsync !== 'function') {
+    (Array as any).fromAsync = async function fromAsync(source: any, mapFn?: any): Promise<any[]> {
+      var result: any[] = []; var i = 0;
+      if (source && typeof source[Symbol.asyncIterator] === 'function') {
+        for await (var item of source) { result.push(mapFn ? await mapFn(item, i++) : item); }
+      } else {
+        for (var item2 of source) { var resolved = await item2; result.push(mapFn ? await mapFn(resolved, i++) : resolved); }
+      }
+      return result;
+    };
+  }
+  // Promise.try (ES2025) polyfill
+  if (typeof (Promise as any).try !== 'function') {
+    (Promise as any).try = function promiseTry(fn: () => any): Promise<any> {
+      return new Promise((resolve, reject) => { try { resolve(fn()); } catch (e) { reject(e); } });
+    };
+  }  // Error.cause support (ES2022) — QJS 2021 may not pass it through
   if (typeof Error !== 'undefined' && !(new Error('', { cause: 'x' } as any) as any).cause) {
     var _OrigError = Error;
     (globalThis as any).Error = function Error(msg?: string, opts?: { cause?: unknown }) {
@@ -3219,6 +3525,13 @@ export function createPageJS(
   }
 
   // ── RTCPeerConnection stub (item 541) ─────────────────────────────────────
+
+  // Iterator.from (ES2025 Stage 3) polyfill
+  if (typeof (Iterator as any).from !== 'function') {
+    (Iterator as any).from = function from(iterable: Iterable<unknown>) {
+      return (iterable as any)[Symbol.iterator]();
+    };
+  }
 
   class RTCPeerConnection_ {
     localDescription: unknown = null; remoteDescription: unknown = null;
@@ -3892,6 +4205,128 @@ export function createPageJS(
     requestIdleCallback,
     cancelIdleCallback,
     structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
+
+    // -- New event / media / speech constructors ---------------------------------
+    ToggleEvent,
+    Highlight: Highlight_,
+    CloseWatcher: CloseWatcher_,
+    EyeDropper: EyeDropper_,
+    MediaStream: MediaStream_,
+    MediaStreamTrack: MediaStreamTrack_,
+    MediaRecorder: MediaRecorder_,
+    WebTransport: WebTransport_,
+    SpeechRecognition: SpeechRecognition_,
+    webkitSpeechRecognition: SpeechRecognition_,
+    SpeechGrammar: SpeechGrammar_,
+    SpeechGrammarList: SpeechGrammarList_,
+    webkitSpeechGrammarList: SpeechGrammarList_,
+    MediaMetadata: MediaMetadata_,
+
+    // -- Prioritized Task Scheduling / Picture-in-Picture -----------------------
+    TaskController: TaskController_,
+    TaskPriorityChangeEvent: VEvent,
+    documentPictureInPicture,
+
+    // -- CSS rule constructors (additional) ------------------------------------
+    CSSContainerRule: CSSContainerRule_,
+    CSSLayerBlockRule: CSSRule_,
+    CSSLayerStatementRule: CSSRule_,
+
+    // -- Launch Queue API (Chrome 98+) -----------------------------------------
+    launchQueue: {
+      _handlers: [] as any[],
+      setConsumer(fn: (launchParams: unknown) => void): void { this._handlers = [fn]; },
+    },
+
+    // -- PerformanceEntry subclass constructors (instanceof checks) ------------
+    PerformanceEntry: Object,
+    PerformanceMark: Object,
+    PerformanceMeasure: Object,
+    PerformanceResourceTiming: Object,
+    PerformanceNavigationTiming: Object,
+    PerformancePaintTiming: Object,
+    PerformanceLongTaskTiming: Object,
+    PerformanceEventTiming: Object,
+
+    // -- Cookie Store API (Chrome 87+) -----------------------------------------
+    cookieStore: {
+      get(name: string): Promise<unknown> { return Promise.resolve(null); },
+      getAll(_name?: string): Promise<unknown[]> { return Promise.resolve([]); },
+      set(_name: string, _value?: string): Promise<void> { return Promise.resolve(); },
+      delete(_name: string): Promise<void> { return Promise.resolve(); },
+      onchange: null as any,
+      addEventListener(_t: string, _fn: unknown): void {},
+      removeEventListener(_t: string, _fn: unknown): void {},
+    },
+
+    // -- WebGPU stub (Chrome 113+) -- not supported but stub for feature detect --
+    // navigator.gpu is on navigator, handled below; this is for GPU types
+    GPUValidationError: Object,
+    GPUOutOfMemoryError: Object,
+    GPUPipelineError: Object,
+
+    // -- ReadableStreamBYOBReader (Chrome 89+) ---------------------------------
+    ReadableStreamBYOBReader: ReadableStreamBYOBReader_,
+
+    // -- IDB constructors (for instanceof checks) --------------------------------
+    IDBRequest: IDBRequest_,
+    IDBOpenDBRequest: IDBRequest_,
+    IDBDatabase: IDBDatabase_,
+    IDBTransaction: IDBTransaction_,
+    IDBObjectStore: IDBObjectStore_,
+    IDBCursor: Object,
+    IDBCursorWithValue: Object,
+    IDBIndex: Object,
+
+    // -- Additional event constructors ------------------------------------
+    PromiseRejectionEvent,
+    FormDataEvent,
+    DeviceMotionEvent,
+    DeviceOrientationEvent,
+
+    // -- ViewTransition API -----------------------------------------------
+    ViewTransition: ViewTransition_,
+
+    // -- Window Controls Overlay (Chrome 93+ PWA) -------------------------
+    windowControlsOverlay: {
+      visible: false,
+      getTitlebarAreaRect(): DOMRect_ { return new DOMRect_(0, 0, 0, 0); },
+      ongeometrychange: null as any,
+      addEventListener(_t: string, _fn: unknown): void {},
+      removeEventListener(_t: string, _fn: unknown): void {},
+    },
+
+    // -- Screen Details API (Chrome 100+) - multi-screen -------------------
+    getScreenDetails(): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'Not supported')); },
+
+    // -- SVG / MathML element constructors (for instanceof) ---------------
+    SVGElement: VElement,
+    SVGSVGElement: VElement,
+    SVGPathElement: VElement,
+    MathMLElement: VElement,
+
+    // -- DOM node constructors (for instanceof) ---------------------------
+    Text: VNode,
+    CDATASection: VNode,
+    Comment: VNode,
+    Attr: Object,
+    NodeFilter: { SHOW_ALL: 0xFFFFFFFF, SHOW_ELEMENT: 0x1, SHOW_TEXT: 0x4, SHOW_COMMENT: 0x80, FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3 },
+    TreeWalker: Object,
+    NodeIterator: Object,
+    Selection: Object,
+
+    // -- Audio Worklet (Chrome 66+) ----------------------------------------
+    AudioWorkletNode: AudioNode_,
+    OfflineAudioContext: AudioContext_,
+
+    // -- URLPattern (Chrome 95+) ------------------------------------------
+    URLPattern: URLPattern_,
+
+    // -- FileSystem API (for instanceof/feature detect) --------------------
+    FileSystemHandle: Object,
+    FileSystemFileHandle: Object,
+    FileSystemDirectoryHandle: Object,
+    FileSystemWritableFileStream: Object,
   };
 
   // ── Wire localStorage/sessionStorage → `storage` events (item 500) ────────
