@@ -543,6 +543,11 @@ export function createPageJS(
       getPreferredCanvasFormat(): string { return 'bgra8unorm'; },
       wgslLanguageFeatures: new Set<string>(),
     },
+      /** Contacts API - Android Chrome 80+, not available on desktop */
+      contacts: new ContactsManager_(),
+      credentials: new CredentialsContainer_(),
+      serviceWorker: new ServiceWorkerContainer_(),
+      locks: new LockManager_(),
   };
 
   // ── window.screen ─────────────────────────────────────────────────────────
@@ -2560,6 +2565,8 @@ export function createPageJS(
 
   var _documentFonts = new FontFaceSet_();
   (doc as any).fonts = _documentFonts;
+  (doc as any).pictureInPictureEnabled = false;
+  (doc as any).pictureInPictureElement = null;
 
   // ── EventSource (Server-Sent Events) ─────────────────────────────────────
 
@@ -3148,7 +3155,475 @@ export function createPageJS(
   // ── Streams API (ReadableStream, WritableStream, TransformStream) ─────────
   // Minimal stubs — complete enough for feature-detection by frameworks.
 
-  class ReadableStreamDefaultReader_ {
+  // â”€â”€ WebCodecs (Chrome 94+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  class VideoColorSpace_ {
+    fullRange = false; matrix = "rgb"; primaries = "bt709"; transfer = "iec61966-2-1";
+    constructor(_init?: unknown) {}
+    toJSON(): unknown { return { fullRange: this.fullRange, matrix: this.matrix, primaries: this.primaries, transfer: this.transfer }; }
+  }
+  class EncodedVideoChunk_ {
+    type: string; timestamp: number; duration: number | null; byteLength: number;
+    constructor(init: any) { this.type = init?.type ?? "key"; this.timestamp = init?.timestamp ?? 0; this.duration = init?.duration ?? null; this.byteLength = (init?.data?.byteLength ?? 0); }
+    copyTo(_dest: unknown): void {}
+  }
+  class EncodedAudioChunk_ {
+    type: string; timestamp: number; duration: number | null; byteLength: number;
+    constructor(init: any) { this.type = init?.type ?? "key"; this.timestamp = init?.timestamp ?? 0; this.duration = init?.duration ?? null; this.byteLength = (init?.data?.byteLength ?? 0); }
+    copyTo(_dest: unknown): void {}
+  }
+  class VideoFrame_ {
+    codedWidth = 0; codedHeight = 0; displayWidth = 0; displayHeight = 0;
+    timestamp: number; duration: number | null; colorSpace: VideoColorSpace_;
+    constructor(_init: unknown, opts?: any) {
+      this.timestamp = opts?.timestamp ?? 0; this.duration = opts?.duration ?? null;
+      this.colorSpace = new VideoColorSpace_();
+    }
+    allocationSize(_opts?: unknown): number { return this.codedWidth * this.codedHeight * 4; }
+    copyTo(_dest: unknown, _opts?: unknown): Promise<unknown> { return Promise.resolve([]); }
+    clone(): VideoFrame_ { return new VideoFrame_(null, { timestamp: this.timestamp }); }
+    close(): void {}
+  }
+  class AudioData_ {
+    format = "f32"; sampleRate = 48000; numberOfFrames = 0; numberOfChannels = 1;
+    duration = 0; timestamp: number;
+    constructor(init: any) { this.timestamp = init?.timestamp ?? 0; }
+    allocationSize(_opts?: unknown): number { return this.numberOfFrames * 4; }
+    copyTo(_dest: unknown, _opts?: unknown): void {}
+    clone(): AudioData_ { return new AudioData_({ timestamp: this.timestamp }); }
+    close(): void {}
+  }
+  class VideoDecoder_ extends VEventTarget {
+    state: "unconfigured" | "configured" | "closed" = "unconfigured";
+    decodeQueueSize = 0; _init: any;
+    constructor(init: any) { super(); this._init = init; }
+    configure(_cfg: unknown): void { this.state = "configured"; }
+    decode(_chunk: unknown): void {}
+    flush(): Promise<void> { return Promise.resolve(); }
+    reset(): void { this.state = "unconfigured"; }
+    close(): void { this.state = "closed"; }
+    static isConfigSupported(_c: unknown): Promise<unknown> { return Promise.resolve({ supported: false }); }
+  }
+  class VideoEncoder_ extends VEventTarget {
+    state: "unconfigured" | "configured" | "closed" = "unconfigured"; encodeQueueSize = 0;
+    constructor(_init: any) { super(); }
+    configure(_cfg: unknown): void { this.state = "configured"; }
+    encode(_frame: unknown, _opts?: unknown): void {}
+    flush(): Promise<void> { return Promise.resolve(); }
+    reset(): void { this.state = "unconfigured"; }
+    close(): void { this.state = "closed"; }
+    static isConfigSupported(_c: unknown): Promise<unknown> { return Promise.resolve({ supported: false }); }
+  }
+  class AudioDecoder_ extends VEventTarget {
+    state: "unconfigured" | "configured" | "closed" = "unconfigured"; decodeQueueSize = 0;
+    constructor(_init: any) { super(); }
+    configure(_cfg: unknown): void { this.state = "configured"; }
+    decode(_chunk: unknown): void {}
+    flush(): Promise<void> { return Promise.resolve(); }
+    reset(): void { this.state = "unconfigured"; }
+    close(): void { this.state = "closed"; }
+    static isConfigSupported(_c: unknown): Promise<unknown> { return Promise.resolve({ supported: false }); }
+  }
+  class AudioEncoder_ extends VEventTarget {
+    state: "unconfigured" | "configured" | "closed" = "unconfigured"; encodeQueueSize = 0;
+    constructor(_init: any) { super(); }
+    configure(_cfg: unknown): void { this.state = "configured"; }
+    encode(_data: unknown, _opts?: unknown): void {}
+    flush(): Promise<void> { return Promise.resolve(); }
+    reset(): void { this.state = "unconfigured"; }
+    close(): void { this.state = "closed"; }
+    static isConfigSupported(_c: unknown): Promise<unknown> { return Promise.resolve({ supported: false }); }
+  }
+  class ImageTrack_ {
+    animated = false; frameCount = 1; repetitionCount = 0; selected = true;
+  }
+  class ImageTrackList_ {
+    length = 0; selectedIndex = -1; selectedTrack: ImageTrack_ | null = null;
+    ready: Promise<void> = Promise.resolve();
+    [Symbol.iterator](): Iterator<ImageTrack_> { return ([] as ImageTrack_[])[Symbol.iterator](); }
+  }
+  class ImageDecoder_ {
+    complete = false; type = ""; tracks = new ImageTrackList_();
+    constructor(_init: unknown) {}
+    decode(_opts?: unknown): Promise<unknown> { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
+    reset(): void {} close(): void {}
+    static isTypeSupported(_t: string): Promise<boolean> { return Promise.resolve(false); }
+  }
+  // Navigation API event constructors (Chrome 102+)
+  class NavigateEvent_ extends VEvent {
+    canIntercept: boolean; destination: unknown; downloadRequest: string | null;
+    formData: FormData | null; hashChange: boolean; info: unknown;
+    navigationType: string; signal: AbortSignal;
+    constructor(type: string, init: any = {}) {
+      super(type, init);
+      this.canIntercept = init.canIntercept ?? false; this.destination = init.destination ?? null;
+      this.downloadRequest = init.downloadRequest ?? null; this.formData = init.formData ?? null;
+      this.hashChange = init.hashChange ?? false; this.info = init.info ?? undefined;
+      this.navigationType = init.navigationType ?? "push";
+      this.signal = init.signal ?? new AbortController().signal;
+    }
+    intercept(_opts?: unknown): void {}
+    scroll(): void {}
+  }
+  class NavigationCurrentEntryChangeEvent_ extends VEvent {
+    from: unknown; navigationType: string | null;
+    constructor(type: string, init: any = {}) {
+      super(type, init); this.from = init.from ?? null; this.navigationType = init.navigationType ?? null;
+    }
+  }
+  // Scroll-driven animations (Chrome 115+)
+  class ScrollTimeline_ {
+    axis: string; source: unknown | null;
+    constructor(opts: any = {}) { this.axis = opts.axis ?? "block"; this.source = opts.source ?? null; }
+    get currentTime(): unknown { return null; }
+  }
+  class ViewTimeline_ {
+    axis: string; subject: unknown | null; startOffset: unknown; endOffset: unknown;
+    constructor(opts: any = {}) {
+      this.axis = opts.axis ?? "block"; this.subject = opts.subject ?? null;
+      this.startOffset = null; this.endOffset = null;
+    }
+    get currentTime(): unknown { return null; }
+  }
+  // Reporting API (Chrome 69+)
+  class ReportingObserver_ {
+    _cb: (reports: unknown[], obs: ReportingObserver_) => void;
+    constructor(cb: (reports: unknown[], obs: ReportingObserver_) => void, _opts?: unknown) { this._cb = cb; }
+    observe(): void {} disconnect(): void {} takeRecords(): unknown[] { return []; }
+  }
+  // ContactsManager (Android Chrome 80+)
+  class ContactsManager_ {
+    getProperties(): Promise<string[]> { return Promise.resolve(["name", "email", "tel", "address", "icon"]); }
+    select(_props: string[], _opts?: unknown): Promise<unknown[]> { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
+  }
+  // PictureInPictureWindow
+  class PictureInPictureWindow_ extends VEventTarget {
+    width = 0; height = 0;
+    onresize: ((ev: VEvent) => void) | null = null;
+  }
+  // PushManager / PushSubscription (Chrome 42+)
+  class PushSubscription_ {
+    endpoint = ""; expirationTime: number | null = null;
+    options = { applicationServerKey: null as unknown, userVisibleOnly: true };
+    getKey(_name: string): ArrayBuffer | null { return null; }
+    toJSON(): unknown { return { endpoint: this.endpoint, expirationTime: this.expirationTime, keys: {} }; }
+    unsubscribe(): Promise<boolean> { return Promise.resolve(false); }
+  }
+  class PushManager_ {
+    permissionState(_opts?: unknown): Promise<string> { return Promise.resolve("denied"); }
+    subscribe(_opts?: unknown): Promise<PushSubscription_> { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
+    getSubscription(): Promise<PushSubscription_ | null> { return Promise.resolve(null); }
+  }
+  // SyncManager / PeriodicSyncManager (Chrome 49+/80+)
+  class SyncManager_ {
+    register(_tag: string): Promise<void> { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
+    getTags(): Promise<string[]> { return Promise.resolve([]); }
+  }
+  class PeriodicSyncManager_ {
+    register(_tag: string, _opts?: unknown): Promise<void> { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
+    unregister(_tag: string): Promise<void> { return Promise.resolve(); }
+    getTags(): Promise<string[]> { return Promise.resolve([]); }
+  }
+  // PageRevealEvent (Chrome 123+)
+  class PageRevealEvent_ extends VEvent {
+    viewTransition: unknown | null;
+    constructor(type: string, init: any = {}) { super(type, init); this.viewTransition = init.viewTransition ?? null; }
+  }
+  // SnapEvent (CSS Scroll Snap, Chrome 129+)
+  class SnapEvent_ extends VEvent {
+    snapTargetBlock: unknown | null; snapTargetInline: unknown | null;
+    constructor(type: string, init: any = {}) {
+      super(type, init); this.snapTargetBlock = init.snapTargetBlock ?? null; this.snapTargetInline = init.snapTargetInline ?? null;
+    }
+  }
+  // CSSPropertyRule (Houdini Properties & Values, Chrome 85+)
+  class CSSPropertyRule_ extends CSSRule_ {
+    name = ""; syntax = "*"; inherits = false; initialValue: string | null = null;
+    constructor(init: any = {}) {
+      super(); this.name = init.name ?? ""; this.syntax = init.syntax ?? "*";
+      this.inherits = init.inherits ?? false; this.initialValue = init.initialValue ?? null;
+    }
+  }
+  // ResizeObserverSize (Chrome 84+)
+  class ResizeObserverSize_ {
+    blockSize: number; inlineSize: number;
+    constructor(inline = 0, block = 0) { this.inlineSize = inline; this.blockSize = block; }
+  }
+  // TransformStreamDefaultController
+  class TransformStreamDefaultController_ {
+    desiredSize: number | null = 1;
+    enqueue(_chunk: unknown): void {}
+    error(_reason?: unknown): void {}
+    terminate(): void {}
+  }
+  // ScreenOrientation (Chrome 38+)
+  class ScreenOrientation_ extends VEventTarget {
+    angle = 0; type = "landscape-primary";
+    onchange: ((ev: VEvent) => void) | null = null;
+    lock(_orientation: string): Promise<void> { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
+    unlock(): void {}
+  }
+  // CSS Typed OM stubs (Chrome 66+)
+  class CSSStyleValue_ {
+    toString(): string { return ""; }
+    static parse(_p: string, _v: string): CSSStyleValue_ { return new CSSStyleValue_(); }
+    static parseAll(_p: string, _v: string): CSSStyleValue_[] { return []; }
+  }
+  class CSSNumericValue_ extends CSSStyleValue_ {
+    value = 0; unit = "";
+    constructor(v = 0, u = "") { super(); this.value = v; this.unit = u; }
+    add(..._vals: unknown[]): CSSNumericValue_ { return this; }
+    sub(..._vals: unknown[]): CSSNumericValue_ { return this; }
+    mul(..._vals: unknown[]): CSSNumericValue_ { return this; }
+    div(..._vals: unknown[]): CSSNumericValue_ { return this; }
+    min(..._vals: unknown[]): CSSNumericValue_ { return this; }
+    max(..._vals: unknown[]): CSSNumericValue_ { return this; }
+    equals(..._vals: unknown[]): boolean { return false; }
+    to(_unit: string): CSSNumericValue_ { return this; }
+    toSum(..._units: string[]): CSSNumericValue_ { return this; }
+    type(): unknown { return {}; }
+  }
+  class CSSUnitValue_ extends CSSNumericValue_ {
+    constructor(value: number, unit: string) { super(value, unit); }
+    toString(): string { return `${this.value}${this.unit}`; }
+  }
+  class CSSKeywordValue_ extends CSSStyleValue_ {
+    value: string;
+    constructor(v: string) { super(); this.value = v; }
+    toString(): string { return this.value; }
+  }
+  class StylePropertyMap_ {
+    _map = new Map<string, CSSStyleValue_>();
+    get(property: string): CSSStyleValue_ | undefined { return this._map.get(property); }
+    getAll(property: string): CSSStyleValue_[] { var v = this._map.get(property); return v ? [v] : []; }
+    has(property: string): boolean { return this._map.has(property); }
+    set(property: string, ...values: unknown[]): void { this._map.set(property, values[0] as CSSStyleValue_); }
+    append(_property: string, ..._values: unknown[]): void {}
+    delete(property: string): void { this._map.delete(property); }
+    clear(): void { this._map.clear(); }
+    forEach(fn: (v: CSSStyleValue_, k: string, m: StylePropertyMap_) => void): void { this._map.forEach((v, k) => fn(v, k, this)); }
+    get size(): number { return this._map.size; }
+    entries(): IterableIterator<[string, CSSStyleValue_]> { return this._map.entries(); }
+    keys(): IterableIterator<string> { return this._map.keys(); }
+    values(): IterableIterator<CSSStyleValue_> { return this._map.values(); }
+    [Symbol.iterator](): IterableIterator<[string, CSSStyleValue_]> { return this._map.entries(); }
+  }
+  // Sanitizer API (Chrome 105+)
+  class Sanitizer_ {
+    _config: unknown;
+    constructor(config?: unknown) { this._config = config; }
+    sanitize(_input: unknown): unknown { return _input; }
+    sanitizeFor(_element: string, _input: string): unknown { return null; }
+    getConfiguration(): unknown { return this._config ?? {}; }
+    static getDefaultConfiguration(): unknown { return {}; }
+  }
+  // Trusted Types stubs (Chrome 83+)
+  class TrustedHTML_ {
+    _value: string; constructor(v: string) { this._value = v; }
+    toString(): string { return this._value; }
+    toJSON(): string { return this._value; }
+  }
+  class TrustedScript_ {
+    _value: string; constructor(v: string) { this._value = v; }
+    toString(): string { return this._value; }
+    toJSON(): string { return this._value; }
+  }
+  class TrustedScriptURL_ {
+    _value: string; constructor(v: string) { this._value = v; }
+    toString(): string { return this._value; }
+    toJSON(): string { return this._value; }
+  }
+  class TrustedTypePolicy_ {
+    name: string;
+    constructor(name: string, _rules: unknown) { this.name = name; }
+    createHTML(input: string, ..._args: unknown[]): TrustedHTML_ { return new TrustedHTML_(input); }
+    createScript(input: string, ..._args: unknown[]): TrustedScript_ { return new TrustedScript_(input); }
+    createScriptURL(input: string, ..._args: unknown[]): TrustedScriptURL_ { return new TrustedScriptURL_(input); }
+  }
+  class TrustedTypePolicyFactory_ {
+    _policies = new Map<string, TrustedTypePolicy_>();
+    defaultPolicy: TrustedTypePolicy_ | null = null;
+    emptyHTML: TrustedHTML_ = new TrustedHTML_("");
+    emptyScript: TrustedScript_ = new TrustedScript_("");
+    createPolicy(name: string, rules?: unknown): TrustedTypePolicy_ {
+      var p = new TrustedTypePolicy_(name, rules ?? {});
+      this._policies.set(name, p);
+      if (name === "default") this.defaultPolicy = p;
+      return p;
+    }
+    isHTML(val: unknown): val is TrustedHTML_ { return val instanceof TrustedHTML_; }
+    isScript(val: unknown): val is TrustedScript_ { return val instanceof TrustedScript_; }
+    isScriptURL(val: unknown): val is TrustedScriptURL_ { return val instanceof TrustedScriptURL_; }
+    getAttributeType(_tagName: string, _attr: string, _ns?: string): string | null { return null; }
+    getPropertyType(_tagName: string, _prop: string, _ns?: string): string | null { return null; }
+    getPolicyNames(): string[] { return [...this._policies.keys()]; }
+    getTypeMapping(_ns?: string): unknown { return {}; }
+  }
+  // MessagePort (Chrome 1+) - needed for MessageChannel
+  class MessagePort_ extends VEventTarget {
+    onmessage: ((ev: VEvent) => void) | null = null;
+    onmessageerror: ((ev: VEvent) => void) | null = null;
+    _other: MessagePort_ | null = null;
+    postMessage(data: unknown, _transfer?: unknown): void {
+      var port = this._other;
+      if (!port) return;
+      var ev = new VEvent("message", { bubbles: false, cancelable: false });
+      (ev as any).data = data; (ev as any).source = null; (ev as any).lastEventId = ""; (ev as any).origin = "";
+      setTimeout_(() => { try { port!.dispatchEvent(ev); } catch(_) {} }, 0);
+    }
+    start(): void {}
+    close(): void {}
+  }
+  // WakeLockSentinel (Screen Wake Lock API, Chrome 84+)
+  class WakeLockSentinel_ extends VEventTarget {
+    released = false; type = "screen";
+    onrelease: ((ev: VEvent) => void) | null = null;
+    release(): Promise<void> { this.released = true; return Promise.resolve(); }
+  }
+  // LockManager (Web Locks API, Chrome 69+)
+  class Lock_ {
+    mode: string; name: string;
+    constructor(name: string, mode: string) { this.name = name; this.mode = mode; }
+  }
+  class LockManager_ {
+    request(name: string, cbOrOptions: unknown, cb?: (lock: Lock_) => unknown): Promise<unknown> {
+      var theCb = typeof cbOrOptions === "function" ? cbOrOptions as (lock: Lock_) => unknown : cb;
+      var opts: any = typeof cbOrOptions === "object" && cbOrOptions !== null ? cbOrOptions : {};
+      var mode = opts.mode ?? "exclusive";
+      if (!theCb) return Promise.resolve();
+      var lock = new Lock_(name, mode);
+      try { var result = (theCb as any)(lock); return Promise.resolve(result); } catch(e) { return Promise.reject(e); }
+    }
+    query(): Promise<unknown> { return Promise.resolve({ held: [], pending: [] }); }
+  }
+  // CacheStorage / Cache (Service Worker Caches API, Chrome 43+)
+  class Cache_ {
+    _entries: Map<string, unknown> = new Map();
+    match(request: unknown, _opts?: unknown): Promise<unknown> {
+      var url = typeof request === "string" ? request : (request as any)?.url ?? "";
+      return Promise.resolve(this._entries.get(url) ?? undefined);
+    }
+    matchAll(request?: unknown, _opts?: unknown): Promise<unknown[]> {
+      if (!request) return Promise.resolve([...this._entries.values()]);
+      var url = typeof request === "string" ? request : (request as any)?.url ?? "";
+      var v = this._entries.get(url); return Promise.resolve(v ? [v] : []);
+    }
+    add(_request: unknown): Promise<void> { return Promise.resolve(); }
+    addAll(_requests: unknown[]): Promise<void> { return Promise.resolve(); }
+    put(request: unknown, _response: unknown): Promise<void> {
+      var url = typeof request === "string" ? request : (request as any)?.url ?? "";
+      this._entries.set(url, _response); return Promise.resolve();
+    }
+    delete(request: unknown, _opts?: unknown): Promise<boolean> {
+      var url = typeof request === "string" ? request : (request as any)?.url ?? "";
+      return Promise.resolve(this._entries.delete(url));
+    }
+    keys(_request?: unknown, _opts?: unknown): Promise<unknown[]> { return Promise.resolve([...this._entries.keys()]); }
+  }
+  class CacheStorage_ {
+    _caches: Map<string, Cache_> = new Map();
+    match(request: unknown, opts?: unknown): Promise<unknown> {
+      for (var cache of this._caches.values()) {
+        var url = typeof request === "string" ? request : (request as any)?.url ?? "";
+        if (cache._entries.has(url)) return cache.match(request, opts);
+      }
+      return Promise.resolve(undefined);
+    }
+    has(cacheName: string): Promise<boolean> { return Promise.resolve(this._caches.has(cacheName)); }
+    open(cacheName: string): Promise<Cache_> {
+      if (!this._caches.has(cacheName)) this._caches.set(cacheName, new Cache_());
+      return Promise.resolve(this._caches.get(cacheName)!);
+    }
+    delete(cacheName: string): Promise<boolean> { return Promise.resolve(this._caches.delete(cacheName)); }
+    keys(): Promise<string[]> { return Promise.resolve([...this._caches.keys()]); }
+  }
+  // ServiceWorkerContainer stub (Chrome 40+)
+  class ServiceWorkerContainer_ extends VEventTarget {
+    controller: unknown | null = null;
+    ready: Promise<unknown> = new Promise(() => {}); // never resolves (no SW)
+    oncontrollerchange: ((ev: VEvent) => void) | null = null;
+    onmessage: ((ev: VEvent) => void) | null = null;
+    onmessageerror: ((ev: VEvent) => void) | null = null;
+    register(_scriptURL: string, _options?: unknown): Promise<unknown> {
+      return Promise.reject(new DOMException("Service workers are not supported in JSOS", "NotSupportedError"));
+    }
+    getRegistration(_scope?: string): Promise<unknown> { return Promise.resolve(undefined); }
+    getRegistrations(): Promise<unknown[]> { return Promise.resolve([]); }
+    startMessages(): void {}
+  }
+  // PaymentRequest (Chrome 60+) â€” stub so feature detection works
+  class PaymentRequest_ extends VEventTarget {
+    id = ""; shippingAddress: unknown | null = null; shippingOption: string | null = null; shippingType: string | null = null;
+    onshippingaddresschange: ((ev: VEvent) => void) | null = null;
+    onshippingoptionchange: ((ev: VEvent) => void) | null = null;
+    onpaymentmethodchange: ((ev: VEvent) => void) | null = null;
+    constructor(_methodData: unknown, _details: unknown, _options?: unknown) { super(); }
+    show(_details?: unknown): Promise<unknown> { return Promise.reject(new DOMException("Payment not supported", "NotSupportedError")); }
+    abort(): Promise<void> { return Promise.resolve(); }
+    canMakePayment(): Promise<boolean> { return Promise.resolve(false); }
+    hasEnrolledInstrument(): Promise<boolean> { return Promise.resolve(false); }
+    static canMakePayment(_data: unknown): Promise<boolean> { return Promise.resolve(false); }
+  }
+  // PublicKeyCredential / CredentialsContainer (WebAuthn, Chrome 67+)
+  class Credential_ {
+    id = ""; type = "";
+  }
+  class PublicKeyCredential_ extends Credential_ {
+    rawId: ArrayBuffer = new ArrayBuffer(0);
+    response: unknown = {};
+    authenticatorAttachment: string | null = null;
+    getClientExtensionResults(): unknown { return {}; }
+    toJSON(): unknown { return {}; }
+    static isConditionalMediationAvailable(): Promise<boolean> { return Promise.resolve(false); }
+    static isUserVerifyingPlatformAuthenticatorAvailable(): Promise<boolean> { return Promise.resolve(false); }
+    static parseCreationOptionsFromJSON(_opts: unknown): unknown { return _opts; }
+    static parseRequestOptionsFromJSON(_opts: unknown): unknown { return _opts; }
+  }
+  class CredentialsContainer_ {
+    get(_options?: unknown): Promise<Credential_ | null> { return Promise.resolve(null); }
+    create(_options?: unknown): Promise<Credential_ | null> { return Promise.reject(new DOMException("Credentials not supported", "NotSupportedError")); }
+    store(_credential: unknown): Promise<Credential_> { return Promise.reject(new DOMException("Credentials not supported", "NotSupportedError")); }
+    preventSilentAccess(): Promise<void> { return Promise.resolve(); }
+  }
+  // XR (WebXR Device API, Chrome 79+) â€” minimal stubs
+  class XRSystem_ extends VEventTarget {
+    ondevicechange: ((ev: VEvent) => void) | null = null;
+    isSessionSupported(_mode: string): Promise<boolean> { return Promise.resolve(false); }
+    requestSession(_mode: string, _opts?: unknown): Promise<unknown> { return Promise.reject(new DOMException("WebXR not supported", "NotSupportedError")); }
+  }
+  class XRSession_ extends VEventTarget {
+    renderState: unknown = {}; inputSources: unknown[] = [];
+    visibilityState = "hidden"; frameRate: number | null = null;
+    onend: ((ev: VEvent) => void) | null = null;
+    onselect: ((ev: VEvent) => void) | null = null;
+    onselectstart: ((ev: VEvent) => void) | null = null;
+    onselectend: ((ev: VEvent) => void) | null = null;
+    onsqueeze: ((ev: VEvent) => void) | null = null;
+    updateRenderState(_state?: unknown): void {}
+    requestReferenceSpace(_type: string): Promise<unknown> { return Promise.reject(new DOMException("WebXR not supported", "NotSupportedError")); }
+    requestAnimationFrame(_callback: (time: number, frame: unknown) => void): number { return 0; }
+    cancelAnimationFrame(_id: number): void {}
+    end(): Promise<void> { return Promise.resolve(); }
+  }
+  // BarcodeDetector / Shape Detection API (Chrome 83+)
+  class BarcodeDetector_ {
+    constructor(_opts?: unknown) {}
+    detect(_image: unknown): Promise<unknown[]> { return Promise.resolve([]); }
+    static getSupportedFormats(): Promise<string[]> { return Promise.resolve([]); }
+  }
+  class FaceDetector_ {
+    constructor(_opts?: unknown) {}
+    detect(_image: unknown): Promise<unknown[]> { return Promise.resolve([]); }
+  }
+  class TextDetector_ {
+    detect(_image: unknown): Promise<unknown[]> { return Promise.resolve([]); }
+  }
+  // NavigationPreloadManager (Service Worker, Chrome 62+)
+  class NavigationPreloadManager_ {
+    enable(): Promise<void> { return Promise.resolve(); }
+    disable(): Promise<void> { return Promise.resolve(); }
+    setHeaderValue(_value: string): Promise<void> { return Promise.resolve(); }
+    getState(): Promise<unknown> { return Promise.resolve({ enabled: false, headerValue: "true" }); }
+  }  class ReadableStreamDefaultReader_ {
     _stream: any;
     _done = false;
     constructor(stream: any) { this._stream = stream; }
@@ -4151,7 +4626,6 @@ export function createPageJS(
     isSecureContext: true,          // treat JSOS as a secure context
     crossOriginIsolated: false,     // no SharedArrayBuffer isolation
     // Trusted Types stub — checked by CSP-strict apps to see if API exists
-    trustedTypes: null as unknown,
     // origin — used by service workers and fetch
     get origin(): string { try { return new URL_(cb.baseURL).origin; } catch(_) { return 'null'; } },
     dispatchEvent: (ev: VEvent) => {
@@ -4327,6 +4801,121 @@ export function createPageJS(
     FileSystemFileHandle: Object,
     FileSystemDirectoryHandle: Object,
     FileSystemWritableFileStream: Object,
+
+    // -- WebCodecs (Chrome 94+) -----------------------------------------------
+    VideoDecoder:       VideoDecoder_,
+    VideoEncoder:       VideoEncoder_,
+    AudioDecoder:       AudioDecoder_,
+    AudioEncoder:       AudioEncoder_,
+    ImageDecoder:       ImageDecoder_,
+    ImageTrack:         ImageTrack_,
+    ImageTrackList:     ImageTrackList_,
+    VideoFrame:         VideoFrame_,
+    AudioData:          AudioData_,
+    VideoColorSpace:    VideoColorSpace_,
+    EncodedVideoChunk:  EncodedVideoChunk_,
+    EncodedAudioChunk:  EncodedAudioChunk_,
+
+    // -- Navigation API events (Chrome 102+) ----------------------------------
+    NavigateEvent:                     NavigateEvent_,
+    NavigationCurrentEntryChangeEvent: NavigationCurrentEntryChangeEvent_,
+
+    // -- Scroll-driven animations (Chrome 115+) -------------------------------
+    ScrollTimeline: ScrollTimeline_,
+    ViewTimeline:   ViewTimeline_,
+
+    // -- Reporting API (Chrome 69+) -------------------------------------------
+    ReportingObserver: ReportingObserver_,
+
+    // -- Contacts (Android Chrome 80+) ----------------------------------------
+    ContactsManager: ContactsManager_,
+
+    // -- PictureInPicture -----------------------------------------------------
+    PictureInPictureWindow: PictureInPictureWindow_,
+    PictureInPictureEvent:  VEvent,
+
+    // -- Push / Background Sync -----------------------------------------------
+    PushManager:          PushManager_,
+    PushSubscription:     PushSubscription_,
+    PushMessageData:      Object,
+    PushEvent:            VEvent,
+    SyncManager:          SyncManager_,
+    PeriodicSyncManager:  PeriodicSyncManager_,
+
+    // -- PageRevealEvent / SnapEvent ------------------------------------------
+    PageRevealEvent: PageRevealEvent_,
+    SnapEvent:       SnapEvent_,
+
+    // -- CSS Houdini ----------------------------------------------------------
+    CSSPropertyRule:    CSSPropertyRule_,
+    ResizeObserverSize: ResizeObserverSize_,
+
+    // -- Streams writers/controllers ------------------------------------------
+    WritableStreamDefaultWriter:       WritableStreamDefaultWriter_,
+    TransformStreamDefaultController:  TransformStreamDefaultController_,
+
+    // -- ScreenOrientation (Chrome 38+) ----------------------------------------
+    ScreenOrientation: ScreenOrientation_,
+
+    // -- CSS Typed OM (Chrome 66+) ---------------------------------------------
+    CSSStyleValue:    CSSStyleValue_,
+    CSSNumericValue:  CSSNumericValue_,
+    CSSUnitValue:     CSSUnitValue_,
+    CSSKeywordValue:  CSSKeywordValue_,
+    StylePropertyMap: StylePropertyMap_,
+
+    // -- Sanitizer API (Chrome 105+) ------------------------------------
+    Sanitizer: Sanitizer_,
+
+    // -- Trusted Types (Chrome 83+) -------------------------------------
+    TrustedHTML:              TrustedHTML_,
+    TrustedScript:            TrustedScript_,
+    TrustedScriptURL:         TrustedScriptURL_,
+    TrustedTypePolicy:        TrustedTypePolicy_,
+    TrustedTypePolicyFactory: TrustedTypePolicyFactory_,
+    trustedTypes:             new TrustedTypePolicyFactory_(),
+
+    // -- MessagePort --------------------------------------------------
+    MessagePort: MessagePort_,
+
+    // -- WakeLock (Chrome 84+) -----------------------------------------
+    WakeLockSentinel: WakeLockSentinel_,
+
+    // -- Web Locks (Chrome 69+) ----------------------------------------
+    Lock:        Lock_,
+    LockManager: LockManager_,
+
+    // -- CacheStorage / Cache (Chrome 43+) ----------------------------
+    caches:       new CacheStorage_(),
+    Cache:        Cache_,
+    CacheStorage: CacheStorage_,
+
+    // -- ServiceWorkerContainer ----------------------------------------
+    ServiceWorkerContainer: ServiceWorkerContainer_,
+
+    // -- PaymentRequest (Chrome 60+) -----------------------------------
+    PaymentRequest:           PaymentRequest_,
+    PaymentResponse:          Object,
+    PaymentMethodChangeEvent: VEvent,
+
+    // -- WebAuthn (Chrome 67+) ----------------------------------------
+    Credential:           Credential_,
+    PublicKeyCredential:  PublicKeyCredential_,
+    CredentialsContainer: CredentialsContainer_,
+
+    // -- WebXR (Chrome 79+) -------------------------------------------
+    XRSystem:         XRSystem_,
+    XRSession:        XRSession_,
+    XRRigidTransform: Object,
+    XRFrame:          Object,
+
+    // -- Shape Detection API (Chrome 83+) -----------------------------
+    BarcodeDetector: BarcodeDetector_,
+    FaceDetector:    FaceDetector_,
+    TextDetector:    TextDetector_,
+
+    // -- NavigationPreloadManager (Chrome 62+) ------------------------
+    NavigationPreloadManager: NavigationPreloadManager_,
   };
 
   // ── Wire localStorage/sessionStorage → `storage` events (item 500) ────────
