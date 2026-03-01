@@ -83,7 +83,7 @@ export class BrowserApp implements App {
   readonly name = 'Browser';
 
   private _win:           WMWindow | null = null;
-  private _urlInput       = 'about:jstest';
+  private _urlInput       = 'about:jsos';
   private _urlBarFocus    = true;
   private _urlCursorPos   = 0;
   private _urlScrollOff   = 0;
@@ -97,7 +97,7 @@ export class BrowserApp implements App {
   private _bookmarks:     HistoryEntry[] = [];
 
   private _pageTitle   = 'JSOS Browser';
-  private _pageURL     = 'about:jstest';
+  private _pageURL     = 'about:jsos';
   private _pageSource  = '';
   private _pageBaseURL = '';    // from <base href> in current page
   private _pageLines:  RenderedLine[] = [];
@@ -225,10 +225,10 @@ export class BrowserApp implements App {
   onMount(win: WMWindow): void {
     this._win = win;
     // Initialize first tab
-    this._tabs = [this._makeBlankTab('about:jstest')];
+    this._tabs = [this._makeBlankTab('about:jsos')];
     this._curTab = 0;
     this._loadTab(0);
-    this._navigate('about:jstest');
+    this._navigate('about:jsos');
   }
 
   onUnmount(): void {

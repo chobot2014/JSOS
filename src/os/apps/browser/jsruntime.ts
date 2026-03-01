@@ -4073,6 +4073,7 @@ export function createPageJS(
       var fn2 = new Function(raw2) as () => void;
       fn2.call(win);
     } catch (e2) {
+
       var msg2 = String(e2);
       if (msg2.indexOf('SyntaxError') !== -1) {
         // Both stage 1 and stage 2 failed with SyntaxErrors.

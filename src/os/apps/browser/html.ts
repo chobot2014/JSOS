@@ -164,7 +164,26 @@ export function tokenise(html: string): HtmlToken[] {
   while (i < n) {
     if (html[i] === '<') {
       var tok = readTag();
-      if (tok) tokens.push(tok);
+      if (tok) {
+        tokens.push(tok);
+        // ── Raw-text elements: <script> and <style> ─────────────────────────
+        // Per HTML5 spec, content inside these elements must NOT be parsed as
+        // HTML — '<' and '&' are literal characters until the matching close
+        // tag.  Without this, `rafId <= 0` would be parsed as a tag '<= 0…>'
+        // and the script content would be silently corrupted.
+        if (tok.kind === 'open' && (tok.tag === 'script' || tok.tag === 'style')) {
+          var closeTag = '</' + tok.tag;
+          var htmlLC = html.toLowerCase();
+          var closeIdx = htmlLC.indexOf(closeTag, i);
+          var rawEnd = closeIdx >= 0 ? closeIdx : n;
+          var rawContent = html.slice(i, rawEnd);
+          if (rawContent) {
+            // No entity decoding — script/style content is raw text
+            tokens.push({ kind: 'text', tag: '', text: rawContent, attrs: new Map() });
+          }
+          i = rawEnd; // advance past raw content; close tag parsed next
+        }
+      }
     } else {
       var start = i;
       while (i < n && html[i] !== '<') i++;
