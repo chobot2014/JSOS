@@ -1522,9 +1522,21 @@ export function createPageJS(
     constructor(fn: (entries: unknown[], obs: IntersectionObserverImpl) => void, opts?: { threshold?: number }) {
       this._fn = fn; this._threshold = opts?.threshold ?? 0;
     }
-    observe(el: unknown): void   { if (el instanceof VElement) this._elements.push(el); }
+    observe(el: unknown): void {
+      if (el instanceof VElement) {
+        if (!this._elements.includes(el)) this._elements.push(el);
+        if (!_ioObservers.includes(this)) _ioObservers.push(this);
+        // Fire initial entries on next tick (browsers always deliver initial state)
+        var self = this;
+        setTimeout_(function() { self._tick(768); }, 0);
+      }
+    }
     unobserve(el: unknown): void { this._elements = this._elements.filter(e => e !== el); }
-    disconnect(): void           { this._elements = []; }
+    disconnect(): void {
+      this._elements = [];
+      var _ii = _ioObservers.indexOf(this);
+      if (_ii >= 0) _ioObservers.splice(_ii, 1);
+    }
     /** Called by tick to fire entries for elements that have entered the viewport. */
     _tick(viewportH: number): void {
       if (this._elements.length === 0) return;
@@ -1555,9 +1567,28 @@ export function createPageJS(
     _elements: VElement[] = [];
     _lastSizes = new WeakMap<VElement, { w: number; h: number }>();
     constructor(fn: (entries: unknown[]) => void) { this._fn = fn; }
-    observe(el: unknown): void   { if (el instanceof VElement) this._elements.push(el); }
+    observe(el: unknown): void   {
+      if (el instanceof VElement) {
+        if (!this._elements.includes(el)) this._elements.push(el);
+        // Register in the global tick list (idempotent)
+        if (!_roObservers.includes(this)) _roObservers.push(this);
+        // Fire initial callback on next tick (browsers always deliver one entry on observe)
+        var self = this;
+        setTimeout_(function() {
+          var r = (el as VElement).getBoundingClientRect?.() ?? { width: 0, height: 0, top: 0, left: 0, right: 200, bottom: 20, x: 0, y: 0 };
+          self._lastSizes.set(el as VElement, { w: r.width, h: r.height });
+          try { self._fn([{ target: el, contentRect: r,
+            borderBoxSize: [{ inlineSize: r.width, blockSize: r.height }],
+            contentBoxSize:[{ inlineSize: r.width, blockSize: r.height }] }]); } catch (_) {}
+        }, 0);
+      }
+    }
     unobserve(el: unknown): void { this._elements = this._elements.filter(e => e !== el); }
-    disconnect(): void           { this._elements = []; }
+    disconnect(): void {
+      this._elements = [];
+      var _ri = _roObservers.indexOf(this);
+      if (_ri >= 0) _roObservers.splice(_ri, 1);
+    }
     _tick(): void {
       var entries: unknown[] = [];
       for (var el of this._elements) {
@@ -3992,6 +4023,8 @@ export function createPageJS(
       ? raw.replace(/^#!.*/, '') : raw;
     // Strip leading 'use strict' directive
     s = s.replace(/^\s*(?:'use strict'|"use strict")\s*;?/, '');
+    // Replace dynamic import() — QJS rejects native import() inside new Function()
+    s = s.replace(/\bimport\s*\(/g, '__jsos_dynamic_import__(');
     return s;
   }
 
@@ -4108,6 +4141,65 @@ export function createPageJS(
   // Module registry for basic import() support (item 534)
   var _moduleCache: Map<string, unknown> = new Map();
 
+  // importmap registry — populated by <script type="importmap"> tags
+  var _importMap: Map<string, string> = new Map();
+
+  /** Resolve a module specifier through the importmap, then against baseHref. */
+  function _resolveModuleSpecifier(specifier: string, fromURL?: string): string {
+    // 1. importmap bare-specifier lookup
+    if (_importMap.has(specifier)) return _importMap.get(specifier)!;
+    // 2. Prefix match ("lit/" → "https://cdn.skypack.dev/lit/")
+    for (var _entry of Array.from(_importMap.entries())) {
+      var _key = _entry[0];
+      if (_key.endsWith('/') && specifier.startsWith(_key)) {
+        return _entry[1] + specifier.slice(_key.length);
+      }
+    }
+    // 3. Relative/absolute URL
+    var base = fromURL || _baseHref;
+    try { return new URL(specifier, base).href; } catch(_) { return specifier; }
+  }
+
+  /**
+   * Runtime implementation of dynamic import() inside browser page scripts.
+   * Replaces:  import('specifier')
+   * With:      __jsos_dynamic_import__('specifier')
+   */
+  function __jsos_dynamic_import__(specifier: string): Promise<unknown> {
+    var resolved = _resolveModuleSpecifier(specifier);
+    if (_moduleCache.has(resolved)) return Promise.resolve(_moduleCache.get(resolved));
+    return new Promise(function(resolve, reject) {
+      _fetchURL(resolved, function(err: string | null, text?: string) {
+        if (err || !text) { reject(new Error('Failed to import: ' + resolved + (err ? ' (' + err + ')' : ''))); return; }
+        var transformed = _transformModuleCode(text, resolved);
+        // Run module code; __esm_exports is the namespace
+        try {
+          var modFn = new Function('__jsos_dynamic_import__', transformed) as (di: unknown) => void;
+          modFn.call(win, __jsos_dynamic_import__);
+          // Access __esm_exports through a second pass (it's var-scoped inside modFn)
+          // Re-run to capture exports — use a returns-exports wrapper
+          var wrapFn = new Function('__jsos_dynamic_import__',
+            transformed + '\nreturn __esm_exports;') as (di: unknown) => Record<string, unknown>;
+          var exports: Record<string, unknown> = wrapFn.call(win, __jsos_dynamic_import__);
+          _moduleCache.set(resolved, exports);
+          resolve(exports);
+        } catch(e) {
+          reject(e);
+        }
+      });
+    });
+  }
+
+  /** Minimal fetch helper used by __jsos_dynamic_import__ (reuses os.fetchAsync). */
+  function _fetchURL(url: string, cb2: (err: string | null, text?: string) => void): void {
+    try {
+      os.fetchAsync(url, function(resp: FetchResponse | null, err?: string) {
+        if (resp && resp.status >= 200 && resp.status < 300) cb2(null, resp.bodyText);
+        else cb2(err || 'HTTP ' + (resp?.status ?? 0));
+      });
+    } catch(e) { cb2(String(e)); }
+  }
+
   function _transformModuleCode(code: string, moduleURL: string): string {
     // Inject import.meta.url and transform basic ES module syntax for New Function context
     var header = 'var import_meta_url = ' + JSON.stringify(moduleURL) + ';\n' +
@@ -4115,6 +4207,10 @@ export function createPageJS(
                   'var __esm_exports = {};\n';
     // Replace `import.meta` with our injected variable
     var transformed = code.replace(/\bimport\.meta\b/g, 'import_meta');
+    // Replace dynamic import() expressions BEFORE stripping static imports
+    // import('specifier')  →  __jsos_dynamic_import__('specifier')
+    // This must come before the static-import strip so we don't accidentally strip these
+    transformed = transformed.replace(/\bimport\s*\(/g, '__jsos_dynamic_import__(');
     // Strip bare top-level import statements (import x from 'y'; import { a } from 'b';)
     // Replace with empty comment so line numbers are preserved-ish and stack traces show origin
     transformed = transformed.replace(/^[ \t]*import\s+(?:type\s+)?(?:[\w{},*\s]+from\s+)?['"][^'"]*['"]\s*;?[ \t]*/gm, '/* import stripped */ ');
@@ -4140,6 +4236,18 @@ export function createPageJS(
       return;
     }
     var s = scripts[idx];
+    // Handle importmap BEFORE the type-skip filter
+    if (s.type && s.type.trim().toLowerCase() === 'importmap') {
+      if (s.inline && s.code) {
+        try {
+          var _im = JSON.parse(s.code) as { imports?: Record<string, string>; scopes?: Record<string, Record<string, string>> };
+          if (_im && _im.imports) {
+            Object.keys(_im.imports).forEach(function(k) { _importMap.set(k, (_im.imports as any)[k]); });
+          }
+        } catch(_imErr) { cb.log('[importmap parse error] ' + String(_imErr)); }
+      }
+      runScripts(idx + 1); return;
+    }
     // Skip non-JS scripts (but include module)
     if (s.type && !s.type.match(/javascript|ecmascript|module|text$/i)) {
       runScripts(idx + 1); return;
@@ -4235,6 +4343,11 @@ export function createPageJS(
 
   wireHandlers(doc.body, win);
   wireHandlers(doc.head, win);
+
+  // Expose dynamic-import helper on win so both stage-1 (with(_winScope)) and
+  // stage-2 (globalThis bridge) scripts can call it as a bare identifier.
+  (win as any).__jsos_dynamic_import__ = __jsos_dynamic_import__;
+
   runScripts(0);
 
   // ── PageJS interface returned to BrowserApp ───────────────────────────────
