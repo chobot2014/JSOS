@@ -332,4 +332,12 @@ export class BrowserPerformance {
     },
     get jsHeapSizeLimit(): number { return 512 * 1024 * 1024; },
   };
+
+  // ── performance.eventCounts (Chrome 85+) — Map-like object of dispatched event counts ───
+  // React DevTools and some analytics libraries access this.
+  readonly eventCounts: { get(type: string): number; forEach(cb: (count: number, type: string) => void): void; readonly size: number } = {
+    get(_type: string): number { return 0; },
+    forEach(_cb: (count: number, type: string) => void): void {},
+    get size(): number { return 0; },
+  };
 }

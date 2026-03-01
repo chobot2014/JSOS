@@ -335,6 +335,7 @@ export function acquireSpan(x: number, text: string, color: number): RenderedSpa
     s.href = undefined; s.bold = undefined; s.del = undefined;
     s.mark = undefined; s.codeBg = undefined; s.underline = undefined;
     s.searchHit = undefined; s.hitIdx = undefined; s.fontScale = undefined;
+    s.elId = undefined;
     return s;
   }
   return { x, text, color };

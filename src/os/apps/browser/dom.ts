@@ -56,6 +56,16 @@ export class VEvent {
   isTrusted: boolean = false;
   eventPhase: number = 0;  // 0=none, 1=capture, 2=at-target, 3=bubble
 
+  // Event phase constants (DOM Level 2)
+  static readonly NONE            = 0;
+  static readonly CAPTURING_PHASE = 1;
+  static readonly AT_TARGET       = 2;
+  static readonly BUBBLING_PHASE  = 3;
+  readonly NONE            = 0;
+  readonly CAPTURING_PHASE = 1;
+  readonly AT_TARGET       = 2;
+  readonly BUBBLING_PHASE  = 3;
+
   constructor(type: string, init?: { bubbles?: boolean; cancelable?: boolean }) {
     this.type      = type;
     this.bubbles   = init?.bubbles    ?? true;
@@ -110,6 +120,14 @@ export class VEventTarget {
   }
 }
 
+// ── Recursive ownerDocument propagation helper ──────────────────────────────
+// When a detached subtree is appended to a document, every descendant must
+// have its ownerDocument updated so mutations on them mark _dirty correctly.
+function _setOwnerDocRecursive(node: VNode, doc: VDocument | null): void {
+  node.ownerDocument = doc;
+  for (var _ch of node.childNodes) _setOwnerDocRecursive(_ch, doc);
+}
+
 // ── VNode base ────────────────────────────────────────────────────────────────
 
 export class VNode extends VEventTarget {
@@ -147,10 +165,24 @@ export class VNode extends VEventTarget {
   get lastChild():       VNode | null { return this.childNodes[this.childNodes.length - 1] ?? null; }
   get nextSibling():     VNode | null { var i = this.parentNode ? this.parentNode.childNodes.indexOf(this) : -1; return i >= 0 ? (this.parentNode!.childNodes[i + 1] ?? null) : null; }
   get previousSibling(): VNode | null { var i = this.parentNode ? this.parentNode.childNodes.indexOf(this) : -1; return i > 0  ? (this.parentNode!.childNodes[i - 1] ?? null) : null; }
+  /** parentElement — like parentNode but returns null if parent is not an Element node */
+  get parentElement():   VElement | null { var _p = this.parentNode; return (_p && _p.nodeType === 1) ? _p as VElement : null; }
+  /** nodeValue — null for Element and Document nodes; data for Text/Comment nodes. */
+  get nodeValue(): string | null { return (this as any).data !== undefined ? (this as any).data : null; }
+  set nodeValue(v: string | null) { if ((this as any).data !== undefined && v !== null) { (this as any).data = v; if (this.ownerDocument) this.ownerDocument._dirty = true; } }
 
   appendChild(child: VNode): VNode {
+    // DocumentFragment: insert all its children, not the fragment itself (WHATWG spec)
+    if (child.nodeType === 11) {
+      var _fragNodes = child.childNodes.slice();
+      child.childNodes = [];
+      for (var _fn of _fragNodes) this.appendChild(_fn);
+      return child;
+    }
     if (child.parentNode) child.parentNode.removeChild(child);
-    child.parentNode = this; child.ownerDocument = this.ownerDocument;
+    child.parentNode = this;
+    // Recursively propagate ownerDocument so nested elements track dirty correctly
+    _setOwnerDocRecursive(child, this.ownerDocument);
     this.childNodes.push(child);
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
@@ -172,10 +204,18 @@ export class VNode extends VEventTarget {
   }
   insertBefore(newNode: VNode, ref: VNode | null): VNode {
     if (!ref) return this.appendChild(newNode);
+    // DocumentFragment: insert all its children in order before ref
+    if (newNode.nodeType === 11) {
+      var _fragNodes = newNode.childNodes.slice();
+      newNode.childNodes = [];
+      for (var _fn of _fragNodes) this.insertBefore(_fn, ref);
+      return newNode;
+    }
     if (newNode.parentNode) newNode.parentNode.removeChild(newNode);
     var i = this.childNodes.indexOf(ref);
     if (i < 0) return this.appendChild(newNode);
-    newNode.parentNode = this; newNode.ownerDocument = this.ownerDocument;
+    newNode.parentNode = this;
+    _setOwnerDocRecursive(newNode, this.ownerDocument);
     this.childNodes.splice(i, 0, newNode);
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
@@ -187,7 +227,8 @@ export class VNode extends VEventTarget {
     var i = this.childNodes.indexOf(oldNode);
     if (i < 0) return oldNode;
     if (newNode.parentNode) newNode.parentNode.removeChild(newNode);
-    oldNode.parentNode = null; newNode.parentNode = this; newNode.ownerDocument = this.ownerDocument;
+    oldNode.parentNode = null; newNode.parentNode = this;
+    _setOwnerDocRecursive(newNode, this.ownerDocument);
     this.childNodes[i] = newNode;
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
@@ -465,7 +506,10 @@ export class VClassList {
 // ── VElement ──────────────────────────────────────────────────────────────────
 
 /** Monotonically increasing element UID — used as computed style cache key (item 944). */
-var _elemUidCounter = 0;
+var _elemUidCounter  = 0;
+/** Shared mutable state for CE construction — set the .tag before new CustomElement() */
+export const _cePending: { tag: string } = { tag: '' };
+var _jsoselCounter   = 0;  // auto-ID counter for click-dispatch hit-testing
 
 export class VElement extends VNode {
   tagName:   string;
@@ -480,7 +524,10 @@ export class VElement extends VNode {
   _dirtyLayout: boolean = true;
 
   constructor(tag: string) {
-    super(); this.tagName = tag.toUpperCase(); this.nodeName = this.tagName;
+    super();
+    // Support Custom Element construction: if tag is empty but _cePending.tag is set, use it
+    var _resolvedTag = tag || _cePending.tag || 'unknown';
+    this.tagName = _resolvedTag.toUpperCase(); this.nodeName = this.tagName;
     this._style = new VStyleMap(this); this.style = makeStyleProxy(this._style);
     this.classList = new VClassList(this);
   }
@@ -490,6 +537,29 @@ export class VElement extends VNode {
   get className(): string  { return this._attrs.get('class') || ''; } set className(v: string) { this.setAttribute('class', v); }
   get href():      string  { return this._attrs.get('href')  || ''; } set href(v: string)      { this.setAttribute('href', v); }
   get src():       string  { return this._attrs.get('src')   || ''; } set src(v: string)       { this.setAttribute('src', v); }
+  get srcdoc():    string  { return this._attrs.get('srcdoc') || ''; } set srcdoc(v: string)   { this.setAttribute('srcdoc', v); }
+  /** HTMLIFrameElement.contentWindow — a null stub (JSOS has no nested browsing context). */
+  get contentWindow(): null { return null; }
+  /** HTMLIFrameElement.contentDocument — a null stub. */
+  get contentDocument(): null { return null; }
+  get sandbox(): { add(_v: string): void; remove(_v: string): void; contains(_v: string): boolean; toString(): string; value: string } {
+    return { add() {}, remove() {}, contains() { return false; }, toString() { return ''; }, value: '' };
+  }
+  // ── HTMLImageElement properties (Chrome 90+) ──────────────────────────────
+  /** naturalWidth — actual width of the image resource. Stub for text-mode (no image loading). */
+  get naturalWidth():  number  { return 0; }
+  /** naturalHeight — actual height of the image resource. */
+  get naturalHeight(): number  { return 0; }
+  /** complete — true when the image has finished loading. Always true in text-mode. */
+  get complete():      boolean { return true; }
+  /** currentSrc — resolved URL of the image being used. Returns src attribute value. */
+  get currentSrc():    string  { return this._attrs.get('src') || ''; }
+  /** loading — 'eager' | 'lazy' hint. Read/write attribute. */
+  get loading():       string  { return this._attrs.get('loading') || 'eager'; }
+  set loading(v: string) { this.setAttribute('loading', v); }
+  /** decode() — Promise that resolves when image is decoded. Immediately resolves in text-mode. */
+  decode(): Promise<void>      { return Promise.resolve(); }
+
   get value():     string  { return this._attrs.get('value') || ''; } set value(v: string)     { this.setAttribute('value', v); }
   get type():      string  { return this._attrs.get('type')  || ''; } set type(v: string)      { this.setAttribute('type', v); }
   get name():      string  { return this._attrs.get('name')  || ''; } set name(v: string)      { this.setAttribute('name', v); }
@@ -520,6 +590,26 @@ export class VElement extends VNode {
   set translate(v: boolean) { this.setAttribute('translate', v ? 'yes' : 'no'); }
   get inert(): boolean { return this._attrs.has('inert'); }
   set inert(v: boolean) { if (v) this.setAttribute('inert', ''); else this.removeAttribute('inert'); }
+  // ── Popover API (Chrome 114+) — used by modern UI component libraries ─────
+  get popover(): string | null { return this.getAttribute('popover'); }
+  set popover(v: string | null) { if (v == null) this.removeAttribute('popover'); else this.setAttribute('popover', v); }
+  showPopover(): void { this.setAttribute('data-popover-open', ''); this.dispatchEvent(new VEvent('toggle', { bubbles: false })); }
+  hidePopover(): void { this.removeAttribute('data-popover-open'); this.dispatchEvent(new VEvent('toggle', { bubbles: false })); }
+  togglePopover(force?: boolean): boolean {
+    var isOpen = this.hasAttribute('data-popover-open');
+    var shouldOpen = force !== undefined ? force : !isOpen;
+    if (shouldOpen) this.showPopover(); else this.hidePopover();
+    return shouldOpen;
+  }
+  // ── HTMLDialogElement — dialog.showModal() / dialog.show() / dialog.close() ─
+  get open(): boolean { return this.hasAttribute('open'); }
+  showModal(): void { this.setAttribute('open', ''); this.setAttribute('aria-modal', 'true'); }
+  show(): void { this.setAttribute('open', ''); }
+  close(returnValue?: string): void {
+    this.removeAttribute('open');
+    if (returnValue !== undefined) (this as any).returnValue = returnValue;
+    this.dispatchEvent(new VEvent('close', { bubbles: false }));
+  }
   get enterKeyHint(): string { return this._attrs.get('enterkeyhint') ?? ''; }
   set enterKeyHint(v: string) { this.setAttribute('enterkeyhint', v); }
   get inputMode(): string { return this._attrs.get('inputmode') ?? ''; }
@@ -562,6 +652,19 @@ export class VElement extends VNode {
   _setOn(ev: string, fn: ((e: VEvent) => void) | null): void {
     var old = this._onHandlers[ev]; if (old) this.removeEventListener(ev, old);
     this._onHandlers[ev] = fn; if (fn) this.addEventListener(ev, fn);
+  }
+
+  /** Override addEventListener to auto-assign data-jsos-el for click hit-testing. */
+  addEventListener(type: string, fn: ((e: VEvent) => void) | { handleEvent(e: VEvent): void } | null, options?: boolean | { capture?: boolean; once?: boolean; passive?: boolean; signal?: unknown }): void {
+    // For pointer/click events, ensure element has a serialisable ID so
+    // index.ts can route the click event back through pageJS.fireClick().
+    if (fn && (type === 'click' || type === 'mousedown' || type === 'pointerdown' || type === 'touchstart')) {
+      if (!this._attrs.has('id') && !this._attrs.has('data-jsos-el')) {
+        this._attrs.set('data-jsos-el', 'jel-' + (++_jsoselCounter));
+        if (this.ownerDocument) this.ownerDocument._dirty = true;
+      }
+    }
+    super.addEventListener(type, fn, options);
   }
 
   getAttribute(name: string): string | null { var v = this._attrs.get(name.toLowerCase()); return v !== undefined ? v : null; }
@@ -665,8 +768,26 @@ export class VElement extends VNode {
     this.removeAttribute(name); return false;
   }
 
-  get innerHTML(): string { return _serialize(this.childNodes); }
+  get innerHTML(): string {
+    // For <template>, serialize .content childNodes (WHATWG spec)
+    if (this.tagName === 'TEMPLATE') {
+      var _tmplContent = (this as any)._content;
+      return _tmplContent ? _serialize(_tmplContent.childNodes) : '';
+    }
+    return _serialize(this.childNodes);
+  }
   set innerHTML(html: string) {
+    // TEMPLATE: parse into .content fragment per WHATWG HTML § 17.9
+    if (this.tagName === 'TEMPLATE') {
+      var _tc = this.content; // lazily creates _content
+      _tc.childNodes = [];
+      if (html) {
+        var _tf = _parseFragment(sanitizeHTML(html), this.ownerDocument);
+        for (var _tch of _tf) { _tch.parentNode = _tc; _tch.ownerDocument = this.ownerDocument; }
+        _tc.childNodes = _tf;
+      }
+      return;
+    }
     var removedNodes = this.childNodes.slice();
     this.childNodes = [];
     if (html) {
@@ -687,6 +808,12 @@ export class VElement extends VNode {
     for (var n of frag) this.parentNode.insertBefore(n, this);
     this.parentNode.removeChild(this);
   }
+  /** setHTMLUnsafe(html) — Chrome 124+ / Firefox 123+. Sets innerHTML without sanitization.
+   *  In JSOS we still sanitize but expose the method so lib detection doesn't throw. */
+  setHTMLUnsafe(html: string): void { this.innerHTML = html; }
+  /** getHTML(opts?) — Chrome 125+. Serializes the element's DOM tree including shadow roots.
+   *  In JSOS we return the same as innerHTML (no real shadow DOM serialization). */
+  getHTML(_opts?: { serializableShadowRoots?: boolean; shadowRoots?: unknown[] }): string { return this.innerHTML; }
   insertAdjacentHTML(pos: string, html: string): void {
     var p = pos.toLowerCase();
     var frag = _parseFragment(html, this.ownerDocument);
@@ -703,7 +830,14 @@ export class VElement extends VNode {
     }
   }
   insertAdjacentText(pos: string, text: string): void { this.insertAdjacentHTML(pos, _escapeText(text)); }
-  insertAdjacentElement(pos: string, el: VElement): VElement | null { this.insertAdjacentHTML(pos, _serializeEl(el)); return el; }
+  insertAdjacentElement(pos: string, newEl: VElement): VElement | null {
+    var p = pos.toLowerCase();
+    if (p === 'beforebegin') { if (this.parentNode) { this.parentNode.insertBefore(newEl, this); return newEl; } return null; }
+    if (p === 'afterbegin')  { this.insertBefore(newEl, this.firstChild); return newEl; }
+    if (p === 'beforeend')   { this.appendChild(newEl); return newEl; }
+    if (p === 'afterend')    { if (this.parentNode) { this.parentNode.insertBefore(newEl, this.nextSibling); return newEl; } return null; }
+    return null;
+  }
 
   /** Append multiple nodes or strings (coerced to Text nodes). */
   append(...nodes: (VNode | string)[]): void {
@@ -761,16 +895,24 @@ export class VElement extends VNode {
   get lastElementChild():  VElement | null { return this.children[this.children.length - 1] ?? null; }
 
   matches(sel: string): boolean { return _matchSel(sel.trim(), this); }
-  closest(sel: string): VElement | null { var el: VElement | null = this; while (el) { if (el.matches(sel)) return el; el = el.parentNode as VElement | null; } return null; }
+  closest(sel: string): VElement | null { var _n: VNode | null = this; while (_n && _n.nodeType === 1) { if ((_n as VElement).matches(sel)) return _n as VElement; _n = _n.parentNode; } return null; }
   querySelectorAll(sel: string): VElement[] { var res: VElement[] = []; _walk(this, el => { if (_matchSel(sel, el)) res.push(el); }); return res; }
   querySelector(sel: string): VElement | null { return this.querySelectorAll(sel)[0] ?? null; }
   getElementsByTagName(tag: string): VElement[] { var t = tag.toUpperCase(); var res: VElement[] = []; _walk(this, el => { if (t === '*' || el.tagName === t) res.push(el); }); return res; }
   getElementsByClassName(cls: string): VElement[] { var clss = cls.split(/\s+/); var res: VElement[] = []; _walk(this, el => { var ec = (el.getAttribute('class') || '').split(/\s+/); if (clss.every(c => ec.includes(c))) res.push(el); }); return res; }
   cloneNode(deep = false): VElement {
     var c = new VElement(this.tagName);
+    c.nodeType = this.nodeType; // preserve nodeType — critical for DocumentFragment clones (nodeType=11)
     this._attrs.forEach((v, k) => c._attrs.set(k, v));
     c._style._map = new Map(this._style._map);
-    if (deep) { for (var ch of this.childNodes) { var cc = ch.cloneNode(true); cc.parentNode = c; c.childNodes.push(cc); } }
+    // Clone _content fragment for <template> elements
+    if ((this as any)._content) {
+      var _cc = (this as any)._content;
+      var _cf = new VElement('#document-fragment'); _cf.nodeType = 11; _cf.ownerDocument = c.ownerDocument;
+      if (deep) { for (var _fch of _cc.childNodes) { var _fcc = _fch.cloneNode(true); _fcc.parentNode = _cf; _cf.childNodes.push(_fcc); } }
+      (c as any)._content = _cf;
+    }
+    if (deep && !(this as any)._content) { for (var ch of this.childNodes) { var cc = ch.cloneNode(true); cc.parentNode = c; c.childNodes.push(cc); } }
     return c;
   }
 
@@ -799,36 +941,61 @@ export class VElement extends VNode {
     if (this.ownerDocument) this.ownerDocument._dirty = true;
   }
 
-  // ── <template> element (item 584 adjacent) ────────────────────────────────
-  /** HTMLTemplateElement.content — returns the document fragment of the template */
+  // ── <template> element (WHATWG HTML § 17.9) ─────────────────────────────────
+  /** HTMLTemplateElement.content — persistent DocumentFragment for <template> elements. */
   get content(): VElement {
-    if (this.tagName.toLowerCase() !== 'template') return this;
-    var frag = new VElement('#document-fragment');
-    frag.nodeType = 11;
-    frag.ownerDocument = this.ownerDocument;
-    for (var ch of this.childNodes) { frag.childNodes.push(ch); }
-    return frag;
+    if (this.tagName.toLowerCase() !== 'template') return this as any;
+    if (!(this as any)._content) {
+      var _frag = new VElement('#document-fragment');
+      _frag.nodeType = 11;
+      _frag.ownerDocument = this.ownerDocument;
+      (this as any)._content = _frag;
+    }
+    return (this as any)._content;
   }
   focus(_opts?: { preventScroll?: boolean }): void {
     var doc = this.ownerDocument;
     if (doc && doc._activeElement !== this) {
       var prev = doc._activeElement;
       doc._activeElement = this;
-      if (prev) { var blurEv = new VEvent('blur', { bubbles: false, cancelable: false }); (blurEv as any).relatedTarget = this; prev.dispatchEvent(blurEv); var focusoutEv = new VEvent('focusout', { bubbles: true, cancelable: false }); (focusoutEv as any).relatedTarget = this; prev.dispatchEvent(focusoutEv); }
-      var focusEv = new VEvent('focus', { bubbles: false, cancelable: false }); (focusEv as any).relatedTarget = prev; this.dispatchEvent(focusEv);
-      var focusinEv = new VEvent('focusin', { bubbles: true, cancelable: false }); (focusinEv as any).relatedTarget = prev; this.dispatchEvent(focusinEv);
+      var ef = doc._eventFactory;
+      if (prev) {
+        var blurEv = ef ? ef.makeFocusEvent('blur', { bubbles: false, cancelable: false, relatedTarget: this }) : new VEvent('blur', { bubbles: false, cancelable: false });
+        if (!ef) (blurEv as any).relatedTarget = this;
+        prev.dispatchEvent(blurEv);
+        var focusoutEv = ef ? ef.makeFocusEvent('focusout', { bubbles: true, cancelable: false, relatedTarget: this }) : new VEvent('focusout', { bubbles: true, cancelable: false });
+        if (!ef) (focusoutEv as any).relatedTarget = this;
+        prev.dispatchEvent(focusoutEv);
+      }
+      var focusEv = ef ? ef.makeFocusEvent('focus', { bubbles: false, cancelable: false, relatedTarget: prev }) : new VEvent('focus', { bubbles: false, cancelable: false });
+      if (!ef) (focusEv as any).relatedTarget = prev;
+      this.dispatchEvent(focusEv);
+      var focusinEv = ef ? ef.makeFocusEvent('focusin', { bubbles: true, cancelable: false, relatedTarget: prev }) : new VEvent('focusin', { bubbles: true, cancelable: false });
+      if (!ef) (focusinEv as any).relatedTarget = prev;
+      this.dispatchEvent(focusinEv);
     }
   }
   blur(): void {
     var doc = this.ownerDocument;
     if (doc && doc._activeElement === this) {
       doc._activeElement = null;
-      var blurEv = new VEvent('blur', { bubbles: false, cancelable: false }); this.dispatchEvent(blurEv);
-      var focusoutEv = new VEvent('focusout', { bubbles: true, cancelable: false }); this.dispatchEvent(focusoutEv);
+      var ef2 = doc._eventFactory;
+      var blurEv2 = ef2 ? ef2.makeFocusEvent('blur', { bubbles: false, cancelable: false }) : new VEvent('blur', { bubbles: false, cancelable: false });
+      this.dispatchEvent(blurEv2);
+      var focusoutEv2 = ef2 ? ef2.makeFocusEvent('focusout', { bubbles: true, cancelable: false }) : new VEvent('focusout', { bubbles: true, cancelable: false });
+      this.dispatchEvent(focusoutEv2);
     }
   }
-  click(): void { this.dispatchEvent(new VEvent('click')); }
-  submit(): void { this.dispatchEvent(new VEvent('submit')); }
+  click(): void {
+    var ef3 = this.ownerDocument?._eventFactory;
+    var clickEv = ef3 ? ef3.makeMouseEvent('click', { bubbles: true, cancelable: true, button: 0, buttons: 0 }) : new VEvent('click', { bubbles: true, cancelable: true });
+    this.dispatchEvent(clickEv);
+  }
+  submit(): void {
+    var ef4 = this.ownerDocument?._eventFactory;
+    var submitEv = ef4 ? ef4.makeSubmitEvent(undefined) : new VEvent('submit', { bubbles: true, cancelable: true });
+    this.dispatchEvent(submitEv);
+  }
   reset(): void {
     // Reset all fields to their default values
     _walk(this, n => {
@@ -935,7 +1102,35 @@ export class VElement extends VNode {
   set defaultChecked(v: boolean) { if (v) this.setAttribute('checked', ''); else this.removeAttribute('checked'); }
 
   // HTMLInputElement-like — scrollIntoView etc.
-  scrollIntoView(): void {}
+  scrollIntoView(_opts?: boolean | { behavior?: string; block?: string; inline?: string }): void {}
+
+  /** HTMLInputElement.showPicker() — opens the browser-native picker for date/time/color inputs (Chrome 99+).
+   *  In text-mode we have no native pickers, so this is a no-op that doesn't throw. */
+  showPicker(): void {}
+
+  /** HTMLSlotElement.assignedNodes() — returns nodes assigned to a <slot> element.
+   *  In our virtual DOM, slot projection isn't performed, so we return the slot's
+   *  light-DOM children (elements with a matching slot= attribute on the parent) as a best-effort. */
+  assignedNodes(_opts?: { flatten?: boolean }): VNode[] {
+    var slotName = this._attrs.get('name') ?? '';
+    if (!this.parentNode) return [];
+    // Walk siblings of the slot's host to find slotted children
+    var host = (this.parentNode as any).host ?? this.parentNode;
+    if (!host || !(host as VElement).childNodes) return [];
+    return (host as VElement).childNodes.filter(n => {
+      if (!(n instanceof VElement)) return slotName === '';
+      var s = (n as VElement)._attrs.get('slot') ?? '';
+      return s === slotName;
+    });
+  }
+
+  /** HTMLSlotElement.assignedElements() — like assignedNodes() but only Element nodes. */
+  assignedElements(_opts?: { flatten?: boolean }): VElement[] {
+    return this.assignedNodes(_opts).filter(n => n instanceof VElement) as VElement[];
+  }
+
+  /** element.assignedSlot — the <slot> element this element is assigned to (if any). */
+  get assignedSlot(): VElement | null { return null; }
 
   // ── Layout/size stubs needed by many JS frameworks ────────────────────────────
 
@@ -953,8 +1148,22 @@ export class VElement extends VNode {
   get clientHeight(): number { return 20; }
   get clientTop():    number { return 0; }
   get clientLeft():   number { return 0; }
-  scrollTop = 0;
-  scrollLeft = 0;
+  _scrollTop  = 0;
+  _scrollLeft = 0;
+  get scrollTop(): number  { return this._scrollTop; }
+  set scrollTop(v: number) {
+    var n = v | 0;
+    if (this._scrollTop === n) return;
+    this._scrollTop = n;
+    this.dispatchEvent(new VEvent('scroll', { bubbles: false }));
+  }
+  get scrollLeft(): number  { return this._scrollLeft; }
+  set scrollLeft(v: number) {
+    var n = v | 0;
+    if (this._scrollLeft === n) return;
+    this._scrollLeft = n;
+    this.dispatchEvent(new VEvent('scroll', { bubbles: false }));
+  }
   get scrollWidth():  number { return 200; }
   get scrollHeight(): number { return 20; }
 
@@ -979,6 +1188,46 @@ export class VElement extends VNode {
       values() { return [][Symbol.iterator](); },
       [Symbol.iterator]() { return [][Symbol.iterator](); },
       size: 0,
+    };
+  }
+
+  /** element.checkVisibility() — Chrome 105+, Firefox 106+.
+   *  Returns true if the element is visible (not hidden via CSS visibility/display/opacity/content-visibility).
+   *  In text-mode we have no real CSS engine, so we do a best-effort based on inline style only. */
+  checkVisibility(opts?: { checkOpacity?: boolean; checkVisibilityCSS?: boolean; contentVisibilityAuto?: boolean; opacityProperty?: boolean; visibilityProperty?: boolean }): boolean {
+    // Walk up the tree checking inline style — non-display or visibility:hidden => invisible
+    var el: VNode | null = this;
+    while (el instanceof VElement) {
+      var s = (el as VElement)._style;
+      if (s.getPropertyValue('display') === 'none') return false;
+      if (opts?.checkVisibilityCSS || opts?.visibilityProperty) {
+        var vis = s.getPropertyValue('visibility');
+        if (vis === 'hidden' || vis === 'collapse') return false;
+      }
+      if ((opts?.checkOpacity || opts?.opacityProperty) && parseFloat(s.getPropertyValue('opacity') || '1') === 0) return false;
+      el = (el as VElement).parentNode;
+    }
+    return true;
+  }
+
+  /** attributeStyleMap — CSS Typed OM, read/write access via StylePropertyMap.
+   *  Backed by the element's inline _style, same as style attribute. */
+  get attributeStyleMap(): any {
+    var self = this;
+    return {
+      set(prop: string, value: string | number): void  { self._style.setProperty(String(prop), String(value)); },
+      get(prop: string): any { var v = self._style.getPropertyValue(prop); return v ? { toString() { return v; }, value: v } : undefined; },
+      has(prop: string): boolean { return !!self._style.getPropertyValue(prop); },
+      delete(prop: string): void { self._style.removeProperty(prop); },
+      clear(): void { self._style.cssText = ''; },
+      forEach(fn: (v: unknown, k: string) => void): void {
+        for (var i = 0; i < self._style.length; i++) { var p = self._style.item(i); fn(self._style.getPropertyValue(p), p); }
+      },
+      entries() { return [][Symbol.iterator](); },
+      keys() { return [][Symbol.iterator](); },
+      values() { return [][Symbol.iterator](); },
+      [Symbol.iterator]() { return [][Symbol.iterator](); },
+      get size(): number { return self._style.length; },
     };
   }
 
@@ -1084,16 +1333,108 @@ export class VElement extends VNode {
     this._selectionStart = this._selectionEnd = s + replacement.length;
   }
   select(): void { this._selectionStart = 0; this._selectionEnd = (this.value ?? '').length; }
+  /** input[type=file].files — empty FileList stub; set externally for testing */
+  files: { length: number; item(i: number): null; [Symbol.iterator](): Iterator<never> } | null = null;
 
   // ── Web Animations API stub (item 585) ────────────────────────────────────────
-  animate(_keyframes: unknown[], _opts?: unknown): { finish(): void; cancel(): void; pause(): void; play(): void; reverse(): void; addEventListener(): void; removeEventListener(): void; finished: Promise<unknown> } {
-    return { finish() {}, cancel() {}, pause() {}, play() {}, reverse() {}, addEventListener() {}, removeEventListener() {}, finished: Promise.resolve(undefined) };
+  animate(_keyframes: unknown[], _opts?: unknown): any {
+    var res: any = {
+      id: '',
+      currentTime: 0,
+      playState: 'finished' as string,
+      playbackRate: 1,
+      pending: false,
+      effect: null,
+      timeline: null,
+      startTime: 0,
+      onfinish: null as ((e: unknown) => void) | null,
+      oncancel: null as ((e: unknown) => void) | null,
+      onremove: null as ((e: unknown) => void) | null,
+      finished: Promise.resolve(undefined) as Promise<unknown>,
+      ready: Promise.resolve(undefined) as Promise<unknown>,
+      finish(): void { this.playState = 'finished'; if (this.onfinish) this.onfinish({}); },
+      cancel(): void { this.playState = 'idle'; if (this.oncancel) this.oncancel({}); },
+      pause(): void  { this.playState = 'paused'; },
+      play(): void   { this.playState = 'running'; },
+      reverse(): void {},
+      updatePlaybackRate(_rate: number): void {},
+      commitStyles(): void {},
+      persist(): void {},
+      addEventListener(_type: string, _fn: (e: unknown) => void): void {},
+      removeEventListener(_type: string, _fn: (e: unknown) => void): void {},
+      dispatchEvent(_e: unknown): boolean { return true; },
+    };
+    // Immediately resolve 'finished' since text-mode has no animation loop
+    res.finished = new Promise<void>(resolve => { setTimeout(resolve, 0); });
+    res.ready    = Promise.resolve(res);
+    return res;
   }
   getAnimations(): unknown[] { return []; }
 
   // ── requestPointerLock / exitPointerLock ──────────────────────────────────────
   requestPointerLock(): void {}
   requestFullscreen(_opts?: unknown): Promise<void> { return Promise.resolve(); }
+
+  // ── ElementInternals / attachInternals() — form-associated custom elements ──────
+  attachInternals(): any {
+    var self = this;
+    return {
+      // Form-associated fields
+      setFormValue(_value: string | File | FormData | null, _state?: string | File | FormData | null): void {},
+      setValidity(_flags?: Partial<ValidityState>, _msg?: string, _anchor?: VElement): void {},
+      checkValidity(): boolean { return true; },
+      reportValidity(): boolean { return true; },
+      get validity(): ValidityState { return { valid: true, valueMissing: false, typeMismatch: false, patternMismatch: false, tooLong: false, tooShort: false, rangeUnderflow: false, rangeOverflow: false, stepMismatch: false, badInput: false, customError: false }; },
+      get validationMessage(): string { return ''; },
+      get willValidate(): boolean { return false; },
+      get form(): VElement | null { var p: any = self.parentNode; while (p) { if ((p as any).tagName === 'FORM') return p; p = (p as any).parentNode; } return null; },
+      get labels(): VElement[] { return []; },
+      // ARIA properties — ElementInternals exposes all ARIAMixin properties
+      role: null as string | null,
+      ariaAtomic: null as string | null,
+      ariaAutoComplete: null as string | null,
+      ariaBusy: null as string | null,
+      ariaChecked: null as string | null,
+      ariaColCount: null as string | null,
+      ariaColIndex: null as string | null,
+      ariaColSpan: null as string | null,
+      ariaCurrent: null as string | null,
+      ariaDescription: null as string | null,
+      ariaDisabled: null as string | null,
+      ariaExpanded: null as string | null,
+      ariaHasPopup: null as string | null,
+      ariaHidden: null as string | null,
+      ariaInvalid: null as string | null,
+      ariaKeyShortcuts: null as string | null,
+      ariaLabel: null as string | null,
+      ariaLevel: null as string | null,
+      ariaLive: null as string | null,
+      ariaModal: null as string | null,
+      ariaMultiLine: null as string | null,
+      ariaMultiSelectable: null as string | null,
+      ariaOrientation: null as string | null,
+      ariaPlaceholder: null as string | null,
+      ariaPosInSet: null as string | null,
+      ariaPressed: null as string | null,
+      ariaReadOnly: null as string | null,
+      ariaRequired: null as string | null,
+      ariaRoleDescription: null as string | null,
+      ariaRowCount: null as string | null,
+      ariaRowIndex: null as string | null,
+      ariaRowSpan: null as string | null,
+      ariaSelected: null as string | null,
+      ariaSetSize: null as string | null,
+      ariaSort: null as string | null,
+      ariaValueMax: null as string | null,
+      ariaValueMin: null as string | null,
+      ariaValueNow: null as string | null,
+      ariaValueText: null as string | null,
+      // Shadow root access (relevant for declarative shadow DOM)
+      get shadowRoot(): any { return self.shadowRoot; },
+      // States for custom state pseudo-class :state()
+      states: new Set<string>(),
+    };
+  }
 
   // ── scroll helpers ────────────────────────────────────────────────────────────
   scroll(xOrOpts?: number | { top?: number; left?: number }, y?: number): void {
@@ -1195,8 +1536,18 @@ export class VElement extends VNode {
   // ── Shadow DOM stub ─────────────────────────────────────────────────────────
 
   _shadowRoot: VElement | null = null;
-  attachShadow(_opts: { mode: string }): VElement { this._shadowRoot = this; return this; }
+  attachShadow(_opts: { mode: string }): VElement {
+    // Return a shadow root proxy: same element with `host` pointing back to it
+    this._shadowRoot = this;
+    // Ensure `.host` on the shadowRoot (this) points to itself
+    if (!(this as any)._shadowHost) (this as any)._shadowHost = this;
+    return this;
+  }
   get shadowRoot(): VElement | null { return this._shadowRoot; }
+  /** ShadowRoot.host — the element that owns this shadow root. */
+  get host(): VElement { return (this as any)._shadowHost ?? this; }
+  /** ShadowRoot.mode — always 'open' in our stub. */
+  get mode(): string { return 'open'; }
   adoptedStyleSheets: unknown[] = [];
 
   // ── next/prev element sibling ─────────────────────────────────────────────────
@@ -1409,6 +1760,13 @@ export class VDocument extends VNode {
   _dirty = false;
   _cookie = '';
   _activeElement: VElement | null = null;
+  _hoveredId = '';           // id or data-jsos-el value of the element under the pointer
+  /** Patched by jsruntime.ts so VElement.focus()/blur()/click() dispatch proper event subclasses */
+  _eventFactory: {
+    makeFocusEvent(type: string, init?: any): VEvent;
+    makeMouseEvent(type: string, init?: any): VEvent;
+    makeSubmitEvent(submitter?: unknown): VEvent;
+  } | null = null;
   _styleSheets: unknown[] = [];
   _currentScript: VElement | null = null;  // set by jsruntime while executing <script>
   _mutationQueue: unknown[] = [];           // queued mutation records for MutationObserver
@@ -1578,6 +1936,10 @@ export class VDocument extends VNode {
   get pictureInPictureElement(): VElement | null { return null; }
   get fullscreenEnabled(): boolean { return false; }
   get pictureInPictureEnabled(): boolean { return false; }
+  /** document.doctype — always an HTML5 doctype in JSOS. */
+  get doctype(): { name: string; publicId: string; systemId: string; nodeType: number; nodeName: string } | null {
+    return { name: 'html', publicId: '', systemId: '', nodeType: 10, nodeName: 'html' };
+  }
 
   /** 'loading' | 'interactive' | 'complete' — set by jsruntime during page lifecycle */
   get readyState(): string { return (this as any)._readyState ?? 'complete'; }
@@ -1591,6 +1953,36 @@ export class VDocument extends VNode {
     return { currentTime: Date.now(), phase: 'active' };
   }
   get hidden(): boolean { return false; }
+  /** Storage Access API — privacy-first browsers / third-party iframes call these */
+  hasStorageAccess(): Promise<boolean> { return Promise.resolve(true); }
+  requestStorageAccess(): Promise<void> { return Promise.resolve(); }
+  requestStorageAccessFor(_origin: string): Promise<void> { return Promise.resolve(); }
+  /** document.fonts — FontFaceSet API (every framework awaits fonts.ready) */
+  get fonts(): any {
+    if (!(this as any)._fonts) {
+      var _fontsReady = Promise.resolve(this.fonts);
+      (this as any)._fonts = {
+        ready: _fontsReady,
+        status: 'loaded',
+        size: 0,
+        check(_font: string, _text?: string): boolean { return true; },
+        load(_font: string, _text?: string): Promise<any[]> { return Promise.resolve([]); },
+        add(_face: unknown): void {},
+        delete(_face: unknown): boolean { return false; },
+        clear(): void {},
+        values(): Iterator<unknown> { return [][Symbol.iterator](); },
+        keys():   Iterator<unknown> { return [][Symbol.iterator](); },
+        entries(): Iterator<unknown> { return [][Symbol.iterator](); },
+        forEach(_fn: unknown): void {},
+        has(_f: unknown): boolean { return false; },
+        [Symbol.iterator](): Iterator<unknown> { return [][Symbol.iterator](); },
+        addEventListener(_t: string, _fn: unknown): void {},
+        removeEventListener(_t: string, _fn: unknown): void {},
+        onloading: null, onloadingdone: null, onloadingerror: null,
+      };
+    }
+    return (this as any)._fonts;
+  }
   get domain(): string { try { return new URL((this as any)._url ?? '').hostname; } catch(_) { return ''; } }
   get URL(): string { return (this as any)._url ?? ''; }
   get documentURI(): string { return (this as any)._url ?? ''; }
@@ -1607,6 +1999,8 @@ export class VDocument extends VNode {
   get images(): VElement[] { return this.querySelectorAll('img'); }
   get links(): VElement[] { return this.querySelectorAll('a[href],area[href]'); }
   get scripts(): VElement[] { return this.querySelectorAll('script'); }
+  /** document.getAnimations() — returns all active animations (GSAP, Web Animations API) */
+  getAnimations(): unknown[] { return []; }
 
   /** document.all — legacy HTMLAllCollection (item 592) */
   get all(): any {
@@ -1856,7 +2250,18 @@ function _matchPseudo(pseudo: string, _arg: string, el: VElement): boolean {
   if (pseudo === 'visited')        return false;
   if (pseudo === 'local-link')     return (el.tagName === 'A' || el.tagName === 'AREA') && el.hasAttribute('href');
   if (pseudo === 'active')         return false;
-  if (pseudo === 'hover')          return false;
+  if (pseudo === 'hover') {
+    var hovDoc = el.ownerDocument as VDocument | null;
+    if (!hovDoc || !hovDoc._hoveredId) return false;
+    var hid = hovDoc._hoveredId;
+    // Check element itself, then walk ancestors (browsers apply :hover to ancestor chain)
+    var cur: VElement | null = el;
+    while (cur) {
+      if ((cur.id && cur.id === hid) || cur.getAttribute('data-jsos-el') === hid) return true;
+      cur = cur.parentNode instanceof VElement ? cur.parentNode : null;
+    }
+    return false;
+  }
   if (pseudo === 'in-range')       {
     var inTag = el.tagName.toLowerCase(); if (inTag !== 'input') return false;
     var inVal = parseFloat(el.value ?? ''); if (isNaN(inVal)) return false;
@@ -1915,6 +2320,7 @@ export function _serialize(nodes: VNode[]): string {
   return nodes.map(n => {
     if (n instanceof VText) return _escapeText((n as VText).data);
     if (n instanceof VElement) return _serializeEl(n as VElement);
+    if ((n as any).nodeType === 8) return '<!--' + ((n as any).data ?? '') + '-->'; // comment node
     return '';
   }).join('');
 }
@@ -1922,13 +2328,40 @@ export function _serialize(nodes: VNode[]): string {
 export function _serializeEl(el: VElement): string {
   var tag = el.tagName.toLowerCase();
   if (tag === '#fragment') return _serialize(el.childNodes);
+  // <template>: serialize content from _content fragment, not childNodes
+  if (tag === 'template') {
+    var _tmplInner = (el as any)._content ? _serialize(((el as any)._content as VElement).childNodes) : '';
+    return '<template>' + _tmplInner + '</template>';
+  }
   var attrs = '';
-  el._attrs.forEach((v, k) => { attrs += ' ' + k + (v !== '' ? '="' + _escapeAttr(v) + '"' : ''); });
-  // merge style
-  var styleStr = el._style.cssText;
-  if (styleStr) {
-    var existing = el._attrs.get('style');
-    if (!existing) attrs += ' style="' + _escapeAttr(styleStr) + '"';
+  // Skip 'style' from the main loop — handled separately below with JS-mutation merge
+  el._attrs.forEach((v, k) => {
+    if (k === 'style') return;
+    attrs += ' ' + k + (v !== '' ? '="' + _escapeAttr(v) + '"' : '');
+  });
+  // Merge: original HTML style attr (base) overlaid with _style._map JS mutations
+  var origStyle = el._attrs.get('style') || '';
+  var hasStyleMap = el._style._map.size > 0;
+  if (origStyle || hasStyleMap) {
+    var styleMap: Map<string, string> = new Map();
+    if (origStyle) {
+      origStyle.split(';').forEach(p => {
+        var ci = p.indexOf(':');
+        if (ci >= 0) {
+          var pk = p.slice(0, ci).trim();
+          var pv = p.slice(ci + 1).trim();
+          if (pk) styleMap.set(pk, pv);
+        }
+      });
+    }
+    // Overlay JS-assigned properties (skip vendor-prefix mirrors to avoid duplication)
+    el._style._map.forEach((v, k) => {
+      if (k && !k.startsWith('-webkit-') && !k.startsWith('-moz-') && !k.startsWith('-ms-') && !k.startsWith('-o-'))
+        styleMap.set(k, v);
+    });
+    var parts: string[] = [];
+    styleMap.forEach((v, k) => { if (v) parts.push(k + ':' + v); });
+    if (parts.length > 0) attrs += ' style="' + _escapeAttr(parts.join(';')) + '"';
   }
   if (_VOID.has(tag)) return '<' + tag + attrs + '>';
   return '<' + tag + attrs + '>' + _serialize(el.childNodes) + '</' + tag + '>';
@@ -2097,10 +2530,19 @@ function _parseFragment(html: string, doc: VDocument | null): VNode[] {
   var i = 0; var n = html.length;
   while (i < n) {
     if (html[i] === '<') {
+      // HTML comment: <!-- ... --> — preserve as comment VNode (Lit uses these as binding markers)
+      if (html[i+1] === '!' && html[i+2] === '-' && html[i+3] === '-') {
+        var _cmEnd = html.indexOf('-->', i + 4);
+        var _cmData = _cmEnd >= 0 ? html.slice(i + 4, _cmEnd) : html.slice(i + 4);
+        i = _cmEnd >= 0 ? _cmEnd + 3 : html.length;
+        var _cmNode = new VNode(); (_cmNode as any).nodeType = 8; (_cmNode as any).nodeName = '#comment'; (_cmNode as any).data = _cmData; _cmNode.ownerDocument = doc;
+        var _cmp = cur(); if (_cmp) { _cmNode.parentNode = _cmp; _cmp.childNodes.push(_cmNode); } else { nodes.push(_cmNode); } if (!_cmp) _cmNode.parentNode = null;
+        continue;
+      }
       var res = parseTag(i + 1); if (!res) break;
       var [tagName, amap, isClose, isSelf, nextI] = res;
       i = nextI;
-      if (!tagName) continue; // comment/PI
+      if (!tagName) continue; // PI / DOCTYPE
       if (isClose) { close(tagName); }
       else {
         var el = open(tagName, amap, isSelf);

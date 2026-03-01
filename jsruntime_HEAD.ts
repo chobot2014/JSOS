@@ -1,9 +1,9 @@
-/**
- * jsruntime.ts — JavaScript execution engine for the JSOS browser
+﻿/**
+ * jsruntime.ts ΓÇö JavaScript execution engine for the JSOS browser
  *
  * After the HTML parser collects <script> tags, this module:
  *  1. Builds a virtual DOM from the raw HTML (dom.ts)
- *  2. Constructs a browser-like global context (window, document, console, …)
+ *  2. Constructs a browser-like global context (window, document, console, ΓÇª)
  *  3. Executes each script via eval() inside that context
  *  4. Wires on* HTML attributes (onclick="foo()") to runtime eval handlers
  *  5. Provides a PageJS handle that BrowserApp uses to fire events (click, input,
@@ -25,16 +25,16 @@ import { cookieJar } from '../../net/http.js';
 import { getCachedStyle, setCachedStyle, bumpStyleGeneration, currentStyleGeneration } from './cache.js';
 import { JSAudioElement, JSVideoElement } from './audio-element.js';
 
-// ── Script record (collected by html.ts during parsing) ───────────────────────
+// ΓöÇΓöÇ Script record (collected by html.ts during parsing) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 export interface ScriptRecord {
   inline: boolean;
-  src:    string;   // for external scripts — absolute or root-relative URL
-  code:   string;   // for inline scripts — the source text
+  src:    string;   // for external scripts ΓÇö absolute or root-relative URL
+  code:   string;   // for inline scripts ΓÇö the source text
   type:   string;   // mime-type, default 'text/javascript'
 }
 
-// ── Callbacks from BrowserApp into the runtime ────────────────────────────────
+// ΓöÇΓöÇ Callbacks from BrowserApp into the runtime ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 export interface PageCallbacks {
   navigate(url: string): void;
@@ -57,7 +57,7 @@ export interface PageCallbacks {
   baseURL: string;
 }
 
-// ── PageJS handle returned to BrowserApp ─────────────────────────────────────
+// ΓöÇΓöÇ PageJS handle returned to BrowserApp ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 export interface PageJS {
   /** Fire a UI event from BrowserApp into the JS page. Returns true if re-render needed. */
@@ -69,13 +69,13 @@ export interface PageJS {
   fireLoad(): boolean;
   /** [Item 950] Fire resize event and trigger media query listeners whose match state changed. */
   fireResize(width: number, height: number): boolean;
-  /** Called when the page is unloaded — fires beforeunload */
+  /** Called when the page is unloaded ΓÇö fires beforeunload */
   dispose(): void;
   /** Synchronously tick any pending timers (called on each render frame) */
   tick(nowMs: number): void;
 }
 
-// ── Timer state ───────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Timer state ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 interface TimerEntry {
   id:       number;
@@ -85,7 +85,7 @@ interface TimerEntry {
   delay:    number;
 }
 
-// ── Storage (per-origin, in-memory + optional VFS persistence) ───────────────
+// ΓöÇΓöÇ Storage (per-origin, in-memory + optional VFS persistence) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 class VStorage {
   _data: Map<string, string> = new Map();
@@ -146,8 +146,8 @@ class VStorage {
 var _localStorage  = new VStorage();
 var _sessionStorage = new VStorage();
 
-// ── Blob object URL store (item 639) ─────────────────────────────────────────
-// Maps blob: URLs → { content: string; type: string }
+// ΓöÇΓöÇ Blob object URL store (item 639) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// Maps blob: URLs ΓåÆ { content: string; type: string }
 var _blobStore = new Map<string, { content: string; type: string }>();
 
 /**
@@ -158,7 +158,7 @@ export function getBlobURLContent(url: string): { content: string; type: string 
   return _blobStore.get(url) ?? null;
 }
 
-// ── Main factory ──────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Main factory ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 export function createPageJS(
   fullHTML:  string,
@@ -169,7 +169,7 @@ export function createPageJS(
   // Skip pages with no JS
   if (scripts.length === 0) return null;
 
-  // ── Initialise per-origin localStorage (item 500) ─────────────────────────
+  // ΓöÇΓöÇ Initialise per-origin localStorage (item 500) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   // Derive a VFS-safe origin key from the base URL (e.g. "http_example.com_80")
   try {
     var _originURL  = new URL(cb.baseURL);
@@ -184,7 +184,7 @@ export function createPageJS(
       _localStorage._load();
     }
   } catch (_) {
-    // Non-URL base (e.g. file:///...) — in-memory only
+    // Non-URL base (e.g. file:///...) ΓÇö in-memory only
     _localStorage._path = '';
     _localStorage._data.clear();
   }
@@ -194,17 +194,17 @@ export function createPageJS(
 
   // Build virtual DOM from the full page HTML
   var doc = buildDOM(fullHTML);
-  // document.readyState transitions (item 531): 'loading' → 'interactive' → 'complete'
+  // document.readyState transitions (item 531): 'loading' ΓåÆ 'interactive' ΓåÆ 'complete'
   (doc as any)._readyState = 'loading';
-  // document.compatMode (item 864) — always standards mode
+  // document.compatMode (item 864) ΓÇö always standards mode
   (doc as any).compatMode = 'CSS1Compat';
-  // document.documentMode (item 867) — IE compat shim: return 11 (IE11 compat)
+  // document.documentMode (item 867) ΓÇö IE compat shim: return 11 (IE11 compat)
   (doc as any).documentMode = 11;
   (doc as any).characterSet = 'UTF-8';
   (doc as any).charset = 'UTF-8';
   // doc._styleSheets populated later after CSSStyleSheet_ class is defined
 
-  // ── <base href> support (item 364) ───────────────────────────────────────
+  // ΓöÇΓöÇ <base href> support (item 364) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   // Extract effective base URL from <base href="..."> if present in the document.
   var _baseHref: string = cb.baseURL;
   {
@@ -235,7 +235,7 @@ export function createPageJS(
   function clearTimeout_(id: number): void { timers = timers.filter(t => t.id !== id); }
   function clearInterval_(id: number): void { clearTimeout_(id); }
 
-  // Mutation flag — reset after re-render check
+  // Mutation flag ΓÇö reset after re-render check
   var needsRerender = false;
   function checkDirty(): void {
     if (doc._dirty) {
@@ -259,14 +259,14 @@ export function createPageJS(
     // (we keep the existing doc object but sync values back from serialized form)
   }
 
-  // ── Form action/method wiring (items 602, 604) ─────────────────────────────
+  // ΓöÇΓöÇ Form action/method wiring (items 602, 604) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   // Intercept submit events that bubble to the document and handle action navigation.
   doc.addEventListener('submit', (ev: VEvent) => {
     if (ev.defaultPrevented) return;
     var form = ev.target as VElement | null;
     if (!form) return;
     var action  = (form as any).action  || '';
-    if (!action) return;  // no action — leave to script handlers
+    if (!action) return;  // no action ΓÇö leave to script handlers
     var method  = ((form as any).method  || 'get').toLowerCase();
     var noVal   = (form as any).noValidate;
     // Validate unless novalidate
@@ -282,7 +282,7 @@ export function createPageJS(
       actionURL += (actionURL.includes('?') ? '&' : '?') + serialized;
       cb.navigate(actionURL);
     } else {
-      // POST — use fetchAsync, then navigate if redirect returned
+      // POST ΓÇö use fetchAsync, then navigate if redirect returned
       os.fetchAsync(actionURL, (resp: any) => {
         if (resp && resp.status >= 300 && resp.status < 400 && resp.headers?.location) {
           cb.navigate(resp.headers.location);
@@ -294,9 +294,9 @@ export function createPageJS(
     }
   });
 
-  // ── window.location ────────────────────────────────────────────────────────
+  // ΓöÇΓöÇ window.location ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
-  // ── window.location ───────────────────────────────────────────────────────
+  // ΓöÇΓöÇ window.location ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   // Tracks URL overridden by pushState/replaceState/hash setter (without real navigation)
   var _locationHrefOverride: string | null = null;
@@ -336,7 +336,7 @@ export function createPageJS(
     toString():     string { return _effectiveHref(); },
   };
 
-  // ── window.history ─────────────────────────────────────────────────────────
+  // ΓöÇΓöÇ window.history ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   function _firePopState(state: unknown): void {
     var ev = new VEvent('popstate', { bubbles: false, cancelable: false });
@@ -376,7 +376,7 @@ export function createPageJS(
     go(delta: number) { var t = this._pos + delta; if (t >= 0 && t < this._stack.length) { this._pos = t; cb.navigate(this._stack[this._pos]); _firePopState(this._states[this._pos]); } },
   };
 
-  // ── window.navigator ───────────────────────────────────────────────────────
+  // ΓöÇΓöÇ window.navigator ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var navigator = {
     userAgent:  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 JSOS/1.0',
@@ -402,12 +402,9 @@ export function createPageJS(
       query(_desc: { name: string }): Promise<{ state: string }> { return Promise.resolve({ state: 'denied', addEventListener() {}, removeEventListener() {} } as any); },
     },
     mediaDevices: {
-      getUserMedia(_c: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError')); },
-      getDisplayMedia(_c?: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError')); },
+      getUserMedia(_c: unknown): Promise<unknown> { return Promise.reject(new Error('NotSupportedError')); },
       enumerateDevices(): Promise<unknown[]> { return Promise.resolve([]); },
       getSupportedConstraints(): object { return {}; },
-      addEventListener(_t: string, _fn: unknown): void {},
-      removeEventListener(_t: string, _fn: unknown): void {},
     },
     serviceWorker: {
       register(_url: string): Promise<unknown> { return Promise.reject(new Error('Not supported')); },
@@ -434,8 +431,6 @@ export function createPageJS(
       estimate(): Promise<{quota: number; usage: number}> { return Promise.resolve({ quota: 1024 * 1024 * 50, usage: 0 }); },
       persist(): Promise<boolean> { return Promise.resolve(false); },
       persisted(): Promise<boolean> { return Promise.resolve(false); },
-      // Origin Private File System (OPFS) (Chrome 86+)
-      getDirectory(): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'OPFS not supported')); },
     },
     locks: {
       request(_name: string, fnOrOpts: unknown, fn?: unknown): Promise<unknown> {
@@ -444,7 +439,7 @@ export function createPageJS(
       },
       query(): Promise<{held: unknown[]; pending: unknown[]}> { return Promise.resolve({ held: [], pending: [] }); },
     },
-    // User-Agent Client Hints API (navigator.userAgentData) — used by React DevTools, Angular, Vite
+    // User-Agent Client Hints API (navigator.userAgentData) ΓÇö used by React DevTools, Angular, Vite
     userAgentData: {
       brands: [
         { brand: 'Chromium', version: '120' },
@@ -472,16 +467,16 @@ export function createPageJS(
         return { brands: this.brands, mobile: this.mobile, platform: this.platform };
       },
     },
-    webdriver: false,        // navigator.webdriver — set false so sites don't detect automation
+    webdriver: false,        // navigator.webdriver ΓÇö set false so sites don't detect automation
     pdfViewerEnabled: true,  // navigator.pdfViewerEnabled
-    // Web Authentication API stub — lets sites detect presence without crashing
+    // Web Authentication API stub ΓÇö lets sites detect presence without crashing
     credentials: {
       get(_opts?: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError')); },
       create(_opts?: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError')); },
       store(_cred: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError')); },
       preventSilentAccess(): Promise<void> { return Promise.resolve(); },
     },
-    // Web HID API stub (item 541) — checked by many modern web apps
+    // Web HID API stub (item 541) ΓÇö checked by many modern web apps
     hid: {
       getDevices(): Promise<unknown[]> { return Promise.resolve([]); },
       requestDevice(_opts?: unknown): Promise<unknown[]> { return Promise.reject(new DOMException('NotSupportedError')); },
@@ -510,51 +505,12 @@ export function createPageJS(
     wakeLock: {
       request(_type?: string): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError')); },
     },
-    // User Activation API (Chrome 72+)
-    userActivation: { hasBeenActive: false, isActive: false },
-    hasStorageAccess(): Promise<boolean> { return Promise.resolve(true); },
-    requestStorageAccess(): Promise<void> { return Promise.resolve(); },
-    // Battery Status API (Chrome 38+)
-    getBattery(): Promise<unknown> {
-      return Promise.resolve({
-        charging: true, chargingTime: 0, dischargingTime: Infinity, level: 1.0,
-        onchargingchange: null, onchargingtimechange: null, ondischargingtimechange: null, onlevelchange: null,
-        addEventListener(_t: string, _fn: unknown): void {},
-        removeEventListener(_t: string, _fn: unknown): void {},
-      });
-    },
-    // App Badge API (Chrome 81+)
-    setAppBadge(_count?: number): Promise<void> { return Promise.resolve(); },
-    clearAppBadge(): Promise<void> { return Promise.resolve(); },
-    // Related Apps API (Chrome 80+)
-    getInstalledRelatedApps(): Promise<unknown[]> { return Promise.resolve([]); },
-    // Media Session API (Chrome 57+)
-    mediaSession: {
-      metadata: null as any,
-      playbackState: 'none' as string,
-      setActionHandler(_action: string, _handler: unknown): void {},
-      setPositionState(_state?: unknown): void {},
-      setMicrophoneActive(_active: boolean): void {},
-      setCameraActive(_active: boolean): void {},
-    },
-    // WebGPU Device API (Chrome 113+) -- stub for feature detection
-    gpu: {
-      requestAdapter(_opts?: unknown): Promise<null> { return Promise.resolve(null); },
-      getPreferredCanvasFormat(): string { return 'bgra8unorm'; },
-      wgslLanguageFeatures: new Set<string>(),
-    },
-      /** Contacts API - Android Chrome 80+, not available on desktop */
-      contacts: new ContactsManager_(),
-      credentials: new CredentialsContainer_(),
-      serviceWorker: new ServiceWorkerContainer_(),
-      locks: new LockManager_(),
   };
 
-  // ── window.screen ─────────────────────────────────────────────────────────
+  // ΓöÇΓöÇ window.screen ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var screen = {
     width: 1024, height: 768, availWidth: 1024, availHeight: 768,
-    availLeft: 0, availTop: 0,
     colorDepth: 32, pixelDepth: 32,
     // Screen Orientation API
     orientation: {
@@ -567,7 +523,7 @@ export function createPageJS(
     },
   };
 
-  // ── CustomEvent ───────────────────────────────────────────────────────────
+  // ΓöÇΓöÇ CustomEvent ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class CustomEvent extends VEvent {
     detail: unknown;
@@ -576,7 +532,7 @@ export function createPageJS(
     }
   }
 
-  // ── Event subclass hierarchy (item 520-529) ───────────────────────────────
+  // ΓöÇΓöÇ Event subclass hierarchy (item 520-529) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class UIEvent extends VEvent {
     detail: number; view: unknown;
@@ -766,348 +722,6 @@ export function createPageJS(
     constructor(type: string, init?: any) { super(type, init); Object.assign(this, init ?? {}); }
   }
 
-  // â”€â”€ ToggleEvent (Chrome 120+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  class ToggleEvent extends VEvent {
-
-    oldState: string; newState: string;
-
-    constructor(type: string, init?: { oldState?: string; newState?: string; bubbles?: boolean; cancelable?: boolean }) {
-
-      super(type, init); this.oldState = init?.oldState ?? ''; this.newState = init?.newState ?? '';
-
-    }
-
-  }
-
-
-
-  // â”€â”€ Highlight API (Chrome 105+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  class Highlight_ extends Set<unknown> {
-
-    priority: number = 0;
-
-    type: string = 'highlight';
-
-  }
-
-
-
-  // â”€â”€ CloseWatcher (Chrome 120+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  class CloseWatcher_ extends VEventTarget {
-
-    onclose: ((e: VEvent) => void) | null = null;
-
-    oncancel: ((e: VEvent) => void) | null = null;
-
-    requestClose(): void { var e = new VEvent('close'); if (this.onclose) this.onclose(e); }
-
-    close(): void { this.requestClose(); }
-
-    destroy(): void {}
-
-  }
-
-
-
-  // â”€â”€ EyeDropper (Chrome 95+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  class EyeDropper_ {
-
-    open(_signal?: unknown): Promise<{ sRGBHex: string }> {
-
-      return Promise.reject(new DOMException('NotSupportedError', 'EyeDropper not supported'));
-
-    }
-
-  }
-
-
-
-  // â”€â”€ MediaStreamTrack (stub) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  class MediaStreamTrack_ extends VEventTarget {
-
-    kind: string = 'video'; id: string = ''; label: string = '';
-
-    enabled: boolean = true; muted: boolean = false; readyState: string = 'ended';
-
-    contentHint: string = '';
-
-    onmute: ((e: VEvent) => void) | null = null;
-
-    onunmute: ((e: VEvent) => void) | null = null;
-
-    onended: ((e: VEvent) => void) | null = null;
-
-    stop(): void { this.readyState = 'ended'; }
-
-    getSettings(): object { return {}; }
-
-    getCapabilities(): object { return {}; }
-
-    getConstraints(): object { return {}; }
-
-    applyConstraints(_c?: unknown): Promise<void> { return Promise.resolve(); }
-
-    clone(): MediaStreamTrack_ { return new MediaStreamTrack_(); }
-
-  }
-
-
-
-  // â”€â”€ MediaStream (stub) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  class MediaStream_ extends VEventTarget {
-
-    id: string = Math.random().toString(36).slice(2);
-
-    active: boolean = false;
-
-    _tracks: MediaStreamTrack_[] = [];
-
-    constructor(tracks?: MediaStreamTrack_[]) { super(); if (tracks) this._tracks = [...tracks]; }
-
-    getTracks(): MediaStreamTrack_[] { return [...this._tracks]; }
-
-    getAudioTracks(): MediaStreamTrack_[] { return this._tracks.filter(t => t.kind === 'audio'); }
-
-    getVideoTracks(): MediaStreamTrack_[] { return this._tracks.filter(t => t.kind === 'video'); }
-
-    getTrackById(id: string): MediaStreamTrack_ | null { return this._tracks.find(t => t.id === id) ?? null; }
-
-    addTrack(t: MediaStreamTrack_): void { if (!this._tracks.includes(t)) this._tracks.push(t); }
-
-    removeTrack(t: MediaStreamTrack_): void { this._tracks = this._tracks.filter(x => x !== t); }
-
-    clone(): MediaStream_ { return new MediaStream_(this._tracks.map(t => t.clone())); }
-
-  }
-
-
-
-  // â”€â”€ MediaRecorder (stub) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  class MediaRecorder_ extends VEventTarget {
-
-    state: string = 'inactive'; mimeType: string = '';
-
-    videoBitsPerSecond: number = 0; audioBitsPerSecond: number = 0;
-
-    stream: MediaStream_; ondataavailable: ((e: unknown) => void) | null = null;
-
-    onstop: ((e: VEvent) => void) | null = null;
-
-    onstart: ((e: VEvent) => void) | null = null;
-
-    onerror: ((e: unknown) => void) | null = null;
-
-    onpause: ((e: VEvent) => void) | null = null;
-
-    onresume: ((e: VEvent) => void) | null = null;
-
-    constructor(stream: MediaStream_, _opts?: unknown) { super(); this.stream = stream; }
-
-    start(_timeslice?: number): void { this.state = 'recording'; }
-
-    stop(): void { this.state = 'inactive'; }
-
-    pause(): void { this.state = 'paused'; }
-
-    resume(): void { this.state = 'recording'; }
-
-    requestData(): void {}
-
-    static isTypeSupported(_mime: string): boolean { return false; }
-
-  }
-
-
-
-  // â”€â”€ WebTransport (stub) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  class WebTransport_ {
-
-    readonly ready: Promise<void>;
-
-    readonly closed: Promise<{ closeCode: number; reason: string }>;
-
-    constructor(_url: string, _opts?: unknown) {
-
-      this.ready = Promise.reject(new DOMException('NotSupportedError', 'WebTransport not supported'));
-
-      this.closed = Promise.reject(new DOMException('NotSupportedError', 'WebTransport not supported'));
-
-    }
-
-    close(_info?: unknown): void {}
-
-    createBidirectionalStream(): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError')); }
-
-    createUnidirectionalStream(): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError')); }
-
-  }
-
-
-
-  // â”€â”€ SpeechRecognition (stub) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  class SpeechRecognition_ extends VEventTarget {
-
-    lang: string = ''; continuous: boolean = false; interimResults: boolean = false;
-
-    maxAlternatives: number = 1; grammars: any = null;
-
-    onresult: ((e: unknown) => void) | null = null;
-
-    onerror: ((e: unknown) => void) | null = null;
-
-    onend: ((e: VEvent) => void) | null = null;
-
-    onstart: ((e: VEvent) => void) | null = null;
-
-    onnomatch: ((e: unknown) => void) | null = null;
-
-    start(): void {
-
-      setTimeout_(() => {
-
-        if (this.onerror) this.onerror({ error: 'not-allowed', message: 'Speech recognition not supported' });
-
-        if (this.onend) this.onend(new VEvent('end'));
-
-      }, 0);
-
-    }
-
-    stop(): void {} abort(): void {}
-
-  }
-
-
-
-  // â”€â”€ SpeechGrammar / SpeechGrammarList (stubs) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  class SpeechGrammar_ { src: string = ''; weight: number = 1; }
-
-  class SpeechGrammarList_ {
-
-    _list: SpeechGrammar_[] = [];
-
-    get length(): number { return this._list.length; }
-
-    item(idx: number): SpeechGrammar_ { return this._list[idx]; }
-
-    addFromURI(_src: string, _weight?: number): void {}
-
-    addFromString(_str: string, _weight?: number): void {}
-
-  }
-
-
-
-  // â”€â”€ MediaMetadata (Chrome 57+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  class MediaMetadata_ {
-
-    title: string; artist: string; album: string; artwork: unknown[];
-
-    constructor(init?: { title?: string; artist?: string; album?: string; artwork?: unknown[] }) {
-
-      this.title = init?.title ?? ''; this.artist = init?.artist ?? '';
-
-      this.album = init?.album ?? ''; this.artwork = init?.artwork ?? [];
-
-    }
-
-  }
-
-  // â”€â”€ PromiseRejectionEvent (Chrome 49+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  // URLPattern (Chrome 95+)
-  class URLPattern_ {
-    hash: string = '*'; hostname: string = '*'; password: string = '*';
-    pathname: string = '*'; port: string = '*'; protocol: string = '*';
-    search: string = '*'; username: string = '*';
-    constructor(input?: string | Record<string,string>, _basePath?: string) {
-      if (typeof input === 'object' && input) { Object.assign(this, input); }
-    }
-    test(_input?: string | Record<string,string>): boolean { return false; }
-    exec(_input?: string | Record<string,string>): unknown { return null; }
-  }
-
-  class PromiseRejectionEvent extends VEvent {
-
-    promise: Promise<unknown>; reason: unknown;
-
-    constructor(type: string, init: { promise: Promise<unknown>; reason: unknown; bubbles?: boolean; cancelable?: boolean }) {
-
-      super(type, init); this.promise = init.promise; this.reason = init.reason;
-
-    }
-
-  }
-
-
-
-  // â”€â”€ FormDataEvent (Chrome 77+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  class FormDataEvent extends VEvent {
-
-    formData: FormData_;
-
-    constructor(type: string, init: { formData: FormData_; bubbles?: boolean; cancelable?: boolean }) {
-
-      super(type, init); this.formData = init.formData;
-
-    }
-
-  }
-
-
-
-  // â”€â”€ DeviceMotionEvent / DeviceOrientationEvent (sensor APIs) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  class DeviceMotionEvent extends VEvent {
-
-    acceleration: unknown = null; accelerationIncludingGravity: unknown = null;
-
-    rotationRate: unknown = null; interval: number = 0;
-
-    constructor(type: string, init?: any) { super(type, init); Object.assign(this, init ?? {}); }
-
-    static requestPermission(): Promise<string> { return Promise.resolve('denied'); }
-
-  }
-
-  class DeviceOrientationEvent extends VEvent {
-
-    alpha: number | null = null; beta: number | null = null; gamma: number | null = null; absolute: boolean = false;
-
-    constructor(type: string, init?: any) { super(type, init); Object.assign(this, init ?? {}); }
-
-    static requestPermission(): Promise<string> { return Promise.resolve('denied'); }
-
-  }
-
-
-
-  // â”€â”€ ViewTransition (Chrome 111+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-  class ViewTransition_ {
-
-    ready: Promise<void> = Promise.resolve();
-
-    finished: Promise<void> = Promise.resolve();
-
-    updateCallbackDone: Promise<void> = Promise.resolve();
-
-    skipTransition(): void {}
-
-  }
-
   class EventTarget_ {
     _listeners: Map<string, Array<(e: VEvent) => void>> = new Map();
     addEventListener(type: string, fn: (e: VEvent) => void): void {
@@ -1124,7 +738,7 @@ export function createPageJS(
     }
   }
 
-  // ── CSS object (item 553) ──────────────────────────────────────────────────
+  // ΓöÇΓöÇ CSS object (item 553) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var CSS_ = {
     supports(_prop: string, _val?: string): boolean { return true; }, // optimistic stub
@@ -1137,17 +751,17 @@ export function createPageJS(
     rem(n: number): string { return n + 'rem'; },
     percent(n: number): string { return n + '%'; },
     number(n: number): string { return String(n); },
-    /** CSS.registerProperty() — CSS Houdini Properties & Values API Level 1 */
+    /** CSS.registerProperty() ΓÇö CSS Houdini Properties & Values API Level 1 */
     registerProperty(_descriptor: { name: string; syntax?: string; inherits: boolean; initialValue?: string }): void {},
-    /** CSS.paintWorklet — Houdini Paint API stub */
+    /** CSS.paintWorklet ΓÇö Houdini Paint API stub */
     paintWorklet: { addModule(_url: string): Promise<void> { return Promise.resolve(); } },
-    /** CSS.layoutWorklet — Houdini Layout API stub */
+    /** CSS.layoutWorklet ΓÇö Houdini Layout API stub */
     layoutWorklet: { addModule(_url: string): Promise<void> { return Promise.resolve(); } },
-    /** CSS.animationWorklet — Houdini Animation Worklet stub */
+    /** CSS.animationWorklet ΓÇö Houdini Animation Worklet stub */
     animationWorklet: { addModule(_url: string): Promise<void> { return Promise.resolve(); } },
   };
 
-  // ── visualViewport stub (item 462) ────────────────────────────────────────
+  // ΓöÇΓöÇ visualViewport stub (item 462) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var _visualViewport = {
     width: 1024, height: 768, offsetLeft: 0, offsetTop: 0,
@@ -1155,7 +769,7 @@ export function createPageJS(
     addEventListener() {}, removeEventListener() {}, dispatchEvent() { return true; },
   };
 
-  // ── DOMException ─────────────────────────────────────────────────────────
+  // ΓöÇΓöÇ DOMException ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class DOMException extends Error {
     code: number; name: string;
@@ -1196,7 +810,7 @@ export function createPageJS(
     };
   }
 
-  // ── Request class (item 506) ──────────────────────────────────────────────
+  // ΓöÇΓöÇ Request class (item 506) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class Request_ {
     url: string; method: string; headers: Headers_; body: any;
@@ -1230,7 +844,7 @@ export function createPageJS(
     formData():    Promise<FormData_>   { return Promise.resolve(new FormData_()); }
   }
 
-  // ── Response class (item 506) ─────────────────────────────────────────────
+  // ΓöÇΓöÇ Response class (item 506) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class Response_ {
     status: number; statusText: string; ok: boolean; headers: Headers_;
@@ -1259,7 +873,7 @@ export function createPageJS(
   }
 
   function fetchAPI(url: string | Request_ | { url?: string; href?: string; toString(): string }, opts?: { method?: string; body?: string | FormData_; headers?: Record<string, string> | Headers_; signal?: AbortSignalImpl; mode?: string; credentials?: string; cache?: string; redirect?: string; referrer?: string; keepalive?: boolean }): Promise<any> {
-    // Allow fetching a Request object — merge its fields with any overriding opts
+    // Allow fetching a Request object ΓÇö merge its fields with any overriding opts
     if (url instanceof Request_) {
       var req = url as Request_;
       opts = Object.assign({ method: req.method, headers: req.headers, body: req.body, signal: req.signal }, opts as any);
@@ -1270,7 +884,7 @@ export function createPageJS(
       var signal = opts?.signal;
       if (signal?.aborted) { reject(signal.reason ?? new Error('AbortError')); return; }
 
-      // ── data: URL support (item 638) ──────────────────────────────────────
+      // ΓöÇΓöÇ data: URL support (item 638) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
       if (urlStr.startsWith('data:')) {
         var commaIdx = urlStr.indexOf(',');
         if (commaIdx < 0) { reject(new Error('Invalid data URL')); return; }
@@ -1367,7 +981,7 @@ export function createPageJS(
     });
   }
 
-  // ── XMLHttpRequest ────────────────────────────────────────────────────────
+  // ΓöÇΓöÇ XMLHttpRequest ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class XMLHttpRequest {
     static UNSENT = 0; static OPENED = 1; static HEADERS_RECEIVED = 2; static LOADING = 3; static DONE = 4;
@@ -1467,7 +1081,7 @@ export function createPageJS(
     }
   }
 
-  // ── console ───────────────────────────────────────────────────────────────
+  // ΓöÇΓöÇ console ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   function _fmt(v: unknown): string {
     if (v === null) return 'null'; if (v === undefined) return 'undefined';
@@ -1507,7 +1121,7 @@ export function createPageJS(
     clear():                void {},
   };
 
-  // ── url resolution helper ─────────────────────────────────────────────────
+  // ΓöÇΓöÇ url resolution helper ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   function _resolveURL(href: string, base: string): string {
     if (/^[a-z][a-z0-9+\-.]*:/.test(href)) return href;  // absolute URL
@@ -1525,7 +1139,7 @@ export function createPageJS(
     return origin + res.join('/');
   }
 
-  // ── URLSearchParams (item 507) ────────────────────────────────────────────
+  // ΓöÇΓöÇ URLSearchParams (item 507) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class URLSearchParamsImpl {
     _pairs: Array<[string, string]> = [];
@@ -1567,7 +1181,7 @@ export function createPageJS(
     toString(): string { return this._pairs.map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&'); }
   }
 
-  // ── URL class (item 506) ──────────────────────────────────────────────────
+  // ΓöÇΓöÇ URL class (item 506) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class URLImpl {
     _protocol = ''; _username = ''; _password = ''; _hostname = ''; _port = '';
@@ -1669,7 +1283,7 @@ export function createPageJS(
     static parse(url: string, base?: string): URLImpl | null { try { return new URLImpl(url, base); } catch (_) { return null; } }
   }
 
-  // ── Blob / File ───────────────────────────────────────────────────────────
+  // ΓöÇΓöÇ Blob / File ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class Blob {
     _parts: string[]; type: string; size: number;
@@ -1691,7 +1305,7 @@ export function createPageJS(
     }
   }
 
-  // ── FileList stub (item 531 adjacent) ─────────────────────────────────────
+  // ΓöÇΓöÇ FileList stub (item 531 adjacent) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class FileList_ {
     _files: File[];
@@ -1701,7 +1315,7 @@ export function createPageJS(
     [Symbol.iterator](): Iterator<File> { return this._files[Symbol.iterator](); }
   }
 
-  // ── FileReader (item 531) ─────────────────────────────────────────────────
+  // ΓöÇΓöÇ FileReader (item 531) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class FileReader_ {
     static EMPTY  = 0; static LOADING = 1; static DONE = 2;
@@ -1771,7 +1385,7 @@ export function createPageJS(
 
   var URL_ = URLImpl;
 
-  // ── FormData (item 503) ───────────────────────────────────────────────
+  // ΓöÇΓöÇ FormData (item 503) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class FormData_ {
     _fields: Array<[string, string, string?]> = [];
@@ -1802,7 +1416,7 @@ export function createPageJS(
     [Symbol.iterator]() { return this.entries(); }
   }
 
-  // ── Headers (item 508) ───────────────────────────────────────────────────
+  // ΓöÇΓöÇ Headers (item 508) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class Headers_ {
     _map: Map<string, string> = new Map();
@@ -1826,7 +1440,7 @@ export function createPageJS(
     [Symbol.iterator]() { return this._map.entries(); }
   }
 
-  // ── MutationObserver ─────────────────────────────────────────────────────
+  // ΓöÇΓöÇ MutationObserver ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var _mutationObservers: MutationObserverImpl[] = [];
 
@@ -1899,7 +1513,7 @@ export function createPageJS(
     }
   }
 
-  // ── IntersectionObserver ─────────────────────────────────────────────────
+  // ΓöÇΓöÇ IntersectionObserver ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class IntersectionObserverImpl {
     _fn:       (entries: unknown[], obs: IntersectionObserverImpl) => void;
@@ -1946,7 +1560,7 @@ export function createPageJS(
 
   var _ioObservers: IntersectionObserverImpl[] = [];
 
-  // ── ResizeObserver ────────────────────────────────────────────────────────
+  // ΓöÇΓöÇ ResizeObserver ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class ResizeObserverImpl {
     _fn:       (entries: unknown[]) => void;
@@ -1993,7 +1607,7 @@ export function createPageJS(
 
   var _roObservers: ResizeObserverImpl[] = [];
 
-  // ── AbortController / AbortSignal (item 540) ──────────────────────────────
+  // ΓöÇΓöÇ AbortController / AbortSignal (item 540) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class AbortSignalImpl {
     aborted = false;
@@ -2015,7 +1629,7 @@ export function createPageJS(
     }
     static timeout(ms: number): AbortSignalImpl {
       var s = new AbortSignalImpl();
-      setTimeout_(() => s._abort(new DOMException('TimeoutError', 'TimeoutError')), ms);
+      setTimeout(() => s._abort(new Error('TimeoutError')), ms);
       return s;
     }
     static abort(reason?: unknown): AbortSignalImpl {
@@ -2030,7 +1644,7 @@ export function createPageJS(
     abort(reason?: unknown): void { this.signal._abort(reason); }
   }
 
-  // ── IndexedDB stub (item 502) ─────────────────────────────────────────────
+  // ΓöÇΓöÇ IndexedDB stub (item 502) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class IDBRequest_ { result: unknown = undefined; error: unknown = null; readyState = 'pending'; onsuccess: ((ev: unknown) => void) | null = null; onerror: ((ev: unknown) => void) | null = null;
     _succeed(r: unknown): void { this.result = r; this.readyState = 'done'; if (this.onsuccess) setTimeout(() => { try { this.onsuccess!({ target: this }); } catch(_) {} }, 0); }
@@ -2113,7 +1727,7 @@ export function createPageJS(
     cmp(a: unknown, b: unknown): number { return a < b ? -1 : a > b ? 1 : 0; },
   };
 
-  // ── Intl stub (item 546) ──────────────────────────────────────────────────
+  // ΓöÇΓöÇ Intl stub (item 546) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var Intl_: any = (typeof Intl !== 'undefined') ? Intl : {
     DateTimeFormat: class {
@@ -2160,8 +1774,8 @@ export function createPageJS(
     supportedValuesOf(_key: string): string[] { return []; },
   };
 
-  // ── CSSStyleSheet O(1) rule index helper (item 943) ───────────────────────
-  // Extracts the "key selector" from a complex selector — the rightmost simple
+  // ΓöÇΓöÇ CSSStyleSheet O(1) rule index helper (item 943) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  // Extracts the "key selector" from a complex selector ΓÇö the rightmost simple
   // selector part that is most selective (#id > .class > tag > *).
   // Used to bucket CSSStyleRule_ entries so getComputedStyle can look up only
   // rules that COULD match the element instead of scanning the full rule list.
@@ -2183,7 +1797,7 @@ export function createPageJS(
     return '*'; // universal
   }
 
-  // ── CSSStyleSheet (items 578-579) ─────────────────────────────────────────
+  // ΓöÇΓöÇ CSSStyleSheet (items 578-579) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class CSSStyleSheet_ {
     cssRules: Array<CSSRule_ | CSSStyleRule_ | CSSMediaRule_ | CSSKeyframesRule_> = [];
@@ -2193,9 +1807,9 @@ export function createPageJS(
     media: { mediaText: string; length: number } = { mediaText: '', length: 0 };
     type = 'text/css';
     _pendingImports: string[] = [];
-    /** O(1) rule index: key → CSSStyleRule_[] (item 943) */
+    /** O(1) rule index: key ΓåÆ CSSStyleRule_[] (item 943) */
     _ruleIdx: Map<string, CSSStyleRule_[]> = new Map();
-    /** @layer ordering — names in cascade order (earlier = lower priority) */
+    /** @layer ordering ΓÇö names in cascade order (earlier = lower priority) */
     _layerOrder?: string[];
 
     /** Add or remove a CSSStyleRule_ from the bucket index.
@@ -2259,11 +1873,11 @@ export function createPageJS(
         // Skip whitespace
         while (i < L && stripped.charCodeAt(i) <= 32) i++;
         if (i >= L) break;
-        // @charset / @namespace — skip to ;
+        // @charset / @namespace ΓÇö skip to ;
         if (/^@(?:charset|namespace)\b/i.test(stripped.slice(i))) {
           var sc = stripped.indexOf(';', i); i = sc >= 0 ? sc + 1 : L; continue;
         }
-        // @import — no block, ends with ;
+        // @import ΓÇö no block, ends with ;
         if (/^@import\b/i.test(stripped.slice(i))) {
           var sc2 = stripped.indexOf(';', i);
           var importSrc = stripped.slice(i, sc2 >= 0 ? sc2 + 1 : L);
@@ -2335,13 +1949,13 @@ export function createPageJS(
           var inner5 = new CSSStyleSheet_(); inner5._parseText(body2); ctr2.cssRules = inner5.cssRules;
           this.cssRules.push(ctr2);
         } else if (lhdr.startsWith('@layer')) {
-          // [Item 436] @layer cascade layers — proper layer-order tracking
+          // [Item 436] @layer cascade layers ΓÇö proper layer-order tracking
           // Spec: unlayered styles win; among layers, later wins over earlier;
           // within a layer, later declaration wins.
           var layerName436 = lhdr.replace('@layer', '').trim();
           // Statement form: "@layer reset, base, theme;" (no body)
           if (!body2 || body2.trim() === '') {
-            // Layer ordering declaration — register names in order
+            // Layer ordering declaration ΓÇö register names in order
             layerName436.split(',').map((n: string) => n.trim()).filter(Boolean).forEach((n: string) => {
               if (!this._layerOrder) this._layerOrder = [];
               if (!this._layerOrder.includes(n)) this._layerOrder.push(n);
@@ -2374,14 +1988,14 @@ export function createPageJS(
           var sr2 = new CSSStyleRule_(hdr, body2.trim()); sr2.parentStyleSheet = this; this.cssRules.push(sr2); this._idxRule(sr2);
         }
       }
-      bumpStyleGeneration(); // item 944 — new rules indexed, invalidate computed style cache
+      bumpStyleGeneration(); // item 944 ΓÇö new rules indexed, invalidate computed style cache
     }
   }
 
   // Pseudo-type for canvas context so TS doesn't complain
   type CSSStyleDeclarationStub = Record<string, string>;
 
-  // ── CSS vendor prefix normalisation (item 866) ────────────────────────────
+  // ΓöÇΓöÇ CSS vendor prefix normalisation (item 866) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   // Maps common -webkit-/-moz- prefixed properties to their standard name.
   // If a rule sets a vendor-prefixed property we also set the standard name
   // (if not already set) so layout/render code only needs to check standard names.
@@ -2400,9 +2014,9 @@ export function createPageJS(
     }
   }
 
-  // ── CSS Rule subclasses (items 580-582) ───────────────────────────────────
+  // ΓöÇΓöÇ CSS Rule subclasses (items 580-582) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
-  /** CSSRule — base class for all CSS rules */
+  /** CSSRule ΓÇö base class for all CSS rules */
   class CSSRule_ {
     static STYLE_RULE      = 1; static MEDIA_RULE   = 4; static FONT_FACE_RULE  = 5;
     static PAGE_RULE       = 6; static IMPORT_RULE   = 3; static CHARSET_RULE    = 2;
@@ -2410,7 +2024,7 @@ export function createPageJS(
     type = 0; cssText = ''; parentStyleSheet: CSSStyleSheet_ | null = null; parentRule: CSSRule_ | null = null;
   }
 
-  /** CSSStyleRule — element-matched style rule (type=1) */
+  /** CSSStyleRule ΓÇö element-matched style rule (type=1) */
   class CSSStyleRule_ extends CSSRule_ {
     type = 1;
     selectorText = '';
@@ -2444,7 +2058,7 @@ export function createPageJS(
     }
   }
 
-  /** CSSMediaRule — @media rule (type=4) */
+  /** CSSMediaRule ΓÇö @media rule (type=4) */
   class CSSMediaRule_ extends CSSRule_ {
     type = 4;
     media: { mediaText: string; length: number; appendMedium(m: string): void; deleteMedium(m: string): void } = {
@@ -2462,7 +2076,7 @@ export function createPageJS(
     deleteRule(index: number): void { this.cssRules.splice(index, 1); }
   }
 
-  /** CSSKeyframesRule — @keyframes rule (type=7) */
+  /** CSSKeyframesRule ΓÇö @keyframes rule (type=7) */
   class CSSKeyframesRule_ extends CSSRule_ {
     type = 7;
     name = '';
@@ -2473,7 +2087,7 @@ export function createPageJS(
     findRule(select: string): CSSRule_ | null { return this.cssRules.find(r => (r as any).keyText === select) ?? null; }
   }
 
-  /** CSSKeyframeRule — individual keyframe stop (type=8, e.g. "0%" or "from") */
+  /** CSSKeyframeRule ΓÇö individual keyframe stop (type=8, e.g. "0%" or "from") */
   class CSSKeyframeRule_ extends CSSRule_ {
     type = 8;
     keyText = '';
@@ -2494,7 +2108,7 @@ export function createPageJS(
     }
   }
 
-  /** CSSSupportRule — @supports rule (type=12) */
+  /** CSSSupportRule ΓÇö @supports rule (type=12) */
   class CSSSupportsRule_ extends CSSRule_ {
     type = 12;
     conditionText = '';
@@ -2504,7 +2118,7 @@ export function createPageJS(
     deleteRule(index: number): void { this.cssRules.splice(index, 1); }
   }
 
-  /** CSSContainerRule — @container rule [Item 438] (type=15) */
+  /** CSSContainerRule ΓÇö @container rule [Item 438] (type=15) */
   class CSSContainerRule_ extends CSSRule_ {
     type = 15;
     containerName = '';
@@ -2526,7 +2140,7 @@ export function createPageJS(
     deleteRule(index: number): void { this.cssRules.splice(index, 1); }
   }
 
-  /** CSSFontFaceRule — @font-face rule (type=5) */
+  /** CSSFontFaceRule ΓÇö @font-face rule (type=5) */
   class CSSFontFaceRule_ extends CSSRule_ {
     type = 5;
     style: CSSStyleDeclarationStub & { cssText: string; 'font-family'?: string; src?: string } = { cssText: '' } as any;
@@ -2544,7 +2158,7 @@ export function createPageJS(
     }
   }
 
-  /** CSSImportRule — @import rule (type=3) */
+  /** CSSImportRule ΓÇö @import rule (type=3) */
   class CSSImportRule_ extends CSSRule_ {
     type = 3;
     href = '';
@@ -2557,7 +2171,7 @@ export function createPageJS(
     constructor() { super('#document-fragment'); this.nodeType = 11; }
   }
 
-  // ── AudioContext / Web Audio API stub ─────────────────────────────────────
+  // ΓöÇΓöÇ AudioContext / Web Audio API stub ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   // Many sites check `window.AudioContext || window.webkitAudioContext`.
   // We provide a stub that accepts method calls without throwing.
 
@@ -2579,21 +2193,6 @@ export function createPageJS(
     setValueCurveAtTime(): this { return this; }
     cancelScheduledValues(): this { return this; }
     cancelAndHoldAtCurrentValue(): this { return this; }
-  }
-
-  // -- OfflineAudioContext stub -----------------------------------------------
-  class OfflineAudioContext_ extends AudioNode_ {
-    length: number; numberOfChannels: number; sampleRate: number;
-    constructor(channelsOrOpts: number | { numberOfChannels: number; length: number; sampleRate: number }, length?: number, sampleRate?: number) {
-      super();
-      if (typeof channelsOrOpts === 'object') {
-        this.numberOfChannels = channelsOrOpts.numberOfChannels; this.length = channelsOrOpts.length; this.sampleRate = channelsOrOpts.sampleRate;
-      } else { this.numberOfChannels = channelsOrOpts; this.length = length ?? 0; this.sampleRate = sampleRate ?? 44100; }
-    }
-    startRendering(): Promise<unknown> { return Promise.resolve(null); }
-    resume(): Promise<void> { return Promise.resolve(); }
-    suspend(_sec: number): Promise<void> { return Promise.resolve(); }
-    createBuffer(_ch: number, _len: number, _sr: number): unknown { return null; }
   }
 
   class AudioContext_ extends AudioNode_ {
@@ -2631,11 +2230,9 @@ export function createPageJS(
     suspend(): Promise<void> { this.state = 'suspended'; return Promise.resolve(); }
     close(): Promise<void> { this.state = 'closed'; return Promise.resolve(); }
     getOutputTimestamp(): { contextTime: number; performanceTime: number } { return { contextTime: 0, performanceTime: 0 }; }
-    // Audio Worklet (Chrome 66+)
-    audioWorklet = { addModule(_url: string): Promise<void> { return Promise.resolve(); } };
   }
 
-  // ── speech synthesis stub ─────────────────────────────────────────────────
+  // ΓöÇΓöÇ speech synthesis stub ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var _speechSynthesis = {
     pending: false, speaking: false, paused: false,
@@ -2648,7 +2245,7 @@ export function createPageJS(
     addEventListener() {}, removeEventListener() {},
   };
 
-  // ── Cache API stub (window.caches) ────────────────────────────────────────
+  // ΓöÇΓöÇ Cache API stub (window.caches) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var _caches = {
     open(_name: string): Promise<unknown> { return Promise.resolve({ put() { return Promise.resolve(); }, match() { return Promise.resolve(undefined); }, delete() { return Promise.resolve(false); }, keys() { return Promise.resolve([]); }, add() { return Promise.resolve(); }, addAll() { return Promise.resolve(); } }); },
@@ -2658,7 +2255,7 @@ export function createPageJS(
     keys(): Promise<string[]> { return Promise.resolve([]); },
   };
 
-  // ── SpeechSynthesisUtterance ──────────────────────────────────────────────
+  // ΓöÇΓöÇ SpeechSynthesisUtterance ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class SpeechSynthesisUtterance_ {
     text = ''; lang = 'en-US'; voice = null; volume = 1; rate = 1; pitch = 1;
@@ -2667,7 +2264,7 @@ export function createPageJS(
     addEventListener() {} removeEventListener() {}
   }
 
-  // ── ClipboardItem ─────────────────────────────────────────────────────────
+  // ΓöÇΓöÇ ClipboardItem ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class ClipboardItem_ {
     _items: Map<string, Blob>;
@@ -2684,7 +2281,7 @@ export function createPageJS(
     }
   }
 
-  // ── FontFace ──────────────────────────────────────────────────────────────
+  // ΓöÇΓöÇ FontFace ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class FontFace_ {
     family: string; style = 'normal'; weight = 'normal'; stretch = 'normal';
@@ -2703,7 +2300,7 @@ export function createPageJS(
     }
   }
 
-  // ── FontFaceSet (document.fonts) ──────────────────────────────────────────
+  // ΓöÇΓöÇ FontFaceSet (document.fonts) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class FontFaceSet_ {
     _fonts: Set<FontFace_> = new Set();
@@ -2730,10 +2327,8 @@ export function createPageJS(
 
   var _documentFonts = new FontFaceSet_();
   (doc as any).fonts = _documentFonts;
-  (doc as any).pictureInPictureEnabled = false;
-  (doc as any).pictureInPictureElement = null;
 
-  // ── EventSource (Server-Sent Events) ─────────────────────────────────────
+  // ΓöÇΓöÇ EventSource (Server-Sent Events) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class EventSource_ {
     static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
@@ -2750,7 +2345,7 @@ export function createPageJS(
     addEventListener() {} removeEventListener() {} dispatchEvent() { return true; }
   }
 
-  // ── OffscreenCanvas ───────────────────────────────────────────────────────
+  // ΓöÇΓöÇ OffscreenCanvas ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class OffscreenCanvas_ {
     width: number; height: number;
@@ -2764,7 +2359,7 @@ export function createPageJS(
     addEventListener() {} removeEventListener() {}
   }
 
-  // ── DOMRect / DOMRectReadOnly / DOMPoint / DOMMatrix ─────────────────────
+  // ΓöÇΓöÇ DOMRect / DOMRectReadOnly / DOMPoint / DOMMatrix ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class DOMRect_ {
     x: number; y: number; width: number; height: number;
@@ -2817,7 +2412,7 @@ export function createPageJS(
   }
   var DOMMatrixReadOnly_ = DOMMatrix_;
 
-  // ── WebSocket stub (item 542) ─────────────────────────────────────────────
+  // ΓöÇΓöÇ WebSocket stub (item 542) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class WebSocket_ {
     static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
@@ -2883,7 +2478,7 @@ export function createPageJS(
     }
   }
 
-  // ── Promise polyfills (item 510) ──────────────────────────────────────────
+  // ΓöÇΓöÇ Promise polyfills (item 510) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   // QuickJS 2023+ usually includes these, but polyfill if absent
   var _PromiseAllSettled: (promises: Promise<unknown>[]) => Promise<Array<{ status: string; value?: unknown; reason?: unknown }>> =
@@ -2908,7 +2503,7 @@ export function createPageJS(
         constructor(errors: unknown[], message?: string) { super(message); this.errors = errors; this.name = 'AggregateError'; }
       };
 
-  // ── window.getComputedStyle — full CSS cascade (item 577) ────────────────
+  // ΓöÇΓöÇ window.getComputedStyle ΓÇö full CSS cascade (item 577) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   // CSS inherited properties set (used for 'unset' keyword resolution in getComputedStyle)
   var _CSS_INHERITED = new Set(['color','font','font-family','font-size','font-style','font-variant','font-weight',
@@ -2928,15 +2523,15 @@ export function createPageJS(
     return a * 10000 + b * 100 + c;
   }
 
-  /** Computed style proxy cache — keyed per-element, invalidated by style generation (item 944). */
+  /** Computed style proxy cache ΓÇö keyed per-element, invalidated by style generation (item 944). */
   var _csProxyCache = new WeakMap<VElement, { gen: number; proxy: any }>();
 
   function getComputedStyle(el: VElement, _pseudoElt?: string | null): any {
-    // ── Computed style cache check (item 944) ───────────────────────────────────
+    // ΓöÇΓöÇ Computed style cache check (item 944) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     var _csGen = currentStyleGeneration();
     var _csHit = _csProxyCache.get(el);
     if (_csHit && _csHit.gen === _csGen) return _csHit.proxy;
-    // ── Full computation below ──────────────────────────────────────────────────
+    // ΓöÇΓöÇ Full computation below ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     // Collect all matching rules with specificity for proper cascade ordering
     // Each entry: { specificity, sourceOrder, layerIndex, style, important: Set<string> }
     var matched: Array<{ spec: number; order: number; layerIdx: number; style: any; important: Set<string> | undefined }> = [];
@@ -2952,7 +2547,7 @@ export function createPageJS(
       for (var rule of rules) {
         if (!rule) continue;
         if (rule.type === 1 && rule.selectorText) {
-          // CSSStyleRule — test each comma-separated selector, take max specificity
+          // CSSStyleRule ΓÇö test each comma-separated selector, take max specificity
           var sels = (rule.selectorText as string).split(',');
           var maxSpec = -1;
           for (var s = 0; s < sels.length; s++) {
@@ -2961,16 +2556,16 @@ export function createPageJS(
           }
           if (maxSpec >= 0) collectRule(rule, maxSpec);
         } else if (rule.type === 4 && rule.cssRules) {
-          // @media — evaluate condition against viewport (item 373)
+          // @media ΓÇö evaluate condition against viewport (item 373)
           var mCond: string = rule.conditionText || (rule.media && rule.media.mediaText) || '';
           if (!mCond || _evalMediaQuery(mCond)) walkRules(rule.cssRules);
         } else if (rule.type === 12 && rule.cssRules) {
-          // @supports — evaluate condition; default permissive for unknown props
+          // @supports ΓÇö evaluate condition; default permissive for unknown props
           var sCond: string = rule.conditionText || '';
           var sMatches = !sCond || (typeof CSS_ !== 'undefined' ? CSS_.supports(sCond) : true);
           if (sMatches) walkRules(rule.cssRules);
         } else if (rule.type === 15 && rule.cssRules) {
-          // [Item 438] @container — evaluate size condition against containing block
+          // [Item 438] @container ΓÇö evaluate size condition against containing block
           var cCond: string = (rule as any).conditionText || '';
           var cName: string = (rule as any).containerName || '';
           if (!cCond || _evalContainerQuery(el, cName, cCond)) walkRules(rule.cssRules);
@@ -2978,7 +2573,7 @@ export function createPageJS(
       }
     }
 
-    // Walk all document stylesheets — use O(1) index for flat rules (item 943)
+    // Walk all document stylesheets ΓÇö use O(1) index for flat rules (item 943)
     for (var si = 0; si < doc._styleSheets.length; si++) {
       var sheet = doc._styleSheets[si] as any as CSSStyleSheet_;
       if (sheet.disabled) continue;
@@ -3057,7 +2652,7 @@ export function createPageJS(
     var inlineMap = (el._style as any)._map as Map<string, string> | undefined;
     if (inlineMap) { inlineMap.forEach((v, p) => { if (v) merged.set(p, v); }); }
 
-    // CSS custom property (var()) resolver — walks ancestor chain
+    // CSS custom property (var()) resolver ΓÇö walks ancestor chain
     // First collect --* vars from this element's matched rules + inline into localVars
     var localVars = new Map<string, string>();
     merged.forEach((v, p) => { if (p.startsWith('--')) localVars.set(p, v); });
@@ -3126,19 +2721,19 @@ export function createPageJS(
     return _csProxy944;
   }
 
-  // ── window.requestAnimationFrame / cancelAnimationFrame ───────────────────
+  // ΓöÇΓöÇ window.requestAnimationFrame / cancelAnimationFrame ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var rafCallbacks: Array<{ id: number; fn: (ts: number) => void }> = [];
   var rafSeq = 1;
   function requestAnimationFrame(fn: (ts: number) => void): number { var id = rafSeq++; rafCallbacks.push({ id, fn }); return id; }
   function cancelAnimationFrame(id: number): void { rafCallbacks = rafCallbacks.filter(r => r.id !== id); }
 
-  // ── Performance (real W3C Performance Timeline) ──────────────────────────
+  // ΓöÇΓöÇ Performance (real W3C Performance Timeline) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var _perf = new BrowserPerformance();
   var performance: BrowserPerformance = _perf;
 
-  // ── Microtask queue ───────────────────────────────────────────────────────
+  // ΓöÇΓöÇ Microtask queue ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   // True microtask ordering: drain before each macrotask fires.
 
   var _microtaskQueue: Array<() => void> = [];
@@ -3153,7 +2748,7 @@ export function createPageJS(
     }
   }
 
-  // ── Scheduler (postTask) ──────────────────────────────────────────────────
+  // ΓöÇΓöÇ Scheduler (postTask) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var scheduler = {
     postTask(fn: () => void, opts?: { priority?: string; delay?: number }): Promise<void> {
@@ -3167,71 +2762,9 @@ export function createPageJS(
     yield(): Promise<void> {
       return new Promise<void>(resolve => setTimeout_(resolve, 0));
     },
-    // scheduler.wait(ms) -- Chrome 124+
-    wait(ms: number): Promise<void> {
-      return new Promise<void>(resolve => setTimeout_(resolve, ms));
-    },
   };
 
-  // -- TaskController / TaskSignal (Prioritized Task Scheduling API) ---------
-
-  class TaskController_ {
-
-    _priority: string;
-
-    signal: any;
-
-    constructor(opts?: { priority?: string }) {
-
-      this._priority = opts?.priority ?? 'user-visible';
-
-      var self2 = this;
-
-      this.signal = {
-
-        get priority() { return self2._priority; },
-
-        aborted: false,
-
-        onprioritychange: null as any,
-
-        addEventListener(_t: string, _fn: unknown): void {},
-
-        removeEventListener(_t: string, _fn: unknown): void {},
-
-      };
-
-    }
-
-    setPriority(priority: string): void { this._priority = priority; }
-
-    abort(_reason?: unknown): void { this.signal.aborted = true; }
-
-  }
-
-
-
-  // -- documentPictureInPicture (Chrome 116+) --------------------------------
-
-  var documentPictureInPicture = {
-
-    requestWindow(_opts?: { width?: number; height?: number }): Promise<unknown> {
-
-      return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError'));
-
-    },
-
-    window: null as unknown,
-
-    onenter: null as unknown,
-
-    addEventListener(_t: string, _fn: unknown): void {},
-
-    removeEventListener(_t: string, _fn: unknown): void {},
-
-  };
-
-  // ── requestIdleCallback / cancelIdleCallback (item 545) ───────────────────
+  // ΓöÇΓöÇ requestIdleCallback / cancelIdleCallback (item 545) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   var _idleCbs = new Map<number, number>(); var _idleCbNext = 1;
   function requestIdleCallback(fn: (deadline: { timeRemaining(): number; didTimeout: boolean }) => void, opts?: { timeout?: number }): number {
     var id = _idleCbNext++;
@@ -3244,7 +2777,7 @@ export function createPageJS(
     var timer = _idleCbs.get(id); if (timer != null) { clearTimeout_(timer); _idleCbs.delete(id); }
   }
 
-  // ── window.crypto (basic) ─────────────────────────────────────────────────
+  // ΓöÇΓöÇ window.crypto (basic) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var crypto = {
     getRandomValues(buf: Uint8Array): Uint8Array {
@@ -3256,7 +2789,7 @@ export function createPageJS(
         var r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
       });
     },
-    // crypto.subtle stub (item 341) — returns valid Promises, not implemented fully
+    // crypto.subtle stub (item 341) ΓÇö returns valid Promises, not implemented fully
     subtle: {
       digest(_algo: unknown, _data: unknown): Promise<ArrayBuffer> { return Promise.resolve(new ArrayBuffer(32)); },
       sign(_algo: unknown, _key: unknown, _data: unknown): Promise<ArrayBuffer> { return Promise.resolve(new ArrayBuffer(64)); },
@@ -3273,13 +2806,13 @@ export function createPageJS(
     },
   };
 
-  // ── DOMParser stub ────────────────────────────────────────────────────────
+  // ΓöÇΓöÇ DOMParser stub ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class DOMParser {
     parseFromString(html: string, _type: string) { return buildDOM(html); }
   }
 
-  // ── XMLSerializer ─────────────────────────────────────────────────────────
+  // ΓöÇΓöÇ XMLSerializer ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   // Serializes a DOM node back to an HTML/XML string.
 
   class XMLSerializer {
@@ -3299,7 +2832,7 @@ export function createPageJS(
     }
   }
 
-  // ── document.implementation ───────────────────────────────────────────────
+  // ΓöÇΓöÇ document.implementation ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   // Basic DOMImplementation stub (needed by many framework feature detections).
 
   var _docImplementation = {
@@ -3317,7 +2850,7 @@ export function createPageJS(
   };
   (doc as any).implementation = _docImplementation;
 
-  // ── WeakRef + FinalizationRegistry stubs (item 548) ──────────────────────
+  // ΓöÇΓöÇ WeakRef + FinalizationRegistry stubs (item 548) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class WeakRefImpl<T extends object> {
     _ref: T;
@@ -3332,7 +2865,7 @@ export function createPageJS(
     unregister(_token: object): void {}
   }
 
-  // ── Custom Elements registry stub (item 550) ──────────────────────────────
+  // ΓöÇΓöÇ Custom Elements registry stub (item 550) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var _ceRegistry: Map<string, unknown> = new Map();
   var customElementsAPI = {
@@ -3346,478 +2879,10 @@ export function createPageJS(
     },
   };
 
-  // ── Streams API (ReadableStream, WritableStream, TransformStream) ─────────
-  // Minimal stubs — complete enough for feature-detection by frameworks.
+  // ΓöÇΓöÇ Streams API (ReadableStream, WritableStream, TransformStream) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  // Minimal stubs ΓÇö complete enough for feature-detection by frameworks.
 
-  // â”€â”€ WebCodecs (Chrome 94+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  class VideoColorSpace_ {
-    fullRange = false; matrix = "rgb"; primaries = "bt709"; transfer = "iec61966-2-1";
-    constructor(_init?: unknown) {}
-    toJSON(): unknown { return { fullRange: this.fullRange, matrix: this.matrix, primaries: this.primaries, transfer: this.transfer }; }
-  }
-  class EncodedVideoChunk_ {
-    type: string; timestamp: number; duration: number | null; byteLength: number;
-    constructor(init: any) { this.type = init?.type ?? "key"; this.timestamp = init?.timestamp ?? 0; this.duration = init?.duration ?? null; this.byteLength = (init?.data?.byteLength ?? 0); }
-    copyTo(_dest: unknown): void {}
-  }
-  class EncodedAudioChunk_ {
-    type: string; timestamp: number; duration: number | null; byteLength: number;
-    constructor(init: any) { this.type = init?.type ?? "key"; this.timestamp = init?.timestamp ?? 0; this.duration = init?.duration ?? null; this.byteLength = (init?.data?.byteLength ?? 0); }
-    copyTo(_dest: unknown): void {}
-  }
-  class VideoFrame_ {
-    codedWidth = 0; codedHeight = 0; displayWidth = 0; displayHeight = 0;
-    timestamp: number; duration: number | null; colorSpace: VideoColorSpace_;
-    constructor(_init: unknown, opts?: any) {
-      this.timestamp = opts?.timestamp ?? 0; this.duration = opts?.duration ?? null;
-      this.colorSpace = new VideoColorSpace_();
-    }
-    allocationSize(_opts?: unknown): number { return this.codedWidth * this.codedHeight * 4; }
-    copyTo(_dest: unknown, _opts?: unknown): Promise<unknown> { return Promise.resolve([]); }
-    clone(): VideoFrame_ { return new VideoFrame_(null, { timestamp: this.timestamp }); }
-    close(): void {}
-  }
-  class AudioData_ {
-    format = "f32"; sampleRate = 48000; numberOfFrames = 0; numberOfChannels = 1;
-    duration = 0; timestamp: number;
-    constructor(init: any) { this.timestamp = init?.timestamp ?? 0; }
-    allocationSize(_opts?: unknown): number { return this.numberOfFrames * 4; }
-    copyTo(_dest: unknown, _opts?: unknown): void {}
-    clone(): AudioData_ { return new AudioData_({ timestamp: this.timestamp }); }
-    close(): void {}
-  }
-  class VideoDecoder_ extends VEventTarget {
-    state: "unconfigured" | "configured" | "closed" = "unconfigured";
-    decodeQueueSize = 0; _init: any;
-    constructor(init: any) { super(); this._init = init; }
-    configure(_cfg: unknown): void { this.state = "configured"; }
-    decode(_chunk: unknown): void {}
-    flush(): Promise<void> { return Promise.resolve(); }
-    reset(): void { this.state = "unconfigured"; }
-    close(): void { this.state = "closed"; }
-    static isConfigSupported(_c: unknown): Promise<unknown> { return Promise.resolve({ supported: false }); }
-  }
-  class VideoEncoder_ extends VEventTarget {
-    state: "unconfigured" | "configured" | "closed" = "unconfigured"; encodeQueueSize = 0;
-    constructor(_init: any) { super(); }
-    configure(_cfg: unknown): void { this.state = "configured"; }
-    encode(_frame: unknown, _opts?: unknown): void {}
-    flush(): Promise<void> { return Promise.resolve(); }
-    reset(): void { this.state = "unconfigured"; }
-    close(): void { this.state = "closed"; }
-    static isConfigSupported(_c: unknown): Promise<unknown> { return Promise.resolve({ supported: false }); }
-  }
-  class AudioDecoder_ extends VEventTarget {
-    state: "unconfigured" | "configured" | "closed" = "unconfigured"; decodeQueueSize = 0;
-    constructor(_init: any) { super(); }
-    configure(_cfg: unknown): void { this.state = "configured"; }
-    decode(_chunk: unknown): void {}
-    flush(): Promise<void> { return Promise.resolve(); }
-    reset(): void { this.state = "unconfigured"; }
-    close(): void { this.state = "closed"; }
-    static isConfigSupported(_c: unknown): Promise<unknown> { return Promise.resolve({ supported: false }); }
-  }
-  class AudioEncoder_ extends VEventTarget {
-    state: "unconfigured" | "configured" | "closed" = "unconfigured"; encodeQueueSize = 0;
-    constructor(_init: any) { super(); }
-    configure(_cfg: unknown): void { this.state = "configured"; }
-    encode(_data: unknown, _opts?: unknown): void {}
-    flush(): Promise<void> { return Promise.resolve(); }
-    reset(): void { this.state = "unconfigured"; }
-    close(): void { this.state = "closed"; }
-    static isConfigSupported(_c: unknown): Promise<unknown> { return Promise.resolve({ supported: false }); }
-  }
-  class ImageTrack_ {
-    animated = false; frameCount = 1; repetitionCount = 0; selected = true;
-  }
-  class ImageTrackList_ {
-    length = 0; selectedIndex = -1; selectedTrack: ImageTrack_ | null = null;
-    ready: Promise<void> = Promise.resolve();
-    [Symbol.iterator](): Iterator<ImageTrack_> { return ([] as ImageTrack_[])[Symbol.iterator](); }
-  }
-  class ImageDecoder_ {
-    complete = false; type = ""; tracks = new ImageTrackList_();
-    constructor(_init: unknown) {}
-    decode(_opts?: unknown): Promise<unknown> { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
-    reset(): void {} close(): void {}
-    static isTypeSupported(_t: string): Promise<boolean> { return Promise.resolve(false); }
-  }
-  // Navigation API event constructors (Chrome 102+)
-  class NavigateEvent_ extends VEvent {
-    canIntercept: boolean; destination: unknown; downloadRequest: string | null;
-    formData: FormData | null; hashChange: boolean; info: unknown;
-    navigationType: string; signal: AbortSignal;
-    constructor(type: string, init: any = {}) {
-      super(type, init);
-      this.canIntercept = init.canIntercept ?? false; this.destination = init.destination ?? null;
-      this.downloadRequest = init.downloadRequest ?? null; this.formData = init.formData ?? null;
-      this.hashChange = init.hashChange ?? false; this.info = init.info ?? undefined;
-      this.navigationType = init.navigationType ?? "push";
-      this.signal = init.signal ?? new AbortController().signal;
-    }
-    intercept(_opts?: unknown): void {}
-    scroll(): void {}
-  }
-  class NavigationCurrentEntryChangeEvent_ extends VEvent {
-    from: unknown; navigationType: string | null;
-    constructor(type: string, init: any = {}) {
-      super(type, init); this.from = init.from ?? null; this.navigationType = init.navigationType ?? null;
-    }
-  }
-  // Scroll-driven animations (Chrome 115+)
-  class ScrollTimeline_ {
-    axis: string; source: unknown | null;
-    constructor(opts: any = {}) { this.axis = opts.axis ?? "block"; this.source = opts.source ?? null; }
-    get currentTime(): unknown { return null; }
-  }
-  class ViewTimeline_ {
-    axis: string; subject: unknown | null; startOffset: unknown; endOffset: unknown;
-    constructor(opts: any = {}) {
-      this.axis = opts.axis ?? "block"; this.subject = opts.subject ?? null;
-      this.startOffset = null; this.endOffset = null;
-    }
-    get currentTime(): unknown { return null; }
-  }
-  // Reporting API (Chrome 69+)
-  class ReportingObserver_ {
-    _cb: (reports: unknown[], obs: ReportingObserver_) => void;
-    constructor(cb: (reports: unknown[], obs: ReportingObserver_) => void, _opts?: unknown) { this._cb = cb; }
-    observe(): void {} disconnect(): void {} takeRecords(): unknown[] { return []; }
-  }
-  // ContactsManager (Android Chrome 80+)
-  class ContactsManager_ {
-    getProperties(): Promise<string[]> { return Promise.resolve(["name", "email", "tel", "address", "icon"]); }
-    select(_props: string[], _opts?: unknown): Promise<unknown[]> { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
-  }
-  // PictureInPictureWindow
-  class PictureInPictureWindow_ extends VEventTarget {
-    width = 0; height = 0;
-    onresize: ((ev: VEvent) => void) | null = null;
-  }
-  // PushManager / PushSubscription (Chrome 42+)
-  class PushSubscription_ {
-    endpoint = ""; expirationTime: number | null = null;
-    options = { applicationServerKey: null as unknown, userVisibleOnly: true };
-    getKey(_name: string): ArrayBuffer | null { return null; }
-    toJSON(): unknown { return { endpoint: this.endpoint, expirationTime: this.expirationTime, keys: {} }; }
-    unsubscribe(): Promise<boolean> { return Promise.resolve(false); }
-  }
-  class PushManager_ {
-    permissionState(_opts?: unknown): Promise<string> { return Promise.resolve("denied"); }
-    subscribe(_opts?: unknown): Promise<PushSubscription_> { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
-    getSubscription(): Promise<PushSubscription_ | null> { return Promise.resolve(null); }
-  }
-  // SyncManager / PeriodicSyncManager (Chrome 49+/80+)
-  class SyncManager_ {
-    register(_tag: string): Promise<void> { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
-    getTags(): Promise<string[]> { return Promise.resolve([]); }
-  }
-  class PeriodicSyncManager_ {
-    register(_tag: string, _opts?: unknown): Promise<void> { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
-    unregister(_tag: string): Promise<void> { return Promise.resolve(); }
-    getTags(): Promise<string[]> { return Promise.resolve([]); }
-  }
-  // PageRevealEvent (Chrome 123+)
-  class PageRevealEvent_ extends VEvent {
-    viewTransition: unknown | null;
-    constructor(type: string, init: any = {}) { super(type, init); this.viewTransition = init.viewTransition ?? null; }
-  }
-  // SnapEvent (CSS Scroll Snap, Chrome 129+)
-  class SnapEvent_ extends VEvent {
-    snapTargetBlock: unknown | null; snapTargetInline: unknown | null;
-    constructor(type: string, init: any = {}) {
-      super(type, init); this.snapTargetBlock = init.snapTargetBlock ?? null; this.snapTargetInline = init.snapTargetInline ?? null;
-    }
-  }
-  // CSSPropertyRule (Houdini Properties & Values, Chrome 85+)
-  class CSSPropertyRule_ extends CSSRule_ {
-    name = ""; syntax = "*"; inherits = false; initialValue: string | null = null;
-    constructor(init: any = {}) {
-      super(); this.name = init.name ?? ""; this.syntax = init.syntax ?? "*";
-      this.inherits = init.inherits ?? false; this.initialValue = init.initialValue ?? null;
-    }
-  }
-  // ResizeObserverSize (Chrome 84+)
-  class ResizeObserverSize_ {
-    blockSize: number; inlineSize: number;
-    constructor(inline = 0, block = 0) { this.inlineSize = inline; this.blockSize = block; }
-  }
-  // TransformStreamDefaultController
-  class TransformStreamDefaultController_ {
-    desiredSize: number | null = 1;
-    enqueue(_chunk: unknown): void {}
-    error(_reason?: unknown): void {}
-    terminate(): void {}
-  }
-  // ScreenOrientation (Chrome 38+)
-  class ScreenOrientation_ extends VEventTarget {
-    angle = 0; type = "landscape-primary";
-    onchange: ((ev: VEvent) => void) | null = null;
-    lock(_orientation: string): Promise<void> { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
-    unlock(): void {}
-  }
-  // CSS Typed OM stubs (Chrome 66+)
-  class CSSStyleValue_ {
-    toString(): string { return ""; }
-    static parse(_p: string, _v: string): CSSStyleValue_ { return new CSSStyleValue_(); }
-    static parseAll(_p: string, _v: string): CSSStyleValue_[] { return []; }
-  }
-  class CSSNumericValue_ extends CSSStyleValue_ {
-    value = 0; unit = "";
-    constructor(v = 0, u = "") { super(); this.value = v; this.unit = u; }
-    add(..._vals: unknown[]): CSSNumericValue_ { return this; }
-    sub(..._vals: unknown[]): CSSNumericValue_ { return this; }
-    mul(..._vals: unknown[]): CSSNumericValue_ { return this; }
-    div(..._vals: unknown[]): CSSNumericValue_ { return this; }
-    min(..._vals: unknown[]): CSSNumericValue_ { return this; }
-    max(..._vals: unknown[]): CSSNumericValue_ { return this; }
-    equals(..._vals: unknown[]): boolean { return false; }
-    to(_unit: string): CSSNumericValue_ { return this; }
-    toSum(..._units: string[]): CSSNumericValue_ { return this; }
-    type(): unknown { return {}; }
-  }
-  class CSSUnitValue_ extends CSSNumericValue_ {
-    constructor(value: number, unit: string) { super(value, unit); }
-    toString(): string { return `${this.value}${this.unit}`; }
-  }
-  class CSSKeywordValue_ extends CSSStyleValue_ {
-    value: string;
-    constructor(v: string) { super(); this.value = v; }
-    toString(): string { return this.value; }
-  }
-  class StylePropertyMap_ {
-    _map = new Map<string, CSSStyleValue_>();
-    get(property: string): CSSStyleValue_ | undefined { return this._map.get(property); }
-    getAll(property: string): CSSStyleValue_[] { var v = this._map.get(property); return v ? [v] : []; }
-    has(property: string): boolean { return this._map.has(property); }
-    set(property: string, ...values: unknown[]): void { this._map.set(property, values[0] as CSSStyleValue_); }
-    append(_property: string, ..._values: unknown[]): void {}
-    delete(property: string): void { this._map.delete(property); }
-    clear(): void { this._map.clear(); }
-    forEach(fn: (v: CSSStyleValue_, k: string, m: StylePropertyMap_) => void): void { this._map.forEach((v, k) => fn(v, k, this)); }
-    get size(): number { return this._map.size; }
-    entries(): IterableIterator<[string, CSSStyleValue_]> { return this._map.entries(); }
-    keys(): IterableIterator<string> { return this._map.keys(); }
-    values(): IterableIterator<CSSStyleValue_> { return this._map.values(); }
-    [Symbol.iterator](): IterableIterator<[string, CSSStyleValue_]> { return this._map.entries(); }
-  }
-  // Sanitizer API (Chrome 105+)
-  class Sanitizer_ {
-    _config: unknown;
-    constructor(config?: unknown) { this._config = config; }
-    sanitize(_input: unknown): unknown { return _input; }
-    sanitizeFor(_element: string, _input: string): unknown { return null; }
-    getConfiguration(): unknown { return this._config ?? {}; }
-    static getDefaultConfiguration(): unknown { return {}; }
-  }
-  // Trusted Types stubs (Chrome 83+)
-  class TrustedHTML_ {
-    _value: string; constructor(v: string) { this._value = v; }
-    toString(): string { return this._value; }
-    toJSON(): string { return this._value; }
-  }
-  class TrustedScript_ {
-    _value: string; constructor(v: string) { this._value = v; }
-    toString(): string { return this._value; }
-    toJSON(): string { return this._value; }
-  }
-  class TrustedScriptURL_ {
-    _value: string; constructor(v: string) { this._value = v; }
-    toString(): string { return this._value; }
-    toJSON(): string { return this._value; }
-  }
-  class TrustedTypePolicy_ {
-    name: string;
-    constructor(name: string, _rules: unknown) { this.name = name; }
-    createHTML(input: string, ..._args: unknown[]): TrustedHTML_ { return new TrustedHTML_(input); }
-    createScript(input: string, ..._args: unknown[]): TrustedScript_ { return new TrustedScript_(input); }
-    createScriptURL(input: string, ..._args: unknown[]): TrustedScriptURL_ { return new TrustedScriptURL_(input); }
-  }
-  class TrustedTypePolicyFactory_ {
-    _policies = new Map<string, TrustedTypePolicy_>();
-    defaultPolicy: TrustedTypePolicy_ | null = null;
-    emptyHTML: TrustedHTML_ = new TrustedHTML_("");
-    emptyScript: TrustedScript_ = new TrustedScript_("");
-    createPolicy(name: string, rules?: unknown): TrustedTypePolicy_ {
-      var p = new TrustedTypePolicy_(name, rules ?? {});
-      this._policies.set(name, p);
-      if (name === "default") this.defaultPolicy = p;
-      return p;
-    }
-    isHTML(val: unknown): val is TrustedHTML_ { return val instanceof TrustedHTML_; }
-    isScript(val: unknown): val is TrustedScript_ { return val instanceof TrustedScript_; }
-    isScriptURL(val: unknown): val is TrustedScriptURL_ { return val instanceof TrustedScriptURL_; }
-    getAttributeType(_tagName: string, _attr: string, _ns?: string): string | null { return null; }
-    getPropertyType(_tagName: string, _prop: string, _ns?: string): string | null { return null; }
-    getPolicyNames(): string[] { return [...this._policies.keys()]; }
-    getTypeMapping(_ns?: string): unknown { return {}; }
-  }
-  // MessagePort (Chrome 1+) - needed for MessageChannel
-  class MessagePort_ extends VEventTarget {
-    onmessage: ((ev: VEvent) => void) | null = null;
-    onmessageerror: ((ev: VEvent) => void) | null = null;
-    _other: MessagePort_ | null = null;
-    postMessage(data: unknown, _transfer?: unknown): void {
-      var port = this._other;
-      if (!port) return;
-      var ev = new VEvent("message", { bubbles: false, cancelable: false });
-      (ev as any).data = data; (ev as any).source = null; (ev as any).lastEventId = ""; (ev as any).origin = "";
-      setTimeout_(() => { try { port!.dispatchEvent(ev); } catch(_) {} }, 0);
-    }
-    start(): void {}
-    close(): void {}
-  }
-  // WakeLockSentinel (Screen Wake Lock API, Chrome 84+)
-  class WakeLockSentinel_ extends VEventTarget {
-    released = false; type = "screen";
-    onrelease: ((ev: VEvent) => void) | null = null;
-    release(): Promise<void> { this.released = true; return Promise.resolve(); }
-  }
-  // LockManager (Web Locks API, Chrome 69+)
-  class Lock_ {
-    mode: string; name: string;
-    constructor(name: string, mode: string) { this.name = name; this.mode = mode; }
-  }
-  class LockManager_ {
-    request(name: string, cbOrOptions: unknown, cb?: (lock: Lock_) => unknown): Promise<unknown> {
-      var theCb = typeof cbOrOptions === "function" ? cbOrOptions as (lock: Lock_) => unknown : cb;
-      var opts: any = typeof cbOrOptions === "object" && cbOrOptions !== null ? cbOrOptions : {};
-      var mode = opts.mode ?? "exclusive";
-      if (!theCb) return Promise.resolve();
-      var lock = new Lock_(name, mode);
-      try { var result = (theCb as any)(lock); return Promise.resolve(result); } catch(e) { return Promise.reject(e); }
-    }
-    query(): Promise<unknown> { return Promise.resolve({ held: [], pending: [] }); }
-  }
-  // CacheStorage / Cache (Service Worker Caches API, Chrome 43+)
-  class Cache_ {
-    _entries: Map<string, unknown> = new Map();
-    match(request: unknown, _opts?: unknown): Promise<unknown> {
-      var url = typeof request === "string" ? request : (request as any)?.url ?? "";
-      return Promise.resolve(this._entries.get(url) ?? undefined);
-    }
-    matchAll(request?: unknown, _opts?: unknown): Promise<unknown[]> {
-      if (!request) return Promise.resolve([...this._entries.values()]);
-      var url = typeof request === "string" ? request : (request as any)?.url ?? "";
-      var v = this._entries.get(url); return Promise.resolve(v ? [v] : []);
-    }
-    add(_request: unknown): Promise<void> { return Promise.resolve(); }
-    addAll(_requests: unknown[]): Promise<void> { return Promise.resolve(); }
-    put(request: unknown, _response: unknown): Promise<void> {
-      var url = typeof request === "string" ? request : (request as any)?.url ?? "";
-      this._entries.set(url, _response); return Promise.resolve();
-    }
-    delete(request: unknown, _opts?: unknown): Promise<boolean> {
-      var url = typeof request === "string" ? request : (request as any)?.url ?? "";
-      return Promise.resolve(this._entries.delete(url));
-    }
-    keys(_request?: unknown, _opts?: unknown): Promise<unknown[]> { return Promise.resolve([...this._entries.keys()]); }
-  }
-  class CacheStorage_ {
-    _caches: Map<string, Cache_> = new Map();
-    match(request: unknown, opts?: unknown): Promise<unknown> {
-      for (var cache of this._caches.values()) {
-        var url = typeof request === "string" ? request : (request as any)?.url ?? "";
-        if (cache._entries.has(url)) return cache.match(request, opts);
-      }
-      return Promise.resolve(undefined);
-    }
-    has(cacheName: string): Promise<boolean> { return Promise.resolve(this._caches.has(cacheName)); }
-    open(cacheName: string): Promise<Cache_> {
-      if (!this._caches.has(cacheName)) this._caches.set(cacheName, new Cache_());
-      return Promise.resolve(this._caches.get(cacheName)!);
-    }
-    delete(cacheName: string): Promise<boolean> { return Promise.resolve(this._caches.delete(cacheName)); }
-    keys(): Promise<string[]> { return Promise.resolve([...this._caches.keys()]); }
-  }
-  // ServiceWorkerContainer stub (Chrome 40+)
-  class ServiceWorkerContainer_ extends VEventTarget {
-    controller: unknown | null = null;
-    ready: Promise<unknown> = new Promise(() => {}); // never resolves (no SW)
-    oncontrollerchange: ((ev: VEvent) => void) | null = null;
-    onmessage: ((ev: VEvent) => void) | null = null;
-    onmessageerror: ((ev: VEvent) => void) | null = null;
-    register(_scriptURL: string, _options?: unknown): Promise<unknown> {
-      return Promise.reject(new DOMException("Service workers are not supported in JSOS", "NotSupportedError"));
-    }
-    getRegistration(_scope?: string): Promise<unknown> { return Promise.resolve(undefined); }
-    getRegistrations(): Promise<unknown[]> { return Promise.resolve([]); }
-    startMessages(): void {}
-  }
-  // PaymentRequest (Chrome 60+) â€” stub so feature detection works
-  class PaymentRequest_ extends VEventTarget {
-    id = ""; shippingAddress: unknown | null = null; shippingOption: string | null = null; shippingType: string | null = null;
-    onshippingaddresschange: ((ev: VEvent) => void) | null = null;
-    onshippingoptionchange: ((ev: VEvent) => void) | null = null;
-    onpaymentmethodchange: ((ev: VEvent) => void) | null = null;
-    constructor(_methodData: unknown, _details: unknown, _options?: unknown) { super(); }
-    show(_details?: unknown): Promise<unknown> { return Promise.reject(new DOMException("Payment not supported", "NotSupportedError")); }
-    abort(): Promise<void> { return Promise.resolve(); }
-    canMakePayment(): Promise<boolean> { return Promise.resolve(false); }
-    hasEnrolledInstrument(): Promise<boolean> { return Promise.resolve(false); }
-    static canMakePayment(_data: unknown): Promise<boolean> { return Promise.resolve(false); }
-  }
-  // PublicKeyCredential / CredentialsContainer (WebAuthn, Chrome 67+)
-  class Credential_ {
-    id = ""; type = "";
-  }
-  class PublicKeyCredential_ extends Credential_ {
-    rawId: ArrayBuffer = new ArrayBuffer(0);
-    response: unknown = {};
-    authenticatorAttachment: string | null = null;
-    getClientExtensionResults(): unknown { return {}; }
-    toJSON(): unknown { return {}; }
-    static isConditionalMediationAvailable(): Promise<boolean> { return Promise.resolve(false); }
-    static isUserVerifyingPlatformAuthenticatorAvailable(): Promise<boolean> { return Promise.resolve(false); }
-    static parseCreationOptionsFromJSON(_opts: unknown): unknown { return _opts; }
-    static parseRequestOptionsFromJSON(_opts: unknown): unknown { return _opts; }
-  }
-  class CredentialsContainer_ {
-    get(_options?: unknown): Promise<Credential_ | null> { return Promise.resolve(null); }
-    create(_options?: unknown): Promise<Credential_ | null> { return Promise.reject(new DOMException("Credentials not supported", "NotSupportedError")); }
-    store(_credential: unknown): Promise<Credential_> { return Promise.reject(new DOMException("Credentials not supported", "NotSupportedError")); }
-    preventSilentAccess(): Promise<void> { return Promise.resolve(); }
-  }
-  // XR (WebXR Device API, Chrome 79+) â€” minimal stubs
-  class XRSystem_ extends VEventTarget {
-    ondevicechange: ((ev: VEvent) => void) | null = null;
-    isSessionSupported(_mode: string): Promise<boolean> { return Promise.resolve(false); }
-    requestSession(_mode: string, _opts?: unknown): Promise<unknown> { return Promise.reject(new DOMException("WebXR not supported", "NotSupportedError")); }
-  }
-  class XRSession_ extends VEventTarget {
-    renderState: unknown = {}; inputSources: unknown[] = [];
-    visibilityState = "hidden"; frameRate: number | null = null;
-    onend: ((ev: VEvent) => void) | null = null;
-    onselect: ((ev: VEvent) => void) | null = null;
-    onselectstart: ((ev: VEvent) => void) | null = null;
-    onselectend: ((ev: VEvent) => void) | null = null;
-    onsqueeze: ((ev: VEvent) => void) | null = null;
-    updateRenderState(_state?: unknown): void {}
-    requestReferenceSpace(_type: string): Promise<unknown> { return Promise.reject(new DOMException("WebXR not supported", "NotSupportedError")); }
-    requestAnimationFrame(_callback: (time: number, frame: unknown) => void): number { return 0; }
-    cancelAnimationFrame(_id: number): void {}
-    end(): Promise<void> { return Promise.resolve(); }
-  }
-  // BarcodeDetector / Shape Detection API (Chrome 83+)
-  class BarcodeDetector_ {
-    constructor(_opts?: unknown) {}
-    detect(_image: unknown): Promise<unknown[]> { return Promise.resolve([]); }
-    static getSupportedFormats(): Promise<string[]> { return Promise.resolve([]); }
-  }
-  class FaceDetector_ {
-    constructor(_opts?: unknown) {}
-    detect(_image: unknown): Promise<unknown[]> { return Promise.resolve([]); }
-  }
-  class TextDetector_ {
-    detect(_image: unknown): Promise<unknown[]> { return Promise.resolve([]); }
-  }
-  // NavigationPreloadManager (Service Worker, Chrome 62+)
-  class NavigationPreloadManager_ {
-    enable(): Promise<void> { return Promise.resolve(); }
-    disable(): Promise<void> { return Promise.resolve(); }
-    setHeaderValue(_value: string): Promise<void> { return Promise.resolve(); }
-    getState(): Promise<unknown> { return Promise.resolve({ enabled: false, headerValue: "true" }); }
-  }  class ReadableStreamDefaultReader_ {
+  class ReadableStreamDefaultReader_ {
     _stream: any;
     _done = false;
     constructor(stream: any) { this._stream = stream; }
@@ -3831,19 +2896,6 @@ export function createPageJS(
     get closed(): Promise<void> { return Promise.resolve(); }
   }
 
-  // -- ReadableStreamBYOBReader (stub) --------------------------------
-  class ReadableStreamBYOBReader_ {
-    _reader: ReadableStreamDefaultReader_;
-    constructor(stream: ReadableStream_) {
-      this._reader = (stream as any).getReader ? (stream as any).getReader() : new ReadableStreamDefaultReader_(stream);
-    }
-    read(_view: ArrayBufferView): Promise<{ done: boolean; value: ArrayBufferView | undefined }> {
-      return this._reader.read() as any;
-    }
-    cancel(_reason?: unknown): Promise<void> { return this._reader.cancel(_reason); }
-    releaseLock(): void { this._reader.releaseLock(); }
-    get closed(): Promise<void> { return this._reader.closed; }
-  }
   class ReadableStream_ {
     locked = false;
     _chunks: unknown[] = [];
@@ -3920,7 +2972,7 @@ export function createPageJS(
     size(chunk: ArrayBufferView): number { return chunk.byteLength; }
   }
 
-  // ── TextEncoderStream / TextDecoderStream (item 545 adjacent) ────────────
+  // ΓöÇΓöÇ TextEncoderStream / TextDecoderStream (item 545 adjacent) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class TextEncoderStream_ {
     readonly encoding = 'utf-8';
@@ -3966,8 +3018,8 @@ export function createPageJS(
     }
   }
 
-  // ── CompressionStream / DecompressionStream (item 545 adjacent) ──────────
-  // Stubs — pass data through unchanged; real compression not yet implemented.
+  // ΓöÇΓöÇ CompressionStream / DecompressionStream (item 545 adjacent) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  // Stubs ΓÇö pass data through unchanged; real compression not yet implemented.
 
   class CompressionStream_ {
     readonly format: string;
@@ -3993,7 +3045,7 @@ export function createPageJS(
     }
   }
 
-  // ── TextEncoder / TextDecoder ─────────────────────────────────────────────
+  // ΓöÇΓöÇ TextEncoder / TextDecoder ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class TextEncoder_ {
     readonly encoding = 'utf-8';
@@ -4033,7 +3085,7 @@ export function createPageJS(
     }
   }
 
-  // ── Patch Promise with polyfills if not natively available (item 510) ────
+  // ΓöÇΓöÇ Patch Promise with polyfills if not natively available (item 510) ΓöÇΓöÇΓöÇΓöÇ
   if (typeof (Promise as any).allSettled !== 'function') (Promise as any).allSettled = _PromiseAllSettled;
   if (typeof (Promise as any).any        !== 'function') (Promise as any).any        = _PromiseAny;
   // Promise.withResolvers (ES2024) polyfill
@@ -4045,8 +3097,8 @@ export function createPageJS(
     };
   }
 
-  // ── JavaScript built-in polyfills ─────────────────────────────────────────
-  // Object.fromEntries (ES2019) — might be missing in older QJS
+  // ΓöÇΓöÇ JavaScript built-in polyfills ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  // Object.fromEntries (ES2019) ΓÇö might be missing in older QJS
   if (typeof (Object as any).fromEntries !== 'function') {
     (Object as any).fromEntries = (entries: Iterable<[PropertyKey, unknown]>) => {
       var obj: Record<PropertyKey, unknown> = {};
@@ -4095,7 +3147,7 @@ export function createPageJS(
   if (typeof structuredClone === 'undefined') {
     (globalThis as any).structuredClone = (v: unknown) => JSON.parse(JSON.stringify(v));
   }
-  // String.prototype.trimStart / trimEnd (ES2019) – belt-and-suspenders
+  // String.prototype.trimStart / trimEnd (ES2019) ΓÇô belt-and-suspenders
   if (typeof (String.prototype as any).trimStart !== 'function') {
     (String.prototype as any).trimStart = function(this: string) { return this.replace(/^\s+/, ''); };
     (String.prototype as any).trimEnd   = function(this: string) { return this.replace(/\s+$/, ''); };
@@ -4117,7 +3169,7 @@ export function createPageJS(
       var copy = this.slice(); copy[index < 0 ? this.length + index : index] = value; return copy;
     };
   }
-  // TypedArray.prototype.at (ES2022) – applies to all typed array prototypes
+  // TypedArray.prototype.at (ES2022) ΓÇô applies to all typed array prototypes
   (function() {
     var _typedProtos = [
       Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
@@ -4144,7 +3196,7 @@ export function createPageJS(
       return result;
     };
   }
-  // Promise.any (ES2021) — in case QJS build is missing it
+  // Promise.any (ES2021) ΓÇö in case QJS build is missing it
   if (typeof Promise.any !== 'function') {
     (Promise as any).any = function<T>(promises: Iterable<Promise<T>>): Promise<T> {
       var arr = Array.from(promises);
@@ -4155,61 +3207,7 @@ export function createPageJS(
       });
     };
   }
-  // Promise.allSettled (ES2020) polyfill
-
-  if (typeof Promise.allSettled !== 'function') {
-
-    (Promise as any).allSettled = function<T>(promises: Iterable<Promise<T>>) {
-
-      var arr = Array.from(promises);
-
-      return Promise.all(arr.map((p: Promise<T>) => Promise.resolve(p).then(
-
-        (value: T) => ({ status: 'fulfilled' as const, value }),
-
-        (reason: unknown) => ({ status: 'rejected' as const, reason })
-
-      )));
-
-    };
-
-  }
-
-  // Array.fromAsync (ES2024) polyfill
-
-  if (typeof (Array as any).fromAsync !== 'function') {
-
-    (Array as any).fromAsync = async function fromAsync(source: any, mapFn?: any): Promise<any[]> {
-
-      var result: any[] = []; var i = 0;
-
-      if (source && typeof source[Symbol.asyncIterator] === 'function') {
-
-        for await (var item of source) { result.push(mapFn ? await mapFn(item, i++) : item); }
-
-      } else {
-
-        for (var item2 of source) { var resolved = await item2; result.push(mapFn ? await mapFn(resolved, i++) : resolved); }
-
-      }
-
-      return result;
-
-    };
-
-  }
-
-  // Promise.try (ES2025) polyfill
-
-  if (typeof (Promise as any).try !== 'function') {
-
-    (Promise as any).try = function promiseTry(fn: () => any): Promise<any> {
-
-      return new Promise((resolve, reject) => { try { resolve(fn()); } catch (e) { reject(e); } });
-
-    };
-
-  }  // Error.cause support (ES2022) — QJS 2021 may not pass it through
+  // Error.cause support (ES2022) ΓÇö QJS 2021 may not pass it through
   if (typeof Error !== 'undefined' && !(new Error('', { cause: 'x' } as any) as any).cause) {
     var _OrigError = Error;
     (globalThis as any).Error = function Error(msg?: string, opts?: { cause?: unknown }) {
@@ -4220,14 +3218,7 @@ export function createPageJS(
     (globalThis as any).Error.prototype = _OrigError.prototype;
   }
 
-  // ── RTCPeerConnection stub (item 541) ─────────────────────────────────────
-
-  // Iterator.from (ES2025 Stage 3) polyfill
-  if (typeof (Iterator as any).from !== 'function') {
-    (Iterator as any).from = function from(iterable: Iterable<unknown>) {
-      return (iterable as any)[Symbol.iterator]();
-    };
-  }
+  // ΓöÇΓöÇ RTCPeerConnection stub (item 541) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class RTCPeerConnection_ {
     localDescription: unknown = null; remoteDescription: unknown = null;
@@ -4278,7 +3269,7 @@ export function createPageJS(
     toJSON() { return { candidate: this.candidate, sdpMid: this.sdpMid, sdpMLineIndex: this.sdpMLineIndex }; }
   }
 
-  // ── Notification API (item 538) ────────────────────────────────────────────
+  // ΓöÇΓöÇ Notification API (item 538) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class Notification_ {
     static permission: string = 'default';
@@ -4307,7 +3298,7 @@ export function createPageJS(
     }
   }
 
-  // ── Selection API stub (item 581) ─────────────────────────────────────────
+  // ΓöÇΓöÇ Selection API stub (item 581) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var _selectionRanges: VRange[] = [];
   var _selection: {
@@ -4358,7 +3349,7 @@ export function createPageJS(
   // Wire document.getSelection() to the same selection object (item 581)
   (doc as any)._selectionRef = _selection;
 
-  // ── HTMLCanvasElement (2D context stub) ───────────────────────────────────
+  // ΓöÇΓöÇ HTMLCanvasElement (2D context stub) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   class HTMLCanvas {
     width = 300; height = 150;
@@ -4397,7 +3388,7 @@ export function createPageJS(
     getBoundingClientRect() { return { x:0, y:0, width:this.width, height:this.height, top:0, left:0, right:this.width, bottom:this.height }; }
   }
 
-  // ── Image() / Audio() constructors ─────────────────────────────────────
+  // ΓöÇΓöÇ Image() / Audio() constructors ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   class _Image_ extends VElement {
     constructor(width?: number, height?: number) {
       super('img');
@@ -4412,8 +3403,8 @@ export function createPageJS(
     }
   }
 
-  // ── matchMedia helper (item 373) ─────────────────────────────────────────
-  // Evaluate a CSS media query string against a fixed 1024×768 viewport.
+  // ΓöÇΓöÇ matchMedia helper (item 373) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  // Evaluate a CSS media query string against a fixed 1024├ù768 viewport.
   function _evalMediaQuery(query: string): boolean {
     var q = query.trim().toLowerCase();
     // Comma-separated OR
@@ -4438,7 +3429,7 @@ export function createPageJS(
       if (mtype === 'screen' || mtype === 'all') { q = q.slice(andIdx + 5).trim(); }
       else if (mtype === 'print' || mtype === 'speech') return false;
     }
-    // Evaluate individual feature queries inside parens — all parts ANDed
+    // Evaluate individual feature queries inside parens ΓÇö all parts ANDed
     var w = 1024, h = 768;
     var parts = q.match(/\([^)]+\)/g) || [q];
     return parts.every(part => {
@@ -4479,7 +3470,7 @@ export function createPageJS(
       // display-mode
       if (inner === 'display-mode: browser')  return true;
       if (inner.startsWith('display-mode:'))  return false;
-      // Unknown — be permissive
+      // Unknown ΓÇö be permissive
       return true;
     });
   }
@@ -4512,7 +3503,7 @@ export function createPageJS(
       if (mh2) { var v3 = parseFloat(mh2[2]); return mh2[1] === 'min' ? ch >= v3 : ch <= v3; }
       var ar2 = inner.match(/^(min-|max-)?aspect-ratio\s*:\s*(\d+)\s*\/\s*(\d+)$/);
       if (ar2) { var rat2 = parseInt(ar2[2]) / parseInt(ar2[3]); var act2 = cw / ch; return ar2[1] === 'min-' ? act2 >= rat2 : ar2[1] === 'max-' ? act2 <= rat2 : Math.abs(act2 - rat2) < 0.01; }
-      return true;  // unknown — permissive
+      return true;  // unknown ΓÇö permissive
     });
   }
 
@@ -4550,7 +3541,7 @@ export function createPageJS(
     return mql;
   }
 
-  // ── Build the global window object ────────────────────────────────────────
+  // ΓöÇΓöÇ Build the global window object ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var win: Record<string, unknown> = {
     // Self-references
@@ -4615,7 +3606,7 @@ export function createPageJS(
     ClipboardEvent,
     GamepadEvent,
     SecurityPolicyViolationEvent,
-    EventTarget: VEventTarget,  // VNode extends VEventTarget → instanceof EventTarget works (item 871)
+    EventTarget: VEventTarget,  // VNode extends VEventTarget ΓåÆ instanceof EventTarget works (item 871)
     DOMException,
     MutationObserver:    MutationObserverImpl,
     IntersectionObserver: IntersectionObserverImpl,
@@ -4767,7 +3758,7 @@ export function createPageJS(
     DOMMatrix:        DOMMatrix_,
     DOMMatrixReadOnly: DOMMatrixReadOnly_,
 
-    // XPathResult constants — used with document.evaluate()
+    // XPathResult constants ΓÇö used with document.evaluate()
     XPathResult: { ANY_TYPE: 0, NUMBER_TYPE: 1, STRING_TYPE: 2, BOOLEAN_TYPE: 3, UNORDERED_NODE_ITERATOR_TYPE: 4, ORDERED_NODE_ITERATOR_TYPE: 5, UNORDERED_NODE_SNAPSHOT_TYPE: 6, ORDERED_NODE_SNAPSHOT_TYPE: 7, ANY_UNORDERED_NODE_TYPE: 8, FIRST_ORDERED_NODE_TYPE: 9 },
 
     // Speech + Cache
@@ -4831,23 +3822,24 @@ export function createPageJS(
     onmessage:  null as unknown,
     onmessageerror: null as unknown,
     postMessage: (_data: unknown, _origin?: string): void => {},
-    // reportError — report an error to the console and fire window error event
+    // reportError ΓÇö report an error to the console and fire window error event
     reportError(err: unknown): void {
       cb.log('[reportError] ' + String(err));
       var ev = new VEvent('error', { bubbles: false, cancelable: true });
       (ev as any).error = err; (ev as any).message = String(err);
       try { doc.dispatchEvent(ev); } catch(_) {}
     },
-    // createImageBitmap — returns a resolved promise with a stub ImageBitmap
+    // createImageBitmap ΓÇö returns a resolved promise with a stub ImageBitmap
     createImageBitmap(_image: unknown, _sxOrOpts?: unknown, _sy?: number, _sw?: number, _sh?: number): Promise<unknown> {
       var bm = { width: 0, height: 0, close() {} };
       return Promise.resolve(bm);
     },
-    // Secure context flags (item 548 adjacent — needed for crypto.subtle, clipboard, etc.)
+    // Secure context flags (item 548 adjacent ΓÇö needed for crypto.subtle, clipboard, etc.)
     isSecureContext: true,          // treat JSOS as a secure context
     crossOriginIsolated: false,     // no SharedArrayBuffer isolation
-    // Trusted Types stub — checked by CSP-strict apps to see if API exists
-    // origin — used by service workers and fetch
+    // Trusted Types stub ΓÇö checked by CSP-strict apps to see if API exists
+    trustedTypes: null as unknown,
+    // origin ΓÇö used by service workers and fetch
     get origin(): string { try { return new URL_(cb.baseURL).origin; } catch(_) { return 'null'; } },
     dispatchEvent: (ev: VEvent) => {
       // Also invoke window.on<type> handler if set (item 530)
@@ -4860,7 +3852,7 @@ export function createPageJS(
     removeEventListener: (t: string, fn: (e: VEvent) => void) => doc.removeEventListener(t, fn),
 
     // Standard JS globals (in case scripts shadow these).
-    // Note: 'null' is intentionally omitted — it is a language literal and
+    // Note: 'null' is intentionally omitted ΓÇö it is a language literal and
     // including it as a window key causes "missing formal parameter" errors
     // in new Function() because the string "null" is a reserved word.
     undefined, NaN, Infinity, isFinite, isNaN, parseFloat, parseInt,
@@ -4900,246 +3892,9 @@ export function createPageJS(
     requestIdleCallback,
     cancelIdleCallback,
     structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
-
-    // -- New event / media / speech constructors ---------------------------------
-    ToggleEvent,
-    Highlight: Highlight_,
-    CloseWatcher: CloseWatcher_,
-    EyeDropper: EyeDropper_,
-    MediaStream: MediaStream_,
-    MediaStreamTrack: MediaStreamTrack_,
-    MediaRecorder: MediaRecorder_,
-    WebTransport: WebTransport_,
-    SpeechRecognition: SpeechRecognition_,
-    webkitSpeechRecognition: SpeechRecognition_,
-    SpeechGrammar: SpeechGrammar_,
-    SpeechGrammarList: SpeechGrammarList_,
-    webkitSpeechGrammarList: SpeechGrammarList_,
-    MediaMetadata: MediaMetadata_,
-
-    // -- Prioritized Task Scheduling / Picture-in-Picture -----------------------
-    TaskController: TaskController_,
-    TaskPriorityChangeEvent: VEvent,
-    documentPictureInPicture,
-
-    // -- CSS rule constructors (additional) ------------------------------------
-    CSSContainerRule: CSSContainerRule_,
-    CSSLayerBlockRule: CSSRule_,
-    CSSLayerStatementRule: CSSRule_,
-
-    // -- Launch Queue API (Chrome 98+) -----------------------------------------
-    launchQueue: {
-      _handlers: [] as any[],
-      setConsumer(fn: (launchParams: unknown) => void): void { this._handlers = [fn]; },
-    },
-
-    // -- PerformanceEntry subclass constructors (instanceof checks) ------------
-    PerformanceEntry: Object,
-    PerformanceMark: Object,
-    PerformanceMeasure: Object,
-    PerformanceResourceTiming: Object,
-    PerformanceNavigationTiming: Object,
-    PerformancePaintTiming: Object,
-    PerformanceLongTaskTiming: Object,
-    PerformanceEventTiming: Object,
-
-    // -- Cookie Store API (Chrome 87+) -----------------------------------------
-    cookieStore: {
-      get(name: string): Promise<unknown> { return Promise.resolve(null); },
-      getAll(_name?: string): Promise<unknown[]> { return Promise.resolve([]); },
-      set(_name: string, _value?: string): Promise<void> { return Promise.resolve(); },
-      delete(_name: string): Promise<void> { return Promise.resolve(); },
-      onchange: null as any,
-      addEventListener(_t: string, _fn: unknown): void {},
-      removeEventListener(_t: string, _fn: unknown): void {},
-    },
-
-    // -- WebGPU stub (Chrome 113+) -- not supported but stub for feature detect --
-    // navigator.gpu is on navigator, handled below; this is for GPU types
-    GPUValidationError: Object,
-    GPUOutOfMemoryError: Object,
-    GPUPipelineError: Object,
-
-    // -- ReadableStreamBYOBReader (Chrome 89+) ---------------------------------
-    ReadableStreamBYOBReader: ReadableStreamBYOBReader_,
-
-    // -- IDB constructors (for instanceof checks) --------------------------------
-    IDBRequest: IDBRequest_,
-    IDBOpenDBRequest: IDBRequest_,
-    IDBDatabase: IDBDatabase_,
-    IDBTransaction: IDBTransaction_,
-    IDBObjectStore: IDBObjectStore_,
-    IDBCursor: Object,
-    IDBCursorWithValue: Object,
-    IDBIndex: Object,
-
-    // -- Additional event constructors ------------------------------------
-    PromiseRejectionEvent,
-    FormDataEvent,
-    DeviceMotionEvent,
-    DeviceOrientationEvent,
-
-    // -- ViewTransition API -----------------------------------------------
-    ViewTransition: ViewTransition_,
-
-    // -- Window Controls Overlay (Chrome 93+ PWA) -------------------------
-    windowControlsOverlay: {
-      visible: false,
-      getTitlebarAreaRect(): DOMRect_ { return new DOMRect_(0, 0, 0, 0); },
-      ongeometrychange: null as any,
-      addEventListener(_t: string, _fn: unknown): void {},
-      removeEventListener(_t: string, _fn: unknown): void {},
-    },
-
-    // -- Screen Details API (Chrome 100+) - multi-screen -------------------
-    getScreenDetails(): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'Not supported')); },
-
-    // -- SVG / MathML element constructors (for instanceof) ---------------
-    SVGElement: VElement,
-    SVGSVGElement: VElement,
-    SVGPathElement: VElement,
-    MathMLElement: VElement,
-
-    // -- DOM node constructors (for instanceof) ---------------------------
-    Text: VNode,
-    CDATASection: VNode,
-    Comment: VNode,
-    Attr: Object,
-    NodeFilter: { SHOW_ALL: 0xFFFFFFFF, SHOW_ELEMENT: 0x1, SHOW_TEXT: 0x4, SHOW_COMMENT: 0x80, FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3 },
-    TreeWalker: Object,
-    NodeIterator: Object,
-    Selection: Object,
-
-    // -- Audio Worklet (Chrome 66+) ----------------------------------------
-    AudioWorkletNode: AudioNode_,
-    OfflineAudioContext: AudioContext_,
-
-    // -- URLPattern (Chrome 95+) ------------------------------------------
-    URLPattern: URLPattern_,
-
-    // -- FileSystem API (for instanceof/feature detect) --------------------
-    FileSystemHandle: Object,
-    FileSystemFileHandle: Object,
-    FileSystemDirectoryHandle: Object,
-    FileSystemWritableFileStream: Object,
-
-    // -- WebCodecs (Chrome 94+) -----------------------------------------------
-    VideoDecoder:       VideoDecoder_,
-    VideoEncoder:       VideoEncoder_,
-    AudioDecoder:       AudioDecoder_,
-    AudioEncoder:       AudioEncoder_,
-    ImageDecoder:       ImageDecoder_,
-    ImageTrack:         ImageTrack_,
-    ImageTrackList:     ImageTrackList_,
-    VideoFrame:         VideoFrame_,
-    AudioData:          AudioData_,
-    VideoColorSpace:    VideoColorSpace_,
-    EncodedVideoChunk:  EncodedVideoChunk_,
-    EncodedAudioChunk:  EncodedAudioChunk_,
-
-    // -- Navigation API events (Chrome 102+) ----------------------------------
-    NavigateEvent:                     NavigateEvent_,
-    NavigationCurrentEntryChangeEvent: NavigationCurrentEntryChangeEvent_,
-
-    // -- Scroll-driven animations (Chrome 115+) -------------------------------
-    ScrollTimeline: ScrollTimeline_,
-    ViewTimeline:   ViewTimeline_,
-
-    // -- Reporting API (Chrome 69+) -------------------------------------------
-    ReportingObserver: ReportingObserver_,
-
-    // -- Contacts (Android Chrome 80+) ----------------------------------------
-    ContactsManager: ContactsManager_,
-
-    // -- PictureInPicture -----------------------------------------------------
-    PictureInPictureWindow: PictureInPictureWindow_,
-    PictureInPictureEvent:  VEvent,
-
-    // -- Push / Background Sync -----------------------------------------------
-    PushManager:          PushManager_,
-    PushSubscription:     PushSubscription_,
-    PushMessageData:      Object,
-    PushEvent:            VEvent,
-    SyncManager:          SyncManager_,
-    PeriodicSyncManager:  PeriodicSyncManager_,
-
-    // -- PageRevealEvent / SnapEvent ------------------------------------------
-    PageRevealEvent: PageRevealEvent_,
-    SnapEvent:       SnapEvent_,
-
-    // -- CSS Houdini ----------------------------------------------------------
-    CSSPropertyRule:    CSSPropertyRule_,
-    ResizeObserverSize: ResizeObserverSize_,
-
-    // -- Streams writers/controllers ------------------------------------------
-    WritableStreamDefaultWriter:       WritableStreamDefaultWriter_,
-    TransformStreamDefaultController:  TransformStreamDefaultController_,
-
-    // -- ScreenOrientation (Chrome 38+) ----------------------------------------
-    ScreenOrientation: ScreenOrientation_,
-
-    // -- CSS Typed OM (Chrome 66+) ---------------------------------------------
-    CSSStyleValue:    CSSStyleValue_,
-    CSSNumericValue:  CSSNumericValue_,
-    CSSUnitValue:     CSSUnitValue_,
-    CSSKeywordValue:  CSSKeywordValue_,
-    StylePropertyMap: StylePropertyMap_,
-
-    // -- Sanitizer API (Chrome 105+) ------------------------------------
-    Sanitizer: Sanitizer_,
-
-    // -- Trusted Types (Chrome 83+) -------------------------------------
-    TrustedHTML:              TrustedHTML_,
-    TrustedScript:            TrustedScript_,
-    TrustedScriptURL:         TrustedScriptURL_,
-    TrustedTypePolicy:        TrustedTypePolicy_,
-    TrustedTypePolicyFactory: TrustedTypePolicyFactory_,
-    trustedTypes:             new TrustedTypePolicyFactory_(),
-
-    // -- MessagePort --------------------------------------------------
-    MessagePort: MessagePort_,
-
-    // -- WakeLock (Chrome 84+) -----------------------------------------
-    WakeLockSentinel: WakeLockSentinel_,
-
-    // -- Web Locks (Chrome 69+) ----------------------------------------
-    Lock:        Lock_,
-    LockManager: LockManager_,
-
-    // -- CacheStorage / Cache (Chrome 43+) ----------------------------
-    caches:       new CacheStorage_(),
-    Cache:        Cache_,
-    CacheStorage: CacheStorage_,
-
-    // -- ServiceWorkerContainer ----------------------------------------
-    ServiceWorkerContainer: ServiceWorkerContainer_,
-
-    // -- PaymentRequest (Chrome 60+) -----------------------------------
-    PaymentRequest:           PaymentRequest_,
-    PaymentResponse:          Object,
-    PaymentMethodChangeEvent: VEvent,
-
-    // -- WebAuthn (Chrome 67+) ----------------------------------------
-    Credential:           Credential_,
-    PublicKeyCredential:  PublicKeyCredential_,
-    CredentialsContainer: CredentialsContainer_,
-
-    // -- WebXR (Chrome 79+) -------------------------------------------
-    XRSystem:         XRSystem_,
-    XRSession:        XRSession_,
-    XRRigidTransform: Object,
-    XRFrame:          Object,
-
-    // -- Shape Detection API (Chrome 83+) -----------------------------
-    BarcodeDetector: BarcodeDetector_,
-    FaceDetector:    FaceDetector_,
-    TextDetector:    TextDetector_,
-
-    // -- NavigationPreloadManager (Chrome 62+) ------------------------
-    NavigationPreloadManager: NavigationPreloadManager_,
   };
 
-  // ── Wire localStorage/sessionStorage → `storage` events (item 500) ────────
+  // ΓöÇΓöÇ Wire localStorage/sessionStorage ΓåÆ `storage` events (item 500) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   function _makeStorageListener(area: VStorage): (key: string | null, old: string | null, nxt: string | null) => void {
     return (key: string | null, old: string | null, nxt: string | null) => {
       var ev = new StorageEvent('storage', {
@@ -5153,7 +3908,7 @@ export function createPageJS(
   _localStorage._listener   = _makeStorageListener(_localStorage);
   _sessionStorage._listener = _makeStorageListener(_sessionStorage);
 
-  // ── Patch doc.createElement to return HTMLCanvas for <canvas> ─────────────
+  // ΓöÇΓöÇ Patch doc.createElement to return HTMLCanvas for <canvas> ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   {
     var _origCreateElement = doc.createElement.bind(doc);
@@ -5163,7 +3918,7 @@ export function createPageJS(
     };
   }
 
-  // ── Wire on* attribute handlers ───────────────────────────────────────────
+  // ΓöÇΓöÇ Wire on* attribute handlers ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   function wireHandlers(root: VElement, _ctx: Record<string, unknown>): void {
     _walk(root, el => {
@@ -5183,18 +3938,18 @@ export function createPageJS(
     });
   }
 
-  // ── Page-script execution scope ────────────────────────────────────────────
+  // ΓöÇΓöÇ Page-script execution scope ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   // A Proxy over `win` that simulates a browser's global object for page scripts.
   //
-  //  • has()  → always true: `with(_winScope)` channels ALL identifier lookups
+  //  ΓÇó has()  ΓåÆ always true: `with(_winScope)` channels ALL identifier lookups
   //              through here first, mirroring how real browsers resolve globals.
-  //  • get()  → return win[key] if present, else fall back to the QJS global
-  //              (Math, Promise, ArrayBuffer, …) so built-ins remain accessible.
-  //  • set()  → write directly to win so bare `gbar = {}` persists as window.gbar
-  //              across subsequent scripts — exactly like a real browser's global.
+  //  ΓÇó get()  ΓåÆ return win[key] if present, else fall back to the QJS global
+  //              (Math, Promise, ArrayBuffer, ΓÇª) so built-ins remain accessible.
+  //  ΓÇó set()  ΓåÆ write directly to win so bare `gbar = {}` persists as window.gbar
+  //              across subsequent scripts ΓÇö exactly like a real browser's global.
   //
   // Using with(Proxy) instead of new Function(...Object.keys(win)) eliminates the
-  // "missing formal parameter" class of errors (reserved words, dotted names, …)
+  // "missing formal parameter" class of errors (reserved words, dotted names, ΓÇª)
   // and makes dynamically-added window properties visible without re-enumeration.
   var _winScope: any = new Proxy(win as any, {
     has(_t: any, _k: any): boolean { return true; },
@@ -5202,19 +3957,19 @@ export function createPageJS(
     set(t: any, k: string, v: any): boolean { t[k] = v; return true; },
   });
 
-  // ── Stage-2 global bridge ─────────────────────────────────────────────────
+  // ΓöÇΓöÇ Stage-2 global bridge ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   // QJS rejects class declarations (static blocks, extends, private fields,
   // any class body) inside with() blocks. When stage-1 falls through to stage-2
   // we run `new Function(code).call(win)`, where `this` = win but bare identifier
-  // lookups still go through globalThis — NOT win.
+  // lookups still go through globalThis ΓÇö NOT win.
   //
   // To fix this we define configurable getters/setters on QJS's globalThis for
   // every win property not already present there.  After bridging:
-  //   • bare `document` resolves to win.document ✓
-  //   • bare `console` resolves to win.console ✓
-  //   • bare `fetch` resolves to win.fetch ✓
-  //   • bare `window.foo = bar` → sets on win ✓ (window getter returns win)
-  //   • Existing QJS builtins (Math, Array, Promise …) are left intact ✓
+  //   ΓÇó bare `document` resolves to win.document Γ£ô
+  //   ΓÇó bare `console` resolves to win.console Γ£ô
+  //   ΓÇó bare `fetch` resolves to win.fetch Γ£ô
+  //   ΓÇó bare `window.foo = bar` ΓåÆ sets on win Γ£ô (window getter returns win)
+  //   ΓÇó Existing QJS builtins (Math, Array, Promise ΓÇª) are left intact Γ£ô
   //
   // Bindings are removed in dispose() so they don't outlive the page.
   var _bridgedKeys: string[] = [];
@@ -5222,7 +3977,7 @@ export function createPageJS(
     var winKeys = Object.keys(win);
     for (var _bi = 0; _bi < winKeys.length; _bi++) {
       var _bk = winKeys[_bi];
-      // Skip keys already on QJS globalThis (builtins: Math, Array, Promise…)
+      // Skip keys already on QJS globalThis (builtins: Math, Array, PromiseΓÇª)
       if (_bk in (globalThis as any)) continue;
       try {
         (function(key: string) {
@@ -5244,16 +3999,16 @@ export function createPageJS(
     _bridgedKeys = [];
   }
 
-  // ── JS source prep for `with()` execution wrapper ────────────────────────
+  // ΓöÇΓöÇ JS source prep for `with()` execution wrapper ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   //
   // QuickJS 2025-09-13 supports all ES2022/2023 syntax natively (static blocks,
   // ergonomic brand checks, reserved-word property keys, private fields, etc.).
-  // We must NOT try to "fix" valid syntax – transforming it only introduces bugs.
+  // We must NOT try to "fix" valid syntax ΓÇô transforming it only introduces bugs.
   //
   // The ONLY preparation needed for the with(__s__){} wrapper is:
-  //   1. Strip hashbang (#!) – QJS allows it in top-level scripts but not inside
+  //   1. Strip hashbang (#!) ΓÇô QJS allows it in top-level scripts but not inside
   //      a function body (which is what new Function() creates).
-  //   2. Strip `'use strict'` / `"use strict"` directives – with() is forbidden
+  //   2. Strip `'use strict'` / `"use strict"` directives ΓÇô with() is forbidden
   //      in strict-mode code.  Inside the with(){} block the directive is just an
   //      expression statement so it never activates strict mode anyway; stripping
   //      it prevents edge-cases where the engine sees it as a directive.
@@ -5268,7 +4023,7 @@ export function createPageJS(
       ? raw.replace(/^#!.*/, '') : raw;
     // Strip leading 'use strict' directive
     s = s.replace(/^\s*(?:'use strict'|"use strict")\s*;?/, '');
-    // Replace dynamic import() — QJS rejects native import() inside new Function()
+    // Replace dynamic import() ΓÇö QJS rejects native import() inside new Function()
     s = s.replace(/\bimport\s*\(/g, '__jsos_dynamic_import__(');
     return s;
   }
@@ -5285,7 +4040,7 @@ export function createPageJS(
         checkDirty();
       };
     } catch(e) {
-      // with() failed (e.g. class body inside handler) — run without scope proxy
+      // with() failed (e.g. class body inside handler) ΓÇö run without scope proxy
       try {
         var raw2 = code.charCodeAt(0) === 35 && code.charCodeAt(1) === 33
           ? code.replace(/^#!.*/, '') : code;
@@ -5301,7 +4056,7 @@ export function createPageJS(
     }
   }
 
-  // ── Execute a script code string in the window context ────────────────────
+  // ΓöÇΓöÇ Execute a script code string in the window context ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   function _fireScriptError(e: any): void {
     cb.log('[JS error] ' + String(e));
@@ -5331,7 +4086,7 @@ export function createPageJS(
     } catch (e) {
       var msg = String(e);
       if (msg.indexOf('SyntaxError') === -1) {
-        // Runtime error — report and return. No point retrying with raw code.
+        // Runtime error ΓÇö report and return. No point retrying with raw code.
         _fireScriptError(e);
         checkDirty();
         return;
@@ -5341,7 +4096,7 @@ export function createPageJS(
     // Stage 2: with() wrapper caused a SyntaxError.
     // This happens when the script contains syntax that QJS rejects inside a
     // with() block (e.g. class static-init blocks, class declarations).
-    // Fall back to running the RAW code directly — no transforms, no scope proxy.
+    // Fall back to running the RAW code directly ΓÇö no transforms, no scope proxy.
     // `this` is bound to win so `this.foo = bar` persists as window.foo.
     // The globalThis bridge (set up at runtime init) makes bare names like
     // `document`, `console`, `fetch` etc. resolve to win's properties.
@@ -5355,7 +4110,7 @@ export function createPageJS(
       var msg2 = String(e2);
       if (msg2.indexOf('SyntaxError') !== -1) {
         // Both stage 1 and stage 2 failed with SyntaxErrors.
-        // Report the stage-2 error (raw code) since it's more meaningful —
+        // Report the stage-2 error (raw code) since it's more meaningful ΓÇö
         // stage-1 error includes the with() wrapper noise.
         _fireScriptError(e2);
       } else {
@@ -5366,7 +4121,7 @@ export function createPageJS(
   }
 
 
-  // ── Load external scripts synchronously via fetchAsync ───────────────────
+  // ΓöÇΓöÇ Load external scripts synchronously via fetchAsync ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   function loadExternalScript(src: string, done: (code?: string) => void, noAutoExec = false): void {
     var url = src.startsWith('http') ? src : _resolveURL(src, _baseHref);
@@ -5381,19 +4136,19 @@ export function createPageJS(
     });
   }
 
-  // ── Run all collected scripts sequentially ────────────────────────────────
+  // ΓöÇΓöÇ Run all collected scripts sequentially ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   // Module registry for basic import() support (item 534)
   var _moduleCache: Map<string, unknown> = new Map();
 
-  // importmap registry — populated by <script type="importmap"> tags
+  // importmap registry ΓÇö populated by <script type="importmap"> tags
   var _importMap: Map<string, string> = new Map();
 
   /** Resolve a module specifier through the importmap, then against baseHref. */
   function _resolveModuleSpecifier(specifier: string, fromURL?: string): string {
     // 1. importmap bare-specifier lookup
     if (_importMap.has(specifier)) return _importMap.get(specifier)!;
-    // 2. Prefix match ("lit/" → "https://cdn.skypack.dev/lit/")
+    // 2. Prefix match ("lit/" ΓåÆ "https://cdn.skypack.dev/lit/")
     for (var _entry of Array.from(_importMap.entries())) {
       var _key = _entry[0];
       if (_key.endsWith('/') && specifier.startsWith(_key)) {
@@ -5422,7 +4177,7 @@ export function createPageJS(
           var modFn = new Function('__jsos_dynamic_import__', transformed) as (di: unknown) => void;
           modFn.call(win, __jsos_dynamic_import__);
           // Access __esm_exports through a second pass (it's var-scoped inside modFn)
-          // Re-run to capture exports — use a returns-exports wrapper
+          // Re-run to capture exports ΓÇö use a returns-exports wrapper
           var wrapFn = new Function('__jsos_dynamic_import__',
             transformed + '\nreturn __esm_exports;') as (di: unknown) => Record<string, unknown>;
           var exports: Record<string, unknown> = wrapFn.call(win, __jsos_dynamic_import__);
@@ -5453,7 +4208,7 @@ export function createPageJS(
     // Replace `import.meta` with our injected variable
     var transformed = code.replace(/\bimport\.meta\b/g, 'import_meta');
     // Replace dynamic import() expressions BEFORE stripping static imports
-    // import('specifier')  →  __jsos_dynamic_import__('specifier')
+    // import('specifier')  ΓåÆ  __jsos_dynamic_import__('specifier')
     // This must come before the static-import strip so we don't accidentally strip these
     transformed = transformed.replace(/\bimport\s*\(/g, '__jsos_dynamic_import__(');
     // Strip bare top-level import statements (import x from 'y'; import { a } from 'b';)
@@ -5468,7 +4223,7 @@ export function createPageJS(
 
   function runScripts(idx: number): void {
     if (idx >= scripts.length) {
-      // All scripts done — fire DOMContentLoaded (interactive), then load (complete)
+      // All scripts done ΓÇö fire DOMContentLoaded (interactive), then load (complete)
       (doc as any)._readyState = 'interactive';
       var dclEv = new VEvent('DOMContentLoaded', { bubbles: true });
       doc.dispatchEvent(dclEv);
@@ -5514,7 +4269,7 @@ export function createPageJS(
   }
 
 
-  // ── Wire handlers then kick off script execution ──────────────────────────
+  // ΓöÇΓöÇ Wire handlers then kick off script execution ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   // Post-win wiring: connect doc back to win and page URL
   (doc as any)._defaultView = win;
@@ -5595,7 +4350,7 @@ export function createPageJS(
 
   runScripts(0);
 
-  // ── PageJS interface returned to BrowserApp ───────────────────────────────
+  // ΓöÇΓöÇ PageJS interface returned to BrowserApp ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
   var disposed = false;
 
@@ -5618,7 +4373,7 @@ export function createPageJS(
     fireClick(id: string): boolean {
       return fireAndCheck(() => {
         var el = findEl(id); if (!el) return;
-        // mousedown → mouseup → click sequence
+        // mousedown ΓåÆ mouseup ΓåÆ click sequence
         for (var et of ['mousedown', 'mouseup', 'click'] as const) {
           var ev: any = new VEvent(et, { bubbles: true, cancelable: true });
           ev.button = 0; ev.buttons = et === 'mouseup' ? 0 : 1;

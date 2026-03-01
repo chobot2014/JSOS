@@ -41,9 +41,19 @@ export class WorkerErrorEvent {
 export class MessagePort {
   private _other:    MessagePort | null = null;
   private _queue:    unknown[]          = [];
-  onmessage: ((ev: WorkerMessageEvent) => void) | null = null;
+  private _onmessage: ((ev: WorkerMessageEvent) => void) | null = null;
   onmessageerror: ((ev: WorkerErrorEvent) => void) | null = null;
   private _started = false;
+
+  // Spec: setting onmessage implicitly calls start() and drains the queue
+  get onmessage(): ((ev: WorkerMessageEvent) => void) | null { return this._onmessage; }
+  set onmessage(fn: ((ev: WorkerMessageEvent) => void) | null) {
+    this._onmessage = fn;
+    if (fn) {
+      // Setting onmessage implicitly calls start() per WHATWG spec
+      this.start();
+    }
+  }
 
   _pair(other: MessagePort): void { this._other = other; }
 
@@ -57,29 +67,42 @@ export class MessagePort {
   }
 
   _enqueue(data: unknown): void {
-    if (this._started && this.onmessage) {
-      try { this.onmessage(new WorkerMessageEvent(data)); } catch (_) {}
+    if (this._started && this._onmessage) {
+      // Deliver asynchronously (macrotask) to match browser MessageChannel semantics.
+      // React 18's concurrent scheduler requires this task-boundary to yield properly.
+      var _self = this;
+      var _data = data;
+      setTimeout(function() {
+        try { if (_self._onmessage) _self._onmessage(new WorkerMessageEvent(_data)); } catch (_) {}
+      }, 0);
     } else {
       this._queue.push(data);
     }
   }
 
   start(): void {
+    if (this._started) return;
     this._started = true;
-    while (this._queue.length > 0 && this.onmessage) {
-      var d = this._queue.shift();
-      try { this.onmessage(new WorkerMessageEvent(d)); } catch (_) {}
+    // Drain any queued messages asynchronously
+    if (this._queue.length > 0 && this._onmessage) {
+      var _drained = this._queue.splice(0);
+      var _self = this;
+      setTimeout(function() {
+        for (var _d of _drained) {
+          try { if (_self._onmessage) _self._onmessage(new WorkerMessageEvent(_d)); } catch (_) {}
+        }
+      }, 0);
     }
   }
 
   close(): void {
-    this._other   = null;
-    this._queue   = [];
-    this.onmessage = null;
+    this._other    = null;
+    this._queue    = [];
+    this._onmessage = null;
   }
 
   addEventListener(type: string, fn: (ev: WorkerMessageEvent | WorkerErrorEvent) => void): void {
-    if (type === 'message') this.onmessage = fn as (ev: WorkerMessageEvent) => void;
+    if (type === 'message') { this.onmessage = fn as (ev: WorkerMessageEvent) => void; }
     if (type === 'messageerror') this.onmessageerror = fn as (ev: WorkerErrorEvent) => void;
   }
 
@@ -100,8 +123,7 @@ export class MessageChannel {
     this.port2 = new MessagePort();
     this.port1._pair(this.port2);
     this.port2._pair(this.port1);
-    this.port1.start();
-    this.port2.start();
+    // Don't auto-start — ports start implicitly when onmessage is set (per spec)
   }
 }
 

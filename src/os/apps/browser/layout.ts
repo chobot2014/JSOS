@@ -69,6 +69,7 @@ export function flowSpans(
       var rsp: RenderedSpan = { x: curX, text: display, color: clr };
       if (sp.href)      rsp.href      = sp.href;
       if (sp.download)  rsp.download  = sp.download;  // item 636
+      if (sp.elId)      rsp.elId      = sp.elId;  // JS click-dispatch hit-test ID
       if (sp.bold)      rsp.bold      = true;
       if (sp.italic)    rsp.italic    = true;
       if (sp.del)       rsp.del       = true;

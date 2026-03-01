@@ -422,7 +422,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
           prev.bold      === sp.bold      && prev.italic    === sp.italic    &&
           prev.code      === sp.code      && prev.del       === sp.del       &&
           prev.mark      === sp.mark      && prev.underline === sp.underline &&
-          prev.color     === sp.color) {
+          prev.color     === sp.color     && prev.elId      === sp.elId) {
         prev.text += sp.text;
       } else {
         merged.push({ ...sp });
@@ -526,6 +526,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     if (mark > 0)                          sp.mark      = true;
     if (underline > 0 || curCSS.underline) sp.underline = true;
     if (curCSS.color !== undefined && !linkHref) sp.color = curCSS.color;
+    if (curCSS._onclickElId && !linkHref) sp.elId = curCSS._onclickElId;
     if (openBlock) { openBlock.spans.push(sp); }
     else           { inlineSpans.push(sp); }
   }
@@ -544,7 +545,20 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     var cls = (attrs.get('class') || '').split(/\s+/).filter(Boolean);
     var inl = attrs.get('style') || '';
     var hasPseudo = sheets.length > 0;
-    if (!inl && !hasPseudo) { cssStack.push({ ...curCSS }); return false; }
+    // Determine if this element has a JS click handler that needs hit-test dispatch.
+    // data-jsos-el is auto-set by VElement.addEventListener(); inline onclick is a fallback.
+    var jselId = attrs.get('data-jsos-el') ||
+                 (attrs.has('onclick') ? (attrs.get('id') || attrs.get('data-jsos-el') || '_ocl') : '') ||
+                 '';
+    if (!inl && !hasPseudo) {
+      cssStack.push({ ...curCSS });
+      if (jselId || curCSS._onclickElId) {
+        curCSS = { ...curCSS };
+        if (jselId) curCSS._onclickElId = attrs.get('data-jsos-el') || id || jselId;
+        // Inherit parent _onclickElId if no override on this element.
+      }
+      return false;
+    }
     var ep = computeElementStyle(tag, id, cls, attrs, curCSS, sheets, inl);
     // Apply counter-reset / counter-increment from computed style (item 434)
     _applyCounters(ep);
@@ -553,6 +567,9 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
       if (pseudo.before) ep._pseudoBefore = pseudo.before;
       if (pseudo.after)  ep._pseudoAfter  = pseudo.after;
     }
+    // Propagate click-dispatch ID into the CSS scope so pushSpan can attach it.
+    if (jselId) ep._onclickElId = attrs.get('data-jsos-el') || id || jselId;
+    else        ep._onclickElId = ep._onclickElId || curCSS._onclickElId;  // inherit
     pushCSS(ep);
     // Inject ::before span immediately (before element content)
     if (curCSS._pseudoBefore) pushSpan(curCSS._pseudoBefore);
@@ -721,6 +738,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
             var lHref = tok.attrs.get('href') || '';
             if (lHref) styleLinks.push(lHref);
           }
+          // <link rel="modulepreload"> — our ESM loader pre-fetches deps recursively, so this is a no-op
           // Favicon from <link rel="icon"> or <link rel="shortcut icon"> (item 628)
           if ((lRel === 'icon' || lRel === 'shortcut icon') && !favicon) {
             var iconHref = tok.attrs.get('href') || '';

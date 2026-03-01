@@ -107,6 +107,8 @@ export class BrowserApp implements App {
   private _status      = '';
   private _dirty       = true;
   private _hoverHref   = '';
+  private _hoverElId   = '';  // JS-element currently under the mouse pointer
+  private _focusedWidgetName = '';  // name of currently JS-focused widget for blur tracking;
 
   // Form / widget state
   private _forms:         FormState[]         = [];
@@ -507,8 +509,20 @@ export class BrowserApp implements App {
           this._navigate(resolved);
           return;
         }
+        // Dispatch JS click for spans that belong to an element with a click handler.
+        // Use _hitTestAnySpan to find elId-only spans that _hitTestLinkFull skips.
+        var hitAny = hitSpan || this._hitTestAnySpan(cx, cy);
+        if (hitAny && hitAny.elId) {
+          if (this._pageJS) this._pageJS.fireClick(hitAny.elId);
+          return;
+        }
 
-        if (this._focusedWidget >= 0) { this._focusedWidget = -1; this._dirty = true; }
+        if (this._focusedWidget >= 0) {
+          // Fire blur on whatever had focus before clicking blank canvas.
+          var blurWp = this._widgets[this._focusedWidget];
+          if (blurWp && blurWp.name && this._pageJS) { this._pageJS.fireBlur(blurWp.name); this._focusedWidgetName = ''; }
+          this._focusedWidget = -1; this._dirty = true;
+        }
         if (this._urlBarFocus) {
           this._urlBarFocus = false; this._urlAllSelected = false;
           this._urlSuggestions = []; this._urlSuggestIdx = -1;
@@ -519,7 +533,7 @@ export class BrowserApp implements App {
       }
     }
 
-    // Hover — update hoverHref and set CSS cursor (items 415/416)
+    // Hover — update hoverHref / hoverElId, set CSS cursor (items 415/416)
     if (event.y >= contentY0 && event.y < contentY1) {
       var cy2  = event.y - contentY0 + this._scrollY;
       var newH = this._hitTestLink(event.x, cy2);
@@ -528,8 +542,27 @@ export class BrowserApp implements App {
         os.wm.setCursor(newH ? 'pointer' : 'default');
         this._dirty = true;
       }
-    } else if (this._hoverHref) {
+      // Fire mouseover/mouseenter/mouseleave for JS-bound elements under cursor.
+      var hoverSpan2 = !newH ? this._hitTestAnySpan(event.x, cy2) : null;
+      var newElId    = hoverSpan2?.elId || '';
+      if (newElId !== this._hoverElId) {
+        if (this._hoverElId && this._pageJS) {
+          this._pageJS.fireMouse(this._hoverElId, 'mouseleave');
+          this._pageJS.fireMouse(this._hoverElId, 'mouseout');
+        }
+        this._hoverElId = newElId;
+        if (newElId && this._pageJS) {
+          this._pageJS.fireMouse(newElId, 'mouseover');
+          this._pageJS.fireMouse(newElId, 'mouseenter');
+        }
+        if (!newH) os.wm.setCursor(newElId ? 'pointer' : 'default');
+      }
+    } else if (this._hoverHref || this._hoverElId) {
       this._hoverHref = '';
+      if (this._hoverElId) {
+        if (this._pageJS) { this._pageJS.fireMouse(this._hoverElId, 'mouseleave'); this._pageJS.fireMouse(this._hoverElId, 'mouseout'); }
+        this._hoverElId = '';
+      }
       os.wm.setCursor('default');
       this._dirty = true;
     }
@@ -1027,6 +1060,14 @@ export class BrowserApp implements App {
   private _handleWidgetClick(idx: number, cx: number, cy: number): void {
     var wp = this._widgets[idx];
     if (wp.disabled) return;
+    // Fire blur on previously-focused widget before switching focus.
+    if (this._focusedWidget >= 0 && this._focusedWidget !== idx) {
+      var prevWp = this._widgets[this._focusedWidget];
+      if (prevWp && prevWp.name && this._pageJS) {
+        this._pageJS.fireBlur(prevWp.name);
+        this._focusedWidgetName = '';
+      }
+    }
     switch (wp.kind) {
       case 'text':
       case 'password':
@@ -1040,6 +1081,7 @@ export class BrowserApp implements App {
         var relX2    = cx - (wp.px + 4);
         wp.cursorPos = scrollO2 + Math.max(0, Math.min(dispLen2, Math.round(relX2 / CHAR_W)));
         this._dirty  = true;
+        if (wp.name && this._pageJS) { this._pageJS.fireFocus(wp.name); this._focusedWidgetName = wp.name; }
         break;
       }
       case 'search': {
@@ -1059,6 +1101,7 @@ export class BrowserApp implements App {
           var relXS    = cx - (wp.px + 4);
           wp.cursorPos = scrollOS + Math.max(0, Math.min(wp.curValue.length - scrollOS, Math.round(relXS / CHAR_W)));
           this._dirty  = true;
+          if (wp.name && this._pageJS) { this._pageJS.fireFocus(wp.name); this._focusedWidgetName = wp.name; }
         }
         break;
       }
@@ -1092,19 +1135,25 @@ export class BrowserApp implements App {
       case 'text':
       case 'password':
       case 'search': {
-        if (ext === 0x4B) { wp.cursorPos = Math.max(0, wp.cursorPos - 1); this._dirty = true; return true; }
-        if (ext === 0x4D) { wp.cursorPos = Math.min(wp.curValue.length, wp.cursorPos + 1); this._dirty = true; return true; }
+        if (ext === 0x4B) { wp.cursorPos = Math.max(0, wp.cursorPos - 1); this._dirty = true; if (this._pageJS) this._pageJS.fireKeydown(wp.name, 'ArrowLeft', 37); return true; }
+        if (ext === 0x4D) { wp.cursorPos = Math.min(wp.curValue.length, wp.cursorPos + 1); this._dirty = true; if (this._pageJS) this._pageJS.fireKeydown(wp.name, 'ArrowRight', 39); return true; }
         if (ext === 0x47) { wp.cursorPos = 0; this._dirty = true; return true; }
         if (ext === 0x4F) { wp.cursorPos = wp.curValue.length; this._dirty = true; return true; }
+        // ArrowUp/Down fire keydown so page JS can navigate autocomplete suggestions.
+        if (ext === 0x48) { this._dirty = true; if (this._pageJS) this._pageJS.fireKeydown(wp.name, 'ArrowUp', 38); return true; }
+        if (ext === 0x50) { this._dirty = true; if (this._pageJS) this._pageJS.fireKeydown(wp.name, 'ArrowDown', 40); return true; }
         if (ch === '\x1b') { this._focusedWidget = -1; this._dirty = true; return true; }
         if (ch === '\t')   { this._cycleFocusedWidget(1); return true; }
-        if (ch === '\n' || ch === '\r') { this._submitForm(wp.formIdx, '', ''); return true; }
+        if (ch === '\n' || ch === '\r') {
+          if (this._pageJS) this._pageJS.fireKeydown(wp.name, 'Enter', 13);
+          this._submitForm(wp.formIdx, '', ''); return true;
+        }
         if (ch === '\b') {
           if (wp.cursorPos > 0) {
             wp.curValue  = wp.curValue.slice(0, wp.cursorPos - 1) + wp.curValue.slice(wp.cursorPos);
             wp.cursorPos = Math.max(0, wp.cursorPos - 1);
             this._dirty  = true;
-            if (this._pageJS) this._pageJS.fireInput(wp.name, wp.curValue);
+            if (this._pageJS) { this._pageJS.fireKeydown(wp.name, 'Backspace', 8); this._pageJS.fireInput(wp.name, wp.curValue); }
           }
           return true;
         }
@@ -1112,7 +1161,7 @@ export class BrowserApp implements App {
           wp.curValue  = wp.curValue.slice(0, wp.cursorPos) + ch + wp.curValue.slice(wp.cursorPos);
           wp.cursorPos++;
           this._dirty  = true;
-          if (this._pageJS) this._pageJS.fireInput(wp.name, wp.curValue);
+          if (this._pageJS) { this._pageJS.fireKeydown(wp.name, ch, ch.charCodeAt(0)); this._pageJS.fireInput(wp.name, wp.curValue); }
           return true;
         }
         return false;
@@ -1120,9 +1169,9 @@ export class BrowserApp implements App {
       case 'textarea': {
         if (ch === '\x1b') { this._focusedWidget = -1; this._dirty = true; return true; }
         if (ch === '\t')   { this._cycleFocusedWidget(1); return true; }
-        if (ch === '\b')   { if (wp.curValue.length) { wp.curValue = wp.curValue.slice(0, -1); this._dirty = true; if (this._pageJS) this._pageJS.fireInput(wp.name, wp.curValue); } return true; }
-        if (ch === '\n' || ch === '\r') { wp.curValue += '\n'; this._dirty = true; if (this._pageJS) this._pageJS.fireInput(wp.name, wp.curValue); return true; }
-        if (ch >= ' ') { wp.curValue += ch; this._dirty = true; if (this._pageJS) this._pageJS.fireInput(wp.name, wp.curValue); return true; }
+        if (ch === '\b')   { if (wp.curValue.length) { wp.curValue = wp.curValue.slice(0, -1); this._dirty = true; if (this._pageJS) { this._pageJS.fireKeydown(wp.name, 'Backspace', 8); this._pageJS.fireInput(wp.name, wp.curValue); } } return true; }
+        if (ch === '\n' || ch === '\r') { wp.curValue += '\n'; this._dirty = true; if (this._pageJS) { this._pageJS.fireKeydown(wp.name, 'Enter', 13); this._pageJS.fireInput(wp.name, wp.curValue); } return true; }
+        if (ch >= ' ') { wp.curValue += ch; this._dirty = true; if (this._pageJS) { this._pageJS.fireKeydown(wp.name, ch, ch.charCodeAt(0)); this._pageJS.fireInput(wp.name, wp.curValue); } return true; }
         return false;
       }
       case 'select': {
@@ -1159,11 +1208,21 @@ export class BrowserApp implements App {
   private _cycleFocusedWidget(dir: number): void {
     var total = this._widgets.length;
     if (total === 0) return;
+    var prev  = this._focusedWidget;
     var next  = (this._focusedWidget + dir + total) % total;
     var tries = 0;
     while (tries < total) {
       var wk = this._widgets[next].kind;
-      if (wk !== 'hidden' && wk !== 'img') { this._focusedWidget = next; this._dirty = true; return; }
+      if (wk !== 'hidden' && wk !== 'img') {
+        if (prev >= 0 && prev !== next && this._pageJS) {
+          var pWp = this._widgets[prev];
+          if (pWp?.name) { this._pageJS.fireBlur(pWp.name); this._focusedWidgetName = ''; }
+        }
+        this._focusedWidget = next; this._dirty = true;
+        var nWp = this._widgets[next];
+        if (nWp?.name && this._pageJS) { this._pageJS.fireFocus(nWp.name); this._focusedWidgetName = nWp.name; }
+        return;
+      }
       next = (next + dir + total) % total; tries++;
     }
   }
@@ -1522,6 +1581,8 @@ export class BrowserApp implements App {
     this._loading       = true;
     this._scrollY       = 0;
     this._hoverHref     = '';
+    this._hoverElId     = '';
+    this._focusedWidgetName = '';
     this._status        = 'Loading...';
     this._dirty         = true;
     this._focusedWidget = -1;
@@ -1644,6 +1705,22 @@ export class BrowserApp implements App {
       for (var j = 0; j < line.nodes.length; j++) {
         var span = line.nodes[j];
         if (span.href && x >= span.x && x <= span.x + span.text.length * CHAR_W) {
+          return span;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Returns ANY span at (x, cy), including those without href (for JS click dispatch). */
+  private _hitTestAnySpan(x: number, cy: number): RenderedSpan | null {
+    for (var i = 0; i < this._pageLines.length; i++) {
+      var line = this._pageLines[i];
+      if (line.y > cy) break;
+      if (line.y + line.lineH <= cy) continue;
+      for (var j = 0; j < line.nodes.length; j++) {
+        var span = line.nodes[j];
+        if (x >= span.x && x <= span.x + span.text.length * CHAR_W) {
           return span;
         }
       }

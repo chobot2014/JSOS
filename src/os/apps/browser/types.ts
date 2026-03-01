@@ -18,6 +18,7 @@ export interface InlineSpan {
   text:       string;
   href?:      string;
   download?:  string;  // <a download="filename"> hint (item 636)
+  elId?:      string;  // Element ID for JS click dispatch (id attr or data-jsos-el attr)
   bold?:      boolean;
   italic?:    boolean;
   code?:      boolean;
@@ -139,6 +140,7 @@ export interface RenderedSpan {
   color:      PixelColor;
   href?:      string;
   download?:  string;  // <a download="filename"> hint (item 636)
+  elId?:      string;  // Element ID for JS click dispatch
   bold?:      boolean;
   italic?:    boolean;   // CSS font-style: italic/oblique (item 433)
   del?:       boolean;
@@ -468,6 +470,8 @@ export interface CSSProps {
   // ── Pseudo-element content (resolved during HTML parsing, not cascade) ───
   _pseudoBefore?: string;  // resolved text of ::before { content: "..." }
   _pseudoAfter?:  string;  // resolved text of ::after  { content: "..." }
+  // ── Click dispatch (set when element has onclick or data-jsos-el attr) ────
+  _onclickElId?:  string;  // ID to fire click events on when user clicks this element
 }
 
 // ── Layout ────────────────────────────────────────────────────────────────────
