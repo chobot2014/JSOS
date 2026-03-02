@@ -1368,6 +1368,68 @@ const sdk = {
     _sdkPrint(text);
   },
 
+  // ── Time ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Wall-clock time utilities.  All timestamps are Unix epoch milliseconds.
+   * The wall clock is seeded from CMOS RTC at first call and corrected by NTP sync.
+   */
+  time: {
+    /** Current Unix epoch time in milliseconds.  Accuracy ≤ 1 s after NTP sync. */
+    now(): number {
+      return _sdkTimeNow();
+    },
+    /** Decomposed UTC date/time for the given ms timestamp (defaults to now). */
+    date(ms?: number): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
+      var d = new Date(ms !== undefined ? ms : _sdkTimeNow());
+      return {
+        year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate(),
+        hour: d.getUTCHours(), minute: d.getUTCMinutes(), second: d.getUTCSeconds(),
+      };
+    },
+    /**
+     * Format a timestamp as a string.
+     * Tokens: YYYY MM DD HH mm ss
+     * Example: os.time.format(Date.now(), 'YYYY-MM-DD HH:mm:ss')
+     */
+    format(ms: number, fmt: string): string {
+      var d = new Date(ms);
+      var p = function(n: number): string { return (n < 10 ? '0' : '') + n; };
+      return fmt
+        .replace('YYYY', '' + d.getUTCFullYear())
+        .replace('MM',   p(d.getUTCMonth() + 1))
+        .replace('DD',   p(d.getUTCDate()))
+        .replace('HH',   p(d.getUTCHours()))
+        .replace('mm',   p(d.getUTCMinutes()))
+        .replace('ss',   p(d.getUTCSeconds()));
+    },
+    /** Human-readable relative time: 'just now', '3s ago', '2m ago', '1h ago', '3d ago'. */
+    since(ms: number): string {
+      var diff = (_sdkTimeNow() - ms) / 1000;
+      if (diff < 10)    return 'just now';
+      if (diff < 60)    return Math.floor(diff) + 's ago';
+      if (diff < 3600)  return Math.floor(diff / 60) + 'm ago';
+      if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+      return Math.floor(diff / 86400) + 'd ago';
+    },
+    /** Format milliseconds as a duration: '1:23:04' (h:mm:ss) or '03:12' (mm:ss). */
+    duration(ms: number): string {
+      var s   = Math.floor(Math.abs(ms) / 1000);
+      var h   = Math.floor(s / 3600);
+      var m   = Math.floor((s % 3600) / 60);
+      var sec = s % 60;
+      var p = function(n: number): string { return (n < 10 ? '0' : '') + n; };
+      return h > 0 ? (h + ':' + p(m) + ':' + p(sec)) : (p(m) + ':' + p(sec));
+    },
+    /** ISO-8601 UTC string for the given ms (defaults to now): '2026-02-25T14:30:00Z'. */
+    iso(ms?: number): string {
+      var d = new Date(ms !== undefined ? ms : _sdkTimeNow());
+      var p = function(n: number): string { return (n < 10 ? '0' : '') + n; };
+      return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate())
+           + 'T' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + ':' + p(d.getUTCSeconds()) + 'Z';
+    },
+  },
+
   // ── System information ───────────────────────────────────────────────────────
 
   system: {
