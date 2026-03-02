@@ -116,7 +116,7 @@ export class VEventTarget {
   }
   _fireList(ev: VEvent): void {
     var arr = this._handlers.get(ev.type);
-    if (arr) { for (var fn of [...arr]) { try { fn(ev); } catch (_) {} if (ev._stopImmediate) break; } }
+    if (arr) { for (var fn of [...arr]) { try { fn(ev); } catch (e) { if (typeof (globalThis as any).os !== 'undefined') (globalThis as any).os.debug.log('[event error] ' + ev.type + ': ' + String(e)); } if (ev._stopImmediate) break; } }
   }
 }
 
@@ -2595,7 +2595,11 @@ export function buildDOM(html: string): VDocument {
     for (var c of htmlEl.childNodes) {
       if (c instanceof VElement) {
         if (c.tagName === 'HEAD') { for (var hc of c.childNodes) { hc.parentNode = doc.head; hc.ownerDocument = doc; doc.head.childNodes.push(hc); } }
-        else if (c.tagName === 'BODY') { for (var bc of c.childNodes) { bc.parentNode = doc.body; bc.ownerDocument = doc; doc.body.childNodes.push(bc); } }
+        else if (c.tagName === 'BODY') {
+          // Copy body element attributes (e.g. onload="fa()") to doc.body (item 571)
+          (c as VElement)._attrs.forEach((v, k) => doc.body._attrs.set(k, v));
+          for (var bc of c.childNodes) { bc.parentNode = doc.body; bc.ownerDocument = doc; doc.body.childNodes.push(bc); }
+        }
       }
     }
   } else {
@@ -2606,7 +2610,10 @@ export function buildDOM(html: string): VDocument {
         inHead = true; for (var hc2 of node.childNodes) { hc2.parentNode = doc.head; hc2.ownerDocument = doc; doc.head.childNodes.push(hc2); } continue;
       }
       if (node instanceof VElement && node.tagName === 'BODY') {
-        inHead = false; for (var bc2 of node.childNodes) { bc2.parentNode = doc.body; bc2.ownerDocument = doc; doc.body.childNodes.push(bc2); } continue;
+        inHead = false;
+        // Copy body element attributes (e.g. onload="fa()") to doc.body (item 571)
+        (node as VElement)._attrs.forEach((v, k) => doc.body._attrs.set(k, v));
+        for (var bc2 of node.childNodes) { bc2.parentNode = doc.body; bc2.ownerDocument = doc; doc.body.childNodes.push(bc2); } continue;
       }
       if (!inHead) { node.parentNode = doc.body; node.ownerDocument = doc; doc.body.childNodes.push(node); }
     }

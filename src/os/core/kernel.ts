@@ -173,6 +173,13 @@ export interface KernelAPI {
    * resets the counter to zero.  Use this to decide when to call yield().
    */
   schedTick(): number;
+  /**
+   * Drain all pending QuickJS Promise microtasks (JS jobs) for the main runtime.
+   * Must be called periodically from the JS event loop so that Promise .then()
+   * and async/await callbacks fire correctly.
+   * Returns the count of jobs that were executed.
+   */
+  drainJobs(): number;
 
   // ─ Mouse (Phase 3) ───────────────────────────────────────────────────────
   /**

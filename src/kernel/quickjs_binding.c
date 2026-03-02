@@ -1143,6 +1143,21 @@ static JSValue js_sched_tick(JSContext *c, JSValueConst this_val,
     return JS_NewUint32(c, n);
 }
 
+/* kernel.drainJobs() — drain all pending Promise microtasks (JS jobs) for
+ * the main runtime.  Must be called periodically from the JS event loop
+ * so that Promise .then() / async-await callbacks fire correctly.
+ * Returns the number of jobs that were executed.
+ * Without this, Promise callbacks in page scripts never run!                 */
+static JSValue js_drain_jobs(JSContext *c, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    if (!rt) return JS_NewInt32(c, 0);
+    int count = 0;
+    JSContext *job_ctx = NULL;
+    while (JS_ExecutePendingJob(rt, &job_ctx) > 0 && count < 10000) count++;
+    return JS_NewInt32(c, count);
+}
+
 static JSValue js_tss_set_esp0(JSContext *c, JSValueConst this_val,
                                 int argc, JSValueConst *argv) {
     (void)this_val;
@@ -3186,6 +3201,7 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("registerSchedulerHook", 1, js_register_scheduler_hook),
     JS_CFUNC_DEF("yield",                 0, js_yield),
     JS_CFUNC_DEF("schedTick",             0, js_sched_tick),
+    JS_CFUNC_DEF("drainJobs",             0, js_drain_jobs),
     JS_CFUNC_DEF("tssSetESP0",            1, js_tss_set_esp0),
     /* Process primitives (Phase 6) */
     JS_CFUNC_DEF("cloneAddressSpace",  0, js_clone_address_space),

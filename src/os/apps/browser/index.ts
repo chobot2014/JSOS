@@ -228,7 +228,7 @@ export class BrowserApp implements App {
     os.debug.log('[browser] onMount start');
     this._win = win;
     // Initialize first tab — use Google search for headless iteration testing
-    var _startURL = 'https://www.google.com/search?q=news';
+    var _startURL = 'about:jsos';
     this._tabs = [this._makeBlankTab(_startURL)];
     this._curTab = 0;
     this._loadTab(0);

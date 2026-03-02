@@ -194,6 +194,23 @@ export function createPageJS(
 
   // Build virtual DOM from the full page HTML
   var doc = buildDOM(fullHTML);
+
+  // Patch: ensure <body on*="..."> attributes are reflected to doc.body._attrs (item 571)
+  // buildDOM redistributes body.childNodes but may not copy body element attributes.
+  {
+    var _bodyTagMatch = fullHTML.match(/<body([^>]*)>/i);
+    if (_bodyTagMatch && _bodyTagMatch[1] && doc.body) {
+      var _bodyTagAttrStr = _bodyTagMatch[1];
+      var _bre = /\s+(on[\w]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+))/gi;
+      var _brm: RegExpExecArray | null;
+      while ((_brm = _bre.exec(_bodyTagAttrStr)) !== null) {
+        var _braName = _brm[1].toLowerCase();
+        var _braVal  = _brm[2] ?? _brm[3] ?? _brm[4] ?? '';
+        (doc.body as any)._attrs.set(_braName, _braVal);
+      }
+    }
+  }
+
   // document.readyState transitions (item 531): 'loading' → 'interactive' → 'complete'
   (doc as any)._readyState = 'loading';
   // document.compatMode (item 864) — always standards mode
@@ -224,12 +241,15 @@ export function createPageJS(
 
   function setTimeout_(fn: () => void, delay: number): number {
     var id = timerSeq++;
-    timers.push({ id, fn, fireAt: Date.now() - startTime + Math.max(0, delay), interval: false, delay });
+    var fireAt = Date.now() - startTime + Math.max(0, delay);
+    timers.push({ id, fn, fireAt, interval: false, delay });
     return id;
   }
   function setInterval_(fn: () => void, delay: number): number {
     var id = timerSeq++;
-    timers.push({ id, fn, fireAt: Date.now() - startTime + Math.max(1, delay), interval: true, delay: Math.max(1, delay) });
+    var fireAt = Date.now() - startTime + Math.max(1, delay);
+    cb.log('[JS] setInterval id=' + id + ' delay=' + delay);
+    timers.push({ id, fn, fireAt, interval: true, delay: Math.max(1, delay) });
     return id;
   }
   function clearTimeout_(id: number): void { timers = timers.filter(t => t.id !== id); }
@@ -257,10 +277,6 @@ export function createPageJS(
     if (doc.title) cb.setTitle(doc.title);
     var _bodyHTML = serializeDOM(doc);
     _rerenderCount++;
-    if (_rerenderCount <= 3) {
-      cb.log('[browser] rerender#' + _rerenderCount + ' ' + _bodyHTML.length + 'B start: ' + _bodyHTML.slice(0, 200).replace(/\n/g, ' '));
-      cb.log('[browser] rerender#' + _rerenderCount + ' mid@2k: ' + _bodyHTML.slice(2000, 3000).replace(/\n/g, ' '));
-    }
     cb.rerender(_bodyHTML);
     // Rebuild the DOM from the new HTML so subsequent JS keeps working
     // (we keep the existing doc object but sync values back from serialized form)
@@ -315,9 +331,9 @@ export function createPageJS(
 
   var location = {
     get href(): string { return _effectiveHref(); },
-    set href(v: string) { cb.navigate(v); },
-    assign(url: string)  { cb.navigate(url); },
-    replace(url: string) { cb.navigate(url); },
+    set href(v: string) { cb.log('[browser] location.href= ' + v.slice(0, 100)); cb.navigate(v); },
+    assign(url: string)  { cb.log('[browser] location.assign: ' + url.slice(0, 100)); cb.navigate(url); },
+    replace(url: string) { cb.log('[browser] location.replace: ' + url.slice(0, 100)); cb.navigate(url); },
     reload()             { cb.navigate(_effectiveHref()); },
     get pathname(): string { return _locPart('pathname'); },
     get hostname(): string { return _locPart('hostname'); },
@@ -3156,8 +3172,12 @@ export function createPageJS(
     var limit = 1000;
     while (_microtaskQueue.length > 0 && limit-- > 0) {
       var fn = _microtaskQueue.shift()!;
-      try { fn(); } catch (_) {}
+      try { fn(); } catch (e) { cb.log('[microtask error] ' + String(e)); }
     }
+    // Also drain native QuickJS Promise jobs (e.g. Promise.then() callbacks)
+    // This is required because QuickJS's job queue is not drained automatically
+    // between JS function calls - only JS_ExecutePendingJob() drains it.
+    try { (kernel as any).drainJobs(); } catch(_) {}
   }
 
   // ── Scheduler (postTask) ──────────────────────────────────────────────────
@@ -3265,7 +3285,12 @@ export function createPageJS(
     },
     // crypto.subtle stub (item 341) — returns valid Promises, not implemented fully
     subtle: {
-      digest(_algo: unknown, _data: unknown): Promise<ArrayBuffer> { return Promise.resolve(new ArrayBuffer(32)); },
+      digest(algo: unknown, data: unknown): Promise<ArrayBuffer> {
+        cb.log('[crypto] subtle.digest algo=' + String(algo) + ' dataLen=' + ((data instanceof ArrayBuffer || ArrayBuffer.isView(data as any)) ? (data as any).byteLength ?? (data as any).length : '?'));
+        // Return 32 zero bytes for SHA-256, 16 for MD5, etc.
+        var _sz = String(algo).includes('512') ? 64 : String(algo).includes('1') ? 20 : 32;
+        return Promise.resolve(new ArrayBuffer(_sz));
+      },
       sign(_algo: unknown, _key: unknown, _data: unknown): Promise<ArrayBuffer> { return Promise.resolve(new ArrayBuffer(64)); },
       verify(_algo: unknown, _key: unknown, _sig: unknown, _data: unknown): Promise<boolean> { return Promise.resolve(false); },
       encrypt(_algo: unknown, _key: unknown, _data: unknown): Promise<ArrayBuffer> { return Promise.resolve(new ArrayBuffer(16)); },
@@ -5605,8 +5630,28 @@ export function createPageJS(
 
   function runScripts(idx: number): void {
     if (idx >= scripts.length) {
-      cb.log('[browser] scripts done (' + idx + '), rerender=' + needsRerender);
       (doc as any)._readyState = 'interactive';
+
+      // Wire <body on*="..."> attribute event handlers to window (item 571)
+      // Real browsers treat <body onload>, <body onDOMContentLoaded>, etc. as
+      // window-level event handlers, not body element handlers.
+      var _bodyEl = doc.body as any;
+      if (_bodyEl) {
+        var _bodyEventAttrs = ['onload', 'onunload', 'onbeforeunload', 'onpagehide', 'onpageshow',
+          'onhashchange', 'onpopstate', 'onstorage', 'onmessage', 'onerror', 'onresize', 'onscroll',
+          'onoffline', 'ononline', 'onfocus', 'onblur'];
+        for (var _bae = 0; _bae < _bodyEventAttrs.length; _bae++) {
+          var _bAttr = _bodyEventAttrs[_bae];
+          var _bAttrVal = typeof _bodyEl.getAttribute === 'function' ? _bodyEl.getAttribute(_bAttr) : null;
+          if (_bAttrVal && !(win as any)[_bAttr]) {
+            var _bHandler = _makeHandler(_bAttrVal);
+            if (_bHandler) {
+              (win as any)[_bAttr] = _bHandler;
+            }
+          }
+        }
+      }
+
       var dclEv = new VEvent('DOMContentLoaded', { bubbles: true });
       doc.dispatchEvent(dclEv);
       (doc as any)._readyState = 'complete';
@@ -5618,7 +5663,6 @@ export function createPageJS(
       return;
     }
     var s = scripts[idx];
-    cb.log('[browser] script[' + idx + '/' + scripts.length + '] type=' + (s.type || 'js') + ' ' + (s.inline ? 'inline len=' + (s.code || '').length + ' :: ' + (s.code || '').slice(0, 100).replace(/\n/g, '\\n') : 'src=' + (s.src || '(none)')));
 
     // importmap — populate _importMap before any scripts run
     if (s.type && s.type.trim().toLowerCase() === 'importmap') {
@@ -5663,6 +5707,7 @@ export function createPageJS(
         });
       } else {
         execScript(s.code);
+        _drainMicrotasks();  // drain Promise jobs after each inline script
         runScripts(idx + 1);
       }
     } else {
@@ -5695,6 +5740,7 @@ export function createPageJS(
       try { var _du = new URL(_effectiveHref()); return cookieJar.getDocumentCookies(_du.hostname, _du.pathname); } catch(_) { return ''; }
     },
     set(v: string): void {
+      cb.log('[browser] document.cookie set: ' + String(v).slice(0, 80));
       try { var _du = new URL(_effectiveHref()); cookieJar.setFromPage(String(v), _du.hostname, _du.pathname); } catch(_) {}
     },
     configurable: true,
