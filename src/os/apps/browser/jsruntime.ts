@@ -258,7 +258,8 @@ export function createPageJS(
     var _bodyHTML = serializeDOM(doc);
     _rerenderCount++;
     if (_rerenderCount <= 3) {
-      cb.log('[browser] rerender#' + _rerenderCount + ' ' + _bodyHTML.length + 'B: ' + _bodyHTML.slice(0, 1000).replace(/\n/g, ' '));
+      cb.log('[browser] rerender#' + _rerenderCount + ' ' + _bodyHTML.length + 'B start: ' + _bodyHTML.slice(0, 200).replace(/\n/g, ' '));
+      cb.log('[browser] rerender#' + _rerenderCount + ' mid@2k: ' + _bodyHTML.slice(2000, 3000).replace(/\n/g, ' '));
     }
     cb.rerender(_bodyHTML);
     // Rebuild the DOM from the new HTML so subsequent JS keeps working
@@ -5223,7 +5224,7 @@ export function createPageJS(
   //
   // Bindings are removed in dispose() so they don't outlive the page.
   var _bridgedKeys: string[] = [];
-  (function _bridgeToGlobal() {
+  function _bridgeToGlobal() {
     var winKeys = Object.keys(win);
     for (var _bi = 0; _bi < winKeys.length; _bi++) {
       var _bk = winKeys[_bi];
@@ -5241,7 +5242,8 @@ export function createPageJS(
         _bridgedKeys.push(_bk);
       } catch(_) {}
     }
-  })();
+  }
+  _bridgeToGlobal(); // initial bridge at page startup
   function _unbridgeFromGlobal(): void {
     for (var _ui = 0; _ui < _bridgedKeys.length; _ui++) {
       try { delete (globalThis as any)[_bridgedKeys[_ui]]; } catch(_) {}
@@ -5332,6 +5334,7 @@ export function createPageJS(
       var fn = new Function('__s__',
         'with(__s__){\n' + src1 + '\n}') as (s: any) => void;
       fn(_winScope);
+      _bridgeToGlobal();  // capture any new win properties set by this script
       checkDirty();
       return;
     } catch (e) {
@@ -5349,8 +5352,9 @@ export function createPageJS(
     // with() block (e.g. class static-init blocks, class declarations).
     // Fall back to running the RAW code directly — no transforms, no scope proxy.
     // `this` is bound to win so `this.foo = bar` persists as window.foo.
-    // The globalThis bridge (set up at runtime init) makes bare names like
-    // `document`, `console`, `fetch` etc. resolve to win's properties.
+    // Re-bridge globalThis first to pick up any properties added by earlier scripts.
+    cb.log('[JS] stage2 fallback for ' + code.length + 'B (stage1: ' + String(stage1Err).slice(0, 60) + ')');
+    _bridgeToGlobal();  // pick up newly-added win properties (e.g. google, AF_etc)
     var raw2 = (code.charCodeAt(0) === 35 && code.charCodeAt(1) === 33)
       ? code.replace(/^#!.*/, '') : code;
     try {
@@ -5368,6 +5372,7 @@ export function createPageJS(
         _fireScriptError(e2);
       }
     }
+    _bridgeToGlobal();  // capture any new win properties set by this script
     checkDirty();
   }
 
