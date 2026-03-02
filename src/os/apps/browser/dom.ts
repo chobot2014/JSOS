@@ -188,6 +188,10 @@ export class VNode extends VEventTarget {
       this.ownerDocument._dirty = true;
       this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [child], removedNodes: [], previousSibling: this.childNodes[this.childNodes.length - 2] ?? null, nextSibling: null });
     }
+    // Auto-execute dynamically inserted <script> elements (required by modern pages that load scripts via JS)
+    if (this.ownerDocument?._scriptInsertHook && child.nodeType === 1 && (child as VElement).tagName === 'SCRIPT') {
+      this.ownerDocument._scriptInsertHook(child as VElement);
+    }
     return child;
   }
   removeChild(child: VNode): VNode {
@@ -220,6 +224,10 @@ export class VNode extends VEventTarget {
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
       this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [newNode], removedNodes: [], previousSibling: this.childNodes[i - 1] ?? null, nextSibling: ref });
+    }
+    // Auto-execute dynamically inserted <script> elements
+    if (this.ownerDocument?._scriptInsertHook && newNode.nodeType === 1 && (newNode as VElement).tagName === 'SCRIPT') {
+      this.ownerDocument._scriptInsertHook(newNode as VElement);
     }
     return newNode;
   }
@@ -1770,6 +1778,8 @@ export class VDocument extends VNode {
   _styleSheets: unknown[] = [];
   _currentScript: VElement | null = null;  // set by jsruntime while executing <script>
   _mutationQueue: unknown[] = [];           // queued mutation records for MutationObserver
+  /** Hook set by jsruntime.ts to auto-execute dynamically inserted <script> elements. */
+  _scriptInsertHook: ((el: VElement) => void) | null = null;
   head: VElement;
   body: VElement;
   documentElement: VElement;

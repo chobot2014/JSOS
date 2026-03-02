@@ -250,11 +250,17 @@ export function createPageJS(
   }
 
   // Re-render helper
+  var _rerenderCount = 0;
   function doRerender(): void {
     needsRerender = false;
     // Update title if changed
     if (doc.title) cb.setTitle(doc.title);
-    cb.rerender(serializeDOM(doc));
+    var _bodyHTML = serializeDOM(doc);
+    _rerenderCount++;
+    if (_rerenderCount <= 3) {
+      cb.log('[browser] rerender#' + _rerenderCount + ' ' + _bodyHTML.length + 'B: ' + _bodyHTML.slice(0, 120).replace(/\n/g, ' '));
+    }
+    cb.rerender(_bodyHTML);
     // Rebuild the DOM from the new HTML so subsequent JS keeps working
     // (we keep the existing doc object but sync values back from serialized form)
   }
@@ -5588,6 +5594,7 @@ export function createPageJS(
 
   function runScripts(idx: number): void {
     if (idx >= scripts.length) {
+      cb.log('[browser] scripts done (' + idx + '), rerender=' + needsRerender);
       (doc as any)._readyState = 'interactive';
       var dclEv = new VEvent('DOMContentLoaded', { bubbles: true });
       doc.dispatchEvent(dclEv);
@@ -5742,6 +5749,48 @@ export function createPageJS(
   // stage-2 (globalThis bridge) scripts can call it as a bare identifier.
   (win as any).__jsos_dynamic_import__ = __jsos_dynamic_import__;
 
+  // ── Dynamic script injection: auto-execute <script> elements added to DOM ─
+  // Modern pages (Google, React apps, etc.) insert <script src="..."> via JS.
+  // Without this hook they fetch resources but never execute any JS.
+  doc._scriptInsertHook = function(scriptEl: VElement): void {
+    if (disposed) return;
+    // Prevent double-execution (e.g. element moved between containers)
+    if ((scriptEl as any)._jsrExecuted) return;
+    (scriptEl as any)._jsrExecuted = true;
+    // Ignore non-JS content types
+    var typeAttr = (scriptEl.getAttribute('type') || '').toLowerCase().trim();
+    if (typeAttr && typeAttr !== 'text/javascript' && typeAttr !== 'application/javascript' &&
+        typeAttr !== 'module' && typeAttr !== 'text/ecmascript' && typeAttr !== 'application/ecmascript') {
+      return;
+    }
+    var srcAttr = scriptEl.getAttribute('src');
+    if (srcAttr) {
+      // External script: fetch and execute asynchronously via existing machinery
+      loadExternalScript(srcAttr, function(code?: string): void {
+        if (disposed) return;
+        checkDirty();
+        if (needsRerender) doRerender();
+        var evType = (code !== undefined) ? 'load' : 'error';
+        var ev = new VEvent(evType, { bubbles: false, cancelable: false });
+        scriptEl.dispatchEvent(ev);
+        var handler = (scriptEl as any)[evType === 'load' ? 'onload' : 'onerror'];
+        if (typeof handler === 'function') { try { handler(ev); } catch(_) {} }
+      }, false /* auto-exec inside loadExternalScript */);
+    } else {
+      // Inline script: execute text content synchronously
+      var code = scriptEl.textContent || '';
+      if (code.trim()) {
+        try {
+          execScript(code);
+          _drainMicrotasks();
+          checkDirty();
+          if (needsRerender) doRerender();
+        } catch(e) { _fireScriptError(e); }
+      }
+    }
+  };
+
+  cb.log('[browser] loading ' + scripts.length + ' script(s) for ' + (cb.baseURL || '').slice(0, 80));
   runScripts(0);
 
   // ── PageJS interface returned to BrowserApp ───────────────────────────────
@@ -5850,10 +5899,11 @@ export function createPageJS(
       if (rafCallbacks.length) {
         var cbs = rafCallbacks.splice(0);
         for (var r of cbs) {
-          try { r.fn(nowMs); } catch(_) {}
+          try { r.fn(nowMs); } catch(e) { cb.log('[JS raf error] ' + String(e)); }
           _drainMicrotasks();
         }
         checkDirty();
+        if (needsRerender) doRerender();  // flush DOM changes made by RAF handlers
       }
       // Fire elapsed timers (drain microtasks after each)
       var elapsed = nowMs;
@@ -5861,7 +5911,7 @@ export function createPageJS(
       for (var i = timers.length - 1; i >= 0; i--) {
         var t = timers[i];
         if (elapsed >= t.fireAt) {
-          try { t.fn(); } catch(_) {}
+          try { t.fn(); } catch(e) { cb.log('[JS timer error] ' + String(e)); }
           _drainMicrotasks();
           if (t.interval) { t.fireAt = elapsed + t.delay; }
           else { timers.splice(i, 1); }

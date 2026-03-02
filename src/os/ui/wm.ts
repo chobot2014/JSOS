@@ -306,6 +306,7 @@ export class WindowManager {
       win._crashed = true;
       var mmsg = ''; try { mmsg = (me instanceof Error) ? me.message : String(me); } catch (_) {}
       win._crashMsg = ('onMount failed: ' + mmsg).substring(0, 80);
+      kernel.serialPut('[WM] onMount crash for "' + opts.title + '": ' + win._crashMsg + '\n');
     }
     if (opts.app.onFocus) { try { opts.app.onFocus(); } catch (_) {} }
     return win;

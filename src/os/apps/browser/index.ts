@@ -225,12 +225,14 @@ export class BrowserApp implements App {
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   onMount(win: WMWindow): void {
+    os.debug.log('[browser] onMount start');
     this._win = win;
     // Initialize first tab
     this._tabs = [this._makeBlankTab('about:jsos')];
     this._curTab = 0;
     this._loadTab(0);
     this._navigate('about:jsos');
+    os.debug.log('[browser] onMount done');
   }
 
   onUnmount(): void {
@@ -1936,6 +1938,7 @@ export class BrowserApp implements App {
 
     // Dispose any previous page JS before setting up the new page
     if (this._pageJS) { this._pageJS.dispose(); this._pageJS = null; }
+    os.debug.log('[browser] parse:', r.scripts.length, 'scripts,', r.nodes.length, 'nodes @', url.slice(0, 72));
     this._layoutPage(r.nodes as any, r.widgets as any, r.title || fallbackTitle || url, url);
 
     // ── Favicon: fetch <link rel="icon"> image and store on current tab (item 628) ──
