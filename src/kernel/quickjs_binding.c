@@ -3341,8 +3341,9 @@ int quickjs_initialize(void) {
     rt = JS_NewRuntime();
     if (!rt) return -1;
 
-    JS_SetMemoryLimit(rt, 50 * 1024 * 1024);  /* 50 MB — Phase 3 needs space for framebuffer */
-    JS_SetMaxStackSize(rt, 256 * 1024);
+    JS_SetMemoryLimit(rt, 512u * 1024u * 1024u); /* 512 MB — main runtime: JS bundle + DOM + net stack + JIT */
+    JS_SetGCThreshold(rt, 128u * 1024u * 1024u); /* GC at 128 MB to avoid hitting the cap */
+    JS_SetMaxStackSize(rt, 512 * 1024);           /* 512 KB stack — TCP/IP state machine recurses deeply */
 
     /* Wire dynamic import() module loader (items 118 + 119) */
     JS_SetModuleLoaderFunc(rt, _module_normalize, _module_load, NULL);

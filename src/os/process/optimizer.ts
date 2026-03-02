@@ -50,7 +50,7 @@ const JIT_POOL_BYTES = 8 * 1024 * 1024;
 const JIT_POOL_WARN_RATIO = 0.80;
 
 /** Warn when heap free falls below this many MB. */
-const MEM_LOW_MB = 1;
+const MEM_LOW_MB = 32; /* warn when less than 32 MB free */
 
 /** How many frames to suppress repeat warnings. */
 const WARN_SUPPRESS_FRAMES = 500;
