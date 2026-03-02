@@ -227,8 +227,8 @@ export class BrowserApp implements App {
   onMount(win: WMWindow): void {
     os.debug.log('[browser] onMount start');
     this._win = win;
-    // Initialize first tab — use Google search for headless iteration testing
-    var _startURL = 'about:jsos';
+    // Initialize first tab — navigate to HN for JS-heavy site testing
+    var _startURL = 'https://en.m.wikipedia.org/wiki/Main_Page';
     this._tabs = [this._makeBlankTab(_startURL)];
     this._curTab = 0;
     this._loadTab(0);

@@ -487,6 +487,114 @@ export function x25519PublicKey(privateKey: number[]): number[] {
   return x25519(privateKey, X25519_BASE);
 }
 
+// ────────────────────────────────── P-256 (secp256r1) ECDH (Item 330) ─────────
+
+/**
+ * NIST P-256 (secp256r1) curve parameters (RFC 5480 / FIPS 186-4).
+ *
+ * All field arithmetic is modulo p.  a = p - 3 (short Weierstrass).
+ */
+const P256r1Curve = {
+  p:  0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFFn,
+  n:  0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551n,
+  a:  0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFCn, // p − 3
+  b:  0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604Bn,
+  Gx: 0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296n,
+  Gy: 0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5n,
+};
+
+interface P256rPoint { x: bigint; y: bigint; }
+
+/** Extended-Euclidean modular inverse (faster than Fermat) */
+function p256rModInv(a: bigint, m: bigint): bigint {
+  var g = m, x = 0n, y = 1n;
+  var ta = ((a % m) + m) % m;
+  while (ta > 1n) {
+    var q = ta / g;
+    [ta, g] = [g, ta - q * g];
+    [x, y]  = [y, x - q * y];
+  }
+  return ((y % m) + m) % m;
+}
+
+function p256rAddPoints(A: P256rPoint | null, B: P256rPoint | null): P256rPoint | null {
+  if (!A) return B;
+  if (!B) return A;
+  var p = P256r1Curve.p, a = P256r1Curve.a;
+  if (A.x === B.x) {
+    if (((A.y + B.y) % p) === 0n) return null; // point at infinity
+    var lam = ((3n * A.x % p * A.x % p + a) % p * p256rModInv(2n * A.y % p, p)) % p;
+    var x3  = ((lam * lam % p) - 2n * A.x % p + 2n * p) % p;
+    var y3  = ((lam * ((A.x - x3 + p) % p)) % p - A.y % p + p) % p;
+    return { x: x3, y: y3 };
+  }
+  var dx = ((B.x - A.x) % p + p) % p;
+  var dy = ((B.y - A.y) % p + p) % p;
+  var lam2 = dy * p256rModInv(dx, p) % p;
+  var x4 = ((lam2 * lam2 % p) - A.x % p - B.x % p + 3n * p) % p;
+  var y4 = ((lam2 * ((A.x - x4 + p) % p)) % p - A.y % p + p) % p;
+  return { x: x4, y: y4 };
+}
+
+function p256rMulScalar(k: bigint, P: P256rPoint | null): P256rPoint | null {
+  var R: P256rPoint | null = null;
+  var Q = P;
+  while (k > 0n) {
+    if (k & 1n) R = p256rAddPoints(R, Q);
+    Q = p256rAddPoints(Q, Q);
+    k >>= 1n;
+  }
+  return R;
+}
+
+/** Encode a bigint as a big-endian byte array of exactly `len` bytes. */
+function bigIntToBytesBE32(v: bigint): number[] {
+  var out: number[] = new Array(32).fill(0);
+  var x = v;
+  for (var i = 31; i >= 0; i--) {
+    out[i] = Number(x & 0xffn);
+    x >>= 8n;
+  }
+  return out;
+}
+
+/** Decode a big-endian byte slice to a bigint. */
+function bytesToBigIntBE(b: number[], off: number, len: number): bigint {
+  var v = 0n;
+  for (var i = 0; i < len; i++) v = (v << 8n) | BigInt(b[off + i] & 0xff);
+  return v;
+}
+
+/**
+ * Generate an uncompressed P-256 public key from a 32-byte big-endian private scalar.
+ * Returns 65 bytes: 0x04 || x (32 BE) || y (32 BE).
+ */
+export function p256PublicKey(privateKey: number[]): number[] {
+  var scalar = bytesToBigIntBE(privateKey, 0, 32);
+  var G: P256rPoint = { x: P256r1Curve.Gx, y: P256r1Curve.Gy };
+  var pub = p256rMulScalar(scalar, G);
+  if (!pub) return new Array(65).fill(0);
+  var out: number[] = [0x04];
+  return out.concat(bigIntToBytesBE32(pub.x)).concat(bigIntToBytesBE32(pub.y));
+}
+
+/**
+ * P-256 ECDH: compute shared secret x-coordinate.
+ * @param privateKey  32-byte big-endian scalar
+ * @param remoteKey   65-byte uncompressed point (0x04 || x || y)
+ * @returns 32-byte shared secret (x-coordinate, big-endian)
+ */
+export function ecdhP256(privateKey: number[], remoteKey: number[]): number[] {
+  if (remoteKey.length !== 65 || remoteKey[0] !== 0x04) return new Array(32).fill(0);
+  var scalar = bytesToBigIntBE(privateKey, 0, 32);
+  var rx = bytesToBigIntBE(remoteKey, 1, 32);
+  var ry = bytesToBigIntBE(remoteKey, 33, 32);
+  var R: P256rPoint = { x: rx, y: ry };
+  var shared = p256rMulScalar(scalar, R);
+  if (!shared) return new Array(32).fill(0);
+  return bigIntToBytesBE32(shared.x);
+}
+
 // ─────────────────────────────────────────────── Random key generation ────────
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
@@ -506,6 +614,25 @@ export function generateKey32(): number[] {
   k[0]  &= 248;
   k[31] &= 127;
   k[31] |= 64;
+  return k;
+}
+
+/**
+ * Generate a 32-byte random private key with no clamping.
+ * Used for P-256 ECDH where the scalar should be a full 256-bit value in [1, n-1].
+ */
+export function generateKey32Unclamped(): number[] {
+  var k: number[] = new Array(32);
+  for (var i = 0; i < 32; i++) {
+    k[i] = (kernel.getTicks() * (i + 3) * 6364136223846793005 + 1442695040888963407) & 0xff;
+    if ((i & 3) === 0) {
+      var t0 = kernel.getTicks();
+      while (kernel.getTicks() === t0) { /* spin */ }
+    }
+  }
+  // Ensure non-zero and < n (P-256 n ≈ 0.9 × 2^256)
+  k[0] |= 0x01;  // guarantee non-zero
+  k[0] &= 0x7f;  // keep below P-256 n
   return k;
 }
 

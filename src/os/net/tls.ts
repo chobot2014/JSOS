@@ -20,7 +20,8 @@ import {
   aesKeyExpand, aesEncryptBlock,
   gcmEncrypt, gcmDecrypt,
   chacha20poly1305Encrypt, chacha20poly1305Decrypt,
-  x25519, x25519PublicKey, generateKey32,
+  x25519, x25519PublicKey, generateKey32, generateKey32Unclamped,
+  p256PublicKey, ecdhP256,
   concat,
 } from './crypto.js';
 import { net, strToBytes } from './net.js';
@@ -51,7 +52,19 @@ const EXT_SUPPORTED_GROUPS   = 0x000a;
 const EXT_KEY_SHARE          = 0x0033;
 const EXT_SIG_ALGS           = 0x000d;
 const EXT_ALPN               = 0x0010;  // [Item 294] Application-Layer Protocol Negotiation
+const EXT_SESSION_TICKET     = 0x0023;  // session ticket (empty = request one)
+const EXT_PSK_KEY_EXCH_MODES = 0x002d;  // RFC 8446 §4.2.9 — required by many TLS 1.3 servers
+const EXT_EC_POINT_FORMATS   = 0x000b;  // EC point formats (legacy compat)
 const GROUP_X25519            = 0x001d;
+const GROUP_P256              = 0x0017;  // secp256r1 / NIST P-256
+
+// HelloRetryRequest sentinel random (RFC 8446 §4.1.3)
+const HRR_RANDOM = [
+  0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11,
+  0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
+  0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e,
+  0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
+];
 
 // ── Byte helpers ──────────────────────────────────────────────────────────────
 
@@ -179,8 +192,10 @@ export class TLSSocket {
   private rxBuf: number[] = [];       // raw bytes from TCP not yet parsed
 
   // Handshake crypto state
-  private myPrivate:  number[] = [];
-  private myPublic:   number[] = [];
+  private myPrivate:    number[] = [];
+  private myPublic:     number[] = [];
+  private myP256Private: number[] = [];
+  private myP256Public:  number[] = [];  // 65 bytes (04 || x || y)
   private transcript: number[] = [];  // all handshake bytes for transcript hash
 
   // Keys (set after key derivation)
@@ -301,21 +316,49 @@ export class TLSSocket {
   // ── Private helpers ────────────────────────────────────────────────────────
 
   private _performHandshake(): boolean {
-    this.myPrivate = generateKey32();
-    this.myPublic  = x25519PublicKey(this.myPrivate);
+    this.myPrivate     = generateKey32();
+    this.myPublic      = x25519PublicKey(this.myPrivate);
+    this.myP256Private = generateKey32Unclamped();
+    // P-256 public key is computed lazily only if server requests it via HRR
 
     var clientHello = this._buildClientHello();
     this.transcript = this.transcript.concat(clientHello.slice(5)); // skip record header
     if (!net.sendBytes(this.sock, clientHello)) return false;
 
-    // Read ServerHello
+    // Read ServerHello (may be a HelloRetryRequest)
     var sh = this._readHandshakeMsg(true);
     if (!sh || sh.type !== HS_SERVER_HELLO) return false;
-    var serverPublic = this._parseServerHello(sh.data);
-    if (!serverPublic) return false;
+
+    // Detect HelloRetryRequest: random field (bytes 2..33) equals HRR sentinel
+    var isHRR = sh.data.length >= 34;
+    if (isHRR) {
+      for (var _hi = 0; _hi < 32; _hi++) {
+        if (sh.data[2 + _hi] !== HRR_RANDOM[_hi]) { isHRR = false; break; }
+      }
+    }
+    if (isHRR) {
+      // Lazily compute P-256 public key now that we know server wants it
+      if (this.myP256Public.length === 0) {
+        this.myP256Public = p256PublicKey(this.myP256Private);
+      }
+      // Reconstruct transcript per RFC 8446 §4.4.1:
+      // replace CH1 bytes with message_hash(CH1) sentinel, then append HRR
+      var ch1Hash = sha256(this.transcript.slice(0, this.transcript.length - sh.data.length - 4));
+      var msgHashMsg = [0xfe, 0x00, 0x00, 0x20].concat(ch1Hash); // type=254, len=32
+      this.transcript = msgHashMsg.concat(this.transcript.slice(this.transcript.length - sh.data.length - 4));
+      // Send a new ClientHello (same key material, server picks from what we offered)
+      var ch2 = this._buildClientHello();
+      this.transcript = this.transcript.concat(ch2.slice(5));
+      if (!net.sendBytes(this.sock, ch2)) return false;
+      sh = this._readHandshakeMsg(true);
+      if (!sh || sh.type !== HS_SERVER_HELLO) return false;
+    }
+
+    var serverKeyInfo = this._parseServerHello(sh.data);
+    if (!serverKeyInfo) return false;
 
     // Derive handshake keys
-    if (!this._deriveHandshakeKeys(serverPublic)) return false;
+    if (!this._deriveHandshakeKeys(serverKeyInfo.key, serverKeyInfo.group)) return false;
 
     // Read encrypted server handshake messages
     var finishedOk = false;
@@ -377,21 +420,22 @@ export class TLSSocket {
     putU16(svExt, 0x0304);  // TLS 1.3
     exts = exts.concat(svExt);
 
-    // supported_groups: x25519
+    // supported_groups: secp256r1 (P-256) + x25519
     var sgExt: number[] = [];
     putU16(sgExt, EXT_SUPPORTED_GROUPS);
-    putU16(sgExt, 4);  // ext len
-    putU16(sgExt, 2);  // list len
+    putU16(sgExt, 6);  // ext len: 2 (list-len) + 2 groups × 2 bytes
+    putU16(sgExt, 4);  // list len
+    putU16(sgExt, GROUP_P256);
     putU16(sgExt, GROUP_X25519);
     exts = exts.concat(sgExt);
 
-    // key_share: x25519
+    // key_share: x25519 only (server can HRR to request P-256 if desired)
     var ksExt: number[] = [];
     putU16(ksExt, EXT_KEY_SHARE);
     var ksData: number[] = [];
-    putU16(ksData, 36);          // client_shares list len
+    putU16(ksData, 36);          // client_shares list len (one x25519 entry)
     putU16(ksData, GROUP_X25519);
-    putU16(ksData, 32);          // key len
+    putU16(ksData, 32);
     ksData = ksData.concat(this.myPublic);
     putU16(ksExt, ksData.length);
     exts = exts.concat(ksExt).concat(ksData);
@@ -405,6 +449,30 @@ export class TLSSocket {
     putU16(saData, 0x0403); // ecdsa_secp256r1_sha256
     putU16(saExt, saData.length);
     exts = exts.concat(saExt).concat(saData);
+
+    // session_ticket (0x0023): empty = request a session ticket
+    // Required by many TLS 1.3 servers (including Fastly) to confirm TLS 1.3 intent
+    var stExt: number[] = [];
+    putU16(stExt, EXT_SESSION_TICKET);
+    putU16(stExt, 0);  // empty session ticket data
+    exts = exts.concat(stExt);
+
+    // psk_key_exchange_modes (0x002d): required by RFC 8446 §4.2.9 for TLS 1.3
+    // Most TLS 1.3 servers (incl. Fastly/BoringSSL) expect this extension
+    var pskExt: number[] = [];
+    putU16(pskExt, EXT_PSK_KEY_EXCH_MODES);
+    putU16(pskExt, 2);  // ext data len = 2
+    putU8(pskExt, 1);   // ke_modes list len = 1 byte
+    putU8(pskExt, 1);   // psk_dhe_ke(1) = PSK with (EC)DHE key exchange
+    exts = exts.concat(pskExt);
+
+    // ec_point_formats (0x000b): legacy compat — uncompressed only
+    var epfExt: number[] = [];
+    putU16(epfExt, EXT_EC_POINT_FORMATS);
+    putU16(epfExt, 2);  // ext data len = 2
+    putU8(epfExt, 1);   // list len = 1
+    putU8(epfExt, 0);   // uncompressed (0)
+    exts = exts.concat(epfExt);
 
     // ALPN extension (Item 294): only offer http/1.1 — we have no HTTP/2 parser,
     // so advertising h2 causes servers (e.g. Google) to negotiate HTTP/2 and
@@ -430,7 +498,9 @@ export class TLSSocket {
     hs = hs.concat(body);
 
     // TLS record
-    var rec: number[] = [TLS_HANDSHAKE, 0x03, 0x01];
+    // TLS record: use 0x0303 (TLS 1.2 legacy) as outer version — RFC 8446 allows 0x0301
+    // but most servers (incl. Fastly) expect 0x0303 in practice
+    var rec: number[] = [TLS_HANDSHAKE, 0x03, 0x03];
     putU16(rec, hs.length);
     return rec.concat(hs);
   }
@@ -438,7 +508,7 @@ export class TLSSocket {
   private _readHandshakeMsg(addToTranscript: boolean):
       { type: number; data: number[] } | null {
     // Read until we have at least 5 bytes (record header)
-    var deadline = kernel.getTicks() + 300;
+    var deadline = kernel.getTicks() + 400;
     while (this.rxBuf.length < 5 && kernel.getTicks() < deadline) {
       var chunk = net.recvBytes(this.sock, 30);
       if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
@@ -446,8 +516,9 @@ export class TLSSocket {
     if (this.rxBuf.length < 5) return null;
     var recType = u8(this.rxBuf, 0);
     var recLen  = u16(this.rxBuf, 3);
+    if (recType !== TLS_HANDSHAKE) return null;
     // Wait for full record
-    deadline = kernel.getTicks() + 300;
+    deadline = kernel.getTicks() + 400;
     while (this.rxBuf.length < 5 + recLen && kernel.getTicks() < deadline) {
       var chunk = net.recvBytes(this.sock, 30);
       if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
@@ -455,7 +526,6 @@ export class TLSSocket {
     if (this.rxBuf.length < 5 + recLen) return null;
     var recData = this.rxBuf.slice(5, 5 + recLen);
     this.rxBuf  = this.rxBuf.slice(5 + recLen);
-    if (recType !== TLS_HANDSHAKE) return null;
     if (recData.length < 4) return null;
     var msgType = u8(recData, 0);
     var msgLen  = u24(recData, 1);
@@ -464,7 +534,7 @@ export class TLSSocket {
     return { type: msgType, data: msgData };
   }
 
-  private _parseServerHello(data: number[]): number[] | null {
+  private _parseServerHello(data: number[]): { group: number; key: number[] } | null {
     if (data.length < 36) return null;
     // version (2) + random (32) + session id len (1) + session id
     var sidLen = u8(data, 34);
@@ -483,21 +553,28 @@ export class TLSSocket {
       var extType = u16(data, off); off += 2;
       var extLen2 = u16(data, off); off += 2;
       if (extType === EXT_KEY_SHARE) {
-        // group (2) + key_exchange (32)
-        if (off + 36 > extEnd) return null;
+        if (off + 4 > extEnd) return null;
         var group = u16(data, off); off += 2;
         var kLen  = u16(data, off); off += 2;
-        if (group !== GROUP_X25519 || kLen !== 32) return null;
-        return data.slice(off, off + 32);
+        if (group === GROUP_X25519) {
+          if (kLen !== 32 || off + 32 > extEnd) return null;
+          return { group: GROUP_X25519, key: data.slice(off, off + 32) };
+        } else if (group === GROUP_P256) {
+          if (kLen !== 65 || off + 65 > extEnd) return null;
+          return { group: GROUP_P256, key: data.slice(off, off + 65) };
+        }
+        return null; // unsupported group
       }
       off += extLen2;
     }
     return null;
   }
 
-  private _deriveHandshakeKeys(serverPublic: number[]): boolean {
-    // Shared secret via X25519
-    var sharedSecret = x25519(this.myPrivate, serverPublic);
+  private _deriveHandshakeKeys(serverKey: number[], group: number): boolean {
+    // Shared secret: X25519 or P-256 ECDH
+    var sharedSecret = (group === GROUP_P256)
+      ? ecdhP256(this.myP256Private, serverKey)
+      : x25519(this.myPrivate, serverKey);
 
     // early_secret = HKDF-Extract(0^32, 0^32)
     var zeros32 = new Array(32).fill(0);

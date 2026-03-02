@@ -339,7 +339,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       var chunk: number[] | null = f.tls ? f.tls.readNB() : net.recvBytesNB(f.sock);
       if (chunk && chunk.length > 0) {
         f.chunks.push(chunk);
-        f.deadline = kernel.getTicks() + 100;  // silence timeout resets on each chunk
+        f.deadline = kernel.getTicks() + 300;  // 3 s silence timeout resets on each chunk
       }
       if (kernel.getTicks() >= f.deadline) f.stage = 'parsing';
       return 'pending';
