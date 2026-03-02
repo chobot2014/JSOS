@@ -1378,8 +1378,12 @@ static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
                                                     * (~1-1.3 GB real peak). If sbrk exhausts
                                                     * the window, that child gets ENOMEM —
                                                     * kernel continues unaffected. */
-    JS_SetMaxStackSize(p->rt, 256 * 1024);        /* 256 KB — recursive HTML parser / deeply
-                                                    * nested JS eval needs more than 64 KB. */
+    JS_SetGCThreshold(p->rt, 256u * 1024u * 1024u); /* GC at 256 MB — keeps heap tidy during
+                                                    * React/Vue reconciliation bursts without
+                                                    * waiting until near the 1 GB wall. */
+    JS_SetMaxStackSize(p->rt, 512 * 1024);        /* 512 KB — deep component trees (React,
+                                                    * Angular), recursive HTML parser, deeply
+                                                    * nested JS eval all need headroom. */
     p->ctx = JS_NewContext(p->rt);
     if (!p->ctx) { JS_FreeRuntime(p->rt); p->rt = NULL; return JS_NewInt32(c, -1); }
     /* Inject minimal child kernel API */
