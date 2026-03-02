@@ -5401,111 +5401,264 @@ export function createPageJS(
     try { return new URL(specifier, base).href; } catch(_) { return specifier; }
   }
 
-  /**
-   * Runtime implementation of dynamic import() inside browser page scripts.
-   * Replaces:  import('specifier')
-   * With:      __jsos_dynamic_import__('specifier')
-   */
-  function __jsos_dynamic_import__(specifier: string): Promise<unknown> {
-    var resolved = _resolveModuleSpecifier(specifier);
-    if (_moduleCache.has(resolved)) return Promise.resolve(_moduleCache.get(resolved));
-    return new Promise(function(resolve, reject) {
-      _fetchURL(resolved, function(err: string | null, text?: string) {
-        if (err || !text) { reject(new Error('Failed to import: ' + resolved + (err ? ' (' + err + ')' : ''))); return; }
-        var transformed = _transformModuleCode(text, resolved);
-        // Run module code; __esm_exports is the namespace
-        try {
-          var modFn = new Function('__jsos_dynamic_import__', transformed) as (di: unknown) => void;
-          modFn.call(win, __jsos_dynamic_import__);
-          // Access __esm_exports through a second pass (it's var-scoped inside modFn)
-          // Re-run to capture exports — use a returns-exports wrapper
-          var wrapFn = new Function('__jsos_dynamic_import__',
-            transformed + '\nreturn __esm_exports;') as (di: unknown) => Record<string, unknown>;
-          var exports: Record<string, unknown> = wrapFn.call(win, __jsos_dynamic_import__);
-          _moduleCache.set(resolved, exports);
-          resolve(exports);
-        } catch(e) {
-          reject(e);
-        }
-      });
-    });
-  }
-
-  /** Minimal fetch helper used by __jsos_dynamic_import__ (reuses os.fetchAsync). */
+  /** Minimal fetch helper — wraps os.fetchAsync with error normalization. */
   function _fetchURL(url: string, cb2: (err: string | null, text?: string) => void): void {
     try {
       os.fetchAsync(url, function(resp: FetchResponse | null, err?: string) {
         if (resp && resp.status >= 200 && resp.status < 300) cb2(null, resp.bodyText);
-        else cb2(err || 'HTTP ' + (resp?.status ?? 0));
+        else cb2(err || 'HTTP ' + (resp ? resp.status : 0));
       });
     } catch(e) { cb2(String(e)); }
   }
 
+  /** Parse all static import/export-from specifiers in module code for pre-loading. */
+  function _parseStaticImportSpecifiers(code: string): string[] {
+    var specs: string[] = [];
+    var re1 = /^[ \t]*import\s+(?:type\s+)?(?:(?:[\w$*{][^'"]*?)\s+from\s+)?['"]([^'"]+)['"]/gm;
+    var re2 = /^[ \t]*export\s+(?:\*|\{[^}]*\})\s+from\s+['"]([^'"]+)['"]/gm;
+    var m: RegExpExecArray | null;
+    while ((m = re1.exec(code)) !== null) { if (m[1] && !m[1].startsWith('data:')) specs.push(m[1]); }
+    while ((m = re2.exec(code)) !== null) { if (m[1] && !m[1].startsWith('data:')) specs.push(m[1]); }
+    return specs;
+  }
+
+  /**
+   * Transform ES module syntax so it can run inside new Function().
+   * Static imports → synchronous __get_module__(resolvedURL) lookups (deps already loaded).
+   * Exports → assignments to __esm_exports.
+   */
   function _transformModuleCode(code: string, moduleURL: string): string {
-    // Inject import.meta.url and transform basic ES module syntax for New Function context
+    var ctr = 0;
     var header = 'var import_meta_url = ' + JSON.stringify(moduleURL) + ';\n' +
-                  'var import_meta = { url: import_meta_url, resolve: function(s) { return s; } };\n' +
-                  'var __esm_exports = {};\n';
-    // Replace `import.meta` with our injected variable
-    var transformed = code.replace(/\bimport\.meta\b/g, 'import_meta');
-    // Replace dynamic import() expressions BEFORE stripping static imports
-    // import('specifier')  →  __jsos_dynamic_import__('specifier')
-    // This must come before the static-import strip so we don't accidentally strip these
-    transformed = transformed.replace(/\bimport\s*\(/g, '__jsos_dynamic_import__(');
-    // Strip bare top-level import statements (import x from 'y'; import { a } from 'b';)
-    // Replace with empty comment so line numbers are preserved-ish and stack traces show origin
-    transformed = transformed.replace(/^[ \t]*import\s+(?:type\s+)?(?:[\w{},*\s]+from\s+)?['"][^'"]*['"]\s*;?[ \t]*/gm, '/* import stripped */ ');
-    // Strip export keywords from top-level declarations
-    transformed = transformed.replace(/^[ \t]*export\s+default\s+/gm, '__esm_exports.default = ');
-    transformed = transformed.replace(/^[ \t]*export\s+(const|let|var|function|class|async)\s+/gm, (_m: string, kw: string) => kw + ' ');
-    transformed = transformed.replace(/^[ \t]*export\s+\{[^}]*\}\s*;?/gm, '');
-    return header + transformed;
+                 'var import_meta = { url: import_meta_url, env: { MODE: "production", PROD: true, DEV: false, BASE_URL: "/" }, resolve: function(s) { return s; } };\n' +
+                 'var __esm_exports = {};\n';
+
+    var out = code.replace(/\bimport\.meta\b/g, 'import_meta');
+    // dynamic import() → __jsos_dynamic_import__()
+    out = out.replace(/\bimport\s*\(/g, '__jsos_dynamic_import__(');
+
+    // ── Static imports → synchronous cache lookups ────────────────────────
+    var _namedExports: string[] = [];  // collect names from inline export decls
+    out = out.replace(
+      /^([ \t]*)import\s+(type\s+)?(?:([\w$]+)\s*,?\s*)?(?:\{\s*([^}]*)\s*\})?\s*(?:\*\s+as\s+([\w$]+)\s+)?(?:from\s+)?(['"][^'"]+['"])\s*;?/gm,
+      function(_full: string, _ind: string, typeOnly: string|undefined,
+               defaultBind: string|undefined, namedBinds: string|undefined,
+               namespaceBind: string|undefined, specifierQuoted: string): string {
+        // import type { ... } → strip entirely
+        if (typeOnly && !defaultBind && !namespaceBind) return '/* import type stripped */\n';
+        var spec = specifierQuoted.slice(1, -1);
+        var resolved = _resolveModuleSpecifier(spec, moduleURL);
+        var varN = '__esm_m' + (ctr++) + '__';
+        var lines = 'var ' + varN + ' = __get_module__(' + JSON.stringify(resolved) + ');\n';
+        if (defaultBind) lines += 'var ' + defaultBind + ' = (' + varN + '["default"] !== undefined ? ' + varN + '["default"] : ' + varN + ');\n';
+        if (namedBinds) {
+          namedBinds.split(',').forEach(function(b: string) {
+            b = b.trim(); if (!b || b === 'type') return;
+            var pts = b.split(/\s+as\s+/); var src = pts[0].trim(); var local = (pts[1] || pts[0]).trim();
+            if (src && src !== 'type' && local) lines += 'var ' + local + ' = ' + varN + '[' + JSON.stringify(src) + '];\n';
+          });
+        }
+        if (namespaceBind) lines += 'var ' + namespaceBind + ' = ' + varN + ';\n';
+        if (!defaultBind && !namedBinds && !namespaceBind) lines += '// side-effect import: ' + spec + '\n';
+        return lines;
+      }
+    );
+
+    // ── Re-exports: export * from 'mod' (optionally as NS) ───────────────
+    out = out.replace(/^[ \t]*export\s+\*\s+(?:as\s+([\w$]+)\s+)?from\s+(['"][^'"]+['"])\s*;?/gm,
+      function(_: string, ns: string|undefined, sq: string): string {
+        var resolved = _resolveModuleSpecifier(sq.slice(1,-1), moduleURL);
+        var varN = '__esm_m' + (ctr++) + '__';
+        if (ns) return 'var ' + varN + ' = __get_module__(' + JSON.stringify(resolved) + ');\n__esm_exports[' + JSON.stringify(ns) + '] = ' + varN + ';\n';
+        return 'var ' + varN + ' = __get_module__(' + JSON.stringify(resolved) + ');\nObject.assign(__esm_exports, ' + varN + ');\n';
+      });
+
+    // ── Re-exports: export { a, b as B } from 'mod' ──────────────────────
+    out = out.replace(/^[ \t]*export\s+\{([^}]*)\}\s+from\s+(['"][^'"]+['"])\s*;?/gm,
+      function(_: string, binds: string, sq: string): string {
+        var resolved = _resolveModuleSpecifier(sq.slice(1,-1), moduleURL);
+        var varN = '__esm_m' + (ctr++) + '__';
+        var result = 'var ' + varN + ' = __get_module__(' + JSON.stringify(resolved) + ');\n';
+        binds.split(',').forEach(function(b: string) {
+          b = b.trim(); if (!b) return;
+          var pts = b.split(/\s+as\s+/); var src = pts[0].trim(); var exported = (pts[1] || pts[0]).trim();
+          if (src && exported) result += '__esm_exports[' + JSON.stringify(exported) + '] = ' + varN + '[' + JSON.stringify(src) + '];\n';
+        });
+        return result;
+      });
+
+    // ── Local re-exports: export { a, b as B } (no 'from') ───────────────
+    out = out.replace(/^[ \t]*export\s+\{([^}]*)\}\s*;?/gm,
+      function(_: string, binds: string): string {
+        var result = '';
+        binds.split(',').forEach(function(b: string) {
+          b = b.trim(); if (!b) return;
+          var pts = b.split(/\s+as\s+/); var local = pts[0].trim(); var exported = (pts[1] || pts[0]).trim();
+          if (local && exported) result += '__esm_exports[' + JSON.stringify(exported) + '] = ' + local + ';\n';
+        });
+        return result;
+      });
+
+    // ── export default expr ────────────────────────────────────────────────
+    out = out.replace(/^([ \t]*)export\s+default\s+/gm, '$1__esm_exports["default"] = ');
+
+    // ── export const/let/var NAME → strip export, collect name ───────────
+    out = out.replace(/^([ \t]*)export\s+(const|let|var)\s+([\w$]+)/gm,
+      function(_: string, ind: string, kw: string, name: string): string {
+        _namedExports.push(name); return ind + kw + ' ' + name;
+      });
+
+    // ── export function/class/async function NAME → strip export, collect name
+    out = out.replace(/^([ \t]*)export\s+(async\s+function|function|class)\s+([\w$]+)/gm,
+      function(_: string, ind: string, kw: string, name: string): string {
+        _namedExports.push(name); return ind + kw + ' ' + name;
+      });
+
+    // ── Remaining bare export keyword (safety net) ────────────────────────
+    out = out.replace(/^[ \t]*export\s+/gm, '');
+
+    // ── Append named export registrations at end ──────────────────────────
+    var trailer = _namedExports.length > 0
+      ? '\n' + _namedExports.map(function(n: string) {
+          return 'if (typeof ' + n + ' !== "undefined") __esm_exports[' + JSON.stringify(n) + '] = ' + n + ';';
+        }).join('\n') + '\n'
+      : '';
+
+    return header + out + trailer;
+  }
+
+  /**
+   * Dynamic import() implementation — recursively pre-loads all static dependencies
+   * before executing any module, then executes once and caches the exports.
+   */
+  function __jsos_dynamic_import__(specifier: string, fromURL?: string): Promise<Record<string, unknown>> {
+    var resolved = _resolveModuleSpecifier(specifier, fromURL || _baseHref);
+    if (_moduleCache.has(resolved)) return Promise.resolve(_moduleCache.get(resolved) as Record<string, unknown>);
+
+    // In-progress guard — prevents duplicate parallel fetches of the same module
+    var _inProgressKey = '__loading__' + resolved;
+    if ((_moduleCache as any)[_inProgressKey]) return (_moduleCache as any)[_inProgressKey] as Promise<Record<string, unknown>>;
+
+    var loading: Promise<Record<string, unknown>> = new Promise<Record<string, unknown>>(function(resolve, reject) {
+      _fetchURL(resolved, function(err: string | null, text?: string) {
+        if (err || !text) {
+          cb.log('[JS] module fetch failed: ' + resolved + (err ? ' (' + err + ')' : ''));
+          reject(new Error('Failed to import: ' + resolved));
+          return;
+        }
+
+        // Pre-load ALL static dependencies before executing this module
+        var depSpecs = _parseStaticImportSpecifiers(text);
+        var depPromises: Promise<unknown>[] = depSpecs.map(function(spec: string) {
+          return __jsos_dynamic_import__(spec, resolved).catch(function(e: unknown) {
+            cb.log('[JS] dep load failed: ' + spec + ' (' + String(e) + ')');
+          });
+        });
+
+        Promise.all(depPromises).then(function() {
+          // All deps are now in _moduleCache — transform and execute synchronously
+          if (_moduleCache.has(resolved)) { resolve(_moduleCache.get(resolved) as Record<string, unknown>); return; }
+          var transformed = _transformModuleCode(text, resolved);
+          var __get_module__ = function(url: string): Record<string, unknown> {
+            return (_moduleCache.get(url) as Record<string, unknown>) ?? ({} as Record<string, unknown>);
+          };
+          try {
+            var wrapFn = new Function('__jsos_dynamic_import__', '__get_module__',
+              transformed + '\nreturn __esm_exports;') as
+              (di: typeof __jsos_dynamic_import__, gm: typeof __get_module__) => Record<string, unknown>;
+            var esm_exports = wrapFn.call(win, __jsos_dynamic_import__, __get_module__);
+            _moduleCache.set(resolved, esm_exports);
+            resolve(esm_exports);
+          } catch(e) {
+            _fireScriptError(e);
+            _moduleCache.set(resolved, {});
+            resolve({});
+          }
+        }).catch(function(e: unknown) { _fireScriptError(e); reject(e); });
+      });
+    });
+
+    (_moduleCache as any)[_inProgressKey] = loading;
+    loading.then(
+      function() { delete (_moduleCache as any)[_inProgressKey]; },
+      function() { delete (_moduleCache as any)[_inProgressKey]; }
+    );
+    return loading;
   }
 
   function runScripts(idx: number): void {
     if (idx >= scripts.length) {
-      // All scripts done — fire DOMContentLoaded (interactive), then load (complete)
       (doc as any)._readyState = 'interactive';
       var dclEv = new VEvent('DOMContentLoaded', { bubbles: true });
       doc.dispatchEvent(dclEv);
       (doc as any)._readyState = 'complete';
       var loadEv = new VEvent('load');
-      (win['dispatchEvent'] as (e: VEvent) => void)(loadEv);  // window.onload
+      (win['dispatchEvent'] as (e: VEvent) => void)(loadEv);
       doc.dispatchEvent(loadEv);
       checkDirty();
       if (needsRerender) doRerender();
       return;
     }
     var s = scripts[idx];
-    // Handle importmap BEFORE the type-skip filter
+
+    // importmap — populate _importMap before any scripts run
     if (s.type && s.type.trim().toLowerCase() === 'importmap') {
       if (s.inline && s.code) {
         try {
-          var _im = JSON.parse(s.code) as { imports?: Record<string, string>; scopes?: Record<string, Record<string, string>> };
-          if (_im && _im.imports) {
-            Object.keys(_im.imports).forEach(function(k) { _importMap.set(k, (_im.imports as any)[k]); });
-          }
+          var _im = JSON.parse(s.code) as { imports?: Record<string, string> };
+          if (_im && _im.imports) Object.keys(_im.imports).forEach(function(k) { _importMap.set(k, (_im.imports as any)[k]); });
         } catch(_imErr) { cb.log('[importmap parse error] ' + String(_imErr)); }
       }
       runScripts(idx + 1); return;
     }
-    // Skip non-JS scripts (but include module)
+
+    // Skip non-JS script types (but allow 'module')
     if (s.type && !s.type.match(/javascript|ecmascript|module|text$/i)) {
       runScripts(idx + 1); return;
     }
-    var isModule = s.type && s.type.toLowerCase().includes('module');
+
+    var isModule = !!(s.type && s.type.toLowerCase().includes('module'));
+
     if (s.inline) {
-      var code = isModule ? _transformModuleCode(s.code, _baseHref + '#script-' + idx) : s.code;
-      execScript(code);
-      runScripts(idx + 1);
-    } else {
-      var scriptBaseURL = _resolveURL(s.src, _baseHref);
-      loadExternalScript(s.src, (loadedCode?: string) => {
-        if (isModule && loadedCode) {
-          execScript(_transformModuleCode(loadedCode, scriptBaseURL));
-        }
+      if (isModule) {
+        // Inline module: pre-load static deps then execute
+        var _iModURL = _baseHref + '#inline-' + idx;
+        var _iDepSpecs = _parseStaticImportSpecifiers(s.code);
+        var _iDeps = _iDepSpecs.map(function(spec: string) {
+          return __jsos_dynamic_import__(spec, _iModURL).catch(function(e: unknown) {
+            cb.log('[JS] inline module dep failed: ' + spec + ' (' + String(e) + ')');
+          });
+        });
+        Promise.all(_iDeps).then(function() {
+          var _iTrans = _transformModuleCode(s.code, _iModURL);
+          var _iGet = function(url: string): Record<string, unknown> {
+            return (_moduleCache.get(url) as Record<string, unknown>) ?? ({} as Record<string, unknown>);
+          };
+          try {
+            var _iFn = new Function('__jsos_dynamic_import__', '__get_module__', _iTrans) as
+              (di: typeof __jsos_dynamic_import__, gm: typeof _iGet) => void;
+            _iFn.call(win, __jsos_dynamic_import__, _iGet);
+          } catch(e) { _fireScriptError(e); }
+          checkDirty();
+          runScripts(idx + 1);
+        });
+      } else {
+        execScript(s.code);
         runScripts(idx + 1);
-      }, !!isModule);
+      }
+    } else {
+      if (isModule) {
+        // External module: full ESM loader (pre-loads deps recursively)
+        __jsos_dynamic_import__(s.src, _baseHref).then(function() {
+          checkDirty();
+          runScripts(idx + 1);
+        }).catch(function(e: unknown) {
+          _fireScriptError(e);
+          runScripts(idx + 1);
+        });
+      } else {
+        loadExternalScript(s.src, function() { runScripts(idx + 1); }, false);
+      }
     }
   }
 
