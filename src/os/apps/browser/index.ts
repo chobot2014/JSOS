@@ -227,11 +227,12 @@ export class BrowserApp implements App {
   onMount(win: WMWindow): void {
     os.debug.log('[browser] onMount start');
     this._win = win;
-    // Initialize first tab
-    this._tabs = [this._makeBlankTab('about:jsos')];
+    // Initialize first tab — use Google search for headless iteration testing
+    var _startURL = 'https://www.google.com/search?q=news';
+    this._tabs = [this._makeBlankTab(_startURL)];
     this._curTab = 0;
     this._loadTab(0);
-    this._navigate('about:jsos');
+    this._navigate(_startURL);
     os.debug.log('[browser] onMount done');
   }
 

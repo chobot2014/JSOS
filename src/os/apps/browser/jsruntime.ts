@@ -258,7 +258,7 @@ export function createPageJS(
     var _bodyHTML = serializeDOM(doc);
     _rerenderCount++;
     if (_rerenderCount <= 3) {
-      cb.log('[browser] rerender#' + _rerenderCount + ' ' + _bodyHTML.length + 'B: ' + _bodyHTML.slice(0, 120).replace(/\n/g, ' '));
+      cb.log('[browser] rerender#' + _rerenderCount + ' ' + _bodyHTML.length + 'B: ' + _bodyHTML.slice(0, 1000).replace(/\n/g, ' '));
     }
     cb.rerender(_bodyHTML);
     // Rebuild the DOM from the new HTML so subsequent JS keeps working
@@ -550,7 +550,10 @@ export function createPageJS(
       wgslLanguageFeatures: new Set<string>(),
     },
     /** Contacts API - Android Chrome 80+, not available on desktop */
-    contacts: new ContactsManager_(),
+    contacts: {
+      getProperties(): Promise<string[]> { return Promise.resolve(['name', 'email', 'tel', 'address', 'icon']); },
+      select(_props: string[], _opts?: unknown): Promise<unknown[]> { return Promise.reject(new DOMException('Not supported', 'NotSupportedError')); },
+    },
   };
 
   // ── window.screen ─────────────────────────────────────────────────────────
@@ -5317,6 +5320,7 @@ export function createPageJS(
   }
 
   function execScript(code: string): void {
+    cb.log('[JS] exec ' + code.length + 'B :: ' + code.slice(0, 80).replace(/\n/g, '\\n'));
     // Stage 1: run inside with(_winScope) so scripts resolve identifiers through
     // the window proxy (bare globals, property writes, etc.)
     // We strip hashbang and 'use strict' because:
@@ -5372,12 +5376,14 @@ export function createPageJS(
 
   function loadExternalScript(src: string, done: (code?: string) => void, noAutoExec = false): void {
     var url = src.startsWith('http') ? src : _resolveURL(src, _baseHref);
+    cb.log('[JS] fetchScript: ' + url);
     os.fetchAsync(url, (resp: FetchResponse | null, _err?: string) => {
       if (resp && resp.status === 200) {
+        cb.log('[JS] fetchScript OK ' + resp.bodyText.length + 'B: ' + url);
         if (!noAutoExec) execScript(resp.bodyText);
         done(resp.bodyText);
       } else {
-        cb.log('[JS] failed to load script: ' + url);
+        cb.log('[JS] failed to load script (' + (resp ? resp.status : 'null') + '): ' + url);
         done(undefined);
       }
     });
@@ -5607,6 +5613,7 @@ export function createPageJS(
       return;
     }
     var s = scripts[idx];
+    cb.log('[browser] script[' + idx + '/' + scripts.length + '] type=' + (s.type || 'js') + ' ' + (s.inline ? 'inline len=' + (s.code || '').length + ' :: ' + (s.code || '').slice(0, 100).replace(/\n/g, '\\n') : 'src=' + (s.src || '(none)')));
 
     // importmap — populate _importMap before any scripts run
     if (s.type && s.type.trim().toLowerCase() === 'importmap') {

@@ -218,7 +218,13 @@ export class ThreadManager {
     for (var i = 0; i < snap.length; i++) {
       var c = snap[i];
       var result: 'done' | 'pending';
-      try { result = c.step(); } catch (_e) { result = 'done'; }
+      try { result = c.step(); } catch (_e) {
+        // Log the exception — previously silently swallowed, making debugging impossible
+        var _eMsg = '';
+        try { _eMsg = (_e instanceof Error) ? (_e.message + (_e.stack ? '\n' + _e.stack.slice(0, 200) : '')) : String(_e); } catch (_) {}
+        (kernel as any).serialPut('[coroutine] ' + c.name + ' threw: ' + _eMsg + '\n');
+        result = 'done';
+      }
       if (result === 'pending') keep.push(c);
     }
     // Merge: retained pending items + any coroutines added during this tick

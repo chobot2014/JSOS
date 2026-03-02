@@ -294,7 +294,9 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       var req  = method + ' ' + path + ' HTTP/1.1\r\n' +
                  'Host: ' + f.parsed.host + '\r\n' +
                  'Connection: close\r\n' +
-                 'Accept: text/html,*/*\r\n' +
+                 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n' +
+                 'Accept-Language: en-US,en;q=0.9\r\n' +
+                 'User-Agent: Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/115.0\r\n' +
                  (bodyStr ? 'Content-Length: ' + bodyStr.length + '\r\n' : '') +
                  extraHdrs +
                  '\r\n' + bodyStr;
@@ -339,6 +341,9 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
 
       var resp = parseHttpResponse(flat);
       if (!resp) {
+        var _previewBytes = flat.slice(0, 64);
+        var _preview = _previewBytes.map(function(b) { return b >= 32 && b < 127 ? String.fromCharCode(b) : '.'; }).join('');
+        kernel.serialPut('[sdk] parse fail ' + total + 'B: ' + _preview + '\n');
         f.callback(null, 'Could not parse HTTP response from ' + f.fetchIP);
         return 'done';
       }

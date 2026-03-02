@@ -406,14 +406,14 @@ export class TLSSocket {
     putU16(saExt, saData.length);
     exts = exts.concat(saExt).concat(saData);
 
-    // ALPN extension (Item 294): prefer h2, then http/1.1
+    // ALPN extension (Item 294): only offer http/1.1 — we have no HTTP/2 parser,
+    // so advertising h2 causes servers (e.g. Google) to negotiate HTTP/2 and
+    // send binary frames we cannot parse.
     var alpnExt: number[] = [];
     putU16(alpnExt, EXT_ALPN);
     var alpnData: number[] = [];
-    var proto1 = strToBytes('h2');
     var proto2 = strToBytes('http/1.1');
     var protoList: number[] = [];
-    putU8(protoList, proto1.length); protoList = protoList.concat(proto1);
     putU8(protoList, proto2.length); protoList = protoList.concat(proto2);
     putU16(alpnData, protoList.length);
     alpnData = alpnData.concat(protoList);
