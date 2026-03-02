@@ -238,7 +238,7 @@ export class TLSSocket {
    */
   readNB(): number[] | null {
     var chunk = net.recvBytesNB(this.sock);
-    if (chunk) this.rxBuf = this.rxBuf.concat(chunk);
+    if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
     if (this.rxBuf.length < 5) return null;
     var outerType = u8(this.rxBuf, 0);
     var recLen    = u16(this.rxBuf, 3);
@@ -271,7 +271,7 @@ export class TLSSocket {
     while (kernel.getTicks() < deadline) {
       // Always poll for more data to ensure rxBuf grows when partial records exist
       var more = net.recvBytes(this.sock, 10);
-      if (more) this.rxBuf = this.rxBuf.concat(more);
+      if (more && more.length > 0) { for (var _pi = 0; _pi < more.length; _pi++) this.rxBuf.push(more[_pi]); }
 
       if (this.rxBuf.length < 5) continue;
       var outerType = u8(this.rxBuf, 0);
@@ -441,7 +441,7 @@ export class TLSSocket {
     var deadline = kernel.getTicks() + 300;
     while (this.rxBuf.length < 5 && kernel.getTicks() < deadline) {
       var chunk = net.recvBytes(this.sock, 30);
-      if (chunk) this.rxBuf = this.rxBuf.concat(chunk);
+      if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
     }
     if (this.rxBuf.length < 5) return null;
     var recType = u8(this.rxBuf, 0);
@@ -450,7 +450,7 @@ export class TLSSocket {
     deadline = kernel.getTicks() + 300;
     while (this.rxBuf.length < 5 + recLen && kernel.getTicks() < deadline) {
       var chunk = net.recvBytes(this.sock, 30);
-      if (chunk) this.rxBuf = this.rxBuf.concat(chunk);
+      if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
     }
     if (this.rxBuf.length < 5 + recLen) return null;
     var recData = this.rxBuf.slice(5, 5 + recLen);
@@ -547,7 +547,7 @@ export class TLSSocket {
       var deadline = kernel.getTicks() + 400;
       while (this.rxBuf.length < 5 && kernel.getTicks() < deadline) {
         var chunk = net.recvBytes(this.sock, 50);
-        if (chunk) this.rxBuf = this.rxBuf.concat(chunk);
+        if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
       }
       if (this.rxBuf.length < 5) return null;
       var outerType = u8(this.rxBuf, 0);
@@ -555,7 +555,7 @@ export class TLSSocket {
       deadline = kernel.getTicks() + 400;
       while (this.rxBuf.length < 5 + recLen && kernel.getTicks() < deadline) {
         var chunk = net.recvBytes(this.sock, 50);
-        if (chunk) this.rxBuf = this.rxBuf.concat(chunk);
+        if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
       }
       if (this.rxBuf.length < 5 + recLen) return null;
       var record     = this.rxBuf.slice(0, 5 + recLen);
@@ -872,14 +872,14 @@ export class TLS12Socket {
     var deadline = kernel.getTicks() + 500;
     while (this._rxBuf.length < 5 && kernel.getTicks() < deadline) {
       var chunk = net.recvBytes(this._sock, 100);
-      if (chunk) this._rxBuf = this._rxBuf.concat(chunk);
+      if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this._rxBuf.push(chunk[_pi]); }
     }
     if (this._rxBuf.length < 5) return null;
     var type   = this._rxBuf[0];
     var recLen = (this._rxBuf[3] << 8) | this._rxBuf[4];
     while (this._rxBuf.length < 5 + recLen && kernel.getTicks() < deadline) {
       var c2 = net.recvBytes(this._sock, 100);
-      if (c2) this._rxBuf = this._rxBuf.concat(c2);
+      if (c2 && c2.length > 0) { for (var _pi2 = 0; _pi2 < c2.length; _pi2++) this._rxBuf.push(c2[_pi2]); }
     }
     if (this._rxBuf.length < 5 + recLen) return null;
     var data = this._rxBuf.slice(5, 5 + recLen);

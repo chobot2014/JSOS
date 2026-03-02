@@ -162,6 +162,24 @@ export interface FetchResponse {
 
 // ── Internal fetch state ──────────────────────────────────────────────────────
 
+/** Convert a raw byte array to a Latin-1 string efficiently.
+ *  Uses chunked String.fromCharCode.apply() to avoid O(n²) concatenation.
+ *  Chunk size of 8192 is well below QuickJS's 65534 argument limit.
+ */
+function _bytesToString(bytes: number[]): string {
+  var CHUNK = 8192;
+  if (bytes.length === 0) return '';
+  if (bytes.length <= CHUNK) {
+    return String.fromCharCode.apply(null, bytes as unknown as number[]);
+  }
+  var parts: string[] = [];
+  for (var _ci = 0; _ci < bytes.length; _ci += CHUNK) {
+    var _end = _ci + CHUNK < bytes.length ? _ci + CHUNK : bytes.length;
+    parts.push(String.fromCharCode.apply(null, bytes.slice(_ci, _end) as unknown as number[]));
+  }
+  return parts.join('');
+}
+
 type FetchStage =
   | 'dns' | 'connecting' | 'tls' | 'sending' | 'receiving' | 'parsing' | 'done';
 
@@ -396,9 +414,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
 
       if (resp.status < 200 || resp.status >= 400) {
         // Return the error response — caller decides how to render it
-        var bodyText = '';
-        for (var bi = 0; bi < resp.body.length; bi++)
-          bodyText += String.fromCharCode(resp.body[bi] & 0xff);
+        var bodyText = _bytesToString(resp.body);
         f.callback({
           status: resp.status, headers: resp.headers,
           body: resp.body, bodyText, finalURL: f.currentURL
@@ -406,9 +422,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
         return 'done';
       }
 
-      var bodyText2 = '';
-      for (var bi2 = 0; bi2 < resp.body.length; bi2++)
-        bodyText2 += String.fromCharCode(resp.body[bi2] & 0xff);
+      var bodyText2 = _bytesToString(resp.body);
       f.callback({ status: resp.status, headers: resp.headers, body: resp.body, bodyText: bodyText2, finalURL: f.currentURL });
       return 'done';
     }

@@ -3363,7 +3363,10 @@ int quickjs_initialize(void) {
 
     JS_SetMemoryLimit(rt, 512u * 1024u * 1024u); /* 512 MB — main runtime: JS bundle + DOM + net stack + JIT */
     JS_SetGCThreshold(rt, 128u * 1024u * 1024u); /* GC at 128 MB to avoid hitting the cap */
-    JS_SetMaxStackSize(rt, 512 * 1024);           /* 512 KB stack — TCP/IP state machine recurses deeply */
+    JS_SetMaxStackSize(rt, 4 * 1024 * 1024);      /* 4 MB stack — Google Fonts loader recurses > 512 KB */
+    /* Note: 2b13cc6 had 512 KB — doubled to 2 MB, then Google font IIFE still
+     * overflowed at ~1.6 MB, so raised to 4 MB.  Child processes keep 512 KB
+     * since they run simpler workloads. */
 
     /* Wire dynamic import() module loader (items 118 + 119) */
     JS_SetModuleLoaderFunc(rt, _module_normalize, _module_load, NULL);

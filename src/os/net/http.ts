@@ -17,6 +17,19 @@ import {
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
+/** Fast O(n) chunk flattener — avoid byte-by-byte loops that cause O(n²) on large responses. */
+function _flattenChunks(chunks: number[][]): number[] {
+  var total = 0;
+  for (var i = 0; i < chunks.length; i++) total += chunks[i].length;
+  var out = new Array<number>(total);
+  var idx = 0;
+  for (var i = 0; i < chunks.length; i++) {
+    var c = chunks[i];
+    for (var j = 0; j < c.length; j++) out[idx++] = c[j];
+  }
+  return out;
+}
+
 // ── Resource priority ─────────────────────────────────────────────────────────
 
 /** Standard Fetch Priority hint (matches W3C Priority Hints spec). */
@@ -503,11 +516,7 @@ export function httpGet(
   }
 
   if (chunks.length === 0) { net.close(sock); _wt.finish(0, 0); return hit?.response ?? null; }
-  var buf: number[] = [];
-  for (var ci = 0; ci < chunks.length; ci++) {
-    var ch = chunks[ci];
-    for (var cj = 0; cj < ch.length; cj++) buf.push(ch[cj]);
-  }
+  var buf = _flattenChunks(chunks);
   var resp = parseHttpResponse(buf);
   if (!resp) { net.close(sock); _wt.finish(0, 0); return hit?.response ?? null; }
 
@@ -596,11 +605,7 @@ export function httpsGet(
   }
 
   if (tlsChunks.length === 0) { tls.close(); _wt2.finish(0, 0); return { tlsOk: true, response: hit2?.response ?? null }; }
-  var tlsBuf: number[] = [];
-  for (var tci = 0; tci < tlsChunks.length; tci++) {
-    var tch = tlsChunks[tci];
-    for (var tcj = 0; tcj < tch.length; tcj++) tlsBuf.push(tch[tcj]);
-  }
+  var tlsBuf = _flattenChunks(tlsChunks);
   var resp2 = parseHttpResponse(tlsBuf);
   if (!resp2) { tls.close(); _wt2.finish(0, 0); return { tlsOk: true, response: hit2?.response ?? null }; }
 
@@ -649,11 +654,7 @@ export function httpPost(
   net.close(sock);
 
   if (chunks.length === 0) return null;
-  var buf: number[] = [];
-  for (var ci = 0; ci < chunks.length; ci++) {
-    var ch = chunks[ci];
-    for (var cj = 0; cj < ch.length; cj++) buf.push(ch[cj]);
-  }
+  var buf = _flattenChunks(chunks);
   return parseHttpResponse(buf);
 }
 
@@ -679,11 +680,7 @@ export function httpsPost(
   tls.close();
 
   if (tlsChunks.length === 0) return { tlsOk: true, response: null };
-  var tlsBuf: number[] = [];
-  for (var tci = 0; tci < tlsChunks.length; tci++) {
-    var tch = tlsChunks[tci];
-    for (var tcj = 0; tcj < tch.length; tcj++) tlsBuf.push(tch[tcj]);
-  }
+  var tlsBuf = _flattenChunks(tlsChunks);
   return { tlsOk: true, response: parseHttpResponse(tlsBuf) };
 }
 

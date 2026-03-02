@@ -248,7 +248,6 @@ export function createPageJS(
   function setInterval_(fn: () => void, delay: number): number {
     var id = timerSeq++;
     var fireAt = Date.now() - startTime + Math.max(1, delay);
-    cb.log('[JS] setInterval id=' + id + ' delay=' + delay);
     timers.push({ id, fn, fireAt, interval: true, delay: Math.max(1, delay) });
     return id;
   }
@@ -331,9 +330,9 @@ export function createPageJS(
 
   var location = {
     get href(): string { return _effectiveHref(); },
-    set href(v: string) { cb.log('[browser] location.href= ' + v.slice(0, 100)); cb.navigate(v); },
-    assign(url: string)  { cb.log('[browser] location.assign: ' + url.slice(0, 100)); cb.navigate(url); },
-    replace(url: string) { cb.log('[browser] location.replace: ' + url.slice(0, 100)); cb.navigate(url); },
+    set href(v: string) { cb.navigate(v); },
+    assign(url: string)  { cb.navigate(url); },
+    replace(url: string) { cb.navigate(url); },
     reload()             { cb.navigate(_effectiveHref()); },
     get pathname(): string { return _locPart('pathname'); },
     get hostname(): string { return _locPart('hostname'); },
@@ -5249,8 +5248,14 @@ export function createPageJS(
   //
   // Bindings are removed in dispose() so they don't outlive the page.
   var _bridgedKeys: string[] = [];
+  var _lastBridgedWinKeyCount = 0;  // fast-path: skip scan if win hasn't grown
   function _bridgeToGlobal() {
     var winKeys = Object.keys(win);
+    // Short-circuit: if win hasn't gained any new keys since the last scan,
+    // there is nothing new to bridge (all existing keys will pass the
+    // `_bk in globalThis` check and continue immediately).
+    if (winKeys.length === _lastBridgedWinKeyCount) return;
+    _lastBridgedWinKeyCount = winKeys.length;
     for (var _bi = 0; _bi < winKeys.length; _bi++) {
       var _bk = winKeys[_bi];
       // Skip keys already on QJS globalThis (builtins: Math, Array, Promise…)
@@ -5347,7 +5352,6 @@ export function createPageJS(
   }
 
   function execScript(code: string): void {
-    cb.log('[JS] exec ' + code.length + 'B :: ' + code.slice(0, 80).replace(/\n/g, '\\n'));
     // Stage 1: run inside with(_winScope) so scripts resolve identifiers through
     // the window proxy (bare globals, property writes, etc.)
     // We strip hashbang and 'use strict' because:
@@ -5378,7 +5382,6 @@ export function createPageJS(
     // Fall back to running the RAW code directly — no transforms, no scope proxy.
     // `this` is bound to win so `this.foo = bar` persists as window.foo.
     // Re-bridge globalThis first to pick up any properties added by earlier scripts.
-    cb.log('[JS] stage2 fallback for ' + code.length + 'B (stage1: ' + String(stage1Err).slice(0, 60) + ')');
     _bridgeToGlobal();  // pick up newly-added win properties (e.g. google, AF_etc)
     var raw2 = (code.charCodeAt(0) === 35 && code.charCodeAt(1) === 33)
       ? code.replace(/^#!.*/, '') : code;
@@ -5406,10 +5409,8 @@ export function createPageJS(
 
   function loadExternalScript(src: string, done: (code?: string) => void, noAutoExec = false): void {
     var url = src.startsWith('http') ? src : _resolveURL(src, _baseHref);
-    cb.log('[JS] fetchScript: ' + url);
     os.fetchAsync(url, (resp: FetchResponse | null, _err?: string) => {
       if (resp && resp.status === 200) {
-        cb.log('[JS] fetchScript OK ' + resp.bodyText.length + 'B: ' + url);
         if (!noAutoExec) execScript(resp.bodyText);
         done(resp.bodyText);
       } else {
