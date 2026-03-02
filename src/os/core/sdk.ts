@@ -1368,153 +1368,6 @@ const sdk = {
     _sdkPrint(text);
   },
 
-  // ── Time ─────────────────────────────────────────────────────────────────────
-
-  /**
-   * Wall-clock time utilities.  All timestamps are Unix epoch milliseconds.
-   * The wall clock is seeded from CMOS RTC at first call and corrected by NTP sync.
-   */
-  time: {
-    /** Current Unix epoch time in milliseconds.  Accuracy ≤ 1 s after NTP sync. */
-    now(): number {
-      return _sdkTimeNow();
-    },
-    /** Decomposed UTC date/time for the given ms timestamp (defaults to now). */
-    date(ms?: number): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
-      var d = new Date(ms !== undefined ? ms : _sdkTimeNow());
-      return {
-        year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate(),
-        hour: d.getUTCHours(), minute: d.getUTCMinutes(), second: d.getUTCSeconds(),
-      };
-    },
-    /**
-     * Format a timestamp as a string.
-     * Tokens: YYYY MM DD HH mm ss
-     * Example: os.time.format(Date.now(), 'YYYY-MM-DD HH:mm:ss')
-     */
-    format(ms: number, fmt: string): string {
-      var d = new Date(ms);
-      var p = function(n: number): string { return (n < 10 ? '0' : '') + n; };
-      return fmt
-        .replace('YYYY', '' + d.getUTCFullYear())
-        .replace('MM',   p(d.getUTCMonth() + 1))
-        .replace('DD',   p(d.getUTCDate()))
-        .replace('HH',   p(d.getUTCHours()))
-        .replace('mm',   p(d.getUTCMinutes()))
-        .replace('ss',   p(d.getUTCSeconds()));
-    },
-    /** Human-readable relative time: 'just now', '3s ago', '2m ago', '1h ago', '3d ago'. */
-    since(ms: number): string {
-      var diff = (_sdkTimeNow() - ms) / 1000;
-      if (diff < 10)    return 'just now';
-      if (diff < 60)    return Math.floor(diff) + 's ago';
-      if (diff < 3600)  return Math.floor(diff / 60) + 'm ago';
-      if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
-      return Math.floor(diff / 86400) + 'd ago';
-    },
-    /** Format milliseconds as a duration: '1:23:04' (h:mm:ss) or '03:12' (mm:ss). */
-    duration(ms: number): string {
-      var s   = Math.floor(Math.abs(ms) / 1000);
-      var h   = Math.floor(s / 3600);
-      var m   = Math.floor((s % 3600) / 60);
-      var sec = s % 60;
-      var p = function(n: number): string { return (n < 10 ? '0' : '') + n; };
-      return h > 0 ? (h + ':' + p(m) + ':' + p(sec)) : (p(m) + ':' + p(sec));
-    },
-    /** ISO-8601 UTC string for the given ms (defaults to now): '2026-02-25T14:30:00Z'. */
-    iso(ms?: number): string {
-      var d = new Date(ms !== undefined ? ms : _sdkTimeNow());
-      var p = function(n: number): string { return (n < 10 ? '0' : '') + n; };
-      return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate())
-           + 'T' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + ':' + p(d.getUTCSeconds()) + 'Z';
-    },
-  },
-
-  // ── Debugging utilities ──────────────────────────────────────────────────────
-
-  debug: {
-    /** Write a structured debug line to /dev/serial and emit a debug:line event. */
-    log(...args: unknown[]): void {
-      var line = '[DEBUG] ' + args.map(function(a) { return String(a); }).join(' ');
-      kernel.serialPut(line + '\n');
-      try { (os as any)._emitEvent('debug:line', { level: 'log', text: line }); } catch (_) {}
-    },
-    /** Write a warning line to /dev/serial. */
-    warn(...args: unknown[]): void {
-      var line = '[WARN] ' + args.map(function(a) { return String(a); }).join(' ');
-      kernel.serialPut(line + '\n');
-      try { (os as any)._emitEvent('debug:line', { level: 'warn', text: line }); } catch (_) {}
-    },
-    /** Write an error line to /dev/serial. */
-    error(...args: unknown[]): void {
-      var line = '[ERROR] ' + args.map(function(a) { return String(a); }).join(' ');
-      kernel.serialPut(line + '\n');
-      try { (os as any)._emitEvent('debug:line', { level: 'error', text: line }); } catch (_) {}
-    },
-    /** Assert a condition; throws Error with optional message on failure. */
-    assert(cond: boolean, message?: string): void {
-      if (!cond) {
-        var err = new Error('Assertion failed: ' + (message || '(no message)'));
-        kernel.serialPut('[ERROR] ' + err.message + '\n');
-        throw err;
-      }
-    },
-    /** Return the current call stack as a string. */
-    trace(): string {
-      try { throw new Error('trace'); } catch (e: any) { return e && e.stack ? e.stack : '(no stack)'; }
-    },
-    /** Recursively serialize a value similar to util.inspect. */
-    inspect(value: unknown, depth?: number): string {
-      var maxDepth = (depth !== undefined ? depth : 3);
-      var seen: unknown[] = [];
-      function _inspect(v: unknown, d: number): string {
-        if (v === null) return 'null';
-        if (v === undefined) return 'undefined';
-        var t = typeof v;
-        if (t === 'string') return JSON.stringify(v);
-        if (t === 'number' || t === 'boolean') return String(v);
-        if (t === 'function') return '[Function: ' + ((v as any).name || 'anonymous') + ']';
-        if (Array.isArray(v)) {
-          if (d <= 0) return '[Array]';
-          if (seen.indexOf(v) !== -1) return '[Circular]';
-          seen.push(v);
-          var items = (v as unknown[]).slice(0, 8).map(function(x) { return _inspect(x, d - 1); });
-          if ((v as unknown[]).length > 8) items.push('...');
-          seen.pop();
-          return '[ ' + items.join(', ') + ' ]';
-        }
-        if (t === 'object') {
-          if (d <= 0) return '[Object]';
-          if (seen.indexOf(v) !== -1) return '[Circular]';
-          seen.push(v);
-          var keys = Object.keys(v as object).slice(0, 16);
-          var pairs = keys.map(function(k) { return k + ': ' + _inspect((v as any)[k], d - 1); });
-          seen.pop();
-          return '{ ' + pairs.join(', ') + ' }';
-        }
-        return String(v);
-      }
-      return _inspect(value, maxDepth);
-    },
-    /** Run fn and return elapsed time in milliseconds. */
-    measure(label: string, fn: () => void): number {
-      var t0 = kernel.getUptime();
-      fn();
-      var elapsed = kernel.getUptime() - t0;
-      kernel.serialPut('[DEBUG] measure "' + label + '": ' + elapsed + 'ms\n');
-      return elapsed;
-    },
-    /** Emit a BREAKPOINT marker on /dev/serial. */
-    breakpoint(): void {
-      kernel.serialPut('BREAKPOINT\n');
-    },
-    /** Return a snapshot of heap usage. */
-    heapSnapshot(): { total: number; free: number; used: number } {
-      var info = (kernel as any).getMemoryInfo ? (kernel as any).getMemoryInfo() : { total: 0, free: 0, used: 0 };
-      return { total: info.total || 0, free: info.free || 0, used: info.used || 0 };
-    },
-  },
-
   // ── System information ───────────────────────────────────────────────────────
 
   system: {
@@ -2922,6 +2775,13 @@ const sdk = {
      *   os.time.tz.formatOffset(-300);   // → '-05:00'
      */
     tz: _tz,
+    /** ISO-8601 UTC string for the given epoch ms (defaults to now): '2026-02-25T14:30:00Z'. */
+    iso(epochMs?: number): string {
+      var dt = sdk.time.date(epochMs);
+      function p2(n: number) { return (n < 10 ? '0' : '') + n; }
+      return dt.year + '-' + p2(dt.month) + '-' + p2(dt.day)
+           + 'T' + p2(dt.hour) + ':' + p2(dt.minute) + ':' + p2(dt.second) + 'Z';
+    },
   },
 
   // ── Audio (PC speaker) ────────────────────────────────────────────────────────
