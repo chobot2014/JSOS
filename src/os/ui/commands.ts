@@ -1151,7 +1151,7 @@ export function registerCommands(g: any): void {
 
     check('init services list', function() {
       var svcs = init.listServices();
-      return Array.isArray(svcs);
+      return Array.isArray(svcs) && svcs.length >= 10;
     });
 
     check('os.disk.available() returns bool', function() {
@@ -1159,11 +1159,35 @@ export function registerCommands(g: any): void {
       return typeof v === 'boolean';
     });
 
+    check('os.disk write/read/rm', function() {
+      if (!os.disk.available()) return true; // skip if no disk mounted
+      var ok1 = os.disk.write('/_sdtest.txt', 'solidify');
+      var rd  = os.disk.read('/_sdtest.txt');
+      var ok2 = os.disk.rm('/_sdtest.txt');
+      return ok1 && rd === 'solidify' && ok2;
+    });
+
     check('os.clipboard read/write', function() {
       os.clipboard.write('_clip_test_');
       var v = os.clipboard.read();
       os.clipboard.write('');
       return v === '_clip_test_';
+    });
+
+    check('proc /proc/net/dev readable', function() {
+      var c = fs.readFile('/proc/net/dev');
+      return typeof c === 'string' && c.length > 0;
+    });
+
+    check('proc /proc/net/tcp readable', function() {
+      var c = fs.readFile('/proc/net/tcp');
+      return typeof c === 'string' && c.length >= 0;
+    });
+
+    check('net TCP socket create/close', function() {
+      var s = net.createSocket('tcp');
+      net.close(s);
+      return s !== null && s !== undefined;
     });
 
     terminal.println('');
