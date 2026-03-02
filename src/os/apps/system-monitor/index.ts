@@ -90,13 +90,47 @@ class SystemMonitorApp extends BaseApp {
       }
 
     } else {
-      // Network
-      canvas.drawText(PADDING, contentY,
-        'Network interface stats are surfaced via /proc/net/dev.',
-        Colors.LIGHT_GREY);
-      canvas.drawText(PADDING, contentY + ROW_H,
-        'See the terminal: cat /proc/net/dev',
-        Colors.DARK_GREY);
+      // Network — parse /proc/net/dev for live Rx/Tx stats
+      var y = contentY;
+
+      // Interface status
+      var ip  = os.net.getIP();
+      var mac = os.net.getMACAddress();
+      var up  = os.net.online();
+
+      canvas.drawText(PADDING, y, 'Interface', Colors.YELLOW); y += ROW_H;
+      canvas.drawText(PADDING + 8,  y, 'Status:  ' + (up ? 'UP' : 'DOWN'), up ? Colors.GREEN : Colors.RED); y += ROW_H;
+      canvas.drawText(PADDING + 8,  y, 'IP:      ' + (ip  || '(none)'), Colors.WHITE); y += ROW_H;
+      canvas.drawText(PADDING + 8,  y, 'MAC:     ' + (mac || '(none)'), Colors.LIGHT_GREY); y += ROW_H;
+
+      // Traffic stats from /proc/net/dev
+      var raw = os.fs.read('/proc/net/dev');
+      if (raw) {
+        // Find the eth0 line: "  eth0:  rxBytes rxPkts..."
+        var lines = raw.split('\n');
+        for (var li = 0; li < lines.length; li++) {
+          var parts = lines[li].trim().split(/[:\s]+/).filter(function(s: string) { return s.length > 0; });
+          if (parts[0] === 'eth0' && parts.length >= 10) {
+            var rxB = parseInt(parts[1],  10);
+            var rxP = parseInt(parts[2],  10);
+            var txB = parseInt(parts[9],  10);
+            var txP = parseInt(parts[10], 10);
+            y += 4;
+            canvas.drawText(PADDING, y, 'Traffic (eth0)', Colors.YELLOW); y += ROW_H;
+            canvas.drawText(PADDING + 8,  y, 'RX:  ' + os.text.bytes(rxB) + '  (' + rxP + ' pkts)', Colors.WHITE); y += ROW_H;
+            canvas.drawText(PADDING + 8,  y, 'TX:  ' + os.text.bytes(txB) + '  (' + txP + ' pkts)', Colors.WHITE); y += ROW_H;
+            break;
+          }
+        }
+      }
+
+      // Active TCP connections from /proc/net/tcp
+      var tcp = os.fs.read('/proc/net/tcp');
+      if (tcp) {
+        var tcpLines = tcp.split('\n').filter(function(l: string) { return l.trim() && !l.trim().startsWith('sl'); });
+        y += 4;
+        canvas.drawText(PADDING, y, 'TCP connections: ' + tcpLines.length, Colors.YELLOW);
+      }
     }
 
     return true;

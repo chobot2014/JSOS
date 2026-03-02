@@ -75,9 +75,27 @@ class SettingsApp extends BaseApp {
 
     } else if (panel === 2) {
       // Network
-      cy = drawRow(canvas, cx, cy, 'Interface:', 'DHCP / virtio-net', Colors.WHITE,      Colors.LIGHT_GREY, ROW_H, cx + 130);
-      cy = drawRow(canvas, cx, cy, 'Config:',    '/etc/network',      Colors.LIGHT_GREY, Colors.LIGHT_GREY, ROW_H, cx + 130);
-      canvas.drawText(cx, cy, 'See: cat /proc/net/dev in terminal', Colors.DARK_GREY);
+      var netIP  = os.net.getIP();
+      var netMAC = os.net.getMACAddress();
+      var netUp  = os.net.online();
+      cy = drawRow(canvas, cx, cy, 'Status:',    netUp ? 'Online' : 'Offline',          Colors.WHITE, netUp ? 0xFF44FF44 : 0xFFFF4444, ROW_H, cx + 130);
+      cy = drawRow(canvas, cx, cy, 'IP:',        netIP  || '(none)',                    Colors.WHITE, Colors.LIGHT_GREY, ROW_H, cx + 130);
+      cy = drawRow(canvas, cx, cy, 'MAC:',       netMAC || '(none)',                    Colors.WHITE, Colors.LIGHT_GREY, ROW_H, cx + 130);
+      cy = drawRow(canvas, cx, cy, 'Interface:', 'eth0 (virtio-net)',                   Colors.LIGHT_GREY, Colors.LIGHT_GREY, ROW_H, cx + 130);
+      cy = drawRow(canvas, cx, cy, 'Config:',    '/etc/network',                        Colors.LIGHT_GREY, Colors.LIGHT_GREY, ROW_H, cx + 130);
+      // Traffic from /proc/net/dev
+      var netRaw = os.fs.read('/proc/net/dev');
+      if (netRaw) {
+        var netLines = netRaw.split('\n');
+        for (var nli = 0; nli < netLines.length; nli++) {
+          var nParts = netLines[nli].trim().split(/[:\s]+/).filter(function(s: string) { return s.length > 0; });
+          if (nParts[0] === 'eth0' && nParts.length >= 10) {
+            cy = drawRow(canvas, cx, cy, 'RX:', os.text.bytes(parseInt(nParts[1], 10)), Colors.WHITE, Colors.LIGHT_GREY, ROW_H, cx + 130);
+            cy = drawRow(canvas, cx, cy, 'TX:', os.text.bytes(parseInt(nParts[9], 10)), Colors.WHITE, Colors.LIGHT_GREY, ROW_H, cx + 130);
+            break;
+          }
+        }
+      }
 
     } else {
       // Storage
