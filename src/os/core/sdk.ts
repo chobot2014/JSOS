@@ -1430,6 +1430,91 @@ const sdk = {
     },
   },
 
+  // ── Debugging utilities ──────────────────────────────────────────────────────
+
+  debug: {
+    /** Write a structured debug line to /dev/serial and emit a debug:line event. */
+    log(...args: unknown[]): void {
+      var line = '[DEBUG] ' + args.map(function(a) { return String(a); }).join(' ');
+      kernel.serialPut(line + '\n');
+      try { (os as any)._emitEvent('debug:line', { level: 'log', text: line }); } catch (_) {}
+    },
+    /** Write a warning line to /dev/serial. */
+    warn(...args: unknown[]): void {
+      var line = '[WARN] ' + args.map(function(a) { return String(a); }).join(' ');
+      kernel.serialPut(line + '\n');
+      try { (os as any)._emitEvent('debug:line', { level: 'warn', text: line }); } catch (_) {}
+    },
+    /** Write an error line to /dev/serial. */
+    error(...args: unknown[]): void {
+      var line = '[ERROR] ' + args.map(function(a) { return String(a); }).join(' ');
+      kernel.serialPut(line + '\n');
+      try { (os as any)._emitEvent('debug:line', { level: 'error', text: line }); } catch (_) {}
+    },
+    /** Assert a condition; throws Error with optional message on failure. */
+    assert(cond: boolean, message?: string): void {
+      if (!cond) {
+        var err = new Error('Assertion failed: ' + (message || '(no message)'));
+        kernel.serialPut('[ERROR] ' + err.message + '\n');
+        throw err;
+      }
+    },
+    /** Return the current call stack as a string. */
+    trace(): string {
+      try { throw new Error('trace'); } catch (e: any) { return e && e.stack ? e.stack : '(no stack)'; }
+    },
+    /** Recursively serialize a value similar to util.inspect. */
+    inspect(value: unknown, depth?: number): string {
+      var maxDepth = (depth !== undefined ? depth : 3);
+      var seen: unknown[] = [];
+      function _inspect(v: unknown, d: number): string {
+        if (v === null) return 'null';
+        if (v === undefined) return 'undefined';
+        var t = typeof v;
+        if (t === 'string') return JSON.stringify(v);
+        if (t === 'number' || t === 'boolean') return String(v);
+        if (t === 'function') return '[Function: ' + ((v as any).name || 'anonymous') + ']';
+        if (Array.isArray(v)) {
+          if (d <= 0) return '[Array]';
+          if (seen.indexOf(v) !== -1) return '[Circular]';
+          seen.push(v);
+          var items = (v as unknown[]).slice(0, 8).map(function(x) { return _inspect(x, d - 1); });
+          if ((v as unknown[]).length > 8) items.push('...');
+          seen.pop();
+          return '[ ' + items.join(', ') + ' ]';
+        }
+        if (t === 'object') {
+          if (d <= 0) return '[Object]';
+          if (seen.indexOf(v) !== -1) return '[Circular]';
+          seen.push(v);
+          var keys = Object.keys(v as object).slice(0, 16);
+          var pairs = keys.map(function(k) { return k + ': ' + _inspect((v as any)[k], d - 1); });
+          seen.pop();
+          return '{ ' + pairs.join(', ') + ' }';
+        }
+        return String(v);
+      }
+      return _inspect(value, maxDepth);
+    },
+    /** Run fn and return elapsed time in milliseconds. */
+    measure(label: string, fn: () => void): number {
+      var t0 = kernel.getUptime();
+      fn();
+      var elapsed = kernel.getUptime() - t0;
+      kernel.serialPut('[DEBUG] measure "' + label + '": ' + elapsed + 'ms\n');
+      return elapsed;
+    },
+    /** Emit a BREAKPOINT marker on /dev/serial. */
+    breakpoint(): void {
+      kernel.serialPut('BREAKPOINT\n');
+    },
+    /** Return a snapshot of heap usage. */
+    heapSnapshot(): { total: number; free: number; used: number } {
+      var info = (kernel as any).getMemoryInfo ? (kernel as any).getMemoryInfo() : { total: 0, free: 0, used: 0 };
+      return { total: info.total || 0, free: info.free || 0, used: info.used || 0 };
+    },
+  },
+
   // ── System information ───────────────────────────────────────────────────────
 
   system: {
