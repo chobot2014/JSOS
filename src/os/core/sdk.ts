@@ -191,11 +191,18 @@ interface ParsedURL {
 }
 
 function _parseURL(raw: string): ParsedURL | null {
-  var m = raw.match(/^(https?):\/\/([^/:]+)(?::(\d+))?(\/.*)?$/);
+  // Accept URLs where the path may be absent before a query string:
+  //   http://host/path?q=v    → host='host', path='/path?q=v'  (standard)
+  //   http://host?q=v         → host='host', path='/?q=v'      (no leading /)
+  //   http://host             → host='host', path='/'
+  var m = raw.match(/^(https?):\/\/([^/:?#]+)(?::(\d+))?(\/[^]*|[?#][^]*)?$/);
   if (!m) return null;
   var protocol = m[1] as 'http' | 'https';
   var port     = m[3] ? parseInt(m[3], 10) : (protocol === 'https' ? 443 : 80);
-  return { protocol, host: m[2], port, path: m[4] || '/' };
+  var rawPath  = m[4] || '/';
+  // If path starts with '?' or '#' (no leading slash), prepend '/'
+  var path = (rawPath.charCodeAt(0) === 63 || rawPath.charCodeAt(0) === 35) ? '/' + rawPath : rawPath;
+  return { protocol, host: m[2], port, path };
 }
 
 function _resolveHref(href: string, baseURL: string): string {
