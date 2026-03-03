@@ -233,6 +233,8 @@ interface InFlightFetch {
   totalRecv:    number;   // bytes received so far
   contentLen:   number;   // Content-Length from headers, or -1 if unknown
   headersDone:  boolean;  // true once we've seen \r\n\r\n in raw bytes
+  bodyOffset:   number;   // byte offset where body starts (after \r\n\r\n)
+  chunked:      boolean;  // true if Transfer-Encoding: chunked
   deadline:     number;
   dnsPort:      number;
   dnsId:        number;
@@ -399,7 +401,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
                  'Host: ' + f.parsed.host + '\r\n' +
                  'Connection: keep-alive\r\n' +
                  'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n' +
-                 'Accept-Encoding: identity\r\n' +
+                 'Accept-Encoding: gzip, deflate\r\n' +
                  'Accept-Language: en-US,en;q=0.9\r\n' +
                  'User-Agent: Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/115.0\r\n' +
                  (bodyStr ? 'Content-Length: ' + bodyStr.length + '\r\n' : '') +
@@ -412,6 +414,8 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       f.totalRecv  = 0;
       f.contentLen = -1;
       f.headersDone = false;
+      f.bodyOffset = 0;
+      f.chunked    = false;
       f.deadline   = kernel.getTicks() + 800;  // 8 s hard timeout
       f.stage      = 'receiving';
       return 'pending';
@@ -425,27 +429,56 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
         f.totalRecv += chunk.length;
         f.deadline = kernel.getTicks() + 200;  // 2 s silence timeout resets on each chunk
 
-        // Parse headers on-the-fly to extract Content-Length for early termination
+        // Parse headers on-the-fly to extract Content-Length / Transfer-Encoding
         if (!f.headersDone) {
-          // Check if we have the full header by scanning accumulated bytes
           var _rawSoFar = _bytesToString(f.chunks.length === 1 ? f.chunks[0] : _flattenChunks(f.chunks));
           var _hEnd = _rawSoFar.indexOf('\r\n\r\n');
           if (_hEnd >= 0) {
             f.headersDone = true;
+            f.bodyOffset  = _hEnd + 4;
             var _hdrStr = _rawSoFar.substring(0, _hEnd);
             var _clMatch = _hdrStr.match(/content-length:\s*(\d+)/i);
             if (_clMatch) f.contentLen = parseInt(_clMatch[1], 10);
+            if (/transfer-encoding:.*chunked/i.test(_hdrStr)) f.chunked = true;
           }
         }
 
-        // Early termination: if we know Content-Length, check if body is complete
-        if (f.headersDone && f.contentLen >= 0) {
-          var _rawAll   = _bytesToString(f.chunks.length === 1 ? f.chunks[0] : _flattenChunks(f.chunks));
-          var _bodyOff  = _rawAll.indexOf('\r\n\r\n');
-          if (_bodyOff >= 0) {
-            var _bodyLen = f.totalRecv - (_bodyOff + 4);
-            if (_bodyLen >= f.contentLen) {
-              f.stage = 'parsing';  // Got all body bytes — stop waiting
+        // Early termination: Content-Length known → simple arithmetic
+        if (f.headersDone && f.contentLen >= 0 && f.totalRecv - f.bodyOffset >= f.contentLen) {
+          f.stage = 'parsing';
+          return 'pending';
+        }
+
+        // Chunked termination: check last 5 bytes for "0\r\n\r\n" (final chunk)
+        if (f.headersDone && f.chunked) {
+          var _lastC = f.chunks[f.chunks.length - 1];
+          // Check if last chunk ends with 0x30 0x0D 0x0A 0x0D 0x0A
+          if (_lastC.length >= 5 &&
+              _lastC[_lastC.length - 5] === 0x30 &&
+              _lastC[_lastC.length - 4] === 0x0D &&
+              _lastC[_lastC.length - 3] === 0x0A &&
+              _lastC[_lastC.length - 2] === 0x0D &&
+              _lastC[_lastC.length - 1] === 0x0A) {
+            f.stage = 'parsing';
+            return 'pending';
+          }
+          // Handle split across last two chunks
+          if (f.chunks.length >= 2) {
+            var _prev = f.chunks[f.chunks.length - 2];
+            var _tail: number[] = [];
+            var _need = 5;
+            // Take tail from prev chunk
+            var _pStart = _prev.length > _need ? _prev.length - _need : 0;
+            for (var _ti = _pStart; _ti < _prev.length; _ti++) _tail.push(_prev[_ti]);
+            // Append all of last chunk
+            for (var _ti = 0; _ti < _lastC.length; _ti++) _tail.push(_lastC[_ti]);
+            if (_tail.length >= 5 &&
+                _tail[_tail.length - 5] === 0x30 &&
+                _tail[_tail.length - 4] === 0x0D &&
+                _tail[_tail.length - 3] === 0x0A &&
+                _tail[_tail.length - 2] === 0x0D &&
+                _tail[_tail.length - 1] === 0x0A) {
+              f.stage = 'parsing';
               return 'pending';
             }
           }
@@ -906,6 +939,8 @@ function _doFetch(
     totalRecv:    0,
     contentLen:   -1,
     headersDone:  false,
+    bodyOffset:   0,
+    chunked:      false,
     deadline:     0,
     dnsPort:      0,
     dnsId:        0,
