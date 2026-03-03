@@ -32,6 +32,7 @@ import { httpsGet } from '../net/http.js';
 import { registerCommands } from '../ui/commands.js';
 import { QJSJITHook } from '../process/qjs-jit.js';
 import { JITOSKernels } from '../process/jit-os.js';
+import { JITBrowserEngine } from '../apps/browser/jit-browser.js';
 import { _registerJITStats } from './sdk.js';
 import { writebackTimer } from '../fs/buffer-cache.js';
 import { ntp } from '../net/ntp.js';
@@ -301,6 +302,11 @@ function main(): void {
       // Tier-2 JIT: compile OS integer kernels (checksum, memcpy, CRC-32, etc.)
       // at module-load time so they run native from the very first call.
       JITOSKernels.init();
+
+      // Tier-2 JIT: compile browser engine hot-paths (string hash, canvas clear,
+      // CSS int parse, composite row, text width, HTML scan) so the browser
+      // renders pages at native speed from the very first page load.
+      JITBrowserEngine.init();
 
       // Register JIT stats providers so os.system.jitStats() returns live data.
       _registerJITStats(qjsJit, () => JITOSKernels.stats());

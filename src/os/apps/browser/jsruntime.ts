@@ -24,6 +24,9 @@ import { WorkerImpl, SharedWorkerImpl, MessageChannel, BroadcastChannelImpl, tic
 import { cookieJar } from '../../net/http.js';
 import { getCachedStyle, setCachedStyle, bumpStyleGeneration, currentStyleGeneration } from './cache.js';
 import { JSAudioElement, JSVideoElement } from './audio-element.js';
+import { JITBrowserEngine } from './jit-browser.js';
+import { installFrameworkPolyfills } from './framework-polyfills.js';
+import { installCompatPolyfills } from './compat-polyfills.js';
 
 // ── Script record (collected by html.ts during parsing) ───────────────────────
 
@@ -388,6 +391,8 @@ export function createPageJS(
           (win['dispatchEvent'] as (e: VEvent) => void)(hcev2);
         }
       } catch (_) {}
+      // SPA route change — prefetch the new URL's likely resources
+      try { JITBrowserEngine.prefetchURL(url); } catch(_) {}
     },
     replaceState(state: unknown, _title: string, url: string) {
       this._stack[this._pos] = url; this._states[this._pos] = state;
@@ -1344,7 +1349,12 @@ export function createPageJS(
       if (signal) {
         signal.addEventListener('abort', () => { aborted = true; reject(signal.reason ?? new Error('AbortError')); });
       }
-      os.fetchAsync(urlStr, (resp: FetchResponse | null, err?: string) => {
+      // Use deduplicated fetch for GET requests to avoid redundant network I/O
+      // (SPAs with code-splitting, React.lazy, Suspense trigger duplicate GETs)
+      var _fetchFn = (method === 'GET' && JITBrowserEngine.ready)
+        ? JITBrowserEngine.deduplicatedFetch
+        : (u: string, c: (r: any, e?: string) => void, o?: any) => os.fetchAsync(u, c, o);
+      _fetchFn(urlStr, (resp: FetchResponse | null, err?: string) => {
         if (aborted) return;
         if (!resp) { reject(new Error(err || 'fetch failed')); return; }
         var text  = resp.bodyText;
@@ -5255,13 +5265,87 @@ export function createPageJS(
   _sessionStorage._listener = _makeStorageListener(_sessionStorage);
 
   // ── Patch doc.createElement to return HTMLCanvas for <canvas> ─────────────
+  // Also intercept dynamic <script> injection (SPAs, ad libs, analytics)
 
   {
     var _origCreateElement = doc.createElement.bind(doc);
     doc.createElement = function(tag: string) {
       if (tag.toLowerCase() === 'canvas') return new HTMLCanvas() as any;
-      return _origCreateElement(tag);
+      var el = _origCreateElement(tag);
+      // Intercept dynamic <script> element injection — when SPAs/frameworks
+      // create a <script> with .src and append it, we fetch+execute it.
+      if (tag.toLowerCase() === 'script') {
+        var _scriptSrc = '';
+        var _scriptText = '';
+        Object.defineProperty(el, 'src', {
+          get() { return _scriptSrc; },
+          set(v: string) {
+            _scriptSrc = v;
+            // Defer execution until the element is appended to the document
+          },
+          configurable: true,
+        });
+        Object.defineProperty(el, 'text', {
+          get() { return _scriptText; },
+          set(v: string) { _scriptText = v; },
+          configurable: true,
+        });
+        // Monkey-patch: when this script element is appended to document,
+        // actually load and execute it (SPA dynamic script injection)
+        var _origAppend = el.appendChild ? el.appendChild.bind(el) : null;
+        var _scriptEl = el;
+        // We hook via a flag checked in doc.body.appendChild / doc.head.appendChild
+        (el as any)._isDynamicScript = true;
+        (el as any)._onAttach = function() {
+          if (_scriptSrc) {
+            loadExternalScript(_scriptSrc, function(code?: string) {
+              if (code) {
+                var loadEv = new VEvent('load');
+                try { _scriptEl.dispatchEvent(loadEv); } catch(_) {}
+              } else {
+                var errEv = new VEvent('error');
+                try { _scriptEl.dispatchEvent(errEv); } catch(_) {}
+              }
+            }, false);
+          } else if (_scriptText) {
+            execScript(_scriptText);
+            var loadEv2 = new VEvent('load');
+            try { _scriptEl.dispatchEvent(loadEv2); } catch(_) {}
+          }
+        };
+      }
+      return el;
     };
+  }
+
+  // ── Patch appendChild/insertBefore to detect dynamic <script> injection ───
+  {
+    var _hookAppendChild = function(parent: any): void {
+      if (!parent) return;
+      var _origAppend2 = parent.appendChild.bind(parent);
+      parent.appendChild = function(child: any) {
+        var result = _origAppend2(child);
+        if (child && (child as any)._isDynamicScript && (child as any)._onAttach) {
+          (child as any)._onAttach();
+          (child as any)._isDynamicScript = false; // prevent double-execution
+        }
+        return result;
+      };
+      if (parent.insertBefore) {
+        var _origInsert = parent.insertBefore.bind(parent);
+        parent.insertBefore = function(newChild: any, refChild: any) {
+          var result = _origInsert(newChild, refChild);
+          if (newChild && (newChild as any)._isDynamicScript && (newChild as any)._onAttach) {
+            (newChild as any)._onAttach();
+            (newChild as any)._isDynamicScript = false;
+          }
+          return result;
+        };
+      }
+    };
+    if (doc.head) _hookAppendChild(doc.head);
+    if (doc.body) _hookAppendChild(doc.body);
+    _hookAppendChild(doc.documentElement);
   }
 
   // ── Wire on* attribute handlers ───────────────────────────────────────────
@@ -5422,7 +5506,24 @@ export function createPageJS(
     try { doc.dispatchEvent(errEv); } catch(_) {}
   }
 
-  function execScript(code: string): void {
+  function execScript(code: string, scriptURL?: string): void {
+    // ── JIT script cache: check for pre-compiled Function ────────────────────
+    var _cachedURL = scriptURL || _baseHref + '#exec';
+    if (JITBrowserEngine.ready) {
+      var cached = JITBrowserEngine.getCachedScript(code, _cachedURL);
+      if (cached) {
+        try {
+          cached.call(win);
+          _bridgeToGlobal();
+          checkDirty();
+          return;
+        } catch(e) { _fireScriptError(e); checkDirty(); return; }
+      }
+    }
+
+    // ── Mutation batching: coalesce DOM changes during script execution ──────
+    JITBrowserEngine.beginMutationBatch();
+
     // Stage 1: run inside with(_winScope) so scripts resolve identifiers through
     // the window proxy (bare globals, property writes, etc.)
     // We strip hashbang and 'use strict' because:
@@ -5433,8 +5534,11 @@ export function createPageJS(
     try {
       var fn = new Function('__s__',
         'with(__s__){\n' + src1 + '\n}') as (s: any) => void;
+      // Cache the compiled function for re-use on back/forward navigation
+      if (JITBrowserEngine.ready) JITBrowserEngine.cacheScript(code, _cachedURL, fn, false);
       fn(_winScope);
       _bridgeToGlobal();  // capture any new win properties set by this script
+      var _batchDirty = JITBrowserEngine.endMutationBatch();
       checkDirty();
       return;
     } catch (e) {
@@ -5442,6 +5546,7 @@ export function createPageJS(
       if (msg.indexOf('SyntaxError') === -1) {
         // Runtime error — report and return. No point retrying with raw code.
         _fireScriptError(e);
+        JITBrowserEngine.endMutationBatch();
         checkDirty();
         return;
       }
@@ -5458,6 +5563,8 @@ export function createPageJS(
       ? code.replace(/^#!.*/, '') : code;
     try {
       var fn2 = new Function(raw2) as () => void;
+      // Cache the stage-2 fallback function too
+      if (JITBrowserEngine.ready) JITBrowserEngine.cacheScript(code, _cachedURL, fn2, false);
       fn2.call(win);
     } catch (e2) {
 
@@ -5472,6 +5579,7 @@ export function createPageJS(
       }
     }
     _bridgeToGlobal();  // capture any new win properties set by this script
+    JITBrowserEngine.endMutationBatch();
     checkDirty();
   }
 
@@ -5480,9 +5588,11 @@ export function createPageJS(
 
   function loadExternalScript(src: string, done: (code?: string) => void, noAutoExec = false): void {
     var url = src.startsWith('http') ? src : _resolveURL(src, _baseHref);
-    os.fetchAsync(url, (resp: FetchResponse | null, _err?: string) => {
+    // Use deduplicated fetch to avoid redundant network requests for the same
+    // script URL (common in SPAs with code-splitting / React.lazy / Suspense).
+    JITBrowserEngine.deduplicatedFetch(url, (resp: FetchResponse | null, _err?: string) => {
       if (resp && resp.status === 200) {
-        if (!noAutoExec) execScript(resp.bodyText);
+        if (!noAutoExec) execScript(resp.bodyText, url);
         done(resp.bodyText);
       } else {
         cb.log('[JS] failed to load script (' + (resp ? resp.status : 'null') + '): ' + url);
@@ -5730,6 +5840,39 @@ export function createPageJS(
       var loadEv = new VEvent('load');
       (win['dispatchEvent'] as (e: VEvent) => void)(loadEv);
       doc.dispatchEvent(loadEv);
+
+      // ── SPA detection: analyse loaded scripts for framework fingerprints ──
+      var _loadedSources: string[] = [];
+      for (var _si = 0; _si < scripts.length; _si++) {
+        if (scripts[_si].code) _loadedSources.push(scripts[_si].code);
+      }
+      if (_loadedSources.length > 0) {
+        var _spa = JITBrowserEngine.detectSPA(_loadedSources);
+        if (_spa.framework !== 'unknown') {
+          cb.log('[browser] detected SPA: ' + _spa.framework +
+            (_spa.version ? ' v' + _spa.version : '') +
+            ' (bundler: ' + _spa.bundler + ')');
+        }
+      }
+
+      // End site-specific mutation batch if one was started
+      if (_siteProfile && _siteProfile.optimizations.indexOf('fast-dom-mutation-batch') >= 0) {
+        JITBrowserEngine.endMutationBatch();
+      }
+
+      // ── Prefetch visible links for instant navigation ─────────────────────
+      try {
+        var _links = doc.querySelectorAll('a[href]');
+        var _prefetchCount = 0;
+        for (var _li = 0; _li < _links.length && _prefetchCount < 5; _li++) {
+          var _lHref = (_links[_li] as VElement).getAttribute('href');
+          if (_lHref && _lHref.startsWith('http') && _lHref.indexOf(_locPart('hostname')) >= 0) {
+            JITBrowserEngine.prefetchURL(_lHref);
+            _prefetchCount++;
+          }
+        }
+      } catch(_) {}
+
       checkDirty();
       if (needsRerender) doRerender();
       return;
@@ -5921,6 +6064,28 @@ export function createPageJS(
   };
 
   cb.log('[browser] loading ' + scripts.length + ' script(s) for ' + (cb.baseURL || '').slice(0, 80));
+
+  // ── Install framework / compatibility polyfills before any scripts run ────
+  // These fill gaps between our Web Platform API surface and what real-world
+  // frameworks (jQuery, React, Vue, Angular, Bootstrap, Tailwind) expect.
+  try { installFrameworkPolyfills(win); } catch(e) { cb.log('[polyfill] framework: ' + String(e)); }
+  try { installCompatPolyfills(win); } catch(e) { cb.log('[polyfill] compat: ' + String(e)); }
+
+  // ── Site-specific optimizations ───────────────────────────────────────────
+  var _siteProfile = JITBrowserEngine.getSiteProfile(cb.baseURL);
+  if (_siteProfile) {
+    cb.log('[browser] applying site profile: ' + _siteProfile.name);
+    // Pre-enable mutation batching for heavy-DOM sites
+    if (_siteProfile.optimizations.indexOf('fast-dom-mutation-batch') >= 0) {
+      JITBrowserEngine.beginMutationBatch();
+    }
+  }
+
+  // ── Flush script cache on full navigation (not back/forward) ──────────────
+  // The cache persists across session to accelerate revisits, but we flush if
+  // the origin has changed to avoid stale closures with wrong window refs.
+  // (Within same origin, cached Functions get re-bound correctly.)
+
   runScripts(0);
 
   // ── PageJS interface returned to BrowserApp ───────────────────────────────
@@ -6019,6 +6184,14 @@ export function createPageJS(
       disposed = true;
       _unbridgeFromGlobal();
       timers = []; rafCallbacks = [];
+      // Log JIT browser engine stats for perf monitoring
+      if (JITBrowserEngine.ready) {
+        var _bs = JITBrowserEngine.stats();
+        cb.log('[jit-browser] scripts cached=' + _bs.scriptCacheEntries +
+          ' hitRate=' + ((_bs.scriptCacheHitRate * 100) | 0) + '%' +
+          ' fetchDedup=' + ((_bs.fetchDedupRate * 100) | 0) + '%' +
+          ' spa=' + _bs.spaFramework);
+      }
       // fire beforeunload
       try { var ev = new VEvent('beforeunload'); doc.dispatchEvent(ev); } catch(_) {}
     },

@@ -582,7 +582,36 @@ export function httpsGet(
     _wt2.markTls(Math.max(0, (kernel.getTicks() - _tHs) * 10));
   }
 
-  // Send HTTP request with optional If-None-Match
+  // If server negotiated HTTP/2 via ALPN, use HTTP/2 path
+  if (tls.alpnProtocol === 'h2') {
+    var h2conn = new HTTP2Connection(host);
+    h2conn.connectOnSocket(tls);
+    var h2sid = h2conn.request('GET', path, host, [
+      ['accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'],
+      ['accept-encoding', 'gzip, deflate'],
+      ['user-agent', 'Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/115.0'],
+    ]);
+    var stream = h2conn.receive(h2sid, 500);
+    if (!stream) { h2conn.close(); _wt2.finish(0, 0); return { tlsOk: true, response: hit2?.response ?? null }; }
+    // Build HttpResponse from H2 stream
+    var h2status = 200;
+    var h2hdrs = new Map<string, string>();
+    for (var _hsi = 0; _hsi < stream.headers.length; _hsi++) {
+      if (stream.headers[_hsi][0] === ':status') h2status = parseInt(stream.headers[_hsi][1], 10) || 200;
+      else if (!stream.headers[_hsi][0].startsWith(':')) {
+        var ev = h2hdrs.get(stream.headers[_hsi][0]);
+        h2hdrs.set(stream.headers[_hsi][0], ev ? ev + '\n' + stream.headers[_hsi][1] : stream.headers[_hsi][1]);
+      }
+    }
+    var h2resp: HttpResponse = { status: h2status, headers: h2hdrs, body: stream.body };
+    _processSetCookie(h2resp, host, path, true);
+    _cacheSet(cacheKey, h2resp);
+    _wt2.finish(h2status, stream.body.length);
+    h2conn.close();
+    return { tlsOk: true, response: h2resp };
+  }
+
+  // Send HTTP/1.1 request with optional If-None-Match
   var etag2 = _cacheGetEtag(cacheKey);
   var req = buildGetRequest(host, path, true, etag2);
   if (!tls.write(req)) {
@@ -665,9 +694,42 @@ export function httpsPost(
     body: number[] = [],
     contentType = 'application/x-www-form-urlencoded'):
     { tlsOk: boolean; response: HttpResponse | null } {
-  var tls = new TLSSocket(host);
-  if (!tls.handshake(ip, port)) { tls.close(); return { tlsOk: false, response: null }; }
+  // Try reusing a pooled TLS connection
+  var pooled = _poolGet(host, port, true);
+  var tls: TLSSocket;
+  if (pooled?.tls) {
+    tls = pooled.tls;
+  } else {
+    tls = new TLSSocket(host);
+    if (!tls.handshake(ip, port)) { tls.close(); return { tlsOk: false, response: null }; }
+  }
 
+  // If server negotiated HTTP/2 via ALPN, use HTTP/2 path
+  if (tls.alpnProtocol === 'h2') {
+    var h2conn = new HTTP2Connection(host);
+    h2conn.connectOnSocket(tls);
+    var h2sid = h2conn.request('POST', path, host, [
+      ['content-type', contentType],
+      ['content-length', '' + body.length],
+      ['user-agent', 'Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/115.0'],
+    ]);
+    h2conn.sendData(h2sid, body, true);
+    var stream = h2conn.receive(h2sid, 500);
+    if (!stream) { h2conn.close(); return { tlsOk: true, response: null }; }
+    var h2status = 200;
+    var h2hdrs = new Map<string, string>();
+    for (var _hpi = 0; _hpi < stream.headers.length; _hpi++) {
+      if (stream.headers[_hpi][0] === ':status') h2status = parseInt(stream.headers[_hpi][1], 10) || 200;
+      else if (!stream.headers[_hpi][0].startsWith(':')) {
+        var ev = h2hdrs.get(stream.headers[_hpi][0]);
+        h2hdrs.set(stream.headers[_hpi][0], ev ? ev + '\n' + stream.headers[_hpi][1] : stream.headers[_hpi][1]);
+      }
+    }
+    h2conn.close();
+    return { tlsOk: true, response: { status: h2status, headers: h2hdrs, body: stream.body } };
+  }
+
+  // HTTP/1.1 POST
   var req = buildPostRequest(host, path, body, contentType);
   if (!tls.write(req)) { tls.close(); return { tlsOk: true, response: null }; }
 
@@ -677,7 +739,8 @@ export function httpsPost(
     var chunk2 = tls.read(100);
     if (chunk2 && chunk2.length > 0) { tlsChunks.push(chunk2); tlsDeadline = kernel.getTicks() + 100; }
   }
-  tls.close();
+  // Return to pool for keep-alive
+  _poolReturn({ sock: null, tls, host, port, https: true, expiry: 0 });
 
   if (tlsChunks.length === 0) return { tlsOk: true, response: null };
   var tlsBuf = _flattenChunks(tlsChunks);
@@ -917,6 +980,26 @@ export class HTTP2Connection {
     this.tls.write(this._buildFrame(H2_SETTINGS, 0, 0, []));
     return true;
   }
+
+  /**
+   * Adopt an existing TLS socket (already handshake-complete with ALPN h2).
+   * Sends the HTTP/2 connection preface + initial SETTINGS.
+   */
+  connectOnSocket(tlsSock: TLSSocket): boolean {
+    this.tls = tlsSock;
+    var preface = strToBytes('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n');
+    this.tls.write(preface);
+    this.tls.write(this._buildFrame(H2_SETTINGS, 0, 0, []));
+    return true;
+  }
+
+  /** Check if this connection is still usable (not closed by GOAWAY). */
+  isAlive(): boolean {
+    return !this.tls.isEOF();
+  }
+
+  /** Get the underlying TLS socket (for pool management). */
+  getTlsSocket(): TLSSocket { return this.tls; }
 
   /** [Item 927] Open a new request stream, send HEADERS frame, return stream id. */
   request(method: string, path: string, host: string, extraHeaders: [string, string][] = []): number {

@@ -34,7 +34,8 @@ import {
   dnsPollReplyAsync,
   dnsCancelAsync,
 } from '../net/dns.js';
-import { parseHttpResponse, cookieJar } from '../net/http.js';
+import { parseHttpResponse, cookieJar, HTTP2Connection } from '../net/http.js';
+import { httpDecompress } from '../net/deflate.js';
 import { config, getHostname, getDnsServers, getTimezone } from './config.js';
 import { locale } from './locale.js';
 import { tz as _tz } from './timezone.js';
@@ -181,7 +182,8 @@ function _bytesToString(bytes: number[]): string {
 }
 
 type FetchStage =
-  | 'dns' | 'connecting' | 'tls' | 'sending' | 'receiving' | 'parsing' | 'done';
+  | 'dns' | 'connecting' | 'tls' | 'sending' | 'receiving' | 'parsing'
+  | 'h2-sending' | 'h2-receiving' | 'done';
 
 interface ParsedURL {
   protocol: 'http' | 'https';
@@ -243,6 +245,8 @@ interface InFlightFetch {
   opts:         FetchOptions;
   callback:     (resp: FetchResponse | null, error?: string) => void;
   pooled:       boolean;  // true if sock/tls came from the keep-alive pool
+  h2conn:       HTTP2Connection | null;  // HTTP/2 multiplexed connection (if ALPN h2)
+  h2streamId:   number;                  // HTTP/2 stream ID for this request
 }
 
 // ── TLS connection keep-alive pool ──────────────────────────────────────────
@@ -258,6 +262,49 @@ interface _PoolEntry {
 var _connPool: _PoolEntry[] = [];
 var _POOL_MAX = 6;
 var _POOL_TTL = 3000;  // 30 s at 100 Hz
+
+// ── HTTP/2 connection pool (one multiplexed connection per host) ──────────────
+interface _H2PoolEntry {
+  conn:   HTTP2Connection;
+  host:   string;
+  port:   number;
+  expiry: number;
+}
+var _h2Pool: _H2PoolEntry[] = [];
+var _H2_POOL_TTL = 6000;  // 60 s at 100 Hz
+
+function _h2PoolGet(host: string, port: number): HTTP2Connection | null {
+  var now = kernel.getTicks();
+  for (var i = _h2Pool.length - 1; i >= 0; i--) {
+    var p = _h2Pool[i];
+    if (now >= p.expiry || !p.conn.isAlive()) {
+      try { p.conn.close(); } catch(_) {}
+      _h2Pool.splice(i, 1);
+      continue;
+    }
+    if (p.host === host && p.port === port) {
+      p.expiry = now + _H2_POOL_TTL;  // refresh TTL on use
+      return p.conn;
+    }
+  }
+  return null;
+}
+
+function _h2PoolPut(host: string, port: number, conn: HTTP2Connection): void {
+  var now = kernel.getTicks();
+  // Evict expired/dead entries
+  for (var i = _h2Pool.length - 1; i >= 0; i--) {
+    if (now >= _h2Pool[i].expiry || !_h2Pool[i].conn.isAlive()) {
+      try { _h2Pool[i].conn.close(); } catch(_) {}
+      _h2Pool.splice(i, 1);
+    }
+  }
+  // Don't duplicate
+  for (var j = 0; j < _h2Pool.length; j++) {
+    if (_h2Pool[j].host === host && _h2Pool[j].port === port) return;
+  }
+  _h2Pool.push({ conn, host, port, expiry: now + _H2_POOL_TTL });
+}
 
 function _poolGet(host: string, port: number, https: boolean): _PoolEntry | null {
   var now = kernel.getTicks();
@@ -325,7 +372,17 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       if (ip) {
         f.fetchIP  = ip;
         f.dnsPort  = 0;
-        // Try connection pool first
+        // Try HTTP/2 pool first (HTTPS only)
+        if (f.parsed.protocol === 'https') {
+          var h2p = _h2PoolGet(f.parsed.host, f.parsed.port);
+          if (h2p) {
+            f.h2conn = h2p;
+            f.pooled = true;
+            f.stage  = 'h2-sending';
+            return 'pending';
+          }
+        }
+        // Try HTTP/1.1 connection pool
         var pooled = _poolGet(f.parsed.host, f.parsed.port, f.parsed.protocol === 'https');
         if (pooled) {
           f.sock   = pooled.sock;
@@ -372,7 +429,21 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
         f.callback(null, 'TLS handshake failed with ' + f.fetchIP);
         return 'done';
       }
-      f.tls   = tls;
+      f.tls = tls;
+      // Check ALPN: if server negotiated h2, use HTTP/2 multiplexed connection
+      if (tls.alpnProtocol === 'h2') {
+        var h2c = new HTTP2Connection(f.parsed.host);
+        if (!h2c.connectOnSocket(tls)) {
+          _cleanupFetch(f);
+          f.callback(null, 'HTTP/2 setup failed with ' + f.fetchIP);
+          return 'done';
+        }
+        f.h2conn = h2c;
+        f.stage  = 'h2-sending';
+        // Store in H2 pool for future requests to this host
+        _h2PoolPut(f.parsed.host, f.parsed.port, h2c);
+        return 'pending';
+      }
       f.stage = 'sending';
       return 'pending';
     }
@@ -580,6 +651,142 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       var bodyText2 = _bytesToString(resp.body);
       f.callback({ status: resp.status, headers: resp.headers, body: resp.body, bodyText: bodyText2, finalURL: f.currentURL });
       return 'done';
+    }
+
+    // ── HTTP/2: Send request via multiplexed stream ──────────────────────
+    if (f.stage === 'h2-sending') {
+      var h2 = f.h2conn!;
+      var h2method = (f.opts.method || 'GET').toUpperCase();
+      var h2path   = f.parsed.path;
+      var h2extras: [string, string][] = [];
+      // Add Accept and User-Agent pseudo-headers
+      h2extras.push(['accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8']);
+      h2extras.push(['accept-encoding', 'gzip, deflate']);
+      h2extras.push(['accept-language', 'en-US,en;q=0.9']);
+      h2extras.push(['user-agent', 'Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/115.0']);
+      // Inject cookies
+      var _h2CookieHdr = cookieJar.getCookieHeader(
+        f.parsed.host, f.parsed.path, f.parsed.protocol === 'https');
+      if (_h2CookieHdr) h2extras.push(['cookie', _h2CookieHdr]);
+      // Add custom headers
+      if (f.opts.headers) {
+        for (var hk in f.opts.headers) {
+          h2extras.push([hk.toLowerCase(), f.opts.headers[hk]]);
+        }
+      }
+      var h2sid = h2.request(h2method, h2path, f.parsed.host, h2extras);
+      f.h2streamId = h2sid;
+      // Send body for POST/PUT etc.
+      if (f.opts.body && h2method !== 'GET' && h2method !== 'HEAD') {
+        var h2body: number[];
+        if (typeof f.opts.body === 'string') {
+          h2body = new Array(f.opts.body.length);
+          for (var _bi = 0; _bi < f.opts.body.length; _bi++) h2body[_bi] = f.opts.body.charCodeAt(_bi) & 0xff;
+        } else {
+          h2body = f.opts.body as number[];
+        }
+        h2.sendData(h2sid, h2body, true);
+      }
+      f.deadline = kernel.getTicks() + 800;  // 8 s timeout
+      f.stage = 'h2-receiving';
+      return 'pending';
+    }
+
+    // ── HTTP/2: Receive response frames ──────────────────────────────────
+    if (f.stage === 'h2-receiving') {
+      var h2r = f.h2conn!;
+      var stream = h2r.receive(f.h2streamId, 50);  // short poll, 500ms
+      if (stream && (stream.state === 'half_closed_remote' || stream.state === 'closed')) {
+        // Extract status and headers from :status pseudo-header
+        var h2status = 200;
+        var h2headers = new Map<string, string>();
+        for (var _hi = 0; _hi < stream.headers.length; _hi++) {
+          var _hdr = stream.headers[_hi];
+          if (_hdr[0] === ':status') {
+            h2status = parseInt(_hdr[1], 10) || 200;
+          } else if (!_hdr[0].startsWith(':')) {
+            // Concatenate duplicate headers with newline (for Set-Cookie etc.)
+            var existing = h2headers.get(_hdr[0]);
+            h2headers.set(_hdr[0], existing ? existing + '\n' + _hdr[1] : _hdr[1]);
+          }
+        }
+
+        // Decompress body if content-encoding is gzip/deflate
+        var h2Body = stream.body;
+        var h2ce = h2headers.get('content-encoding') || '';
+        if (h2ce) {
+          try { h2Body = httpDecompress(h2Body, h2ce); } catch (_e) {}
+        }
+
+        // Process Set-Cookie
+        var _h2SetCookie = h2headers.get('set-cookie');
+        if (_h2SetCookie) {
+          var _scV2 = _h2SetCookie.split('\n');
+          for (var _sc2i = 0; _sc2i < _scV2.length; _sc2i++) {
+            if (_scV2[_sc2i].trim()) {
+              cookieJar.setCookie(_scV2[_sc2i].trim(), {
+                host: f.parsed.host,
+                path: f.parsed.path,
+                secure: f.parsed.protocol === 'https',
+              });
+            }
+          }
+        }
+
+        // Redirect handling
+        if (h2status >= 300 && h2status < 400) {
+          var h2loc = h2headers.get('location') || '';
+          if (h2loc && f.redirects < f.maxRedirects) {
+            f.redirects++;
+            var h2rURL    = _resolveHref(h2loc, f.currentURL);
+            var h2rParsed = _parseURL(h2rURL);
+            if (!h2rParsed) { f.callback(null, 'Invalid redirect URL: ' + h2rURL); return 'done'; }
+            f.currentURL = h2rURL;
+            f.parsed     = h2rParsed;
+            // Try H2 pool for redirect target
+            if (h2rParsed.protocol === 'https') {
+              var h2rConn = _h2PoolGet(h2rParsed.host, h2rParsed.port);
+              if (h2rConn) {
+                f.h2conn = h2rConn;
+                f.stage  = 'h2-sending';
+                return 'pending';
+              }
+            }
+            // Fall back to normal connection flow
+            f.h2conn = null;
+            f.h2streamId = 0;
+            var h2rIP = dnsResolveCached(h2rParsed.host);
+            if (h2rIP) {
+              f.fetchIP  = h2rIP;
+              f.stage    = 'connecting';
+              f.deadline = kernel.getTicks() + 200;
+              f.sock     = net.createSocket('tcp');
+              net.connectAsync(f.sock, h2rIP, h2rParsed.port);
+            } else {
+              f.stage    = 'dns';
+              f.deadline = kernel.getTicks() + 300;
+              var h2rq   = dnsSendQueryAsync(h2rParsed.host);
+              f.dnsPort  = h2rq.port;
+              f.dnsId    = h2rq.id;
+            }
+            return 'pending';
+          }
+        }
+
+        var h2bodyText = _bytesToString(h2Body);
+        if (h2status < 200 || h2status >= 400) {
+          f.callback({ status: h2status, headers: h2headers, body: h2Body, bodyText: h2bodyText, finalURL: f.currentURL }, 'HTTP ' + h2status);
+          return 'done';
+        }
+        f.callback({ status: h2status, headers: h2headers, body: h2Body, bodyText: h2bodyText, finalURL: f.currentURL });
+        return 'done';
+      }
+
+      if (kernel.getTicks() >= f.deadline) {
+        f.callback(null, 'HTTP/2 response timeout from ' + f.parsed.host);
+        return 'done';
+      }
+      return 'pending';
     }
 
     return 'done';
@@ -941,30 +1148,45 @@ function _doFetch(
     opts:         o,
     callback,
     pooled:       false,
+    h2conn:       null,
+    h2streamId:   0,
   };
 
-  // Try connection pool before DNS/TCP
-  var pooled = _poolGet(parsed.host, parsed.port, parsed.protocol === 'https');
-  if (pooled) {
-    f.sock   = pooled.sock;
-    f.tls    = pooled.tls;
-    f.fetchIP = dnsResolveCached(parsed.host) || '';
-    f.pooled = true;
-    f.stage  = 'sending';
-  } else {
-    var cachedIP = dnsResolveCached(parsed.host);
-    if (cachedIP) {
-      f.fetchIP  = cachedIP;
-      f.stage    = 'connecting';
-      f.deadline = kernel.getTicks() + 200;
-      f.sock     = net.createSocket('tcp');
-      net.connectAsync(f.sock, cachedIP, parsed.port);
+  // Try HTTP/2 multiplexed connection pool first (HTTPS only)
+  if (parsed.protocol === 'https') {
+    var h2c = _h2PoolGet(parsed.host, parsed.port);
+    if (h2c) {
+      f.h2conn  = h2c;
+      f.fetchIP = dnsResolveCached(parsed.host) || '';
+      f.pooled  = true;
+      f.stage   = 'h2-sending';
+    }
+  }
+
+  if (!f.h2conn) {
+    // Try HTTP/1.1 connection pool before DNS/TCP
+    var pooled = _poolGet(parsed.host, parsed.port, parsed.protocol === 'https');
+    if (pooled) {
+      f.sock   = pooled.sock;
+      f.tls    = pooled.tls;
+      f.fetchIP = dnsResolveCached(parsed.host) || '';
+      f.pooled = true;
+      f.stage  = 'sending';
     } else {
-      f.stage    = 'dns';
-      f.deadline = kernel.getTicks() + 300;
-      var q      = dnsSendQueryAsync(parsed.host);
-      f.dnsPort  = q.port;
-      f.dnsId    = q.id;
+      var cachedIP = dnsResolveCached(parsed.host);
+      if (cachedIP) {
+        f.fetchIP  = cachedIP;
+        f.stage    = 'connecting';
+        f.deadline = kernel.getTicks() + 200;
+        f.sock     = net.createSocket('tcp');
+        net.connectAsync(f.sock, cachedIP, parsed.port);
+      } else {
+        f.stage    = 'dns';
+        f.deadline = kernel.getTicks() + 300;
+        var q      = dnsSendQueryAsync(parsed.host);
+        f.dnsPort  = q.port;
+        f.dnsId    = q.id;
+      }
     }
   }
 
