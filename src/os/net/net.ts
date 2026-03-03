@@ -2238,6 +2238,21 @@ export class NetworkStack {
   }
 
   /**
+   * Check if the remote side has closed the TCP connection (FIN received).
+   * Returns true if the connection is in CLOSE_WAIT, FIN_WAIT_2, TIME_WAIT,
+   * LAST_ACK, CLOSING, CLOSED, or no connection exists.
+   */
+  isEOF(sock: Socket): boolean {
+    if (this.nicReady) this.pollNIC();
+    this.processRxQueue();
+    var conn = this._connForSock(sock);
+    if (!conn) return true;
+    return conn.state === 'CLOSE_WAIT' || conn.state === 'FIN_WAIT_2' ||
+           conn.state === 'TIME_WAIT'  || conn.state === 'LAST_ACK'   ||
+           conn.state === 'CLOSING'    || conn.state === 'CLOSED';
+  }
+
+  /**
    * Send a UDP datagram with raw byte payload.
    */
   sendUDPRaw(localPort: number, dstIP: IPv4Address, dstPort: number, data: number[]): void {

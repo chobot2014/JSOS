@@ -248,26 +248,38 @@ export class TLSSocket {
   }
 
   /**
-   * Non-blocking TLS read: poll the NIC once and try to parse one complete
-   * TLS record from the buffer.  Returns decrypted app data or null.
+   * Non-blocking TLS read: poll the NIC once and drain ALL complete
+   * TLS records from the buffer.  Returns concatenated decrypted app data or null.
    */
   readNB(): number[] | null {
     var chunk = net.recvBytesNB(this.sock);
     if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
     if (this.rxBuf.length < 5) return null;
-    var outerType = u8(this.rxBuf, 0);
-    var recLen    = u16(this.rxBuf, 3);
-    if (this.rxBuf.length < 5 + recLen) return null;  // incomplete record — wait more
-    var record    = this.rxBuf.slice(0, 5 + recLen);
-    this.rxBuf    = this.rxBuf.slice(5 + recLen);
-    if (outerType !== TLS_APPLICATION_DATA) return null;
-    var dec = tlsDecryptRecord(
-        this.serverAppKey, this.serverAppIV, this.serverAppSeq, record, this.useChaCha20);
-    if (dec) {
-      this.serverAppSeq++;
-      if (dec.type === TLS_APPLICATION_DATA) return dec.data;
+    var result: number[] | null = null;
+    // Drain all complete records in one call
+    while (this.rxBuf.length >= 5) {
+      var outerType = u8(this.rxBuf, 0);
+      var recLen    = u16(this.rxBuf, 3);
+      if (this.rxBuf.length < 5 + recLen) break;  // incomplete record — wait more
+      var record    = this.rxBuf.slice(0, 5 + recLen);
+      this.rxBuf    = this.rxBuf.slice(5 + recLen);
+      if (outerType !== TLS_APPLICATION_DATA) continue;
+      var dec = tlsDecryptRecord(
+          this.serverAppKey, this.serverAppIV, this.serverAppSeq, record, this.useChaCha20);
+      if (dec) {
+        this.serverAppSeq++;
+        if (dec.type === TLS_APPLICATION_DATA) {
+          if (!result) { result = dec.data; }
+          else { for (var _di = 0; _di < dec.data.length; _di++) result.push(dec.data[_di]); }
+        }
+      }
     }
-    return null;
+    return result;
+  }
+
+  /** Check if the underlying TCP connection has received a FIN. */
+  isEOF(): boolean {
+    return net.isEOF(this.sock);
   }
 
   /** Send application data over TLS */

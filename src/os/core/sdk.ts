@@ -230,6 +230,9 @@ interface InFlightFetch {
   sock:         any;   // net.Socket
   tls:          any;   // TLSSocket | null
   chunks:       number[][];
+  totalRecv:    number;   // bytes received so far
+  contentLen:   number;   // Content-Length from headers, or -1 if unknown
+  headersDone:  boolean;  // true once we've seen \r\n\r\n in raw bytes
   deadline:     number;
   dnsPort:      number;
   dnsId:        number;
@@ -237,12 +240,79 @@ interface InFlightFetch {
   maxRedirects: number;
   opts:         FetchOptions;
   callback:     (resp: FetchResponse | null, error?: string) => void;
+  pooled:       boolean;  // true if sock/tls came from the keep-alive pool
+}
+
+// ── TLS connection keep-alive pool ──────────────────────────────────────────
+
+interface _PoolEntry {
+  sock:   any;       // net.Socket
+  tls:    any;       // TLSSocket | null
+  host:   string;
+  port:   number;
+  https:  boolean;
+  expiry: number;    // kernel.getTicks() deadline
+}
+var _connPool: _PoolEntry[] = [];
+var _POOL_MAX = 6;
+var _POOL_TTL = 3000;  // 30 s at 100 Hz
+
+function _poolGet(host: string, port: number, https: boolean): _PoolEntry | null {
+  var now = kernel.getTicks();
+  for (var i = _connPool.length - 1; i >= 0; i--) {
+    var p = _connPool[i];
+    if (now >= p.expiry) {
+      // Evict expired entry
+      try { if (p.tls) p.tls.close(); else net.close(p.sock); } catch(_) {}
+      _connPool.splice(i, 1);
+      continue;
+    }
+    if (p.host === host && p.port === port && p.https === https) {
+      _connPool.splice(i, 1);
+      return p;
+    }
+  }
+  return null;
+}
+
+function _poolPut(entry: _PoolEntry): void {
+  var now = kernel.getTicks();
+  // Evict expired entries
+  for (var i = _connPool.length - 1; i >= 0; i--) {
+    if (now >= _connPool[i].expiry) {
+      try { if (_connPool[i].tls) _connPool[i].tls.close(); else net.close(_connPool[i].sock); } catch(_) {}
+      _connPool.splice(i, 1);
+    }
+  }
+  if (_connPool.length >= _POOL_MAX) {
+    var old = _connPool.shift()!;
+    try { if (old.tls) old.tls.close(); else net.close(old.sock); } catch(_) {}
+  }
+  entry.expiry = now + _POOL_TTL;
+  _connPool.push(entry);
 }
 
 function _cleanupFetch(f: InFlightFetch): void {
-  if (f.sock) { try { net.close(f.sock); } catch (_e) {} f.sock = null; }
-  if (f.tls)  { try { f.tls.close();    } catch (_e) {} f.tls  = null; }
+  if (!f.pooled) {
+    if (f.sock) { try { net.close(f.sock); } catch (_e) {} f.sock = null; }
+    if (f.tls)  { try { f.tls.close();    } catch (_e) {} f.tls  = null; }
+  } else {
+    f.sock = null; f.tls = null;
+  }
   if (f.dnsPort > 0) { dnsCancelAsync(f.dnsPort); f.dnsPort = 0; }
+}
+
+/** Return the connection to the pool (keep-alive) or close it. */
+function _returnOrClose(f: InFlightFetch, connHdr: string): void {
+  if (connHdr.indexOf('close') >= 0) {
+    if (f.sock) { try { net.close(f.sock); } catch (_e) {} }
+    if (f.tls)  { try { f.tls.close();     } catch (_e) {} }
+  } else {
+    _poolPut({ sock: f.sock, tls: f.tls, host: f.parsed.host,
+               port: f.parsed.port, https: f.parsed.protocol === 'https',
+               expiry: 0 /* set by _poolPut */ });
+  }
+  f.sock = null; f.tls = null;
 }
 
 function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
@@ -253,6 +323,15 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       if (ip) {
         f.fetchIP  = ip;
         f.dnsPort  = 0;
+        // Try connection pool first
+        var pooled = _poolGet(f.parsed.host, f.parsed.port, f.parsed.protocol === 'https');
+        if (pooled) {
+          f.sock   = pooled.sock;
+          f.tls    = pooled.tls;
+          f.pooled = true;
+          f.stage  = 'sending';
+          return 'pending';
+        }
         f.stage    = 'connecting';
         f.deadline = kernel.getTicks() + 200;
         f.sock     = net.createSocket('tcp');
@@ -318,8 +397,9 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
         : '';
       var req  = method + ' ' + path + ' HTTP/1.1\r\n' +
                  'Host: ' + f.parsed.host + '\r\n' +
-                 'Connection: close\r\n' +
+                 'Connection: keep-alive\r\n' +
                  'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n' +
+                 'Accept-Encoding: identity\r\n' +
                  'Accept-Language: en-US,en;q=0.9\r\n' +
                  'User-Agent: Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/115.0\r\n' +
                  (bodyStr ? 'Content-Length: ' + bodyStr.length + '\r\n' : '') +
@@ -328,9 +408,12 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       var reqBytes: number[] = new Array(req.length);
       for (var ri = 0; ri < req.length; ri++) reqBytes[ri] = req.charCodeAt(ri) & 0xff;
       if (f.tls) f.tls.write(reqBytes); else net.sendBytes(f.sock, reqBytes);
-      f.chunks   = [];
-      f.deadline = kernel.getTicks() + 500;   // 5 s hard timeout
-      f.stage    = 'receiving';
+      f.chunks     = [];
+      f.totalRecv  = 0;
+      f.contentLen = -1;
+      f.headersDone = false;
+      f.deadline   = kernel.getTicks() + 800;  // 8 s hard timeout
+      f.stage      = 'receiving';
       return 'pending';
     }
 
@@ -339,39 +422,69 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       var chunk: number[] | null = f.tls ? f.tls.readNB() : net.recvBytesNB(f.sock);
       if (chunk && chunk.length > 0) {
         f.chunks.push(chunk);
-        f.deadline = kernel.getTicks() + 300;  // 3 s silence timeout resets on each chunk
+        f.totalRecv += chunk.length;
+        f.deadline = kernel.getTicks() + 200;  // 2 s silence timeout resets on each chunk
+
+        // Parse headers on-the-fly to extract Content-Length for early termination
+        if (!f.headersDone) {
+          // Check if we have the full header by scanning accumulated bytes
+          var _rawSoFar = _bytesToString(f.chunks.length === 1 ? f.chunks[0] : _flattenChunks(f.chunks));
+          var _hEnd = _rawSoFar.indexOf('\r\n\r\n');
+          if (_hEnd >= 0) {
+            f.headersDone = true;
+            var _hdrStr = _rawSoFar.substring(0, _hEnd);
+            var _clMatch = _hdrStr.match(/content-length:\s*(\d+)/i);
+            if (_clMatch) f.contentLen = parseInt(_clMatch[1], 10);
+          }
+        }
+
+        // Early termination: if we know Content-Length, check if body is complete
+        if (f.headersDone && f.contentLen >= 0) {
+          var _rawAll   = _bytesToString(f.chunks.length === 1 ? f.chunks[0] : _flattenChunks(f.chunks));
+          var _bodyOff  = _rawAll.indexOf('\r\n\r\n');
+          if (_bodyOff >= 0) {
+            var _bodyLen = f.totalRecv - (_bodyOff + 4);
+            if (_bodyLen >= f.contentLen) {
+              f.stage = 'parsing';  // Got all body bytes — stop waiting
+              return 'pending';
+            }
+          }
+        }
       }
+
+      // EOF: remote side closed connection — stop immediately
+      var _eof = f.tls ? f.tls.isEOF() : net.isEOF(f.sock);
+      if (_eof && f.totalRecv > 0) { f.stage = 'parsing'; return 'pending'; }
+
       if (kernel.getTicks() >= f.deadline) f.stage = 'parsing';
       return 'pending';
     }
 
     // ── Parse ──────────────────────────────────────────────────────────────
     if (f.stage === 'parsing') {
-      if (f.sock) { try { net.close(f.sock); } catch (_e) {} f.sock = null; }
-      if (f.tls)  { try { f.tls.close();    } catch (_e) {} f.tls  = null; }
-
       var total = 0;
       for (var ci = 0; ci < f.chunks.length; ci++) total += f.chunks[ci].length;
       if (total === 0) {
+        _cleanupFetch(f);
         f.callback(null, 'No response from ' + f.fetchIP);
         return 'done';
       }
-      var flat: number[] = new Array(total);
-      var off = 0;
-      for (var ci2 = 0; ci2 < f.chunks.length; ci2++) {
-        var ch = f.chunks[ci2];
-        for (var j = 0; j < ch.length; j++) flat[off++] = ch[j];
-      }
+      var flat = _flattenChunks(f.chunks);
       f.chunks = [];
 
       var resp = parseHttpResponse(flat);
       if (!resp) {
+        _cleanupFetch(f);
         var _previewBytes = flat.slice(0, 64);
         var _preview = _previewBytes.map(function(b) { return b >= 32 && b < 127 ? String.fromCharCode(b) : '.'; }).join('');
         kernel.serialPut('[sdk] parse fail ' + total + 'B: ' + _preview + '\n');
         f.callback(null, 'Could not parse HTTP response from ' + f.fetchIP);
         return 'done';
       }
+
+      // Return connection to pool or close it
+      var _connHdr = resp.headers.get('connection') || '';
+      _returnOrClose(f, _connHdr);
 
       // Process Set-Cookie headers from response
       var _setCookieHdr = resp.headers.get('set-cookie');
@@ -398,6 +511,16 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
           if (!rParsed) { f.callback(null, 'Invalid redirect URL: ' + rURL); return 'done'; }
           f.currentURL = rURL;
           f.parsed     = rParsed;
+          // Try pool for redirect target
+          var rPooled = _poolGet(rParsed.host, rParsed.port, rParsed.protocol === 'https');
+          if (rPooled) {
+            f.sock   = rPooled.sock;
+            f.tls    = rPooled.tls;
+            f.fetchIP = dnsResolveCached(rParsed.host) || f.fetchIP;
+            f.pooled = true;
+            f.stage  = 'sending';
+            return 'pending';
+          }
           var rIP = dnsResolveCached(rParsed.host);
           if (rIP) {
             f.fetchIP  = rIP;
@@ -436,6 +559,19 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
 
     return 'done';
   };
+}
+
+/** Flatten chunks into a single contiguous array (O(n)). */
+function _flattenChunks(chunks: number[][]): number[] {
+  var total = 0;
+  for (var i = 0; i < chunks.length; i++) total += chunks[i].length;
+  var flat = new Array<number>(total);
+  var off = 0;
+  for (var i2 = 0; i2 < chunks.length; i2++) {
+    var ch = chunks[i2];
+    for (var j = 0; j < ch.length; j++) flat[off++] = ch[j];
+  }
+  return flat;
 }
 
 // ── Module-level state (timer, env, events) ─────────────────────────────────
@@ -767,6 +903,9 @@ function _doFetch(
     sock:         null,
     tls:          null,
     chunks:       [],
+    totalRecv:    0,
+    contentLen:   -1,
+    headersDone:  false,
     deadline:     0,
     dnsPort:      0,
     dnsId:        0,
@@ -774,21 +913,32 @@ function _doFetch(
     maxRedirects: o.maxRedirects !== undefined ? o.maxRedirects : 5,
     opts:         o,
     callback,
+    pooled:       false,
   };
 
-  var cachedIP = dnsResolveCached(parsed.host);
-  if (cachedIP) {
-    f.fetchIP  = cachedIP;
-    f.stage    = 'connecting';
-    f.deadline = kernel.getTicks() + 200;
-    f.sock     = net.createSocket('tcp');
-    net.connectAsync(f.sock, cachedIP, parsed.port);
+  // Try connection pool before DNS/TCP
+  var pooled = _poolGet(parsed.host, parsed.port, parsed.protocol === 'https');
+  if (pooled) {
+    f.sock   = pooled.sock;
+    f.tls    = pooled.tls;
+    f.fetchIP = dnsResolveCached(parsed.host) || '';
+    f.pooled = true;
+    f.stage  = 'sending';
   } else {
-    f.stage    = 'dns';
-    f.deadline = kernel.getTicks() + 300;
-    var q      = dnsSendQueryAsync(parsed.host);
-    f.dnsPort  = q.port;
-    f.dnsId    = q.id;
+    var cachedIP = dnsResolveCached(parsed.host);
+    if (cachedIP) {
+      f.fetchIP  = cachedIP;
+      f.stage    = 'connecting';
+      f.deadline = kernel.getTicks() + 200;
+      f.sock     = net.createSocket('tcp');
+      net.connectAsync(f.sock, cachedIP, parsed.port);
+    } else {
+      f.stage    = 'dns';
+      f.deadline = kernel.getTicks() + 300;
+      var q      = dnsSendQueryAsync(parsed.host);
+      f.dnsPort  = q.port;
+      f.dnsId    = q.id;
+    }
   }
 
   var step = _buildFetchCoroutine(f);
