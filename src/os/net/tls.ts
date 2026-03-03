@@ -30,6 +30,7 @@ import {
   p256PublicKey, ecdhP256,
   concat, getHardwareRandom,
 } from './crypto.js';
+import { sha384, hmacSha384 } from './crypto.js';
 import { net, strToBytes } from './net.js';
 import type { Socket } from './net.js';
 
@@ -108,6 +109,24 @@ function tls12PRF(secret: number[], label: string, seed: number[], len: number):
   while (out.length < len) {
     A = hmacSha256(secret, A);  // A(i) = HMAC(secret, A(i-1))
     var chunk = hmacSha256(secret, A.concat(labelSeed));
+    for (var j = 0; j < chunk.length && out.length < len; j++) out.push(chunk[j]);
+  }
+  return out.slice(0, len);
+}
+
+/**
+ * TLS 1.2 PRF for AES_256_GCM_SHA384 cipher suites.
+ * Same structure as tls12PRF but uses HMAC-SHA-384 instead of HMAC-SHA-256.
+ */
+function tls12PRF384(secret: number[], label: string, seed: number[], len: number): number[] {
+  var labelBytes: number[] = [];
+  for (var i = 0; i < label.length; i++) labelBytes.push(label.charCodeAt(i));
+  var labelSeed = labelBytes.concat(seed);
+  var out: number[] = [];
+  var A = labelSeed.slice();
+  while (out.length < len) {
+    A = hmacSha384(secret, A);
+    var chunk = hmacSha384(secret, A.concat(labelSeed));
     for (var j = 0; j < chunk.length && out.length < len; j++) out.push(chunk[j]);
   }
   return out.slice(0, len);
@@ -649,11 +668,13 @@ export class TLSSocket {
     // Only offer SHA-256-based ciphers so our PRF (SHA-256) is always correct.
     // TLS 1.3 servers pick from 0x1301/0x1303 via supported_versions.
     // TLS 1.2 servers pick from the ECDHE-AES128-GCM ciphers.
-    putU16(body, 14);  // 7 suites Ã— 2 bytes
+    putU16(body, 18);  // 9 suites x 2 bytes
     putU16(body, CS_AES_128_GCM_SHA256);         // 0x1301 TLS 1.3
     putU16(body, CS_CHACHA20_POLY1305_SHA256);   // 0x1303 TLS 1.3
     putU16(body, 0xc02b);  // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+    putU16(body, 0xc02c);  // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
     putU16(body, CS_TLS12_ECDHE_RSA_AES128_GCM); // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+    putU16(body, CS_TLS12_ECDHE_RSA_AES256_GCM); // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
     putU16(body, 0xcca9);  // TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
     putU16(body, CS_TLS12_ECDHE_RSA_CHACHA20);   // TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
     putU16(body, CS_EMPTY_RENEG);                 // 0x00ff SCSV
@@ -1055,10 +1076,12 @@ export class TLSSocket {
     putU16(body, 0x0303);  // TLS 1.2 legacy version
     for (var i = 0; i < 32; i++) putU8(body, clRandom[i]);
     putU8(body, 0);  // no session ID
-    // Cipher suites: ECDHE with AES-128-GCM + ChaCha20 (RSA + ECDSA) + SCSV
-    putU16(body, 10);  // 5 suites Ã— 2 bytes
+    // Cipher suites: ECDHE with AES-128/256-GCM + ChaCha20 (RSA + ECDSA) + SCSV
+    putU16(body, 14);  // 7 suites x 2 bytes
     putU16(body, CS_TLS12_ECDHE_RSA_AES128_GCM);   // 0xc02f
     putU16(body, 0xc02b);                           // ECDHE-ECDSA-AES128-GCM
+    putU16(body, CS_TLS12_ECDHE_RSA_AES256_GCM);   // 0xc030
+    putU16(body, 0xc02c);                           // ECDHE-ECDSA-AES256-GCM
     putU16(body, CS_TLS12_ECDHE_RSA_CHACHA20);      // 0xcca8
     putU16(body, 0xcca9);                           // ECDHE-ECDSA-ChaCha20
     putU16(body, CS_EMPTY_RENEG);
@@ -1271,14 +1294,17 @@ export class TLSSocket {
     kernel.serialPut('[tls12] cipher=0x' + negotiatedCipher.toString(16) + ' EMS=' + (useEMS ? 1 : 0) + '\n');
     // Supported TLS 1.2 cipher suites:
     // AES-128-GCM: 0xC02F (ECDHE-RSA), 0xC02B (ECDHE-ECDSA)
+    // AES-256-GCM: 0xC030 (ECDHE-RSA), 0xC02C (ECDHE-ECDSA)
     // ChaCha20-Poly1305: 0xCCA8 (ECDHE-RSA), 0xCCA9 (ECDHE-ECDSA)
     var isAES128 = (negotiatedCipher === 0xc02f || negotiatedCipher === 0xc02b);
+    var isAES256 = (negotiatedCipher === 0xc030 || negotiatedCipher === 0xc02c);
     var isChacha = (negotiatedCipher === 0xcca8 || negotiatedCipher === 0xcca9);
-    if (!isAES128 && !isChacha) {
+    if (!isAES128 && !isAES256 && !isChacha) {
       kernel.serialPut('[tls12] unsupported cipher 0x' + negotiatedCipher.toString(16) + '\n');
       return false;
     }
     var tls12UseChaCha = isChacha;
+    var useSHA384 = isAES256;  // AES-256-GCM-SHA384 uses SHA-384 for PRF
     // Read messages until ServerHelloDone (type 14)
     var serverECDHEPublic: number[] = [];
     for (var _att = 0; _att < 10; _att++) {
@@ -1315,17 +1341,18 @@ export class TLSSocket {
     else { putU8(cke, this.myP256Public.length); cke = cke.concat(this.myP256Public); }
     var ckeMsg: number[] = [16]; putU24(ckeMsg, cke.length); ckeMsg = ckeMsg.concat(cke);
     this.transcript = this.transcript.concat(ckeMsg);  // add CKE to transcript before EMS hash
+    var prf = useSHA384 ? tls12PRF384 : tls12PRF;
     var masterSecret: number[];
     if (useEMS) {
       // RFC 7627 §4: session_hash = Hash(CH..CKE) — includes ClientKeyExchange
-      var sessionHash = sha256(this.transcript);
-      masterSecret = tls12PRF(sharedSecret, 'extended master secret', sessionHash, 48);
+      var sessionHash = useSHA384 ? sha384(this.transcript) : sha256(this.transcript);
+      masterSecret = prf(sharedSecret, 'extended master secret', sessionHash, 48);
     } else {
-      masterSecret = tls12PRF(sharedSecret, 'master secret', clientRandom.concat(serverRand2), 48);
+      masterSecret = prf(sharedSecret, 'master secret', clientRandom.concat(serverRand2), 48);
     }
-    var keySize = isChacha ? 32 : 16;  // ChaCha20 = 32B key, AES-128 = 16B key
+    var keySize = isChacha ? 32 : isAES256 ? 32 : 16;  // ChaCha20/AES-256 = 32B, AES-128 = 16B
     var ivSize  = isChacha ? 12 : 4;  // ChaCha20 = 12B fixed IV, AES-GCM = 4B implicit IV
-    var keyMaterial  = tls12PRF(masterSecret, 'key expansion', serverRand2.concat(clientRandom), keySize*2 + ivSize*2);
+    var keyMaterial  = prf(masterSecret, 'key expansion', serverRand2.concat(clientRandom), keySize*2 + ivSize*2);
     this.clientAppKey       = keyMaterial.slice(0,         keySize);
     this.serverAppKey       = keyMaterial.slice(keySize,   keySize*2);
     this.tls12ClientWriteIV = keyMaterial.slice(keySize*2,     keySize*2 + ivSize);
@@ -1338,8 +1365,8 @@ export class TLSSocket {
     // Send ChangeCipherSpec
     if (!net.sendBytes(this.sock, [TLS_CHANGE_CIPHER_SPEC, 0x03, 0x03, 0x00, 0x01, 0x01])) return false;
     // Send Finished
-    var finHash = sha256(this.transcript);
-    var verifyData = tls12PRF(masterSecret, 'client finished', finHash, 12);
+    var finHash = useSHA384 ? sha384(this.transcript) : sha256(this.transcript);
+    var verifyData = prf(masterSecret, 'client finished', finHash, 12);
     var finMsg: number[] = [HS_FINISHED]; putU24(finMsg, 12); finMsg = finMsg.concat(verifyData);
     var finRec = tls12UseChaCha
       ? tls12EncryptRecordChaCha(this.clientAppKey, this.tls12ClientWriteIV, this.clientAppSeq, TLS_HANDSHAKE, finMsg)
@@ -1432,12 +1459,14 @@ export class TLSSocket {
     }
     // Check negotiated cipher is one we support
     var isAES128_12 = (negotiatedCipher12 === 0xc02f || negotiatedCipher12 === 0xc02b);
+    var isAES256_12 = (negotiatedCipher12 === 0xc030 || negotiatedCipher12 === 0xc02c);
     var isChacha12  = (negotiatedCipher12 === 0xcca8 || negotiatedCipher12 === 0xcca9);
-    if (!isAES128_12 && !isChacha12) {
+    if (!isAES128_12 && !isAES256_12 && !isChacha12) {
       kernel.serialPut('[tls12] unsupported cipher 0x' + negotiatedCipher12.toString(16) + '\n');
       return false;
     }
     (this as any)._tls12ChaCha = isChacha12;
+    var useSHA384_12 = isAES256_12;  // AES-256-GCM-SHA384 uses SHA-384 for PRF
     kernel.serialPut('[tls12] cipher=0x' + negotiatedCipher12.toString(16) + ' EMS=' + (useEMS12 ? 1 : 0) + '\n');
 
     // Read messages until ServerHelloDone (type 14)
@@ -1503,20 +1532,21 @@ export class TLSSocket {
 
     // TLS 1.2 master secret (use EMS if server supports it)
     var preMaster    = sharedSecret;
+    var prf12 = useSHA384_12 ? tls12PRF384 : tls12PRF;
     var masterSecret: number[];
     if (useEMS12) {
       // RFC 7627 §4: session_hash includes all messages through CKE
-      var sessionHash12 = sha256(this.transcript);
-      masterSecret = tls12PRF(preMaster, 'extended master secret', sessionHash12, 48);
+      var sessionHash12 = useSHA384_12 ? sha384(this.transcript) : sha256(this.transcript);
+      masterSecret = prf12(preMaster, 'extended master secret', sessionHash12, 48);
     } else {
-      masterSecret = tls12PRF(preMaster, 'master secret',
+      masterSecret = prf12(preMaster, 'master secret',
           clientRandom.concat(serverRand2), 48);
     }
 
     // Derive key material: key sizes depend on cipher suite
-    var keySize12 = isChacha12 ? 32 : 16;
+    var keySize12 = (isChacha12 || isAES256_12) ? 32 : 16;
     var ivSize12  = isChacha12 ? 12 : 4;
-    var keyMaterial = tls12PRF(masterSecret, 'key expansion',
+    var keyMaterial = prf12(masterSecret, 'key expansion',
         serverRand2.concat(clientRandom), keySize12*2 + ivSize12*2);
     this.clientAppKey        = keyMaterial.slice(0,  keySize12);
     this.serverAppKey        = keyMaterial.slice(keySize12, keySize12*2);
@@ -1531,8 +1561,8 @@ export class TLSSocket {
     if (!net.sendBytes(this.sock, [TLS_CHANGE_CIPHER_SPEC, 0x03, 0x03, 0x00, 0x01, 0x01])) return false;
 
     // Send Finished (encrypted with new keys)
-    var finHash = sha256(this.transcript);
-    var verifyData = tls12PRF(masterSecret, 'client finished', finHash, 12);
+    var finHash = useSHA384_12 ? sha384(this.transcript) : sha256(this.transcript);
+    var verifyData = prf12(masterSecret, 'client finished', finHash, 12);
     var finMsg: number[] = [HS_FINISHED]; putU24(finMsg, 12); finMsg = finMsg.concat(verifyData);
     var finRec = isChacha12
       ? tls12EncryptRecordChaCha(this.clientAppKey, this.tls12ClientWriteIV, this.clientAppSeq, TLS_HANDSHAKE, finMsg)
@@ -1561,7 +1591,7 @@ export class TLSSocket {
     }
     // We skip server Finished verification (no cert validation anyway)
     this.handshakeDone = true;
-    var cipherName12 = isChacha12 ? 'ChaCha20-Poly1305' : 'AES-128-GCM';
+    var cipherName12 = isChacha12 ? 'ChaCha20-Poly1305' : isAES256_12 ? 'AES-256-GCM' : 'AES-128-GCM';
     kernel.serialPut('[tls12] handshake OK with ' + this.hostname + ' (' + cipherName12 + ')\n');
     return true;
   }

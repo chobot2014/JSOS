@@ -196,21 +196,30 @@ function gmul(a: number, b: number): number {
 }
 
 export function aesKeyExpand(key: number[]): number[] {
-  // Returns 176 bytes = 11 round keys × 16 bytes
+  // Supports AES-128 (16-byte key → 176 bytes) and AES-256 (32-byte key → 240 bytes)
+  var Nk = key.length >> 2;         // 4 for AES-128, 8 for AES-256
+  var Nr = Nk + 6;                  // 10 for AES-128, 14 for AES-256
+  var totalBytes = (Nr + 1) * 16;   // 176 or 240
   var ek = key.slice();
-  var i = 4; // already have 4 words (16 bytes)
-  while (ek.length < 176) {
+  var i = Nk;
+  while (ek.length < totalBytes) {
     var base = ek.length - 4;
     var prev4 = [ek[base], ek[base+1], ek[base+2], ek[base+3]];
-    if ((i & 3) === 0) {
+    if (i % Nk === 0) {
       // RotWord + SubWord + Rcon
       var t0 = prev4[0];
-      prev4[0] = AES_SBOX[prev4[1]] ^ AES_RCON[i >> 2];
+      prev4[0] = AES_SBOX[prev4[1]] ^ AES_RCON[i / Nk];
       prev4[1] = AES_SBOX[prev4[2]];
       prev4[2] = AES_SBOX[prev4[3]];
       prev4[3] = AES_SBOX[t0];
+    } else if (Nk > 6 && i % Nk === 4) {
+      // Additional SubWord for AES-256
+      prev4[0] = AES_SBOX[prev4[0]];
+      prev4[1] = AES_SBOX[prev4[1]];
+      prev4[2] = AES_SBOX[prev4[2]];
+      prev4[3] = AES_SBOX[prev4[3]];
     }
-    var base2 = ek.length - 16;
+    var base2 = ek.length - (Nk * 4);  // W[i - Nk]
     ek.push(ek[base2]   ^ prev4[0]);
     ek.push(ek[base2+1] ^ prev4[1]);
     ek.push(ek[base2+2] ^ prev4[2]);
@@ -222,9 +231,10 @@ export function aesKeyExpand(key: number[]): number[] {
 
 export function aesEncryptBlock(block: number[], ek: number[]): number[] {
   var s = block.slice();
+  var Nr = (ek.length >> 4) - 1;  // 10 for AES-128 (176B), 14 for AES-256 (240B)
   // AddRoundKey 0
   for (var i = 0; i < 16; i++) s[i] ^= ek[i];
-  for (var rnd = 1; rnd < 11; rnd++) {
+  for (var rnd = 1; rnd <= Nr; rnd++) {
     // SubBytes
     for (var i = 0; i < 16; i++) s[i] = AES_SBOX[s[i]];
     // ShiftRows
@@ -233,7 +243,7 @@ export function aesEncryptBlock(block: number[], ek: number[]): number[] {
     s[2]=t[10];s[6]=t[14];s[10]=t[2];s[14]=t[6];
     s[3]=t[15];s[7]=t[3];s[11]=t[7];s[15]=t[11];
     // MixColumns (skip in last round)
-    if (rnd < 10) {
+    if (rnd < Nr) {
       for (var c = 0; c < 4; c++) {
         var i0 = c*4, a0=s[i0],a1=s[i0+1],a2=s[i0+2],a3=s[i0+3];
         s[i0  ] = gmul(2,a0)^gmul(3,a1)^a2^a3;
