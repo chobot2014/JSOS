@@ -323,8 +323,12 @@ export class VNode extends VEventTarget {
   }
   /** Removes this node from its parent. */
   remove(): void { if (this.parentNode) this.parentNode.removeChild(this); }
-  /** Returns true if this node is in a document (has ownerDocument set). */
-  get isConnected(): boolean { return this.ownerDocument !== null; }
+  /** Returns true if this node is in a connected document tree (walks parent chain to verify). */
+  get isConnected(): boolean {
+    var n: VNode | null = this;
+    while (n.parentNode) n = n.parentNode;
+    return n.nodeType === 9; // DOCUMENT_NODE
+  }
   /** Checks if this node contains another (inclusive). */
   contains(other: VNode | null): boolean {
     if (!other) return false;

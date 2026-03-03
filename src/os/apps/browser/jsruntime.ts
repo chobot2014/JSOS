@@ -4930,6 +4930,13 @@ export function createPageJS(
     requestIdleCallback,
     cancelIdleCallback,
     structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
+    // React 18 / ReactDOM.flushSync — run fn then synchronously commit DOM changes
+    flushSync: (fn: () => void): void => {
+      try { fn(); } catch(e) { _fireScriptError(e); }
+      _drainMicrotasks();
+      checkDirty();
+      if (needsRerender) doRerender();
+    },
 
     // -- New event / media / speech constructors ---------------------------------
     ToggleEvent,
@@ -5168,6 +5175,30 @@ export function createPageJS(
     // -- NavigationPreloadManager (Chrome 62+) ------------------------
     NavigationPreloadManager: NavigationPreloadManager_,
   };
+
+  // ── Patch Date to use real wall clock (CMOS RTC via os.time.now()) ────────
+  // QuickJS's native Date.now() returns 0 because gettimeofday() is not wired to
+  // the RTC. We proxy Date so all page-script date/time operations are correct.
+  {
+    var _nativeDate = Date;
+    var _patchedDate = new Proxy(_nativeDate, {
+      apply(_tgt, _this, args) {
+        // Date() called as a function returns a string like real browsers
+        return new _nativeDate(args.length === 0 ? os.time.now() : args[0]).toString();
+      },
+      construct(_tgt, args) {
+        if (args.length === 0) return new _nativeDate(os.time.now());
+        return Reflect.construct(_nativeDate, args);
+      },
+      get(tgt, prop) {
+        if (prop === 'now') return () => os.time.now();
+        var val = (tgt as any)[prop];
+        if (typeof val === 'function') return val.bind(tgt);
+        return val;
+      },
+    });
+    win['Date'] = _patchedDate;
+  }
 
   // ── Wire localStorage/sessionStorage → `storage` events (item 500) ────────
   function _makeStorageListener(area: VStorage): (key: string | null, old: string | null, nxt: string | null) => void {
