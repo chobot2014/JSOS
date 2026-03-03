@@ -724,8 +724,8 @@ function sha512Core(data: number[], iv: bigint[]): number[] {
   var bitLenLo = (data.length * 8) >>> 0;
   msg.push(0x80);
   while ((msg.length % 128) !== 112) msg.push(0);
-  // 128-bit big-endian bit length
-  for (var i = 7; i >= 0; i--) msg.push(0, 0, 0, 0); // high 64 bits (always 0 for sane messages)
+  // 128-bit big-endian bit length: high 64 bits (always 0 for sane messages) + low 64 bits
+  msg.push(0, 0, 0, 0, 0, 0, 0, 0);  // high 64 bits
   msg.push((bitLenHi >>> 24) & 0xff, (bitLenHi >>> 16) & 0xff,
            (bitLenHi >>>  8) & 0xff,  bitLenHi         & 0xff,
            (bitLenLo >>> 24) & 0xff, (bitLenLo >>> 16) & 0xff,
