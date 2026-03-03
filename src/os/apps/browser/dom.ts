@@ -324,6 +324,7 @@ export class VNode extends VEventTarget {
     if (v) { var t = new VText(v); t.parentNode = this; t.ownerDocument = this.ownerDocument; this.childNodes.push(t); }
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
+      if (this.ownerDocument._idIndex) this.ownerDocument._idIndex = null; // invalidate ID index
       this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: this.childNodes.slice(), removedNodes, previousSibling: null, nextSibling: null });
     }
   }
@@ -837,6 +838,7 @@ export class VElement extends VNode {
     }
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
+      if (this.ownerDocument._idIndex) this.ownerDocument._idIndex = null; // invalidate ID index
       this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: this.childNodes.slice(), removedNodes, previousSibling: null, nextSibling: null });
     }
   }
