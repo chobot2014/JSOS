@@ -1,14 +1,19 @@
-/**
+﻿/**
  * JSOS TLS 1.3 + TLS 1.2 Client
  *
- * Pure TypeScript TLS client (RFC 8446 / RFC 5246) using the crypto.ts primitives.
+ * Pure TypeScript TLS client (RFC 8446 / RFC 5246 / RFC 7905) using crypto.ts.
  *
  * Capabilities:
  *   - TLS 1.3: X25519 and P-256 key exchange, AES-128-GCM + ChaCha20-Poly1305
- *   - TLS 1.2: ECDHE-RSA with P-256, AES-128-GCM (fallback for Fastly edges)
+ *   - TLS 1.2: ECDHE-RSA + ECDHE-ECDSA, AES-128-GCM + ChaCha20-Poly1305
+ *   - Extended Master Secret (RFC 7627) for TLS 1.2
+ *   - HelloRetryRequest (HRR) support for TLS 1.3
+ *   - ALPN negotiation (h2 + http/1.1)
+ *   - Session tickets (NewSessionTicket) for future 0-RTT
+ *   - Automatic fallback: TLS 1.3 preferred, TLS 1.2 if server rejects
+ *   - close_notify alert on shutdown
  *   - No certificate validation (bare-metal dev OS)
- *   - Server name indication (SNI)
- *   - Automatic fallback: TLS 1.3 preferred, TLS 1.2 if server returns protocol_version
+ *   - SNI (Server Name Indication) on all handshakes
  *
  * Architecture:
  *   TLSSocket wraps a net.ts TCP Socket.
@@ -30,7 +35,7 @@ import type { Socket } from './net.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
-// ── TLS constants ─────────────────────────────────────────────────────────────
+// â”€â”€ TLS constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const TLS_HANDSHAKE          = 22;
 const TLS_APPLICATION_DATA   = 23;
@@ -53,18 +58,18 @@ const CS_TLS12_ECDHE_RSA_CHACHA20   = 0xcca8;  // TLS_ECDHE_RSA_WITH_CHACHA20_PO
 const CS_EMPTY_RENEG                = 0x00ff;
 const EXT_SNI                = 0x0000;
 const EXT_SUPPORTED_VERS     = 0x002b;
-const EXT_RENEGOTIATION_INFO = 0xff01;  // RFC 5746 — required by Fastly/BoringSSL
+const EXT_RENEGOTIATION_INFO = 0xff01;  // RFC 5746 â€” required by Fastly/BoringSSL
 const EXT_SUPPORTED_GROUPS   = 0x000a;
 const EXT_KEY_SHARE          = 0x0033;
 const EXT_SIG_ALGS           = 0x000d;
 const EXT_ALPN               = 0x0010;  // [Item 294] Application-Layer Protocol Negotiation
 const EXT_SESSION_TICKET     = 0x0023;  // session ticket (empty = request one)
-const EXT_PSK_KEY_EXCH_MODES = 0x002d;  // RFC 8446 §4.2.9 — required by many TLS 1.3 servers
+const EXT_PSK_KEY_EXCH_MODES = 0x002d;  // RFC 8446 Â§4.2.9 â€” required by many TLS 1.3 servers
 const EXT_EC_POINT_FORMATS   = 0x000b;  // EC point formats (legacy compat)
 const GROUP_X25519            = 0x001d;
 const GROUP_P256              = 0x0017;  // secp256r1 / NIST P-256
 
-// HelloRetryRequest sentinel random (RFC 8446 §4.1.3)
+// HelloRetryRequest sentinel random (RFC 8446 Â§4.1.3)
 const HRR_RANDOM = [
   0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11,
   0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
@@ -72,7 +77,7 @@ const HRR_RANDOM = [
   0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
 ];
 
-// ── Byte helpers ──────────────────────────────────────────────────────────────
+// â”€â”€ Byte helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function u8(b: number[], i: number): number  { return b[i] & 0xff; }
 function u16(b: number[], i: number): number { return ((b[i] & 0xff) << 8) | (b[i+1] & 0xff); }
@@ -83,9 +88,9 @@ function putU8(b: number[], v: number): void  { b.push(v & 0xff); }
 function putU16(b: number[], v: number): void { b.push((v >> 8) & 0xff); b.push(v & 0xff); }
 function putU24(b: number[], v: number): void { b.push((v >> 16) & 0xff); b.push((v >> 8) & 0xff); b.push(v & 0xff); }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TLS 1.2 PRF (RFC 5246 §5) — P_SHA256 HMAC-based pseudorandom function
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// TLS 1.2 PRF (RFC 5246 Â§5) â€” P_SHA256 HMAC-based pseudorandom function
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * TLS 1.2 PRF (for AES_128_GCM_SHA256 cipher suites).
@@ -164,7 +169,58 @@ function tls12EncryptRecord(key: number[], implicitIV: number[], seq: number,
   return rec.concat(explicitNonce).concat(enc.ciphertext).concat(enc.tag);
 }
 
-// ── AEAD helpers ──────────────────────────────────────────────────────────────
+/**
+ * TLS 1.2 ChaCha20-Poly1305 record decryption (RFC 7905).
+ * Nonce = write_IV(12) XOR padded_seq(12). No explicit nonce in the record.
+ */
+function tls12DecryptRecordChaCha(key: number[], writeIV: number[], seq: number,
+    record: number[]): number[] | null {
+  if (record.length < 5 + 16) return null;
+  var recType = record[0];
+  var recLen  = u16(record, 3);
+  if (record.length < 5 + recLen) return null;
+  var cipherLen = recLen - 16;
+  if (cipherLen < 0) return null;
+  var ciphertext = record.slice(5, 5 + cipherLen);
+  var tag        = record.slice(5 + cipherLen, 5 + cipherLen + 16);
+  // Nonce = writeIV XOR padded sequence number (12 bytes)
+  var nonce = xorIV(writeIV, seq);
+  // AAD = seq_num(8B) || type(1B) || version(2B) || length_of_plaintext(2B)
+  var aad: number[] = [0,0,0,0];
+  aad.push((seq >>> 24) & 0xff);
+  aad.push((seq >>> 16) & 0xff);
+  aad.push((seq >>>  8) & 0xff);
+  aad.push(seq          & 0xff);
+  aad.push(recType);
+  aad.push(0x03); aad.push(0x03);
+  aad.push((cipherLen >>> 8) & 0xff);
+  aad.push(cipherLen & 0xff);
+  return chacha20poly1305Decrypt(key, nonce, aad, ciphertext, tag);
+}
+
+/**
+ * TLS 1.2 ChaCha20-Poly1305 record encryption (RFC 7905).
+ */
+function tls12EncryptRecordChaCha(key: number[], writeIV: number[], seq: number,
+    recType: number, plaintext: number[]): number[] {
+  var nonce = xorIV(writeIV, seq);
+  // AAD
+  var aad: number[] = [0,0,0,0];
+  aad.push((seq >>> 24) & 0xff);
+  aad.push((seq >>> 16) & 0xff);
+  aad.push((seq >>>  8) & 0xff);
+  aad.push(seq          & 0xff);
+  aad.push(recType);
+  aad.push(0x03); aad.push(0x03);
+  aad.push((plaintext.length >>> 8) & 0xff);
+  aad.push(plaintext.length & 0xff);
+  var enc = chacha20poly1305Encrypt(key, nonce, aad, plaintext);
+  var totalLen = enc.ciphertext.length + enc.tag.length;
+  var rec = [recType, 0x03, 0x03, (totalLen >>> 8) & 0xff, totalLen & 0xff];
+  return rec.concat(enc.ciphertext).concat(enc.tag);
+}
+
+// â”€â”€ AEAD helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function xorIV(baseIV: number[], seq: number): number[] {
   var iv = baseIV.slice();
@@ -225,9 +281,9 @@ function tlsDecryptRecord(
   return { type: innerType, data: plain };
 }
 
-// ── TLS record-layer buffering ────────────────────────────────────────────────
+// â”€â”€ TLS record-layer buffering â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// ── TLS Session Ticket Cache (Item 930) ──────────────────────────────────────
+// â”€â”€ TLS Session Ticket Cache (Item 930) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** [Item 930] Stored TLS 1.3 session ticket with associated resumption secret. */
 export interface TLSSessionTicket {
@@ -308,7 +364,7 @@ export class TLSSocket {
   /** TLS 1.2 implicit write IVs (4 bytes each). */
   private tls12ClientWriteIV: number[] = [];
   private tls12ServerWriteIV: number[] = [];
-  /** Set when server sends protocol_version alert — need TLS 1.2 retry. */
+  /** Set when server sends protocol_version alert â€” need TLS 1.2 retry. */
   private _got_pv_alert = false;
 
   // Decrypted but not yet parsed handshake bytes (handles multi-message records)
@@ -333,7 +389,7 @@ export class TLSSocket {
     var ok = this._performHandshake();
     kernel.serialPut('[dbg] pv_alert=' + (this._got_pv_alert ? 1 : 0) + ' ok=' + (ok ? 1 : 0) + '\n');
     if (!ok && this._got_pv_alert) {
-      // Server rejected TLS 1.3 (protocol_version alert) — retry with TLS 1.2
+      // Server rejected TLS 1.3 (protocol_version alert) â€” retry with TLS 1.2
       kernel.serialPut('[tls] TLS 1.3 rejected by ' + this.hostname + ', retrying with TLS 1.2\n');
       net.close(this.sock);
       this.sock = net.createSocket('tcp');
@@ -390,13 +446,14 @@ export class TLSSocket {
     while (this.rxBuf.length >= 5) {
       var outerType = u8(this.rxBuf, 0);
       var recLen    = u16(this.rxBuf, 3);
-      if (this.rxBuf.length < 5 + recLen) break;  // incomplete record — wait more
+      if (this.rxBuf.length < 5 + recLen) break;  // incomplete record â€” wait more
       var record    = this.rxBuf.slice(0, 5 + recLen);
       this.rxBuf    = this.rxBuf.slice(5 + recLen);
       if (outerType !== TLS_APPLICATION_DATA) continue;
       if (this.useTLS12) {
-        var plain12 = tls12DecryptRecord(
-            this.serverAppKey, this.tls12ServerWriteIV, this.serverAppSeq, record);
+        var plain12 = (this as any)._tls12ChaCha
+          ? tls12DecryptRecordChaCha(this.serverAppKey, this.tls12ServerWriteIV, this.serverAppSeq, record)
+          : tls12DecryptRecord(this.serverAppKey, this.tls12ServerWriteIV, this.serverAppSeq, record);
         if (plain12) {
           this.serverAppSeq++;
           if (!result) { result = plain12; }
@@ -426,9 +483,9 @@ export class TLSSocket {
   write(data: number[]): boolean {
     if (!this.handshakeDone) return false;
     if (this.useTLS12) {
-      var rec12 = tls12EncryptRecord(
-          this.clientAppKey, this.tls12ClientWriteIV, this.clientAppSeq,
-          TLS_APPLICATION_DATA, data);
+      var rec12 = (this as any)._tls12ChaCha
+        ? tls12EncryptRecordChaCha(this.clientAppKey, this.tls12ClientWriteIV, this.clientAppSeq, TLS_APPLICATION_DATA, data)
+        : tls12EncryptRecord(this.clientAppKey, this.tls12ClientWriteIV, this.clientAppSeq, TLS_APPLICATION_DATA, data);
       this.clientAppSeq++;
       return net.sendBytes(this.sock, rec12);
     }
@@ -457,8 +514,9 @@ export class TLSSocket {
 
       if (outerType === TLS_APPLICATION_DATA) {
         if (this.useTLS12) {
-          var plain12 = tls12DecryptRecord(
-              this.serverAppKey, this.tls12ServerWriteIV, this.serverAppSeq, record);
+          var plain12 = (this as any)._tls12ChaCha
+            ? tls12DecryptRecordChaCha(this.serverAppKey, this.tls12ServerWriteIV, this.serverAppSeq, record)
+            : tls12DecryptRecord(this.serverAppKey, this.tls12ServerWriteIV, this.serverAppSeq, record);
           if (plain12) { this.serverAppSeq++; return plain12; }
         } else {
           var dec = tlsDecryptRecord(
@@ -469,16 +527,34 @@ export class TLSSocket {
           }
         }
       }
-      // Alert or other record type — skip and keep polling
+      // Alert or other record type â€” skip and keep polling
     }
     return null;
   }
 
   close(): void {
+    // Send close_notify alert for clean TLS shutdown
+    if (this.handshakeDone) {
+      try {
+        // close_notify = alert level 1 (warning), description 0
+        var alertData = [1, 0];
+        if (this.useTLS12) {
+          var alertRec = (this as any)._tls12ChaCha
+            ? tls12EncryptRecordChaCha(this.clientAppKey, this.tls12ClientWriteIV, this.clientAppSeq, 21, alertData)
+            : tls12EncryptRecord(this.clientAppKey, this.tls12ClientWriteIV, this.clientAppSeq, 21, alertData);
+          net.sendBytes(this.sock, alertRec);
+        } else {
+          var alertRec = tlsEncryptRecord(
+              this.clientAppKey, this.clientAppIV, this.clientAppSeq,
+              21, alertData, this.useChaCha20);
+          net.sendBytes(this.sock, alertRec);
+        }
+      } catch (_) { /* best-effort */ }
+    }
     net.close(this.sock);
   }
 
-  // ── Private helpers ────────────────────────────────────────────────────────
+  // â”€â”€ Private helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   private _performHandshake(): boolean {
     this.myPrivate     = generateKey32();
@@ -506,7 +582,7 @@ export class TLSSocket {
       if (this.myP256Public.length === 0) {
         this.myP256Public = p256PublicKey(this.myP256Private);
       }
-      // Reconstruct transcript per RFC 8446 §4.4.1:
+      // Reconstruct transcript per RFC 8446 Â§4.4.1:
       // replace CH1 bytes with message_hash(CH1) sentinel, then append HRR
       var ch1Hash = sha256(this.transcript.slice(0, this.transcript.length - sh.data.length - 4));
       var msgHashMsg = [0xfe, 0x00, 0x00, 0x20].concat(ch1Hash); // type=254, len=32
@@ -542,11 +618,11 @@ export class TLSSocket {
         finishedOk = this._processServerFinished(msg.data);
         break;
       }
-      // Parse ALPN from EncryptedExtensions (RFC 8446 §4.3.1)
+      // Parse ALPN from EncryptedExtensions (RFC 8446 Â§4.3.1)
       if (msg.type === HS_ENCRYPTED_EXT) {
         this._parseEncryptedExtensions(msg.data);
       }
-      // Certificate, CertificateVerify — skip
+      // Certificate, CertificateVerify â€” skip
     }
     if (!finishedOk) return false;
 
@@ -561,19 +637,19 @@ export class TLSSocket {
 
     // ProtocolVersion = 0x0303
     putU16(body, 0x0303);
-    // Random (32 bytes of hardware-random — RFC 8446 §4.1.2 requires unpredictable bytes)
+    // Random (32 bytes of hardware-random â€” RFC 8446 Â§4.1.2 requires unpredictable bytes)
     var _rnd = getHardwareRandom(32);
     (this as any)._tls12ClientRandom = _rnd;  // save for in-place TLS 1.2 continuation
     for (var i = 0; i < 32; i++) putU8(body, _rnd[i]);
-    // Session ID — 32 bytes of hardware random (required for TLS 1.3 middlebox compat)
+    // Session ID â€” 32 bytes of hardware random (required for TLS 1.3 middlebox compat)
     putU8(body, 32);
     var _sid = getHardwareRandom(32);
     for (var i = 0; i < 32; i++) putU8(body, _sid[i]);
-    // Cipher suites — TLS 1.3 + TLS 1.2 AES-128-GCM fallbacks
+    // Cipher suites â€” TLS 1.3 + TLS 1.2 AES-128-GCM fallbacks
     // Only offer SHA-256-based ciphers so our PRF (SHA-256) is always correct.
     // TLS 1.3 servers pick from 0x1301/0x1303 via supported_versions.
     // TLS 1.2 servers pick from the ECDHE-AES128-GCM ciphers.
-    putU16(body, 14);  // 7 suites × 2 bytes
+    putU16(body, 14);  // 7 suites Ã— 2 bytes
     putU16(body, CS_AES_128_GCM_SHA256);         // 0x1301 TLS 1.3
     putU16(body, CS_CHACHA20_POLY1305_SHA256);   // 0x1303 TLS 1.3
     putU16(body, 0xc02b);  // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
@@ -599,7 +675,7 @@ export class TLSSocket {
     putU16(sniExt, sniData.length);
     exts = exts.concat(sniExt).concat(sniData);
 
-    // supported_versions: TLS 1.3 + TLS 1.2 — real browsers advertise both, and
+    // supported_versions: TLS 1.3 + TLS 1.2 â€” real browsers advertise both, and
     // some Fastly edges send protocol_version(70) when they see TLS 1.3 only
     var svExt: number[] = [];
     putU16(svExt, EXT_SUPPORTED_VERS);
@@ -612,7 +688,7 @@ export class TLSSocket {
     // supported_groups: secp256r1 (P-256) + x25519
     var sgExt: number[] = [];
     putU16(sgExt, EXT_SUPPORTED_GROUPS);
-    putU16(sgExt, 6);  // ext len: 2 (list-len) + 2 groups × 2 bytes
+    putU16(sgExt, 6);  // ext len: 2 (list-len) + 2 groups Ã— 2 bytes
     putU16(sgExt, 4);  // list len
     putU16(sgExt, GROUP_P256);
     putU16(sgExt, GROUP_X25519);
@@ -627,7 +703,7 @@ export class TLSSocket {
     putU16(ksData, GROUP_X25519);
     putU16(ksData, 32);
     ksData = ksData.concat(this.myPublic);
-    // P-256 entry (65-byte uncompressed point) — required by some Fastly edges
+    // P-256 entry (65-byte uncompressed point) â€” required by some Fastly edges
     putU16(ksData, GROUP_P256);
     putU16(ksData, 65);
     ksData = ksData.concat(this.myP256Public);
@@ -638,7 +714,7 @@ export class TLSSocket {
     var saExt: number[] = [];
     putU16(saExt, EXT_SIG_ALGS);
     var saData: number[] = [];
-    putU16(saData, 14);  // list len: 7 sig algs × 2 bytes
+    putU16(saData, 14);  // list len: 7 sig algs Ã— 2 bytes
     putU16(saData, 0x0804); // rsa_pss_rsae_sha256
     putU16(saData, 0x0805); // rsa_pss_rsae_sha384
     putU16(saData, 0x0806); // rsa_pss_rsae_sha512
@@ -656,7 +732,7 @@ export class TLSSocket {
     putU16(stExt, 0);  // empty session ticket data
     exts = exts.concat(stExt);
 
-    // psk_key_exchange_modes (0x002d): required by RFC 8446 §4.2.9 for TLS 1.3
+    // psk_key_exchange_modes (0x002d): required by RFC 8446 Â§4.2.9 for TLS 1.3
     // Most TLS 1.3 servers (incl. Fastly/BoringSSL) expect this extension
     var pskExt: number[] = [];
     putU16(pskExt, EXT_PSK_KEY_EXCH_MODES);
@@ -665,12 +741,12 @@ export class TLSSocket {
     putU8(pskExt, 1);   // psk_dhe_ke(1) = PSK with (EC)DHE key exchange
     exts = exts.concat(pskExt);
 
-    // extended_master_secret (0x0017) — Chrome always sends this in TLS 1.3 CH for JA3 compat
+    // extended_master_secret (0x0017) â€” Chrome always sends this in TLS 1.3 CH for JA3 compat
     var emsExt13: number[] = [];
     putU16(emsExt13, 0x0017); putU16(emsExt13, 0);
     exts = exts.concat(emsExt13);
 
-    // ALPN extension: offer h2 (HTTP/2) and http/1.1 — prefer h2.
+    // ALPN extension: offer h2 (HTTP/2) and http/1.1 â€” prefer h2.
     // HTTP/2 is fully implemented via HTTP2Connection class.
     var alpnExt: number[] = [];
     putU16(alpnExt, EXT_ALPN);
@@ -702,7 +778,7 @@ export class TLSSocket {
     putU24(hs, body.length);
     hs = hs.concat(body);
 
-    // TLS record: RFC 8446 §5.1 says outer version for ClientHello SHOULD be 0x0301 (TLS 1.0)
+    // TLS record: RFC 8446 Â§5.1 says outer version for ClientHello SHOULD be 0x0301 (TLS 1.0)
     // but 0x0303 is what the vast majority of real implementations use
     var rec: number[] = [TLS_HANDSHAKE, 0x03, 0x03];
     putU16(rec, hs.length);
@@ -712,7 +788,7 @@ export class TLSSocket {
   private _readHandshakeMsg(addToTranscript: boolean):
       { type: number; data: number[] } | null {
     // Read until we have at least 5 bytes (record header)
-    var deadline = kernel.getTicks() + 400;
+    var deadline = kernel.getTicks() + 800;
     while (this.rxBuf.length < 5 && kernel.getTicks() < deadline) {
       var chunk = net.recvBytes(this.sock, 30);
       if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
@@ -730,7 +806,7 @@ export class TLSSocket {
       var alertLevel = this.rxBuf.length > 5 ? u8(this.rxBuf, 5) : 0;
       var alertDesc  = this.rxBuf.length > 6 ? u8(this.rxBuf, 6) : 0;
       kernel.serialPut('[tls] alert from ' + this.hostname + ': level=' + alertLevel + ' desc=' + alertDesc + '\n');
-      if (alertDesc === 70 || alertDesc === 40) this._got_pv_alert = true;  // protocol_version or handshake_failure → trigger TLS 1.2 retry
+      if (alertDesc === 70 || alertDesc === 40) this._got_pv_alert = true;  // protocol_version or handshake_failure â†’ trigger TLS 1.2 retry
       return null;
     }
     if (recType !== TLS_HANDSHAKE) {
@@ -738,7 +814,7 @@ export class TLSSocket {
       return null;
     }
     // Wait for full record
-    deadline = kernel.getTicks() + 400;
+    deadline = kernel.getTicks() + 800;
     while (this.rxBuf.length < 5 + recLen && kernel.getTicks() < deadline) {
       var chunk = net.recvBytes(this.sock, 30);
       if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
@@ -754,7 +830,7 @@ export class TLSSocket {
     return { type: msgType, data: msgData };
   }
 
-  /** Parse EncryptedExtensions to extract ALPN negotiated protocol (RFC 8446 §4.3.1). */
+  /** Parse EncryptedExtensions to extract ALPN negotiated protocol (RFC 8446 Â§4.3.1). */
   private _parseEncryptedExtensions(data: number[]): void {
     if (data.length < 2) return;
     var extLen = u16(data, 0);
@@ -850,9 +926,11 @@ export class TLSSocket {
     var cHsTraffic = hkdfExpandLabel(handshakeSecret, 'c hs traffic', txHash, 32);
     var sHsTraffic = hkdfExpandLabel(handshakeSecret, 's hs traffic', txHash, 32);
 
-    this.clientHsKey = hkdfExpandLabel(cHsTraffic, 'key', [], 16);
+    // ChaCha20-Poly1305 uses 32-byte keys; AES-128-GCM uses 16-byte keys
+    var keyLen = this.useChaCha20 ? 32 : 16;
+    this.clientHsKey = hkdfExpandLabel(cHsTraffic, 'key', [], keyLen);
     this.clientHsIV  = hkdfExpandLabel(cHsTraffic, 'iv',  [], 12);
-    this.serverHsKey = hkdfExpandLabel(sHsTraffic, 'key', [], 16);
+    this.serverHsKey = hkdfExpandLabel(sHsTraffic, 'key', [], keyLen);
     this.serverHsIV  = hkdfExpandLabel(sHsTraffic, 'iv',  [], 12);
 
     // Save for ClientFinished MAC computation and app key derivation
@@ -877,7 +955,7 @@ export class TLSSocket {
 
     // Read a new encrypted TLS record, skipping ChangeCipherSpec records
     for (var skip = 0; skip < 5; skip++) {
-      var deadline = kernel.getTicks() + 400;
+      var deadline = kernel.getTicks() + 800;
       while (this.rxBuf.length < 5 && kernel.getTicks() < deadline) {
         var chunk = net.recvBytes(this.sock, 50);
         if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
@@ -885,7 +963,7 @@ export class TLSSocket {
       if (this.rxBuf.length < 5) return null;
       var outerType = u8(this.rxBuf, 0);
       var recLen    = u16(this.rxBuf, 3);
-      deadline = kernel.getTicks() + 400;
+      deadline = kernel.getTicks() + 800;
       while (this.rxBuf.length < 5 + recLen && kernel.getTicks() < deadline) {
         var chunk = net.recvBytes(this.sock, 50);
         if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
@@ -915,7 +993,7 @@ export class TLSSocket {
 
   private _processServerFinished(data: number[]): boolean {
     // transcript at this point = ClientHello..ServerFinished (correct for both
-    // app-key derivation and the ClientFinished verify_data per RFC 8446 §7.1)
+    // app-key derivation and the ClientFinished verify_data per RFC 8446 Â§7.1)
     var txHash = sha256(this.transcript);
 
     // Derive application traffic keys NOW (transcript hash must NOT include ClientFinished)
@@ -950,16 +1028,23 @@ export class TLSSocket {
     var masterSecret   = hkdfExtract(derivedSecret, zeros32);
     var cAppTraffic = hkdfExpandLabel(masterSecret, 'c ap traffic', txHash, 32);
     var sAppTraffic = hkdfExpandLabel(masterSecret, 's ap traffic', txHash, 32);
-    this.clientAppKey = hkdfExpandLabel(cAppTraffic, 'key', [], 16);
+    // ChaCha20-Poly1305 uses 32-byte keys; AES-128-GCM uses 16-byte keys
+    var keyLen = this.useChaCha20 ? 32 : 16;
+    this.clientAppKey = hkdfExpandLabel(cAppTraffic, 'key', [], keyLen);
     this.clientAppIV  = hkdfExpandLabel(cAppTraffic, 'iv',  [], 12);
-    this.serverAppKey = hkdfExpandLabel(sAppTraffic, 'key', [], 16);
+    this.serverAppKey = hkdfExpandLabel(sAppTraffic, 'key', [], keyLen);
     this.serverAppIV  = hkdfExpandLabel(sAppTraffic, 'iv',  [], 12);
+
+    // Derive resumption_master_secret for session tickets (TLS 1.3 Â§7.1)
+    // transcript at this point includes everything through ServerFinished
+    (this as any)._resumptionMaster = hkdfExpandLabel(masterSecret, 'res master', txHash, 32);
+    this._resumptionSecret = (this as any)._resumptionMaster;
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // TLS 1.2 ECDHE-RSA handshake (RFC 5246 + RFC 4492)
   // Used as fallback when server rejects TLS 1.3 with protocol_version alert.
-  // ─────────────────────────────────────────────────────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /** Build a TLS 1.2 ClientHello (no TLS 1.3 extensions). */
   private _buildClientHello12(): number[] {
@@ -970,10 +1055,12 @@ export class TLSSocket {
     putU16(body, 0x0303);  // TLS 1.2 legacy version
     for (var i = 0; i < 32; i++) putU8(body, clRandom[i]);
     putU8(body, 0);  // no session ID
-    // Cipher suites: ECDHE-RSA-AES128-GCM-SHA256 + empty reneg
-    putU16(body, 6);  // 3 suites × 2 bytes
-    putU16(body, CS_TLS12_ECDHE_RSA_AES128_GCM);
-    putU16(body, CS_TLS12_ECDHE_RSA_AES256_GCM);  // AES-256 fallback
+    // Cipher suites: ECDHE with AES-128-GCM + ChaCha20 (RSA + ECDSA) + SCSV
+    putU16(body, 10);  // 5 suites Ã— 2 bytes
+    putU16(body, CS_TLS12_ECDHE_RSA_AES128_GCM);   // 0xc02f
+    putU16(body, 0xc02b);                           // ECDHE-ECDSA-AES128-GCM
+    putU16(body, CS_TLS12_ECDHE_RSA_CHACHA20);      // 0xcca8
+    putU16(body, 0xcca9);                           // ECDHE-ECDSA-ChaCha20
     putU16(body, CS_EMPTY_RENEG);
     // Compression
     putU8(body, 1); putU8(body, 0);
@@ -1000,15 +1087,21 @@ export class TLSSocket {
     putU16(sg, EXT_SUPPORTED_GROUPS);
     putU16(sg, 6); putU16(sg, 4); putU16(sg, GROUP_P256); putU16(sg, GROUP_X25519);
     exts = exts.concat(sg);
-    // Sig algs
+    // Sig algs â€” match what TLS 1.3 CH offers for maximum compatibility
     var sa: number[] = [];
     putU16(sa, EXT_SIG_ALGS);
     var saD: number[] = [];
-    putU16(saD, 8);
-    putU16(saD, 0x0804); putU16(saD, 0x0401); putU16(saD, 0x0403); putU16(saD, 0x0501);
+    putU16(saD, 14);  // 7 sig algs Ã— 2 bytes
+    putU16(saD, 0x0804);  // rsa_pss_rsae_sha256
+    putU16(saD, 0x0805);  // rsa_pss_rsae_sha384
+    putU16(saD, 0x0806);  // rsa_pss_rsae_sha512
+    putU16(saD, 0x0403);  // ecdsa_secp256r1_sha256
+    putU16(saD, 0x0503);  // ecdsa_secp384r1_sha384
+    putU16(saD, 0x0401);  // rsa_pkcs1_sha256
+    putU16(saD, 0x0501);  // rsa_pkcs1_sha384
     putU16(sa, saD.length);
     exts = exts.concat(sa).concat(saD);
-    // Extended master secret (0x0017) — required by modern TLS 1.2 endpoints (Fastly)
+    // Extended master secret (0x0017) â€” required by modern TLS 1.2 endpoints (Fastly)
     var ems: number[] = [];
     putU16(ems, 0x0017); putU16(ems, 0);
     exts = exts.concat(ems);
@@ -1038,8 +1131,21 @@ export class TLSSocket {
     return rec.concat(hs);
   }
 
-  /** Read a raw (unencrypted) TLS 1.2 handshake message from rxBuf. */
+  /** Read a raw (unencrypted) TLS 1.2 handshake message from rxBuf.
+   *  Handles multiple handshake messages coalesced in a single TLS record. */
+  private _hs12Remainder: number[] = [];  // leftover bytes from a coalesced record
   private _readHS12(): { type: number; data: number[] } | null {
+    // First, check if we have leftover handshake bytes from a previous record
+    if (this._hs12Remainder.length >= 4) {
+      var mt0 = u8(this._hs12Remainder, 0);
+      var ml0 = u24(this._hs12Remainder, 1);
+      if (this._hs12Remainder.length >= 4 + ml0) {
+        this.transcript = this.transcript.concat(this._hs12Remainder.slice(0, 4 + ml0));
+        var data0 = this._hs12Remainder.slice(4, 4 + ml0);
+        this._hs12Remainder = this._hs12Remainder.slice(4 + ml0);
+        return { type: mt0, data: data0 };
+      }
+    }
     var deadline = kernel.getTicks() + 600;
     while (kernel.getTicks() < deadline) {
       if (this.rxBuf.length >= 5) {
@@ -1059,6 +1165,10 @@ export class TLSSocket {
           if (rd.length < 4) return null;
           var mt = u8(rd, 0); var ml = u24(rd, 1);
           this.transcript = this.transcript.concat(rd.slice(0, 4 + ml));
+          // Save any remaining bytes (coalesced messages) for the next call
+          if (rd.length > 4 + ml) {
+            this._hs12Remainder = rd.slice(4 + ml);
+          }
           return { type: mt, data: rd.slice(4, 4 + ml) };
         }
       }
@@ -1078,7 +1188,7 @@ export class TLSSocket {
     if (this.rxBuf.length < 5) return null;
     var rt  = u8(this.rxBuf, 0);
     var rl  = u16(this.rxBuf, 3);
-    deadline = kernel.getTicks() + 400;
+    deadline = kernel.getTicks() + 800;
     while (this.rxBuf.length < 5 + rl && kernel.getTicks() < deadline) {
       var c = net.recvBytes(this.sock, 30);
       if (c && c.length > 0) for (var _pi = 0; _pi < c.length; _pi++) this.rxBuf.push(c[_pi]);
@@ -1086,11 +1196,26 @@ export class TLSSocket {
     if (this.rxBuf.length < 5 + rl) return null;
     var rec = this.rxBuf.slice(0, 5 + rl);
     this.rxBuf = this.rxBuf.slice(5 + rl);
+    // Handle alerts — log and return null
+    if (rt === 21) {
+      var al12 = rec.length > 5 ? u8(rec, 5) : 0;
+      var ad12 = rec.length > 6 ? u8(rec, 6) : 0;
+      kernel.serialPut('[tls12] encrypted-phase alert from ' + this.hostname + ': level=' + al12 + ' desc=' + ad12 + '\n');
+      return null;
+    }
     // TLS 1.2 Finished is encrypted as a Handshake record (type 22)
-    if (rt !== TLS_HANDSHAKE && rt !== TLS_APPLICATION_DATA) return null;
-    // Decrypt using server write key
-    var plain = tls12DecryptRecord(this.serverAppKey, this.tls12ServerWriteIV, this.serverAppSeq, rec);
-    if (!plain) return null;
+    if (rt !== TLS_HANDSHAKE && rt !== TLS_APPLICATION_DATA) {
+      kernel.serialPut('[tls12] unexpected record type ' + rt + ' in encrypted phase\n');
+      return null;
+    }
+    // Decrypt using server write key (AES-GCM or ChaCha20 depending on negotiated cipher)
+    var plain = (this as any)._tls12ChaCha
+      ? tls12DecryptRecordChaCha(this.serverAppKey, this.tls12ServerWriteIV, this.serverAppSeq, rec)
+      : tls12DecryptRecord(this.serverAppKey, this.tls12ServerWriteIV, this.serverAppSeq, rec);
+    if (!plain) {
+      kernel.serialPut('[tls12] Finished decrypt failed (recLen=' + rl + ')\n');
+      return null;
+    }
     this.serverAppSeq++;
     if (plain.length < 4) return null;
     var mt = u8(plain, 0); var ml = u24(plain, 1);
@@ -1104,6 +1229,7 @@ export class TLSSocket {
    */
   private _performHandshake12InPlace(serverHelloData: number[]): boolean {
     this.useTLS12 = true;
+    this._hs12Remainder = [];
     this.serverAppSeq = 0; this.clientAppSeq = 0;
     // Fresh ephemeral keys for ClientKeyExchange (independent of TLS 1.3 keys)
     this.myP256Private = generateKey32Unclamped();
@@ -1143,20 +1269,23 @@ export class TLSSocket {
       }
     }
     kernel.serialPut('[tls12] cipher=0x' + negotiatedCipher.toString(16) + ' EMS=' + (useEMS ? 1 : 0) + '\n');
-    // We support AES-128-GCM with ECDHE (RSA or ECDSA) for TLS 1.2
-    // 0xC02F = ECDHE-RSA-AES128-GCM, 0xC02B = ECDHE-ECDSA-AES128-GCM
+    // Supported TLS 1.2 cipher suites:
+    // AES-128-GCM: 0xC02F (ECDHE-RSA), 0xC02B (ECDHE-ECDSA)
+    // ChaCha20-Poly1305: 0xCCA8 (ECDHE-RSA), 0xCCA9 (ECDHE-ECDSA)
     var isAES128 = (negotiatedCipher === 0xc02f || negotiatedCipher === 0xc02b);
-    if (!isAES128) {
-      kernel.serialPut('[tls12] unsupported cipher 0x' + negotiatedCipher.toString(16) + ' — need AES-128-GCM\n');
+    var isChacha = (negotiatedCipher === 0xcca8 || negotiatedCipher === 0xcca9);
+    if (!isAES128 && !isChacha) {
+      kernel.serialPut('[tls12] unsupported cipher 0x' + negotiatedCipher.toString(16) + '\n');
       return false;
     }
+    var tls12UseChaCha = isChacha;
     // Read messages until ServerHelloDone (type 14)
     var serverECDHEPublic: number[] = [];
     for (var _att = 0; _att < 10; _att++) {
       var msg = this._readHS12();
       if (!msg) { kernel.serialPut('[tls12] missing server handshake message\n'); return false; }
-      if (msg.type === 11) continue;  // Certificate — skip verification
-      if (msg.type === 13) continue;  // CertificateRequest — skip
+      if (msg.type === 11) continue;  // Certificate â€” skip verification
+      if (msg.type === 13) continue;  // CertificateRequest â€” skip
       if (msg.type === 12) {
         var ske = msg.data;
         if (ske.length < 4) return false;
@@ -1179,27 +1308,31 @@ export class TLSSocket {
     }
     var clientRandom: number[] = (this as any)._tls12ClientRandom;
     var serverRand2:  number[] = (this as any)._tls12ServerRandom;
+    // Build ClientKeyExchange FIRST — RFC 7627 §4 requires session_hash to
+    // include all messages up to and including ClientKeyExchange.
+    var cke: number[] = [];
+    if (serverECDHEPublic.length === 32) { putU8(cke, 32); cke = cke.concat(this.myPublic); }
+    else { putU8(cke, this.myP256Public.length); cke = cke.concat(this.myP256Public); }
+    var ckeMsg: number[] = [16]; putU24(ckeMsg, cke.length); ckeMsg = ckeMsg.concat(cke);
+    this.transcript = this.transcript.concat(ckeMsg);  // add CKE to transcript before EMS hash
     var masterSecret: number[];
     if (useEMS) {
-      // RFC 7627: master_secret = PRF(pre_master_secret, "extended master secret",
-      //             session_hash) where session_hash = Hash(CH..ServerHelloDone)
+      // RFC 7627 §4: session_hash = Hash(CH..CKE) — includes ClientKeyExchange
       var sessionHash = sha256(this.transcript);
       masterSecret = tls12PRF(sharedSecret, 'extended master secret', sessionHash, 48);
     } else {
       masterSecret = tls12PRF(sharedSecret, 'master secret', clientRandom.concat(serverRand2), 48);
     }
-    var keySize = isAES256 ? 32 : 16;  // AES-256 vs AES-128
-    var keyMaterial  = tls12PRF(masterSecret, 'key expansion', serverRand2.concat(clientRandom), keySize*2 + 8);
+    var keySize = isChacha ? 32 : 16;  // ChaCha20 = 32B key, AES-128 = 16B key
+    var ivSize  = isChacha ? 12 : 4;  // ChaCha20 = 12B fixed IV, AES-GCM = 4B implicit IV
+    var keyMaterial  = tls12PRF(masterSecret, 'key expansion', serverRand2.concat(clientRandom), keySize*2 + ivSize*2);
     this.clientAppKey       = keyMaterial.slice(0,         keySize);
     this.serverAppKey       = keyMaterial.slice(keySize,   keySize*2);
-    this.tls12ClientWriteIV = keyMaterial.slice(keySize*2,     keySize*2 + 4);
-    this.tls12ServerWriteIV = keyMaterial.slice(keySize*2 + 4, keySize*2 + 8);
-    // Send ClientKeyExchange
-    var cke: number[] = [];
-    if (serverECDHEPublic.length === 32) { putU8(cke, 32); cke = cke.concat(this.myPublic); }
-    else { putU8(cke, this.myP256Public.length); cke = cke.concat(this.myP256Public); }
-    var ckeMsg: number[] = [16]; putU24(ckeMsg, cke.length); ckeMsg = ckeMsg.concat(cke);
-    this.transcript = this.transcript.concat(ckeMsg);
+    this.tls12ClientWriteIV = keyMaterial.slice(keySize*2,     keySize*2 + ivSize);
+    this.tls12ServerWriteIV = keyMaterial.slice(keySize*2 + ivSize, keySize*2 + ivSize*2);
+    // Remember if TLS 1.2 is using ChaCha20 for record encrypt/decrypt
+    (this as any)._tls12ChaCha = tls12UseChaCha;
+    // Send ClientKeyExchange (already in transcript)
     var ckeRec = [TLS_HANDSHAKE, 0x03, 0x03]; putU16(ckeRec, ckeMsg.length);
     if (!net.sendBytes(this.sock, ckeRec.concat(ckeMsg))) return false;
     // Send ChangeCipherSpec
@@ -1208,12 +1341,20 @@ export class TLSSocket {
     var finHash = sha256(this.transcript);
     var verifyData = tls12PRF(masterSecret, 'client finished', finHash, 12);
     var finMsg: number[] = [HS_FINISHED]; putU24(finMsg, 12); finMsg = finMsg.concat(verifyData);
-    var finRec = tls12EncryptRecord(this.clientAppKey, this.tls12ClientWriteIV, this.clientAppSeq, TLS_HANDSHAKE, finMsg);
+    var finRec = tls12UseChaCha
+      ? tls12EncryptRecordChaCha(this.clientAppKey, this.tls12ClientWriteIV, this.clientAppSeq, TLS_HANDSHAKE, finMsg)
+      : tls12EncryptRecord(this.clientAppKey, this.tls12ClientWriteIV, this.clientAppSeq, TLS_HANDSHAKE, finMsg);
     this.clientAppSeq++;
     if (!net.sendBytes(this.sock, finRec)) return false;
-    // Read server CCS
-    var ccs = this._readHS12();
-    if (!ccs) { kernel.serialPut('[tls12] no CCS from server\n'); return false; }
+    // Read server CCS — may be preceded by NewSessionTicket (RFC 5077)
+    var ccs: { type: number; data: number[] } | null = null;
+    for (var _ccsAtt = 0; _ccsAtt < 5; _ccsAtt++) {
+      ccs = this._readHS12();
+      if (!ccs) break;
+      if (ccs.type === 20) break;  // Got actual CCS
+      kernel.serialPut('[tls12] skipping pre-CCS handshake msg type=' + ccs.type + '\n');
+    }
+    if (!ccs || ccs.type !== 20) { kernel.serialPut('[tls12] no CCS from server\n'); return false; }
     // Read server Finished (encrypted)
     var sFinRaw = this._readEncryptedHS12();
     if (!sFinRaw || sFinRaw.type !== HS_FINISHED) { kernel.serialPut('[tls12] no server Finished\n'); return false; }
@@ -1233,6 +1374,7 @@ export class TLSSocket {
   private _performHandshake12(): boolean {
     this.useTLS12 = true;
     this.transcript = [];
+    this._hs12Remainder = [];
     this.serverAppSeq = 0; this.clientAppSeq = 0;
     this.myP256Private = generateKey32Unclamped();
     this.myP256Public  = p256PublicKey(this.myP256Private);
@@ -1258,9 +1400,12 @@ export class TLSSocket {
     var serverRandom = sh.data.slice(2, 34);
     (this as any)._tls12ServerRandom = serverRandom;
 
-    // Parse ServerHello extensions for ALPN
+    // Parse ServerHello extensions for ALPN, EMS, and detect negotiated cipher
+    var useEMS12 = false;
+    var negotiatedCipher12 = 0;
     if (sh.data.length > 34) {
       var _sh12SidLen = u8(sh.data, 34);
+      negotiatedCipher12 = u16(sh.data, 35 + _sh12SidLen);
       var _sh12ExtOff = 35 + _sh12SidLen + 2 + 1; // sid + cipher(2) + compression(1)
       if (_sh12ExtOff + 2 <= sh.data.length) {
         var _sh12ExtLen = u16(sh.data, _sh12ExtOff); _sh12ExtOff += 2;
@@ -1268,6 +1413,7 @@ export class TLSSocket {
         while (_sh12ExtOff + 4 <= _sh12ExtEnd) {
           var _sh12Et = u16(sh.data, _sh12ExtOff); _sh12ExtOff += 2;
           var _sh12El = u16(sh.data, _sh12ExtOff); _sh12ExtOff += 2;
+          if (_sh12Et === 0x0017) { useEMS12 = true; }  // extended_master_secret
           if (_sh12Et === EXT_ALPN && _sh12El >= 4) {
             var _alpnLL = u16(sh.data, _sh12ExtOff);
             if (_alpnLL > 0 && _sh12ExtOff + 3 <= _sh12ExtEnd) {
@@ -1284,6 +1430,15 @@ export class TLSSocket {
         }
       }
     }
+    // Check negotiated cipher is one we support
+    var isAES128_12 = (negotiatedCipher12 === 0xc02f || negotiatedCipher12 === 0xc02b);
+    var isChacha12  = (negotiatedCipher12 === 0xcca8 || negotiatedCipher12 === 0xcca9);
+    if (!isAES128_12 && !isChacha12) {
+      kernel.serialPut('[tls12] unsupported cipher 0x' + negotiatedCipher12.toString(16) + '\n');
+      return false;
+    }
+    (this as any)._tls12ChaCha = isChacha12;
+    kernel.serialPut('[tls12] cipher=0x' + negotiatedCipher12.toString(16) + ' EMS=' + (useEMS12 ? 1 : 0) + '\n');
 
     // Read messages until ServerHelloDone (type 14)
     var serverECDHEPublic: number[] = [];
@@ -1293,8 +1448,8 @@ export class TLSSocket {
         kernel.serialPut('[tls12] missing server handshake message\n');
         return false;
       }
-      if (msg.type === 11) continue;  // Certificate — skip verification
-      if (msg.type === 13) continue;  // CertificateRequest — skip
+      if (msg.type === 11) continue;  // Certificate â€” skip verification
+      if (msg.type === 13) continue;  // CertificateRequest â€” skip
       if (msg.type === 12) {
         // ServerKeyExchange: curve_type(1)=3, namedCurve(2), pubkey_len(1), pubkey(65)
         var ske = msg.data;
@@ -1330,37 +1485,45 @@ export class TLSSocket {
       sharedSecret = ecdhP256(this.myP256Private, serverECDHEPublic);
     }
 
-    // TLS 1.2 master secret
+    // Build CKE first — RFC 7627 §4 requires session_hash to include CKE
     var clientRandom: number[] = (this as any)._tls12ClientRandom;
     var serverRand2:  number[] = (this as any)._tls12ServerRandom;
-    var preMaster    = sharedSecret;
-    var masterSecret = tls12PRF(preMaster, 'master secret',
-        clientRandom.concat(serverRand2), 48);
-
-    // Derive key material: client_write_key(16) + server_write_key(16)
-    //   + client_write_IV(4) + server_write_IV(4) — for AES-128-GCM
-    var keyMaterial = tls12PRF(masterSecret, 'key expansion',
-        serverRand2.concat(clientRandom), 16 + 16 + 4 + 4);
-    this.clientAppKey        = keyMaterial.slice(0,  16);  // client_write_key
-    this.serverAppKey        = keyMaterial.slice(16, 32);  // server_write_key
-    this.tls12ClientWriteIV  = keyMaterial.slice(32, 36);  // client_write_IV (4)
-    this.tls12ServerWriteIV  = keyMaterial.slice(36, 40);  // server_write_IV (4)
-
-    // Send ClientKeyExchange
     var cke: number[] = [];
     if (serverECDHEPublic.length === 32) {
-      // x25519: just 32 bytes
       putU8(cke, 32);
       cke = cke.concat(this.myPublic);
     } else {
-      // P-256 uncompressed point
       putU8(cke, this.myP256Public.length);
       cke = cke.concat(this.myP256Public);
     }
     var ckeMsg: number[] = [16];  // HS_CLIENT_KEY_EXCHANGE
     putU24(ckeMsg, cke.length);
     ckeMsg = ckeMsg.concat(cke);
-    this.transcript = this.transcript.concat(ckeMsg);
+    this.transcript = this.transcript.concat(ckeMsg);  // add CKE before EMS hash
+
+    // TLS 1.2 master secret (use EMS if server supports it)
+    var preMaster    = sharedSecret;
+    var masterSecret: number[];
+    if (useEMS12) {
+      // RFC 7627 §4: session_hash includes all messages through CKE
+      var sessionHash12 = sha256(this.transcript);
+      masterSecret = tls12PRF(preMaster, 'extended master secret', sessionHash12, 48);
+    } else {
+      masterSecret = tls12PRF(preMaster, 'master secret',
+          clientRandom.concat(serverRand2), 48);
+    }
+
+    // Derive key material: key sizes depend on cipher suite
+    var keySize12 = isChacha12 ? 32 : 16;
+    var ivSize12  = isChacha12 ? 12 : 4;
+    var keyMaterial = tls12PRF(masterSecret, 'key expansion',
+        serverRand2.concat(clientRandom), keySize12*2 + ivSize12*2);
+    this.clientAppKey        = keyMaterial.slice(0,  keySize12);
+    this.serverAppKey        = keyMaterial.slice(keySize12, keySize12*2);
+    this.tls12ClientWriteIV  = keyMaterial.slice(keySize12*2, keySize12*2 + ivSize12);
+    this.tls12ServerWriteIV  = keyMaterial.slice(keySize12*2 + ivSize12, keySize12*2 + ivSize12*2);
+
+    // Send ClientKeyExchange (already in transcript)
     var ckeRec = [TLS_HANDSHAKE, 0x03, 0x03]; putU16(ckeRec, ckeMsg.length);
     if (!net.sendBytes(this.sock, ckeRec.concat(ckeMsg))) return false;
 
@@ -1371,14 +1534,21 @@ export class TLSSocket {
     var finHash = sha256(this.transcript);
     var verifyData = tls12PRF(masterSecret, 'client finished', finHash, 12);
     var finMsg: number[] = [HS_FINISHED]; putU24(finMsg, 12); finMsg = finMsg.concat(verifyData);
-    var finRec = tls12EncryptRecord(this.clientAppKey, this.tls12ClientWriteIV,
-        this.clientAppSeq, TLS_HANDSHAKE, finMsg);
+    var finRec = isChacha12
+      ? tls12EncryptRecordChaCha(this.clientAppKey, this.tls12ClientWriteIV, this.clientAppSeq, TLS_HANDSHAKE, finMsg)
+      : tls12EncryptRecord(this.clientAppKey, this.tls12ClientWriteIV, this.clientAppSeq, TLS_HANDSHAKE, finMsg);
     this.clientAppSeq++;
     if (!net.sendBytes(this.sock, finRec)) return false;
 
-    // Read server ChangeCipherSpec
-    var ccs = this._readHS12();
-    if (!ccs) {
+    // Read server ChangeCipherSpec — may be preceded by NewSessionTicket (RFC 5077)
+    var ccs: { type: number; data: number[] } | null = null;
+    for (var _ccsAtt2 = 0; _ccsAtt2 < 5; _ccsAtt2++) {
+      ccs = this._readHS12();
+      if (!ccs) break;
+      if (ccs.type === 20) break;  // Got actual CCS
+      kernel.serialPut('[tls12] skipping pre-CCS handshake msg type=' + ccs.type + '\n');
+    }
+    if (!ccs || ccs.type !== 20) {
       kernel.serialPut('[tls12] no ChangeCipherSpec from server\n');
       return false;
     }
@@ -1391,7 +1561,8 @@ export class TLSSocket {
     }
     // We skip server Finished verification (no cert validation anyway)
     this.handshakeDone = true;
-    kernel.serialPut('[tls12] handshake OK with ' + this.hostname + ' (AES-128-GCM)\n');
+    var cipherName12 = isChacha12 ? 'ChaCha20-Poly1305' : 'AES-128-GCM';
+    kernel.serialPut('[tls12] handshake OK with ' + this.hostname + ' (' + cipherName12 + ')\n');
     return true;
   }
 
@@ -1425,19 +1596,19 @@ export class TLSSocket {
   private _tryReadSessionTicket(): void {
     var raw = net.recvBytes(this.sock, 80);  // short poll
     if (!raw || raw.length < 9) return;
-    for (var ri = 0; ri < raw.length; ) {
+    var ri = 0;
+    for (; ri < raw.length; ) {
       if (ri + 5 > raw.length) break;
       var outerType = raw[ri];
       var recLen    = (raw[ri + 3] << 8) | raw[ri + 4];
-      ri += 5;
-      if (ri + recLen > raw.length) break;
-      var recData = raw.slice(ri, ri + recLen);
-      ri += recLen;
+      if (ri + 5 + recLen > raw.length) break;  // incomplete record
+      var fullRec = raw.slice(ri, ri + 5 + recLen);
+      ri += 5 + recLen;
       if (outerType !== TLS_APPLICATION_DATA) continue;
       // Try to decrypt as app-data record wrapping a handshake record
       var dec = tlsDecryptRecord(
           this.serverAppKey, this.serverAppIV, this.serverAppSeq,
-          raw.slice(ri - recLen - 5, ri), this.useChaCha20);
+          fullRec, this.useChaCha20);
       if (!dec) continue;
       this.serverAppSeq++;
       var inner = dec.data;
@@ -1468,16 +1639,16 @@ export class TLSSocket {
       this._savedTicket = t;
       break;
     }
-    // Push any remaining bytes back to rxBuf for application reads
-    if (raw) {
-      for (var i = 0; i < raw.length; i++) this.rxBuf.push(raw[i]);
+    // Push only remaining unconsumed bytes back to rxBuf for application reads
+    if (ri < raw.length) {
+      for (var i = ri; i < raw.length; i++) this.rxBuf.push(raw[i]);
     }
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // [Item 296] TLS ECDSA certificate support
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 import type { P256PublicKey } from './rsa.js';
 
@@ -1563,7 +1734,7 @@ export function buildECDSACert(
     ...spki,
   ]);
 
-  // Stub signature (48 bytes zero — real impl would ECDSA-sign the tbsCert hash)
+  // Stub signature (48 bytes zero â€” real impl would ECDSA-sign the tbsCert hash)
   var sigR      = new Array(32).fill(0);
   var sigS      = new Array(32).fill(1);
   var ecdsaSig  = seq([...integer(sigR), ...integer(sigS)]);
@@ -1572,9 +1743,9 @@ export function buildECDSACert(
   return seq([...tbsCert, ...algoId, ...sigBits]);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // [Item 297] TLS 1.2 fallback socket
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const TLS_VERSION_12 = 0x0303;
 
@@ -1660,7 +1831,7 @@ export class TLS12Socket {
   }
 
   private _doHandshake(): boolean {
-    // ── ClientHello ──
+    // â”€â”€ ClientHello â”€â”€
     var rand: number[] = [];
     for (var i = 0; i < 32; i++) rand.push((Math.random() * 256) | 0);
     var clientHello: number[] = [
@@ -1683,7 +1854,7 @@ export class TLS12Socket {
     var hsHello = [0x01, 0x00, (clientHello.length >> 8) & 0xff, clientHello.length & 0xff, ...clientHello];
     this._sendRecord(22, hsHello); // TLS_HANDSHAKE = 22
 
-    // ── ServerHello / Certificate (simplified: just wait for CCS) ──
+    // â”€â”€ ServerHello / Certificate (simplified: just wait for CCS) â”€â”€
     var gotServerHello = false;
     var got_ccs        = false;
     var deadline = kernel.getTicks() + 2000;
@@ -1695,16 +1866,16 @@ export class TLS12Socket {
     }
     if (!gotServerHello) return false;
 
-    // ── ClientKeyExchange (RSA, null pre-master for stub) ──
+    // â”€â”€ ClientKeyExchange (RSA, null pre-master for stub) â”€â”€
     var pms: number[] = [0x03, 0x03]; // pre-master secret: version bytes
     for (var j = 0; j < 46; j++) pms.push((Math.random() * 256) | 0);
     var cke = [0x10, 0x00, 0x00, pms.length + 2, 0x00, pms.length, ...pms];
     this._sendRecord(22, cke);
 
-    // ── ChangeCipherSpec ──
+    // â”€â”€ ChangeCipherSpec â”€â”€
     this._sendRecord(20, [0x01]);
 
-    // ── Finished (stub: 12 zero bytes for verify_data) ──
+    // â”€â”€ Finished (stub: 12 zero bytes for verify_data) â”€â”€
     var finished = [0x14, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     this._sendRecord(22, finished);
@@ -1743,9 +1914,9 @@ function _buildSNIExtension(host: string): number[] {
   ];
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // [Item 298] TLS Client Certificates
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * [Item 298] TLS client certificate configuration.
@@ -1768,7 +1939,7 @@ export interface ClientCertConfig {
   signCallback:   (hash: number[]) => number[];
 }
 
-/** Global client certificate store — one entry per server name or '*' wildcard. */
+/** Global client certificate store â€” one entry per server name or '*' wildcard. */
 var _clientCerts: Map<string, ClientCertConfig> = new Map();
 
 /**
@@ -1813,9 +1984,9 @@ export function buildTLSCertificateVerify(sigAlg: number, signature: number[]): 
   return [0x0f, ...[(sigData.length >> 16) & 0xff, (sigData.length >> 8) & 0xff, sigData.length & 0xff], ...sigData];
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // [Item 299] Certificate Pinning API
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface PinnedCert {
   /** Server hostname this pin applies to. Exact or wildcard prefix *.example.com */
@@ -1892,13 +2063,13 @@ export class CertificatePinStore {
 
     if (pins.length > 0) return 'pinned-mismatch';  // pins exist but none matched
 
-    // TOFU: no pins yet — pin this certificate automatically
+    // TOFU: no pins yet â€” pin this certificate automatically
     if (this._tofu) {
       this.addPin({ host, spkiHash: certSpkiHash, expires: now + (86400 * 365) });
       return 'tofu-pinned';
     }
 
-    return 'ok';  // no pins and TOFU disabled — allow any cert
+    return 'ok';  // no pins and TOFU disabled â€” allow any cert
   }
 
   /** Export all pins (for persistence). */
