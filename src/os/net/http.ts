@@ -879,8 +879,9 @@ export class HPack {
         out.push(...this._encInt(idx, 7).map((b, j) => j === 0 ? b | 0x80 : b));
       } else if (idx) {
         // Literal with incremental indexing, name referenced (§6.2.1)
-        out.push(0x40); // 01000000
-        out.push(...this._encInt(idx, 6));
+        var idxBytes = this._encInt(idx, 6);
+        idxBytes[0] |= 0x40;
+        out.push(...idxBytes);
         out.push(...this._encStr(value));
         this._addDyn(name, value);
       } else {
@@ -1148,6 +1149,21 @@ export class HTTP2Connection {
 
   private _handleFrame(type: number, flags: number, sid: number, payload: number[]): void {
     if (type === H2_SETTINGS && !(flags & 0x01)) {
+      // [Item 311] Parse and store server SETTINGS parameters
+      var settOff = 0;
+      while (settOff + 6 <= payload.length) {
+        var settId  = (payload[settOff] << 8) | payload[settOff + 1];
+        var settVal = (payload[settOff + 2] << 24) | (payload[settOff + 3] << 16) | (payload[settOff + 4] << 8) | payload[settOff + 5];
+        this.settings.set(settId, settVal);
+        if (settId === 0x1) this.hpackEnc.updateMaxSize(settVal);
+        if (settId === 0x4) {
+          this.streams.forEach((s, streamId) => {
+            var cur = this.streamSendWindows.get(streamId) ?? 65535;
+            this.streamSendWindows.set(streamId, cur + settVal - 65535);
+          });
+        }
+        settOff += 6;
+      }
       // ACK server SETTINGS
       this.tls.write(this._buildFrame(H2_SETTINGS, 0x01, 0, []));
     } else if (type === H2_HEADERS) {
@@ -1185,26 +1201,6 @@ export class HTTP2Connection {
     } else if (type === H2_GOAWAY) {
       // Server is shutting down; mark all streams closed
       this.streams.forEach(s => { s.state = 'closed'; });
-    } else if (type === H2_SETTINGS && !(flags & 0x01)) {
-      // [Item 311] Parse and store server SETTINGS parameters
-      var settOff = 0;
-      while (settOff + 6 <= payload.length) {
-        var settId  = (payload[settOff] << 8) | payload[settOff + 1];
-        var settVal = (payload[settOff + 2] << 24) | (payload[settOff + 3] << 16) | (payload[settOff + 4] << 8) | payload[settOff + 5];
-        this.settings.set(settId, settVal);
-        // [Item 311] Update HPACK dynamic table size if HEADER_TABLE_SIZE changed
-        if (settId === 0x1) this.hpackEnc.updateMaxSize(settVal);
-        // [Item 310] Update initial stream window size
-        if (settId === 0x4) {
-          this.streams.forEach((s, streamId) => {
-            var cur = this.streamSendWindows.get(streamId) ?? 65535;
-            this.streamSendWindows.set(streamId, cur + settVal - 65535);
-          });
-        }
-        settOff += 6;
-      }
-      // ACK the SETTINGS
-      this.tls.write(this._buildFrame(H2_SETTINGS, 0x01, 0, []));
     } else if (type === H2_WINDOW_UPDATE) {
       // [Item 310] Peer is increasing our send window
       var incr = ((payload[0] & 0x7f) << 24) | (payload[1] << 16) | (payload[2] << 8) | payload[3];
