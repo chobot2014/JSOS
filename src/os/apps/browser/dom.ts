@@ -968,16 +968,26 @@ export class VElement extends VNode {
   }
 
   get children(): VElement[] { return this.childNodes.filter(c => c instanceof VElement) as VElement[]; }
-  get childElementCount(): number { return this.children.length; }
-  get firstElementChild(): VElement | null { return this.children[0] ?? null; }
-  get lastElementChild():  VElement | null { return this.children[this.children.length - 1] ?? null; }
+  get childElementCount(): number { var n = 0; for (var c of this.childNodes) { if (c instanceof VElement) n++; } return n; }
+  get firstElementChild(): VElement | null { var c: VNode | null = this.firstChild; while (c) { if (c instanceof VElement) return c; c = c._nextSib; } return null; }
+  get lastElementChild():  VElement | null { var c: VNode | null = this.lastChild;  while (c) { if (c instanceof VElement) return c; c = c._prevSib; } return null; }
 
   matches(sel: string): boolean { return _matchSel(sel.trim(), this); }
   closest(sel: string): VElement | null { var _n: VNode | null = this; while (_n && _n.nodeType === 1) { if ((_n as VElement).matches(sel)) return _n as VElement; _n = _n.parentNode; } return null; }
   querySelectorAll(sel: string): VElement[] { var res: VElement[] = []; _walk(this, el => { if (_matchSel(sel, el)) res.push(el); }); return res; }
-  querySelector(sel: string): VElement | null { return this.querySelectorAll(sel)[0] ?? null; }
+  querySelector(sel: string): VElement | null { return _walkFind(this, el => _matchSel(sel, el)); }
   getElementsByTagName(tag: string): VElement[] { var t = tag.toUpperCase(); var res: VElement[] = []; _walk(this, el => { if (t === '*' || el.tagName === t) res.push(el); }); return res; }
-  getElementsByClassName(cls: string): VElement[] { var clss = cls.split(/\s+/); var res: VElement[] = []; _walk(this, el => { var ec = (el.getAttribute('class') || '').split(/\s+/); if (clss.every(c => ec.includes(c))) res.push(el); }); return res; }
+  getElementsByClassName(cls: string): VElement[] {
+    var clss = cls.split(/\s+/);
+    var res: VElement[] = [];
+    _walk(this, el => {
+      var raw = el._attrs.get('class') || '';
+      if (!raw) return;
+      var ec = raw.split(/\s+/);
+      if (clss.every(c => ec.includes(c))) res.push(el);
+    });
+    return res;
+  }
   cloneNode(deep = false): VElement {
     var c = new VElement(this.tagName);
     c.nodeType = this.nodeType; // preserve nodeType — critical for DocumentFragment clones (nodeType=11)
@@ -1903,7 +1913,7 @@ export class VDocument extends VNode {
     }
     return this._idIndex.get(id) ?? null;
   }
-  querySelector(sel: string): VElement | null { return this.body.querySelector(sel) ?? this.head.querySelector(sel); }
+  querySelector(sel: string): VElement | null { return _walkFind(this.body, el => _matchSel(sel, el)) ?? _walkFind(this.head, el => _matchSel(sel, el)); }
   querySelectorAll(sel: string): VElement[] { return [...this.head.querySelectorAll(sel), ...this.body.querySelectorAll(sel)]; }
   getElementsByTagName(tag: string): VElement[] { return this.body.getElementsByTagName(tag); }
   getElementsByClassName(cls: string): VElement[] { return this.body.getElementsByClassName(cls); }
@@ -2202,6 +2212,18 @@ export function _walk(root: VNode, fn: (el: VElement) => void): void {
   for (var c of root.childNodes) {
     if (c instanceof VElement) { fn(c); _walk(c, fn); }
   }
+}
+
+/** Like _walk but stops as soon as fn returns true (short-circuit). */
+function _walkFind(root: VNode, fn: (el: VElement) => boolean): VElement | null {
+  for (var c of root.childNodes) {
+    if (c instanceof VElement) {
+      if (fn(c)) return c;
+      var found = _walkFind(c, fn);
+      if (found) return found;
+    }
+  }
+  return null;
 }
 
 /** Very basic CSS selector matcher — supports: tag, #id, .cls, [attr], [attr=val],
