@@ -186,6 +186,8 @@ export class VNode extends VEventTarget {
     this.childNodes.push(child);
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
+      // Invalidate ID index since a new subtree was added (may have id elements)
+      if (this.ownerDocument._idIndex) this.ownerDocument._idIndex = null;
       this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [child], removedNodes: [], previousSibling: this.childNodes[this.childNodes.length - 2] ?? null, nextSibling: null });
     }
     // Auto-execute dynamically inserted <script> elements (required by modern pages that load scripts via JS)
@@ -201,6 +203,8 @@ export class VNode extends VEventTarget {
       this.childNodes.splice(i, 1); child.parentNode = null;
       if (this.ownerDocument) {
         this.ownerDocument._dirty = true;
+        // Invalidate ID index since a subtree was removed (may have had id elements)
+        if (this.ownerDocument._idIndex) this.ownerDocument._idIndex = null;
         this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [], removedNodes: [child], previousSibling: prev, nextSibling: next });
       }
     }
@@ -223,6 +227,7 @@ export class VNode extends VEventTarget {
     this.childNodes.splice(i, 0, newNode);
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
+      if (this.ownerDocument._idIndex) this.ownerDocument._idIndex = null;
       this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [newNode], removedNodes: [], previousSibling: this.childNodes[i - 1] ?? null, nextSibling: ref });
     }
     // Auto-execute dynamically inserted <script> elements
@@ -240,6 +245,7 @@ export class VNode extends VEventTarget {
     this.childNodes[i] = newNode;
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
+      if (this.ownerDocument._idIndex) this.ownerDocument._idIndex = null;
       this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [newNode], removedNodes: [oldNode], previousSibling: this.childNodes[i - 1] ?? null, nextSibling: this.childNodes[i + 1] ?? null });
     }
     return oldNode;
@@ -495,14 +501,24 @@ export function makeStyleProxy(sm: VStyleMap): any {
 
 export class VClassList {
   _owner: VElement;
+  _cache: string[] | null = null;  // cached parsed class list — invalidated by setAttribute('class',...)
   constructor(owner: VElement) { this._owner = owner; }
-  _clss(): string[] { return (this._owner.getAttribute('class') || '').split(/\s+/).filter(Boolean); }
-  _set(a: string[]): void { this._owner.setAttribute('class', a.join(' ')); }
+  /** Invalidate cache when 'class' attribute changes externally. */
+  _invalidate(): void { this._cache = null; }
+  _clss(): string[] {
+    if (!this._cache) this._cache = (this._owner.getAttribute('class') || '').split(/\s+/).filter(Boolean);
+    return this._cache;
+  }
+  _set(a: string[]): void {
+    this._cache = null;  // clear before setAttribute so mutation observers get fresh state
+    this._owner.setAttribute('class', a.join(' '));
+    this._cache = a;    // restore after (setAttribute already invalidated, but we have the array)
+  }
   contains(c: string): boolean { return this._clss().includes(c); }
-  add(...cs: string[]):    void { var a = this._clss(); for (var c of cs) if (!a.includes(c)) a.push(c); this._set(a); }
+  add(...cs: string[]):    void { var a = this._clss().slice(); for (var c of cs) if (!a.includes(c)) a.push(c); this._set(a); }
   remove(...cs: string[]): void { this._set(this._clss().filter(x => !cs.includes(x))); }
-  toggle(c: string, force?: boolean): boolean { var a = this._clss(); var i = a.indexOf(c); if (force === true || (force === undefined && i < 0)) { if (i < 0) a.push(c); this._set(a); return true; } if (i >= 0) { a.splice(i, 1); this._set(a); } return false; }
-  replace(old: string, n: string): boolean { var a = this._clss(); var i = a.indexOf(old); if (i >= 0) { a[i] = n; this._set(a); return true; } return false; }
+  toggle(c: string, force?: boolean): boolean { var a = this._clss().slice(); var i = a.indexOf(c); if (force === true || (force === undefined && i < 0)) { if (i < 0) a.push(c); this._set(a); return true; } if (i >= 0) { a.splice(i, 1); this._set(a); } return false; }
+  replace(old: string, n: string): boolean { var a = this._clss().slice(); var i = a.indexOf(old); if (i >= 0) { a[i] = n; this._set(a); return true; } return false; }
   get value(): string { return this._owner.getAttribute('class') || ''; }
   [Symbol.iterator]() { return this._clss()[Symbol.iterator](); }
   get length(): number { return this._clss().length; }
@@ -684,6 +700,12 @@ export class VElement extends VNode {
     var lname = name.toLowerCase();
     var oldValue = this._attrs.get(lname) ?? null;
     this._attrs.set(lname, String(value));
+    if (lname === 'class') this.classList._invalidate(); // invalidate cached class list
+    // Maintain O(1) ID index
+    if (lname === 'id' && this.ownerDocument && this.ownerDocument._idIndex) {
+      if (oldValue !== null) this.ownerDocument._idIndex.delete(oldValue);
+      this.ownerDocument._idIndex.set(String(value), this);
+    }
     this._dirtyLayout = true; // item 891
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
@@ -694,6 +716,11 @@ export class VElement extends VNode {
     var lname = name.toLowerCase();
     var oldValue = this._attrs.get(lname) ?? null;
     this._attrs.delete(lname);
+    if (lname === 'class') this.classList._invalidate(); // invalidate cached class list
+    // Maintain O(1) ID index
+    if (lname === 'id' && oldValue !== null && this.ownerDocument && this.ownerDocument._idIndex) {
+      this.ownerDocument._idIndex.delete(oldValue);
+    }
     this._dirtyLayout = true; // item 891
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
@@ -1784,6 +1811,8 @@ export class VDocument extends VNode {
   _mutationQueue: unknown[] = [];           // queued mutation records for MutationObserver
   /** Hook set by jsruntime.ts to auto-execute dynamically inserted <script> elements. */
   _scriptInsertHook: ((el: VElement) => void) | null = null;
+  /** Lazy O(1) ID index — null means needs rebuild on next getElementById call. */
+  _idIndex: Map<string, VElement> | null = null;
   head: VElement;
   body: VElement;
   documentElement: VElement;
@@ -1823,7 +1852,17 @@ export class VDocument extends VNode {
     return this.createAttribute(qualifiedName);
   }
 
-  getElementById(id: string): VElement | null { var res: VElement | null = null; _walk(this.body, el => { if (!res && el.id === id) res = el; }); if (!res) _walk(this.head, el => { if (!res && el.id === id) res = el; }); return res; }
+  getElementById(id: string): VElement | null {
+    if (!id) return null;
+    if (!this._idIndex) {
+      // Lazily build O(1) index from entire document
+      this._idIndex = new Map<string, VElement>();
+      var self = this;
+      _walk(this.body, function(el) { var eid = el._attrs.get('id'); if (eid) self._idIndex!.set(eid, el); });
+      _walk(this.head, function(el) { var eid = el._attrs.get('id'); if (eid && !self._idIndex!.has(eid)) self._idIndex!.set(eid, el); });
+    }
+    return this._idIndex.get(id) ?? null;
+  }
   querySelector(sel: string): VElement | null { return this.body.querySelector(sel) ?? this.head.querySelector(sel); }
   querySelectorAll(sel: string): VElement[] { return [...this.head.querySelectorAll(sel), ...this.body.querySelectorAll(sel)]; }
   getElementsByTagName(tag: string): VElement[] { return this.body.getElementsByTagName(tag); }
