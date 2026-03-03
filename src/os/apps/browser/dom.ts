@@ -974,8 +974,26 @@ export class VElement extends VNode {
 
   matches(sel: string): boolean { return _matchSel(sel.trim(), this); }
   closest(sel: string): VElement | null { var _n: VNode | null = this; while (_n && _n.nodeType === 1) { if ((_n as VElement).matches(sel)) return _n as VElement; _n = _n.parentNode; } return null; }
-  querySelectorAll(sel: string): VElement[] { var res: VElement[] = []; _walk(this, el => { if (_matchSel(sel, el)) res.push(el); }); return res; }
-  querySelector(sel: string): VElement | null { return _walkFind(this, el => _matchSel(sel, el)); }
+  querySelectorAll(sel: string): VElement[] {
+    var s = sel.trim();
+    // Fast path: pure #id — O(1) via ID index
+    if (/^#[\w-]+$/.test(s)) { var _el = this.ownerDocument?.getElementById(s.slice(1)) ?? null; return _el ? [_el] : []; }
+    // Fast path: single tag name — O(N) but avoids selector parsing overhead
+    if (/^[a-zA-Z][\w-]*$/.test(s)) { return this.getElementsByTagName(s); }
+    // Fast path: single class — O(N) via getElementsByClassName
+    if (/^\.[\w-]+$/.test(s)) { return this.getElementsByClassName(s.slice(1)); }
+    var res: VElement[] = []; _walk(this, el => { if (_matchSel(s, el)) res.push(el); }); return res;
+  }
+  querySelector(sel: string): VElement | null {
+    var s = sel.trim();
+    // Fast path: pure #id — O(1) via ID index
+    if (/^#[\w-]+$/.test(s)) { return this.ownerDocument?.getElementById(s.slice(1)) ?? null; }
+    // Fast path: single tag name
+    if (/^[a-zA-Z][\w-]*$/.test(s)) { return _walkFind(this, el => el.tagName === s.toUpperCase()); }
+    // Fast path: single class
+    if (/^\.[\w-]+$/.test(s)) { var _cls = s.slice(1); return _walkFind(this, el => el.classList.contains(_cls)); }
+    return _walkFind(this, el => _matchSel(s, el));
+  }
   getElementsByTagName(tag: string): VElement[] { var t = tag.toUpperCase(); var res: VElement[] = []; _walk(this, el => { if (t === '*' || el.tagName === t) res.push(el); }); return res; }
   getElementsByClassName(cls: string): VElement[] {
     var clss = cls.split(/\s+/);
@@ -1913,8 +1931,16 @@ export class VDocument extends VNode {
     }
     return this._idIndex.get(id) ?? null;
   }
-  querySelector(sel: string): VElement | null { return _walkFind(this.body, el => _matchSel(sel, el)) ?? _walkFind(this.head, el => _matchSel(sel, el)); }
-  querySelectorAll(sel: string): VElement[] { return [...this.head.querySelectorAll(sel), ...this.body.querySelectorAll(sel)]; }
+  querySelector(sel: string): VElement | null {
+    var s = sel.trim();
+    if (/^#[\w-]+$/.test(s)) { return this.getElementById(s.slice(1)); }
+    return _walkFind(this.body, el => _matchSel(s, el)) ?? _walkFind(this.head, el => _matchSel(s, el));
+  }
+  querySelectorAll(sel: string): VElement[] {
+    var s = sel.trim();
+    if (/^#[\w-]+$/.test(s)) { var _e = this.getElementById(s.slice(1)); return _e ? [_e] : []; }
+    return [...this.head.querySelectorAll(s), ...this.body.querySelectorAll(s)];
+  }
   getElementsByTagName(tag: string): VElement[] { return this.body.getElementsByTagName(tag); }
   getElementsByClassName(cls: string): VElement[] { return this.body.getElementsByClassName(cls); }
   getElementsByName(name: string): VElement[] { var res: VElement[] = []; _walk(this.body, el => { if (el.getAttribute('name') === name) res.push(el); }); return res; }
