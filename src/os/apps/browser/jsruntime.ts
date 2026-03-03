@@ -4122,9 +4122,49 @@ export function createPageJS(
   if (typeof (Object as any).hasOwn !== 'function') {
     (Object as any).hasOwn = (obj: object, key: PropertyKey) => Object.prototype.hasOwnProperty.call(obj, key);
   }
-  // structuredClone basic polyfill if missing
+  // structuredClone — real implementation: handles Date, Map, Set, ArrayBuffer,
+  // typed arrays, RegExp, and circular references via WeakMap.
+  function _structuredClone<T>(value: T): T {
+    const seen = new WeakMap<object, unknown>();
+    function _clone(v: unknown): unknown {
+      if (v === null || typeof v !== 'object' && typeof v !== 'function') return v;
+      if (typeof v === 'function') return undefined; // functions not clonable
+      const o = v as object;
+      if (seen.has(o)) return seen.get(o);
+      if (v instanceof Date)        { const d = new Date((v as Date).getTime()); seen.set(o, d); return d; }
+      if (v instanceof RegExp)      { const r = new RegExp((v as RegExp).source, (v as RegExp).flags); seen.set(o, r); return r; }
+      if (v instanceof ArrayBuffer) { const b = (v as ArrayBuffer).slice(0); seen.set(o, b); return b; }
+      if (ArrayBuffer.isView(v))    {
+        const src = v as ArrayBufferView;
+        const buf = (src.buffer as ArrayBuffer).slice(src.byteOffset, src.byteOffset + src.byteLength);
+        const C = (src as any).constructor as { new(b: ArrayBuffer): ArrayBufferView };
+        const t = new C(buf); seen.set(o, t); return t;
+      }
+      if (v instanceof Map) {
+        const m = new Map<unknown, unknown>(); seen.set(o, m);
+        (v as Map<unknown, unknown>).forEach((val, k) => m.set(_clone(k), _clone(val)));
+        return m;
+      }
+      if (v instanceof Set) {
+        const s = new Set<unknown>(); seen.set(o, s);
+        (v as Set<unknown>).forEach(val => s.add(_clone(val)));
+        return s;
+      }
+      if (Array.isArray(v)) {
+        const a: unknown[] = new Array((v as unknown[]).length);
+        seen.set(o, a);
+        for (let i = 0; i < (v as unknown[]).length; i++) a[i] = _clone((v as unknown[])[i]);
+        return a;
+      }
+      const obj: Record<string, unknown> = Object.create(Object.getPrototypeOf(v));
+      seen.set(o, obj);
+      for (const k of Object.keys(v)) obj[k] = _clone((v as Record<string, unknown>)[k]);
+      return obj;
+    }
+    return _clone(value) as T;
+  }
   if (typeof structuredClone === 'undefined') {
-    (globalThis as any).structuredClone = (v: unknown) => JSON.parse(JSON.stringify(v));
+    (globalThis as any).structuredClone = _structuredClone;
   }
   // String.prototype.trimStart / trimEnd (ES2019) – belt-and-suspenders
   if (typeof (String.prototype as any).trimStart !== 'function') {
@@ -4929,7 +4969,7 @@ export function createPageJS(
     scheduler,
     requestIdleCallback,
     cancelIdleCallback,
-    structuredClone: (v: unknown) => JSON.parse(JSON.stringify(v)),
+    structuredClone: _structuredClone,
     // React 18 / ReactDOM.flushSync — run fn then synchronously commit DOM changes
     flushSync: (fn: () => void): void => {
       try { fn(); } catch(e) { _fireScriptError(e); }

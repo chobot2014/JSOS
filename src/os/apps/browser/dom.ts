@@ -128,6 +128,17 @@ function _setOwnerDocRecursive(node: VNode, doc: VDocument | null): void {
   for (var _ch of node.childNodes) _setOwnerDocRecursive(_ch, doc);
 }
 
+// ── Sibling pointer initializer ───────────────────────────────────────────────
+// After bulk DOM construction (parser / innerHTML), walk the tree and populate
+// _prevSib / _nextSib on every level so O(1) nextSibling / previousSibling works.
+function _initSiblings(nodes: VNode[]): void {
+  for (var _si = 0; _si < nodes.length; _si++) {
+    nodes[_si]._prevSib = _si > 0 ? nodes[_si - 1] : null;
+    nodes[_si]._nextSib = _si < nodes.length - 1 ? nodes[_si + 1] : null;
+    if (nodes[_si].childNodes.length > 0) _initSiblings(nodes[_si].childNodes);
+  }
+}
+
 // ── VNode base ────────────────────────────────────────────────────────────────
 
 export class VNode extends VEventTarget {
@@ -160,11 +171,14 @@ export class VNode extends VEventTarget {
   ownerDocument: VDocument | null = null;
   _handlers:        Map<string, Array<(e: VEvent) => void>> = new Map();
   _captureHandlers: Map<string, Array<(e: VEvent) => void>> = new Map();
+  // ── O(1) sibling pointers (maintained by all DOM mutation methods) ──────────
+  _nextSib: VNode | null = null;
+  _prevSib: VNode | null = null;
 
   get firstChild():      VNode | null { return this.childNodes[0] ?? null; }
   get lastChild():       VNode | null { return this.childNodes[this.childNodes.length - 1] ?? null; }
-  get nextSibling():     VNode | null { var i = this.parentNode ? this.parentNode.childNodes.indexOf(this) : -1; return i >= 0 ? (this.parentNode!.childNodes[i + 1] ?? null) : null; }
-  get previousSibling(): VNode | null { var i = this.parentNode ? this.parentNode.childNodes.indexOf(this) : -1; return i > 0  ? (this.parentNode!.childNodes[i - 1] ?? null) : null; }
+  get nextSibling():     VNode | null { return this._nextSib; }
+  get previousSibling(): VNode | null { return this._prevSib; }
   /** parentElement — like parentNode but returns null if parent is not an Element node */
   get parentElement():   VElement | null { var _p = this.parentNode; return (_p && _p.nodeType === 1) ? _p as VElement : null; }
   /** nodeValue — null for Element and Document nodes; data for Text/Comment nodes. */
@@ -180,15 +194,20 @@ export class VNode extends VEventTarget {
       return child;
     }
     if (child.parentNode) child.parentNode.removeChild(child);
+    var _prevLast = this.childNodes.length > 0 ? this.childNodes[this.childNodes.length - 1] : null;
     child.parentNode = this;
     // Recursively propagate ownerDocument so nested elements track dirty correctly
     _setOwnerDocRecursive(child, this.ownerDocument);
     this.childNodes.push(child);
+    // Maintain O(1) sibling linked list
+    child._prevSib = _prevLast;
+    child._nextSib = null;
+    if (_prevLast) _prevLast._nextSib = child;
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
       // Invalidate ID index since a new subtree was added (may have id elements)
       if (this.ownerDocument._idIndex) this.ownerDocument._idIndex = null;
-      this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [child], removedNodes: [], previousSibling: this.childNodes[this.childNodes.length - 2] ?? null, nextSibling: null });
+      this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [child], removedNodes: [], previousSibling: _prevLast, nextSibling: null });
     }
     // Auto-execute dynamically inserted <script> elements (required by modern pages that load scripts via JS)
     if (this.ownerDocument?._scriptInsertHook && child.nodeType === 1 && (child as VElement).tagName === 'SCRIPT') {
@@ -201,6 +220,10 @@ export class VNode extends VEventTarget {
     if (i >= 0) {
       var prev = this.childNodes[i - 1] ?? null; var next = this.childNodes[i + 1] ?? null;
       this.childNodes.splice(i, 1); child.parentNode = null;
+      // Maintain O(1) sibling linked list
+      if (prev) prev._nextSib = next;
+      if (next) next._prevSib = prev;
+      child._nextSib = null; child._prevSib = null;
       if (this.ownerDocument) {
         this.ownerDocument._dirty = true;
         // Invalidate ID index since a subtree was removed (may have had id elements)
@@ -225,10 +248,16 @@ export class VNode extends VEventTarget {
     newNode.parentNode = this;
     _setOwnerDocRecursive(newNode, this.ownerDocument);
     this.childNodes.splice(i, 0, newNode);
+    // Maintain O(1) sibling linked list: newNode is now at index i, ref at i+1
+    var _ibPrev = this.childNodes[i - 1] ?? null;
+    newNode._prevSib = _ibPrev;
+    newNode._nextSib = ref;
+    if (_ibPrev) _ibPrev._nextSib = newNode;
+    ref._prevSib = newNode;
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
       if (this.ownerDocument._idIndex) this.ownerDocument._idIndex = null;
-      this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [newNode], removedNodes: [], previousSibling: this.childNodes[i - 1] ?? null, nextSibling: ref });
+      this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [newNode], removedNodes: [], previousSibling: _ibPrev, nextSibling: ref });
     }
     // Auto-execute dynamically inserted <script> elements
     if (this.ownerDocument?._scriptInsertHook && newNode.nodeType === 1 && (newNode as VElement).tagName === 'SCRIPT') {
@@ -243,16 +272,24 @@ export class VNode extends VEventTarget {
     oldNode.parentNode = null; newNode.parentNode = this;
     _setOwnerDocRecursive(newNode, this.ownerDocument);
     this.childNodes[i] = newNode;
+    // Maintain O(1) sibling linked list
+    var _rcPrev = this.childNodes[i - 1] ?? null;
+    var _rcNext = this.childNodes[i + 1] ?? null;
+    newNode._prevSib = _rcPrev;
+    newNode._nextSib = _rcNext;
+    if (_rcPrev) _rcPrev._nextSib = newNode;
+    if (_rcNext) _rcNext._prevSib = newNode;
+    oldNode._prevSib = null; oldNode._nextSib = null;
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
       if (this.ownerDocument._idIndex) this.ownerDocument._idIndex = null;
-      this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [newNode], removedNodes: [oldNode], previousSibling: this.childNodes[i - 1] ?? null, nextSibling: this.childNodes[i + 1] ?? null });
+      this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [newNode], removedNodes: [oldNode], previousSibling: _rcPrev, nextSibling: _rcNext });
     }
     return oldNode;
   }
   cloneNode(deep = false): VNode {
     var c = new VNode(); (c as any).nodeType = this.nodeType; (c as any).nodeName = this.nodeName;
-    if (deep) { for (var ch of this.childNodes) { var cc = ch.cloneNode(true); cc.parentNode = c; c.childNodes.push(cc); } }
+    if (deep) { for (var ch of this.childNodes) { var cc = ch.cloneNode(true); cc.parentNode = c; c.childNodes.push(cc); } _initSiblings(c.childNodes); }
     return c;
   }
   addEventListener(type: string, fn: ((e: VEvent) => void) | { handleEvent(e: VEvent): void } | null, options?: boolean | { capture?: boolean; once?: boolean; passive?: boolean; signal?: unknown }): void {
@@ -950,10 +987,10 @@ export class VElement extends VNode {
     if ((this as any)._content) {
       var _cc = (this as any)._content;
       var _cf = new VElement('#document-fragment'); _cf.nodeType = 11; _cf.ownerDocument = c.ownerDocument;
-      if (deep) { for (var _fch of _cc.childNodes) { var _fcc = _fch.cloneNode(true); _fcc.parentNode = _cf; _cf.childNodes.push(_fcc); } }
+      if (deep) { for (var _fch of _cc.childNodes) { var _fcc = _fch.cloneNode(true); _fcc.parentNode = _cf; _cf.childNodes.push(_fcc); } _initSiblings(_cf.childNodes); }
       (c as any)._content = _cf;
     }
-    if (deep && !(this as any)._content) { for (var ch of this.childNodes) { var cc = ch.cloneNode(true); cc.parentNode = c; c.childNodes.push(cc); } }
+    if (deep && !(this as any)._content) { for (var ch of this.childNodes) { var cc = ch.cloneNode(true); cc.parentNode = c; c.childNodes.push(cc); } _initSiblings(c.childNodes); }
     return c;
   }
 
@@ -1667,6 +1704,7 @@ export class VElement extends VNode {
         this.childNodes.push(br as any);
       }
     }
+    _initSiblings(this.childNodes); // restore O(1) sibling pointers
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
       this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: this.childNodes.slice(), removedNodes: removed, previousSibling: null, nextSibling: null });
@@ -2624,6 +2662,8 @@ function _parseFragment(html: string, doc: VDocument | null): VNode[] {
       pushText(raw);
     }
   }
+  // Initialize O(1) sibling pointers for every node in the parsed tree
+  _initSiblings(nodes);
   return nodes;
 }
 
@@ -2663,6 +2703,10 @@ export function buildDOM(html: string): VDocument {
       if (!inHead) { node.parentNode = doc.body; node.ownerDocument = doc; doc.body.childNodes.push(node); }
     }
   }
+
+  // Re-initialize sibling pointers after redistribution (nodes were moved from frag → head/body)
+  _initSiblings(doc.head.childNodes);
+  _initSiblings(doc.body.childNodes);
 
   // Extract <title>
   var titles = doc.head.getElementsByTagName('title');
