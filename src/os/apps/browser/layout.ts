@@ -8,7 +8,7 @@ import {
   CLR_QUOTE_TXT,
 } from './constants.js';
 import { getLayoutCache, setLayoutCache, layoutFingerprint } from './cache.js';
-import { layoutGrid } from './layout-ext.js';
+import { layoutGrid, layoutTable } from './layout-ext.js';
 
 // ── Inline word-flow layout ───────────────────────────────────────────────────
 
@@ -324,6 +324,36 @@ function _layoutNodesImpl(
         if (gLineEnd > gMaxY) gMaxY = gLineEnd;
       }
       y = gMaxY + (nd.marginBottom || 0);
+      lastBottomMargin = nd.marginBottom || 0;
+      continue;
+    }
+
+    // ── Table layout ─────────────────────────────────────────────────────────
+    if (nd.type === 'table' && nd.children) {
+      var tblY = y;
+      // Resolve percentage width
+      var tblContentW = contentW;
+      if ((nd as any)._widthPct) {
+        tblContentW = Math.floor(contentW * (nd as any)._widthPct / 100);
+      } else if (nd.boxWidth) {
+        tblContentW = Math.min(nd.boxWidth, contentW);
+      }
+      (nd as any).boxWidth = tblContentW;
+      var tblLines = layoutTable(
+        nd, tblContentW,
+        function(spans: InlineSpan[], txLeft: number, txMax: number, txLineH: number) {
+          return flowSpans(spans, txLeft, txMax, txLineH, CLR_BODY);
+        }
+      );
+      var tblMaxY = tblY;
+      for (var tli = 0; tli < tblLines.length; tli++) {
+        var tln = tblLines[tli];
+        lines.push({ y: tblY + tln.y, nodes: tln.nodes, lineH: tln.lineH,
+                     bgColor: tln.bgColor, preBg: tln.preBg });
+        var tLineEnd = tblY + tln.y + (tln.lineH || LINE_H);
+        if (tLineEnd > tblMaxY) tblMaxY = tLineEnd;
+      }
+      y = tblMaxY + (nd.marginBottom || 0);
       lastBottomMargin = nd.marginBottom || 0;
       continue;
     }

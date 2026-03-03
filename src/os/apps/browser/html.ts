@@ -2,7 +2,7 @@ import type {
   HtmlToken, ParseResult, RenderNode, InlineSpan, BlockType,
   WidgetBlueprint, WidgetKind, FormState, CSSProps, ScriptRecord, DecodedImage,
 } from './types.js';
-import { parseInlineStyle } from './css.js';
+import { parseInlineStyle, parseCSSColor } from './css.js';
 import { isGradient } from './gradient.js';
 import { type CSSRule, computeElementStyle, getPseudoContent } from './stylesheet.js';
 import { renderSVG } from './svg.js';
@@ -195,6 +195,15 @@ export function tokenise(html: string): HtmlToken[] {
   return tokens;
 }
 
+// ── Color parsing helper for HTML presentational attributes ───────────────────
+
+function _parseColorCSS(val: string): number | undefined {
+  if (!val) return undefined;
+  // Handle bare hex like "ff6600" (common in HN bgcolor="ff6600")
+  if (/^[0-9a-f]{3,8}$/i.test(val) && !val.startsWith('#')) val = '#' + val;
+  return parseCSSColor(val);
+}
+
 // ── HTML parser ───────────────────────────────────────────────────────────────
 
 export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
@@ -384,11 +393,11 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
 
   // ── Table tracking ──────────────────────────────────────────────────────────
   var inTable       = false;
-  var tableRows:    Array<Array<{ text: string; head: boolean }>> = [];
-  var tableCurRow:  Array<{ text: string; head: boolean }> = [];
-  var tableCellBuf  = '';
+  var tableNode:  RenderNode | null   = null;  // the <table> RenderNode
+  var tableRowNode: RenderNode | null = null;  // current <tr>
+  var tableCellNode: RenderNode | null = null; // current <td>/<th>
+  var tableCellSpans: InlineSpan[] = [];       // spans collected inside current cell
   var inTableCell   = false;
-  var tableCellHead = false;
 
   // Track open <p> tags for implicit auto-close (HTML5 tree builder rule, item 359)
   var pOpen = 0;
@@ -514,7 +523,21 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
 
   function pushSpan(text: string): void {
     if (!text) return;
-    if (inTableCell) { tableCellBuf += text; return; }
+    if (inTableCell) {
+      // Collect full InlineSpan (preserving links, formatting, etc.)
+      var tsp: InlineSpan = { text };
+      if (linkHref)                          tsp.href      = linkHref;
+      if (linkDownload)                      tsp.download  = linkDownload;
+      if (bold > 0      || curCSS.bold)      tsp.bold      = true;
+      if (italic > 0    || curCSS.italic)    tsp.italic    = true;
+      if (codeInl > 0)                       tsp.code      = true;
+      if (del > 0       || curCSS.strike)    tsp.del       = true;
+      if (mark > 0)                          tsp.mark      = true;
+      if (underline > 0 || curCSS.underline) tsp.underline = true;
+      if (curCSS.color !== undefined && !linkHref) tsp.color = curCSS.color;
+      tableCellSpans.push(tsp);
+      return;
+    }
     if (skipDepth > 0) return;
     var sp: InlineSpan = { text };
     if (linkHref)                          sp.href      = linkHref;
@@ -1070,26 +1093,92 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
         }
 
         // ── Table ─────────────────────────────────────────────────────────────
-        case 'table':
+        case 'table': {
           applyStyle(tok.tag, tok.attrs); flushInline();
-          inTable = true; tableRows = []; tableCurRow = []; tableCellBuf = ''; inTableCell = false;
-          nodes.push({ type: 'p-break', spans: [] }); break;
-        case 'thead': case 'tbody': case 'tfoot': break;
-        case 'tr':
-          if (inTable && (inTableCell || tableCurRow.length > 0)) {
-            if (inTableCell) { tableCurRow.push({ text: tableCellBuf.trim(), head: tableCellHead }); inTableCell = false; }
-            tableRows.push(tableCurRow); tableCurRow = [];
+          inTable = true; inTableCell = false;
+          tableNode = { type: 'table', spans: [], children: [] };
+          tableRowNode = null; tableCellNode = null; tableCellSpans = [];
+          // Map HTML presentational attributes to CSS props
+          var tbgc = tok.attrs.get('bgcolor');
+          if (tbgc) tableNode.bgColor = _parseColorCSS(tbgc);
+          var twid = tok.attrs.get('width');
+          if (twid) {
+            if (twid.endsWith('%')) {
+              // Percentage of content width — will be resolved at layout time
+              (tableNode as any)._widthPct = parseInt(twid, 10);
+            } else {
+              tableNode.boxWidth = parseInt(twid, 10) || undefined;
+            }
           }
-          flushInline();
-          nodes.push({ type: 'p-break', spans: [] }); break;
-        case 'th':
+          var tcsp = tok.attrs.get('cellspacing');
+          if (tcsp) tableNode.borderSpacing = parseInt(tcsp, 10) || 0;
+          var tcpd = tok.attrs.get('cellpadding');
+          if (tcpd) (tableNode as any)._cellPadding = parseInt(tcpd, 10);
+          if (tok.attrs.get('border') === '0') tableNode.borderWidth = 0;
+          break;
+        }
+        case 'thead': case 'tbody': case 'tfoot': break;
+        case 'tr': {
+          // Close any open cell/row
+          if (inTable && inTableCell && tableRowNode) {
+            tableCellNode!.spans = tableCellSpans.slice();
+            tableRowNode.children!.push(tableCellNode!);
+            inTableCell = false; tableCellNode = null; tableCellSpans = [];
+          }
+          if (inTable && tableRowNode && tableNode) {
+            tableNode.children!.push(tableRowNode);
+          }
+          tableRowNode = { type: 'table-row', spans: [], children: [] };
+          var trbgc = tok.attrs.get('bgcolor');
+          if (trbgc) tableRowNode.bgColor = _parseColorCSS(trbgc);
+          break;
+        }
+        case 'th': {
           applyStyle(tok.tag, tok.attrs); bold++;
-          if (inTable) { inTableCell = true; tableCellHead = true; tableCellBuf = ''; } else pushSpan('| ');
+          if (inTable) {
+            // Close any previously open cell
+            if (inTableCell && tableRowNode && tableCellNode) {
+              tableCellNode.spans = tableCellSpans.slice();
+              tableRowNode.children!.push(tableCellNode);
+            }
+            inTableCell = true; tableCellSpans = [];
+            tableCellNode = { type: 'table-cell', spans: [] };
+            var thcs = tok.attrs.get('colspan');
+            if (thcs) tableCellNode.colspan = parseInt(thcs, 10) || 1;
+            var thrs = tok.attrs.get('rowspan');
+            if (thrs) tableCellNode.rowspan = parseInt(thrs, 10) || 1;
+            var thva = tok.attrs.get('valign');
+            if (thva) tableCellNode.verticalAlign = thva;
+            var thbg = tok.attrs.get('bgcolor');
+            if (thbg) tableCellNode.bgColor = _parseColorCSS(thbg);
+            var thwi = tok.attrs.get('width');
+            if (thwi) tableCellNode.boxWidth = parseInt(thwi, 10) || undefined;
+          } else { pushSpan('| '); }
           break;
-        case 'td':
+        }
+        case 'td': {
           applyStyle(tok.tag, tok.attrs);
-          if (inTable) { inTableCell = true; tableCellHead = false; tableCellBuf = ''; } else pushSpan('| ');
+          if (inTable) {
+            // Close any previously open cell
+            if (inTableCell && tableRowNode && tableCellNode) {
+              tableCellNode.spans = tableCellSpans.slice();
+              tableRowNode.children!.push(tableCellNode);
+            }
+            inTableCell = true; tableCellSpans = [];
+            tableCellNode = { type: 'table-cell', spans: [] };
+            var tdcs = tok.attrs.get('colspan');
+            if (tdcs) tableCellNode.colspan = parseInt(tdcs, 10) || 1;
+            var tdrs = tok.attrs.get('rowspan');
+            if (tdrs) tableCellNode.rowspan = parseInt(tdrs, 10) || 1;
+            var tdva = tok.attrs.get('valign');
+            if (tdva) tableCellNode.verticalAlign = tdva;
+            var tdbg = tok.attrs.get('bgcolor');
+            if (tdbg) tableCellNode.bgColor = _parseColorCSS(tdbg);
+            var tdwi = tok.attrs.get('width');
+            if (tdwi) tableCellNode.boxWidth = parseInt(tdwi, 10) || undefined;
+          } else { pushSpan('| '); }
           break;
+        }
         case 'colgroup': case 'col': break;
 
         // ── Default block ─────────────────────────────────────────────────────
@@ -1210,56 +1299,41 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
 
         case 'th':
           bold = Math.max(0, bold - 1);
-          if (inTable && inTableCell) { tableCurRow.push({ text: tableCellBuf.trim(), head: true }); inTableCell = false; } else pushSpan('  ');
+          if (inTable && inTableCell && tableRowNode && tableCellNode) {
+            // Mark all spans as bold for <th>
+            for (var _thi = 0; _thi < tableCellSpans.length; _thi++) tableCellSpans[_thi].bold = true;
+            tableCellNode.spans = tableCellSpans.slice();
+            tableRowNode.children!.push(tableCellNode);
+            inTableCell = false; tableCellNode = null; tableCellSpans = [];
+          } else if (!inTable) { pushSpan('  '); }
           popCSS(); break;
         case 'td':
-          if (inTable && inTableCell) { tableCurRow.push({ text: tableCellBuf.trim(), head: false }); inTableCell = false; } else pushSpan('  ');
+          if (inTable && inTableCell && tableRowNode && tableCellNode) {
+            tableCellNode.spans = tableCellSpans.slice();
+            tableRowNode.children!.push(tableCellNode);
+            inTableCell = false; tableCellNode = null; tableCellSpans = [];
+          } else if (!inTable) { pushSpan('  '); }
           popCSS(); break;
         case 'table': {
           if (inTable) {
-            if (inTableCell) { tableCurRow.push({ text: tableCellBuf.trim(), head: tableCellHead }); inTableCell = false; }
-            if (tableCurRow.length > 0) { tableRows.push(tableCurRow); tableCurRow = []; }
-            inTable = false;
-            if (tableRows.length > 0) {
-              var numCols = 0;
-              for (var tri = 0; tri < tableRows.length; tri++) { if (tableRows[tri].length > numCols) numCols = tableRows[tri].length; }
-              var colW: number[] = [];
-              for (var ci = 0; ci < numCols; ci++) colW[ci] = 3;
-              for (var tri2 = 0; tri2 < tableRows.length; tri2++) {
-                for (var ci2 = 0; ci2 < tableRows[tri2].length; ci2++) {
-                  var cw = tableRows[tri2][ci2].text.length + 2;
-                  if (cw > colW[ci2]) colW[ci2] = cw;
-                }
-              }
-              var hbar = function(l: string, m: string, r: string, x: string): string {
-                return l + colW.map(function(w) { return m.repeat(w); }).join(x) + r;
-              };
-              var dataRow = function(cells: Array<{text: string; head: boolean}>): string {
-                var s = '\u2502';
-                for (var ci3 = 0; ci3 < numCols; ci3++) {
-                  var c = cells[ci3] ? cells[ci3].text : '';
-                  s += ' ' + c + ' '.repeat(Math.max(0, colW[ci3] - c.length - 1)) + '\u2502';
-                }
-                return s;
-              };
-              nodes.push({ type: 'pre', spans: [{ text: hbar('\u250C', '\u2500', '\u2510', '\u252C') }] });
-              for (var tri3 = 0; tri3 < tableRows.length; tri3++) {
-                if (tri3 > 0) {
-                  var prevHead = tableRows[tri3 - 1].some(function(cc) { return cc.head; });
-                  var nxtHead  = tableRows[tri3].some(function(cc)  { return cc.head; });
-                  if (prevHead && !nxtHead) {
-                    nodes.push({ type: 'pre', spans: [{ text: hbar('\u255E', '\u2550', '\u2561', '\u256A') }] });
-                  } else {
-                    nodes.push({ type: 'pre', spans: [{ text: hbar('\u251C', '\u2500', '\u2524', '\u253C') }] });
-                  }
-                }
-                nodes.push({ type: 'pre', spans: [{ text: dataRow(tableRows[tri3]) }] });
-              }
-              nodes.push({ type: 'pre', spans: [{ text: hbar('\u2514', '\u2500', '\u2518', '\u2534') }] });
+            // Close any open cell
+            if (inTableCell && tableRowNode && tableCellNode) {
+              tableCellNode.spans = tableCellSpans.slice();
+              tableRowNode.children!.push(tableCellNode);
+              inTableCell = false; tableCellNode = null; tableCellSpans = [];
             }
-            tableRows = []; tableCurRow = [];
+            // Close any open row
+            if (tableRowNode && tableNode) {
+              tableNode.children!.push(tableRowNode);
+              tableRowNode = null;
+            }
+            inTable = false;
+            // Emit the table node into the document
+            if (tableNode && tableNode.children!.length > 0) {
+              nodes.push(tableNode);
+            }
+            tableNode = null;
           }
-          nodes.push({ type: 'p-break', spans: [] });
           popCSS(); break;
         }
         case 'thead': case 'tbody': case 'tfoot': break;
@@ -1297,8 +1371,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
       }
 
       txt = txt.replace(/[\r\n\t]+/g, ' ');
-      if (inTableCell) { tableCellBuf += txt; continue; }
-      if (!txt.trim()) continue;
+      if (!txt.trim() && !inTableCell) continue;
       pushSpan(txt);
     }
   }

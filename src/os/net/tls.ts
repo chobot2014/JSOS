@@ -23,7 +23,6 @@
 
 import {
   sha256, hmacSha256, hkdfExtract, hkdfExpand, hkdfExpandLabel,
-  aesKeyExpand, aesEncryptBlock,
   gcmEncrypt, gcmDecrypt,
   chacha20poly1305Encrypt, chacha20poly1305Decrypt,
   x25519, x25519PublicKey, generateKey32, generateKey32Unclamped,
@@ -267,8 +266,6 @@ function tlsEncryptRecord(
     var cc = chacha20poly1305Encrypt(key, nonce, aad, inner);
     return aad.concat(cc.ciphertext).concat(cc.tag);
   }
-  var ek = aesKeyExpand(key);
-  // Use gcmEncrypt from crypto.ts
   var aeadOut = gcmEncrypt(key, nonce, aad, inner);
   return aad.concat(aeadOut.ciphertext).concat(aeadOut.tag);
 }
@@ -1643,10 +1640,9 @@ export class TLSSocket {
       this.serverAppSeq++;
       var inner = dec.data;
       if (inner.length < 4) continue;
-      // TLS 1.3: inner content type is last byte of plaintext
-      var innerType = inner[inner.length - 1];
-      if (innerType !== TLS_HANDSHAKE) continue;
-      var hs = inner.slice(0, inner.length - 1);
+      // TLS 1.3: tlsDecryptRecord already strips inner content type
+      if (dec.type !== TLS_HANDSHAKE) continue;
+      var hs = inner;
       if (hs[0] !== 4) continue;  // HS_NEW_SESSION_TICKET = 4
       var ticketLen = (hs[1] << 16) | (hs[2] << 8) | hs[3];
       if (hs.length < 4 + ticketLen) continue;
