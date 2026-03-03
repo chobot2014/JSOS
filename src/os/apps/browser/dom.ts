@@ -23,10 +23,10 @@ import { bumpStyleGeneration } from './cache.js';
  * Item 370.
  */
 export function sanitizeHTML(html: string): string {
-  // 1. Remove entire <script>…</script> and <style>…</style> blocks (case-insensitive, greedy)
+  // 1. Remove <script>…</script> blocks only — NOT <style>!
+  //    Many SPAs (styled-components, emotion, MUI) inject <style> via innerHTML.
   var s = html
-    .replace(/<script[\s\S]*?<\/script\s*>/gi, '')
-    .replace(/<style[\s\S]*?<\/style\s*>/gi, '');
+    .replace(/<script[\s\S]*?<\/script\s*>/gi, '');
 
   // 2. Strip on* event-handler attributes from all tags
   //    Matches: onclick="...", onhover='...', onerror (unquoted), etc.

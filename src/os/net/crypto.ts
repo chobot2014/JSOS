@@ -599,18 +599,10 @@ export function ecdhP256(privateKey: number[], remoteKey: number[]): number[] {
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
-/** Generate a 32-byte random private key using kernel tick entropy */
+/** Generate a 32-byte random private key using hardware RDRAND entropy */
 export function generateKey32(): number[] {
-  var k: number[] = new Array(32);
-  for (var i = 0; i < 32; i++) {
-    // Mix tick counter with position for deterministic-but-varied bytes
-    k[i] = (kernel.getTicks() * (i + 1) * 6364136223846793005 + 1442695040888963407) & 0xff;
-    // Let time advance slightly for next byte
-    if ((i & 3) === 0) {
-      var t0 = kernel.getTicks();
-      while (kernel.getTicks() === t0) { /* spin */ }
-    }
-  }
+  var k = getHardwareRandom(32);
+  // X25519 scalar clamping (RFC 7748 §5)
   k[0]  &= 248;
   k[31] &= 127;
   k[31] |= 64;
@@ -622,14 +614,7 @@ export function generateKey32(): number[] {
  * Used for P-256 ECDH where the scalar should be a full 256-bit value in [1, n-1].
  */
 export function generateKey32Unclamped(): number[] {
-  var k: number[] = new Array(32);
-  for (var i = 0; i < 32; i++) {
-    k[i] = (kernel.getTicks() * (i + 3) * 6364136223846793005 + 1442695040888963407) & 0xff;
-    if ((i & 3) === 0) {
-      var t0 = kernel.getTicks();
-      while (kernel.getTicks() === t0) { /* spin */ }
-    }
-  }
+  var k = getHardwareRandom(32);
   // Ensure non-zero and < n (P-256 n ≈ 0.9 × 2^256)
   k[0] |= 0x01;  // guarantee non-zero
   k[0] &= 0x7f;  // keep below P-256 n

@@ -227,8 +227,8 @@ export class BrowserApp implements App {
   onMount(win: WMWindow): void {
     os.debug.log('[browser] onMount start');
     this._win = win;
-    // Initialize first tab — navigate to HN for JS-heavy site testing
-    var _startURL = 'https://en.m.wikipedia.org/wiki/Main_Page';
+    // Initialize first tab — navigate to HN for JS-heavy SPA testing
+    var _startURL = 'https://news.ycombinator.com/';
     this._tabs = [this._makeBlankTab(_startURL)];
     this._curTab = 0;
     this._loadTab(0);
@@ -2008,8 +2008,16 @@ export class BrowserApp implements App {
         confirm: (_msg: string): boolean => true,   // no blocking UI — default accept
         prompt:  (_msg: string, def: string): string => def,
         rerender: (bodyHTML: string) => {
-          // Re-parse the mutated body and re-layout without re-running scripts
+          // Re-parse the mutated body and re-layout without re-running scripts.
+          // Also extract any dynamically injected <style> tags (e.g. styled-components, MUI).
           var newHTML  = '<body>' + bodyHTML + '</body>';
+          var rTmp = parseHTML(newHTML);
+          // Merge any new inline styles from JS-injected <style> tags into sheets
+          if (rTmp.styles.length > 0) {
+            var _dynStyles = rTmp.styles.join('\n');
+            var _dynRules  = parseStylesheet(_dynStyles);
+            if (_dynRules.length > 0) sheets = sheets.concat(_dynRules);
+          }
           var r2 = parseHTML(newHTML, sheets);
           self2._forms = r2.forms;
           self2._layoutPage(r2.nodes as any, r2.widgets as any, self2._pageTitle, self2._pageURL);

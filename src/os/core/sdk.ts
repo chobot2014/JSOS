@@ -367,7 +367,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
     // ── TLS handshake (synchronous — typically < 200 ms) ──────────────────
     if (f.stage === 'tls') {
       var tls = new TLSSocket(f.parsed.host);
-      if (!tls.handshakeOnConnected(f.sock)) {
+      if (!tls.handshakeOnConnected(f.sock, f.fetchIP, +f.parsed.port)) {
         _cleanupFetch(f);
         f.callback(null, 'TLS handshake failed with ' + f.fetchIP);
         return 'done';
@@ -423,8 +423,14 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
 
     // ── Receive ────────────────────────────────────────────────────────────
     if (f.stage === 'receiving') {
-      var chunk: number[] | null = f.tls ? f.tls.readNB() : net.recvBytesNB(f.sock);
-      if (chunk && chunk.length > 0) {
+      // Drain ALL available data in one coroutine step (no inter-tick yielding).
+      // This avoids the ~20ms WM frame latency for each NIC read when TCP delivers
+      // data in multiple segments (common with gzip + chunked encoding).
+      // We spin up to 64 reads; if still pending data, we'll continue next tick.
+      var _drainLimit = 64;
+      for (var _dr = 0; _dr < _drainLimit; _dr++) {
+        var chunk: number[] | null = f.tls ? f.tls.readNB() : net.recvBytesNB(f.sock);
+        if (!chunk || chunk.length === 0) break;  // nothing available right now
         f.chunks.push(chunk);
         f.totalRecv += chunk.length;
         f.deadline = kernel.getTicks() + 200;  // 2 s silence timeout resets on each chunk
@@ -449,38 +455,24 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
           return 'pending';
         }
 
-        // Chunked termination: check last 5 bytes for "0\r\n\r\n" (final chunk)
+        // Chunked termination: scan last ≤8 bytes across chunks for "0\r\n\r\n"
         if (f.headersDone && f.chunked) {
-          var _lastC = f.chunks[f.chunks.length - 1];
-          // Check if last chunk ends with 0x30 0x0D 0x0A 0x0D 0x0A
-          if (_lastC.length >= 5 &&
-              _lastC[_lastC.length - 5] === 0x30 &&
-              _lastC[_lastC.length - 4] === 0x0D &&
-              _lastC[_lastC.length - 3] === 0x0A &&
-              _lastC[_lastC.length - 2] === 0x0D &&
-              _lastC[_lastC.length - 1] === 0x0A) {
+          // Build tail from the last byte(s) of accumulated data
+          var _tail5: number[] = [];
+          for (var _ci2 = f.chunks.length - 1; _ci2 >= 0 && _tail5.length < 8; _ci2--) {
+            var _ck = f.chunks[_ci2];
+            var _take = Math.min(_ck.length, 8 - _tail5.length);
+            for (var _ti2 = _ck.length - _take; _ti2 < _ck.length; _ti2++) _tail5.unshift(_ck[_ti2]);
+          }
+          var _tl = _tail5.length;
+          if (_tl >= 5 &&
+              _tail5[_tl - 5] === 0x30 &&
+              _tail5[_tl - 4] === 0x0D &&
+              _tail5[_tl - 3] === 0x0A &&
+              _tail5[_tl - 2] === 0x0D &&
+              _tail5[_tl - 1] === 0x0A) {
             f.stage = 'parsing';
             return 'pending';
-          }
-          // Handle split across last two chunks
-          if (f.chunks.length >= 2) {
-            var _prev = f.chunks[f.chunks.length - 2];
-            var _tail: number[] = [];
-            var _need = 5;
-            // Take tail from prev chunk
-            var _pStart = _prev.length > _need ? _prev.length - _need : 0;
-            for (var _ti = _pStart; _ti < _prev.length; _ti++) _tail.push(_prev[_ti]);
-            // Append all of last chunk
-            for (var _ti = 0; _ti < _lastC.length; _ti++) _tail.push(_lastC[_ti]);
-            if (_tail.length >= 5 &&
-                _tail[_tail.length - 5] === 0x30 &&
-                _tail[_tail.length - 4] === 0x0D &&
-                _tail[_tail.length - 3] === 0x0A &&
-                _tail[_tail.length - 2] === 0x0D &&
-                _tail[_tail.length - 1] === 0x0A) {
-              f.stage = 'parsing';
-              return 'pending';
-            }
           }
         }
       }
