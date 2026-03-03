@@ -392,7 +392,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
           return 'pending';
         }
         f.stage    = 'connecting';
-        f.deadline = kernel.getTicks() + 200;
+        f.deadline = kernel.getTicks() + 500;
         f.sock     = net.createSocket('tcp');
         net.connectAsync(f.sock, ip, f.parsed.port);
         return 'pending';
@@ -487,7 +487,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       f.headersDone = false;
       f.bodyOffset = 0;
       f.chunked    = false;
-      f.deadline   = kernel.getTicks() + 800;  // 8 s hard timeout
+      f.deadline   = kernel.getTicks() + 3000;  // 30 s hard timeout
       f.stage      = 'receiving';
       return 'pending';
     }
@@ -504,7 +504,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
         if (!chunk || chunk.length === 0) break;  // nothing available right now
         f.chunks.push(chunk);
         f.totalRecv += chunk.length;
-        f.deadline = kernel.getTicks() + 200;  // 2 s silence timeout resets on each chunk
+        f.deadline = kernel.getTicks() + 500;  // 5 s silence timeout resets on each chunk
 
         // Parse headers on-the-fly to extract Content-Length / Transfer-Encoding
         if (!f.headersDone) {
@@ -621,12 +621,12 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
           if (rIP) {
             f.fetchIP  = rIP;
             f.stage    = 'connecting';
-            f.deadline = kernel.getTicks() + 200;
+            f.deadline = kernel.getTicks() + 500;
             f.sock     = net.createSocket('tcp');
             net.connectAsync(f.sock, rIP, rParsed.port);
           } else {
             f.stage    = 'dns';
-            f.deadline = kernel.getTicks() + 300;
+            f.deadline = kernel.getTicks() + 500;
             var rq     = dnsSendQueryAsync(rParsed.host);
             f.dnsPort  = rq.port;
             f.dnsId    = rq.id;
@@ -687,7 +687,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
         }
         h2.sendData(h2sid, h2body, true);
       }
-      f.deadline = kernel.getTicks() + 800;  // 8 s timeout
+      f.deadline = kernel.getTicks() + 3000;  // 30 s timeout
       f.stage = 'h2-receiving';
       return 'pending';
     }
@@ -695,7 +695,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
     // ── HTTP/2: Receive response frames ──────────────────────────────────
     if (f.stage === 'h2-receiving') {
       var h2r = f.h2conn!;
-      var stream = h2r.receive(f.h2streamId, 50);  // short poll, 500ms
+      var stream = h2r.receive(f.h2streamId, 10);  // short poll, 100ms — don't block coroutine
       if (stream && (stream.state === 'half_closed_remote' || stream.state === 'closed')) {
         // Extract status and headers from :status pseudo-header
         var h2status = 200;
@@ -759,12 +759,12 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
             if (h2rIP) {
               f.fetchIP  = h2rIP;
               f.stage    = 'connecting';
-              f.deadline = kernel.getTicks() + 200;
+              f.deadline = kernel.getTicks() + 500;
               f.sock     = net.createSocket('tcp');
               net.connectAsync(f.sock, h2rIP, h2rParsed.port);
             } else {
               f.stage    = 'dns';
-              f.deadline = kernel.getTicks() + 300;
+              f.deadline = kernel.getTicks() + 500;
               var h2rq   = dnsSendQueryAsync(h2rParsed.host);
               f.dnsPort  = h2rq.port;
               f.dnsId    = h2rq.id;
@@ -1177,12 +1177,12 @@ function _doFetch(
       if (cachedIP) {
         f.fetchIP  = cachedIP;
         f.stage    = 'connecting';
-        f.deadline = kernel.getTicks() + 200;
+        f.deadline = kernel.getTicks() + 500;
         f.sock     = net.createSocket('tcp');
         net.connectAsync(f.sock, cachedIP, parsed.port);
       } else {
         f.stage    = 'dns';
-        f.deadline = kernel.getTicks() + 300;
+        f.deadline = kernel.getTicks() + 500;
         var q      = dnsSendQueryAsync(parsed.host);
         f.dnsPort  = q.port;
         f.dnsId    = q.id;
