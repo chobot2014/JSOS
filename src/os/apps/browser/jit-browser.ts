@@ -175,6 +175,46 @@ function textWidth(physAddr, len, charWidth) {
 }
 `;
 
+/**
+ * Fast byte-scan for HTML tag close boundary (>).
+ * Scans a physmem byte buffer for the next '>' (ASCII 62) from offset.
+ * Returns the offset of the found character, or len if not found.
+ * Symmetric counterpart to scanTagOpen — the HTML tokenizer calls both
+ * equally often (every tag needs both boundaries located).
+ */
+const _SRC_SCAN_TAG_CLOSE = `
+function scanTagClose(physAddr, offset, len) {
+  var i = offset;
+  while (i < len) {
+    var ch = mem8[physAddr + i] & 0xff;
+    if (ch === 62) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return len;
+}
+`;
+
+/**
+ * Generic forward byte scan in a physmem buffer.
+ * Scans for any target byte value — useful for ';', '"', "'", ':', '}'
+ * and other CSS / HTML token delimiters that fire as often as '<'/'>'.
+ */
+const _SRC_SCAN_BYTE = `
+function scanByte(physAddr, offset, len, target) {
+  var i = offset;
+  while (i < len) {
+    var ch = mem8[physAddr + i] & 0xff;
+    if (ch === target) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return len;
+}
+`;
+
 // ─── Compiled function slots ───────────────────────────────────────────────
 
 type JITFn = ((...args: number[]) => number) | null;
@@ -182,6 +222,8 @@ type JITFn = ((...args: number[]) => number) | null;
 var _stringHash:    JITFn = null;
 var _canvasClear:   JITFn = null;
 var _scanTagOpen:   JITFn = null;
+var _scanTagClose:  JITFn = null;
+var _scanByte:      JITFn = null;
 var _parseCSSInt:   JITFn = null;
 var _compositeRow:  JITFn = null;
 var _textWidth:     JITFn = null;
@@ -563,9 +605,11 @@ export const JITBrowserEngine = {
       return fn;
     }
 
-    _stringHash   = tryCompile(_SRC_STRING_HASH,   'stringHash');
-    _canvasClear  = tryCompile(_SRC_CANVAS_CLEAR,  'canvasClear');
+    _stringHash   = tryCompile(_SRC_STRING_HASH,    'stringHash');
+    _canvasClear  = tryCompile(_SRC_CANVAS_CLEAR,   'canvasClear');
     _scanTagOpen  = tryCompile(_SRC_SCAN_TAG_OPEN,  'scanTagOpen');
+    _scanTagClose = tryCompile(_SRC_SCAN_TAG_CLOSE, 'scanTagClose');
+    _scanByte     = tryCompile(_SRC_SCAN_BYTE,       'scanByte');
     _parseCSSInt  = tryCompile(_SRC_PARSE_CSS_INT,  'parseCSSInt');
     _compositeRow = tryCompile(_SRC_COMPOSITE_ROW,  'compositeRow');
     _textWidth    = tryCompile(_SRC_TEXT_WIDTH,      'textWidth');
@@ -603,28 +647,35 @@ export const JITBrowserEngine = {
 
   /** JIT-compiled CSS integer parsing. */
   parseCSSInt(value: string): number {
-    // Fast path for common patterns
+    // parseInt is a C builtin in QuickJS — far faster than a manual char loop.
+    // The `| 0` truncates to int32 and handles NaN → 0.
     if (value.length === 0) return 0;
-    var ch = value.charCodeAt(0);
-    if (ch === 48 && value.length === 1) return 0; // "0"
-    // Full parse
-    var result = 0;
-    var neg = false;
-    for (var i = 0; i < value.length; i++) {
-      var c = value.charCodeAt(i);
-      if (c === 45 && i === 0) { neg = true; continue; }
-      if (c >= 48 && c <= 57) {
-        result = result * 10 + (c - 48);
-      } else {
-        break; // stop at non-digit (px, em, etc.)
-      }
-    }
-    return neg ? -result : result;
+    return parseInt(value, 10) | 0;
   },
 
   /** JIT-compiled per-pixel alpha composite for overlapping elements. */
   compositeRow(dst: number, src: number, n: number): void {
     if (_compositeRow) _compositeRow(dst, src, n);
+  },
+
+  /**
+   * JIT-compiled scan for HTML tag-close boundary '>' in a physmem buffer.
+   * Returns the offset of '>' or len if not found.
+   * Symmetric to scanTagOpen — called equally often by the HTML tokenizer.
+   */
+  scanTagClose(physAddr: number, offset: number, len: number): number {
+    if (_scanTagClose) return _scanTagClose(physAddr, offset, len);
+    return len; // JIT unavailable — caller falls back to its own scanning code
+  },
+
+  /**
+   * JIT-compiled generic forward byte scan in a physmem buffer.
+   * Finds any delimiter byte (';', ':', '"', "'", '}', etc.).
+   * Returns the offset of the target byte or len if not found.
+   */
+  scanByte(physAddr: number, offset: number, len: number, target: number): number {
+    if (_scanByte) return _scanByte(physAddr, offset, len, target);
+    return len; // JIT unavailable — caller falls back to its own scanning code
   },
 
   // ── Script cache ──────────────────────────────────────────────────────────

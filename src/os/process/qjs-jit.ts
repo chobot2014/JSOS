@@ -392,9 +392,9 @@ export class QJSJITCompiler {
     const localBytes = (locals + 8) * 4;  // locals + extra eval-stack space
 
     // IC-backed / slow-path opcodes accepted in addition to JIT_SUPPORTED_OPCODES
-    // (items 848/849/852/858 + OP_call/OP_call0 via C helper slow path)
+    // (items 848/849/852/858 + OP_call/OP_call0/OP_call_method via C helper slow path)
     const IC_OPCODES = new Set([OP_get_field, OP_put_field, OP_get_array_el, OP_put_array_el, OP_typeof,
-                                 OP_call, OP_call0]);
+                                 OP_call, OP_call0, OP_call_method]);
 
     // Prologue — save EBX for reg-alloc path (item 855)
     if (this._regAlloc) {
@@ -874,6 +874,35 @@ export class QJSJITCompiler {
           // Step 8: push int32 result
           e.pushEax();
 
+          pc += 3; break;
+        }
+
+        // OP_call_method (like OP_call but `this` sits between fn and args on
+        // the eval stack): [fn_ptr, this, a0 .. a_{N-1}] → [result]
+        // Only difference from OP_call:
+        //   • fn_ptr is one slot deeper → peekN(6 + callArgc) instead of peekN(5 + callArgc)
+        //   • eval-stack cleanup removes fn + this + N args → (callArgc + 2) * 4
+        case OP_call_method: {
+          const callArgc = bc.u16(pc + 1);
+          if (!this._helperCallFn || callArgc > 4) return null;
+
+          // Build cdecl frame for jit_js_call_fn(fn, a0, a1, a2, a3, argc).
+          e.pushImm32(callArgc);
+          for (let i = 3; i >= callArgc; i--) e.pushImm32(0);
+          for (let k = 0; k < callArgc; k++) {
+            e.peekN(5 - callArgc + 2 * k);
+            e.pushEax();
+          }
+          // fn_ptr is one extra slot deep because `this` sits above it
+          e.peekN(6 + callArgc);
+          e.pushEax();
+
+          e.immEcx(this._helperCallFn);
+          e.callEcx();
+          e.addEsp(24);                      // clean 6-param cdecl frame
+          e.addEsp((callArgc + 2) * 4);      // fn + this + N args
+
+          e.pushEax();
           pc += 3; break;
         }
 
