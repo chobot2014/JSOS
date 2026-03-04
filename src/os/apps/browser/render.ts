@@ -22,6 +22,7 @@
 import type { PixelColor } from '../../core/sdk.js';
 import { CHAR_W, CHAR_H } from './constants.js';
 import type { RenderedLine } from './types.js';
+import { fontRegistry, registerJSOSMono } from './font.js';
 
 declare var kernel: import('../../core/kernel.js').KernelAPI;
 
@@ -175,11 +176,13 @@ export class TextAtlas {
   private _atlasH:  number;
   private _ready:   boolean = false;
 
-  /** Build the atlas from the first 96 ASCII glyphs. */
+  /** Build the atlas from the first 96 ASCII glyphs using the JSOS Mono VGA bitmap font. */
   init(charW: number, charH: number): void {
     this._atlasW = charW * ATLAS_COLS;
     this._atlasH = charH * ATLAS_ROWS;
     this._atlas   = new Uint32Array(this._atlasW * this._atlasH);
+    // Obtain (or register) the bitmap font face at charH pixels.
+    var face = fontRegistry.get('JSOS Mono', charH) ?? registerJSOSMono(charH);
     // Pre-render each character into the atlas slot
     for (var ch = 0x20; ch < 0xA0; ch++) {
       var idx  = ch - 0x20;
@@ -187,13 +190,18 @@ export class TextAtlas {
       var row  = Math.floor(idx / ATLAS_COLS);
       var ox   = col * charW;
       var oy   = row * charH;
-      // Fill with a 0xFFFFFF white glyph placeholder.
-      // Real implementation would use a bitmap font table.
-      for (var y = 0; y < charH; y++) {
-        for (var x = 0; x < charW; x++) {
-          // Checkerboard placeholder — replace with actual font data
-          var on = ((x + y) & 1) === 0;
-          this._atlas[(oy + y) * this._atlasW + (ox + x)] = on ? 0xFFFFFFFF : 0;
+      var glyph = face.getGlyph(ch);
+      if (!glyph) continue;
+      // Blit the 1-bpp glyph bitmap directly into the atlas.
+      // Set pixels write 0xFFFFFFFF (opaque white); blitChar tints with the requested color.
+      var rowBytes = Math.ceil(glyph.width / 8);
+      var glyphH   = Math.min(glyph.height, charH);
+      var glyphW   = Math.min(glyph.width,  charW);
+      for (var gy = 0; gy < glyphH; gy++) {
+        for (var gx = 0; gx < glyphW; gx++) {
+          var srcByte = glyph.data[gy * rowBytes + (gx >> 3)] ?? 0;
+          var bit = (srcByte >> (7 - (gx & 7))) & 1;
+          this._atlas[(oy + gy) * this._atlasW + (ox + gx)] = bit ? 0xFFFFFFFF : 0;
         }
       }
     }
@@ -641,6 +649,34 @@ export class TileRenderer {
     lineY: number,
     tileW: number,
   ): void {
+    var lineH = line.lineH || CHAR_H;
+
+    // ── Background fill (bgColor / preBg / hrLine) ─────────────────────────
+    if (line.bgColor !== undefined) {
+      var bgFill = line.bgColor | 0xFF000000;  // ensure opaque
+      for (var bgy = lineY; bgy < Math.min(lineY + lineH, pixels.length / vpW); bgy++) {
+        for (var bgx = tileX; bgx < tileX + tileW; bgx++) {
+          pixels[bgy * vpW + bgx] = bgFill;
+        }
+      }
+    } else if (line.preBg) {
+      // Code block background (#1e1e2e / dark)
+      for (var bgy2 = lineY; bgy2 < Math.min(lineY + lineH, pixels.length / vpW); bgy2++) {
+        for (var bgx2 = tileX; bgx2 < tileX + tileW; bgx2++) {
+          pixels[bgy2 * vpW + bgx2] = 0xFF2D2D2D;
+        }
+      }
+    } else if (line.hrLine) {
+      // Horizontal rule: single mid-line
+      var hrY = lineY + 1;
+      if (hrY >= 0 && hrY < pixels.length / vpW) {
+        for (var hrx = tileX; hrx < tileX + tileW; hrx++) {
+          pixels[hrY * vpW + hrx] = 0xFFAAAAAA;
+        }
+      }
+    }
+
+    // ── Span rendering ──────────────────────────────────────────────────────
     for (var si = 0; si < line.nodes.length; si++) {
       var span = line.nodes[si];
       var x    = span.x;
@@ -662,6 +698,32 @@ export class TileRenderer {
         } else {
           // Fallback: fill single pixel per character
           pixels[lineY * vpW + px] = clr;
+        }
+      }
+
+      // ── Text decoration ──────────────────────────────────────────────────
+      var spanW  = text.length * cw;
+      var spanX0 = x;
+      var spanX1 = Math.min(x + spanW, tileX + tileW);
+      if (spanX0 < tileX) spanX0 = tileX;
+
+      // Underline: drawn one pixel below baseline (at lineY + ch)
+      if ((span as any).underline && spanX0 < spanX1) {
+        var ulY = lineY + ch;
+        if (ulY >= 0 && ulY < pixels.length / vpW) {
+          for (var ulx = spanX0; ulx < spanX1; ulx++) {
+            if (ulx >= 0 && ulx < vpW) pixels[ulY * vpW + ulx] = clr;
+          }
+        }
+      }
+
+      // Strikethrough (del): drawn at mid-height of the character cell
+      if ((span as any).del && spanX0 < spanX1) {
+        var stY = lineY + Math.round(ch * 0.55);
+        if (stY >= 0 && stY < pixels.length / vpW) {
+          for (var stx = spanX0; stx < spanX1; stx++) {
+            if (stx >= 0 && stx < vpW) pixels[stY * vpW + stx] = clr;
+          }
         }
       }
     }

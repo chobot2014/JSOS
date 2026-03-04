@@ -143,7 +143,7 @@ declare var kernel: import('./kernel.js').KernelAPI;
 // ── Public types ──────────────────────────────────────────────────────────────
 
 export interface FetchOptions {
-  method?:       'GET' | 'POST';
+  method?:       string;  // any HTTP verb: GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS …
   headers?:      Record<string, string>;
   body?:         string | number[];
   /** Maximum redirects to follow (default 5). */

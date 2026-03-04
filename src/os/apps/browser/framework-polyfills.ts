@@ -255,8 +255,8 @@ type WebAssemblyImportDescriptor = { name: string; module: string; kind: string 
 
 // ── Master installer ───────────────────────────────────────────────────────
 
-export function installFrameworkPolyfills(win: any): void {
-  installJQueryPolyfills(win);
-  installAngularPolyfills(win);
-  installWebAssemblyPolyfill(win);
+export function installFrameworkPolyfills(_win: any): void {
+  // No-op: real XMLHttpRequest, process stubs, and WebAssembly types are provided by
+  // jsruntime.ts. The stubs in this file would conflict with (and are inferior to)
+  // the production implementations already installed on the window object.
 }

@@ -525,56 +525,8 @@ function consumeDirtyRegions(): { full: boolean; regions: DirtyRegion[] } {
 // Site-specific fixes for the most commonly visited pages.
 // Modern Google requires extensive Web Platform APIs that we stub/implement.
 
-interface SiteProfile {
-  name:           string;
-  hostname:       string;
-  optimizations:  string[];
-  applied:        boolean;
-}
-
-var _siteProfiles: SiteProfile[] = [
-  {
-    name: 'Google Search',
-    hostname: 'www.google.com',
-    optimizations: [
-      'prefetch-suggestions-api',
-      'stub-service-worker',
-      'fast-dom-mutation-batch',
-      'precompile-search-js',
-    ],
-    applied: false,
-  },
-  {
-    name: 'Hacker News',
-    hostname: 'news.ycombinator.com',
-    optimizations: [
-      'fast-table-layout',
-      'precompile-voting-js',
-      'prefetch-comment-pages',
-    ],
-    applied: false,
-  },
-  {
-    name: 'GitHub',
-    hostname: 'github.com',
-    optimizations: [
-      'turbo-frame-compat',
-      'stimulus-compat',
-      'prefetch-api-endpoints',
-    ],
-    applied: false,
-  },
-];
-
-/** Get optimization profile for a URL. */
-function getSiteProfile(url: string): SiteProfile | null {
-  try {
-    var hostname = new URL(url).hostname;
-    return _siteProfiles.find(p => hostname === p.hostname || hostname.endsWith('.' + p.hostname)) ?? null;
-  } catch (_) {
-    return null;
-  }
-}
+// Site-specific compatibility profiles removed — getSiteProfile() in the public API
+// now always returns null (see JITBrowserEngine export below).
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -759,7 +711,8 @@ export const JITBrowserEngine = {
 
   // ── Site-specific optimization ────────────────────────────────────────────
 
-  getSiteProfile,
+  /** @deprecated Always returns null. Kept for API compatibility. */
+  getSiteProfile(_url: string): null { return null; },
 
   // ── Diagnostics ────────────────────────────────────────────────────────────
 

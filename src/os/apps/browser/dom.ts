@@ -1240,18 +1240,29 @@ export class VElement extends VNode {
 
   // ── Layout/size stubs needed by many JS frameworks ────────────────────────────
 
-  /** Approximate bounding rect — used by JS frameworks checking visibility. */
+  /**
+   * Written back by the layout engine after each layout pass so that JS
+   * measurement APIs return real coordinates instead of the hardcoded fallback.
+   * Shape: { x, y, w, h } in page pixels (top-left origin, before scroll).
+   */
+  _layoutRect: { x: number; y: number; w: number; h: number } | null = null;
+
+  /** Bounding rect — uses layout writeback when available, falls back to fallback. */
   getBoundingClientRect(): { x: number; y: number; width: number; height: number; top: number; left: number; right: number; bottom: number } {
-    // Return a plausible rect so visibility checks don't all return zero
+    if (this._layoutRect) {
+      var r = this._layoutRect;
+      return { x: r.x, y: r.y, width: r.w, height: r.h, top: r.y, left: r.x, right: r.x + r.w, bottom: r.y + r.h };
+    }
+    // Fallback: return a plausible rect so visibility checks don't all return zero
     return { x: 0, y: 0, width: 200, height: 20, top: 0, left: 0, right: 200, bottom: 20 };
   }
-  get offsetWidth():  number { return 200; }
-  get offsetHeight(): number { return 20; }
-  get offsetTop():    number { return 0; }
-  get offsetLeft():   number { return 0; }
+  get offsetWidth():  number { return this._layoutRect ? this._layoutRect.w : 200; }
+  get offsetHeight(): number { return this._layoutRect ? this._layoutRect.h : 20; }
+  get offsetTop():    number { return this._layoutRect ? this._layoutRect.y : 0; }
+  get offsetLeft():   number { return this._layoutRect ? this._layoutRect.x : 0; }
   get offsetParent(): VElement | null { return this.parentNode instanceof VElement ? this.parentNode as VElement : null; }
-  get clientWidth():  number { return 200; }
-  get clientHeight(): number { return 20; }
+  get clientWidth():  number { return this._layoutRect ? this._layoutRect.w : 200; }
+  get clientHeight(): number { return this._layoutRect ? this._layoutRect.h : 20; }
   get clientTop():    number { return 0; }
   get clientLeft():   number { return 0; }
   _scrollTop  = 0;
@@ -1270,8 +1281,8 @@ export class VElement extends VNode {
     this._scrollLeft = n;
     this.dispatchEvent(new VEvent('scroll', { bubbles: false }));
   }
-  get scrollWidth():  number { return 200; }
-  get scrollHeight(): number { return 20; }
+  get scrollWidth():  number { return this._layoutRect ? Math.max(this._layoutRect.w, this._scrollLeft + (this._layoutRect.w)) : 200; }
+  get scrollHeight(): number { return this._layoutRect ? Math.max(this._layoutRect.h, this._scrollTop  + (this._layoutRect.h)) : 20; }
 
   /** Returns an array of DOMRect objects for each CSS border box of the element. */
   getClientRects(): Array<{ x: number; y: number; width: number; height: number; top: number; left: number; right: number; bottom: number }> {

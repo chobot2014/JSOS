@@ -406,7 +406,7 @@ export function createPageJS(
   // ── window.navigator ───────────────────────────────────────────────────────
 
   var navigator = {
-    userAgent:  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 JSOS/1.0',
+    userAgent:  'JSOS/1.0',
     platform:   'Linux x86_64',
     language:   'en-US',
     languages:  ['en-US', 'en'],
@@ -474,19 +474,15 @@ export function createPageJS(
     // User-Agent Client Hints API (navigator.userAgentData) — used by React DevTools, Angular, Vite
     userAgentData: {
       brands: [
-        { brand: 'Chromium', version: '120' },
-        { brand: 'Google Chrome', version: '120' },
         { brand: 'JSOS', version: '1' },
       ],
       mobile: false,
       platform: 'Linux',
       getHighEntropyValues(hints: string[]): Promise<Record<string, unknown>> {
         var vals: Record<string, unknown> = {
-          architecture: 'x86', bitness: '64', model: '', platform: 'Linux',
-          platformVersion: '1.0', uaFullVersion: '120.0.0.0',
+          architecture: 'x86', bitness: '32', model: '', platform: 'Linux',
+          platformVersion: '1.0', uaFullVersion: '1.0',
           fullVersionList: [
-            { brand: 'Chromium', version: '120.0.0.0' },
-            { brand: 'Google Chrome', version: '120.0.0.0' },
             { brand: 'JSOS', version: '1.0.0' },
           ],
           wow64: false,
@@ -1321,7 +1317,7 @@ export function createPageJS(
         return;
       }
 
-      var method = (opts?.method || 'GET').toUpperCase() as 'GET' | 'POST';
+      var method = (opts?.method || 'GET').toUpperCase();
       var extraHeaders: Record<string, string> = {};
       if (opts?.headers) {
         if (opts.headers instanceof Headers_) opts.headers.forEach((v: string, k: string) => { extraHeaders[k] = v; });
@@ -1437,6 +1433,8 @@ export function createPageJS(
       if (this._aborted) return;
       var self = this;
       try { if (self.onloadstart) self.onloadstart({ target: self }); } catch(_) {}
+      var lsListeners = self._listeners.get('loadstart');
+      if (lsListeners) for (var _lsf of lsListeners) try { _lsf({ target: self }); } catch(_) {}
       var bodyStr: string | undefined;
       if (body instanceof FormData_) {
         var pairs: string[] = [];
@@ -1445,7 +1443,32 @@ export function createPageJS(
         self._headers['content-type'] = self._headers['content-type'] || 'application/x-www-form-urlencoded';
       } else if (body) { bodyStr = String(body); }
 
+      // Inject stored cookies (same as fetch API does)
+      try {
+        var _xhrU = new URL(self._url);
+        var _xhrCk = cookieJar.getCookieHeader(_xhrU.hostname, _xhrU.pathname, _xhrU.protocol === 'https:');
+        if (_xhrCk) self._headers['cookie'] = self._headers['cookie'] || _xhrCk;
+      } catch (_) {}
+
+      // Timeout enforcement: abort and fire ontimeout if response takes too long
+      var _xhrTimer: any = null;
+      if (self.timeout > 0) {
+        _xhrTimer = setTimeout(() => {
+          if (self._aborted) return;
+          self._aborted = true;
+          self.status = 0;
+          var toEv = { target: self };
+          try { if (self.ontimeout) self.ontimeout(toEv); } catch(_) {}
+          var toListeners = self._listeners.get('timeout');
+          if (toListeners) for (var _tf of toListeners) try { _tf(toEv); } catch(_) {}
+          try { if (self.onloadend) self.onloadend(toEv); } catch(_) {}
+          var leListeners = self._listeners.get('loadend');
+          if (leListeners) for (var _lef2 of leListeners) try { _lef2(toEv); } catch(_) {}
+        }, self.timeout);
+      }
+
       os.fetchAsync(this._url, (resp: FetchResponse | null, _err?: string) => {
+        if (_xhrTimer !== null) { clearTimeout(_xhrTimer); _xhrTimer = null; }
         if (self._aborted) return;
         if (resp) {
           self.status = resp.status; self.statusText = String(resp.status);
@@ -1461,17 +1484,27 @@ export function createPageJS(
           self._setState(4); // DONE
           var ev = { target: self, loaded: resp.bodyText.length, total: resp.bodyText.length, lengthComputable: true };
           try { if (self.onprogress)  self.onprogress(ev); }  catch(_) {}
+          var pgListeners = self._listeners.get('progress');
+          if (pgListeners) for (var _pgf of pgListeners) try { _pgf(ev); } catch(_) {}
           try { if (self.onload)      self.onload(ev); }      catch(_) {}
+          var ldListeners = self._listeners.get('load');
+          if (ldListeners) for (var _ldf of ldListeners) try { _ldf(ev); } catch(_) {}
           try { if (self.onloadend)   self.onloadend(ev); }   catch(_) {}
+          var leListeners2 = self._listeners.get('loadend');
+          if (leListeners2) for (var _lef3 of leListeners2) try { _lef3(ev); } catch(_) {}
         } else {
           self.status = 0; self._setState(4);
           var errEv = { target: self };
           try { if (self.onerror)   self.onerror(errEv); } catch(_) {}
+          var errListeners = self._listeners.get('error');
+          if (errListeners) for (var _ef of errListeners) try { _ef(errEv); } catch(_) {}
           try { if (self.onloadend) self.onloadend(errEv); } catch(_) {}
+          var leListeners3 = self._listeners.get('loadend');
+          if (leListeners3) for (var _lef4 of leListeners3) try { _lef4(errEv); } catch(_) {}
         }
-        var listeners = self._listeners.get('readystatechange');
-        if (listeners) for (var fn of listeners) try { fn({ target: self }); } catch(_) {}
-      }, { method: this._method as 'GET' | 'POST', headers: this._headers, body: bodyStr });
+        var rsListeners = self._listeners.get('readystatechange');
+        if (rsListeners) for (var fn of rsListeners) try { fn({ target: self }); } catch(_) {}
+      }, { method: this._method, headers: this._headers, body: bodyStr });
     }
 
     abort(): void {
@@ -1482,15 +1515,8 @@ export function createPageJS(
     }
 
     addEventListener(type: string, fn: (ev: unknown) => void, _opts?: unknown): void {
-      var ltype = type.toLowerCase();
-      if (ltype === 'load')        this.onload           = fn as any;
-      else if (ltype === 'error')  this.onerror          = fn as any;
-      else if (ltype === 'abort')  this.onabort          = fn as any;
-      else if (ltype === 'timeout') this.ontimeout       = fn as any;
-      else if (ltype === 'progress') this.onprogress     = fn as any;
-      else if (ltype === 'loadstart') this.onloadstart   = fn as any;
-      else if (ltype === 'loadend')   this.onloadend     = fn as any;
-      else if (ltype === 'readystatechange') this.onreadystatechange = fn as any;
+      // Only push to the _listeners array; never overwrite the on* shortcut
+      // properties — those may be set independently by the page and both must fire.
       var arr = this._listeners.get(type); if (!arr) { arr = []; this._listeners.set(type, arr); }
       if (!arr.includes(fn)) arr.push(fn);
     }
@@ -5958,10 +5984,7 @@ export function createPageJS(
         }
       }
 
-      // End site-specific mutation batch if one was started
-      if (_siteProfile && _siteProfile.optimizations.indexOf('fast-dom-mutation-batch') >= 0) {
-        JITBrowserEngine.endMutationBatch();
-      }
+      // (site-specific mutation batch removed — no endMutationBatch needed)
 
       // ── Prefetch visible links for instant navigation ─────────────────────
       try {
@@ -6185,15 +6208,8 @@ export function createPageJS(
   try { installFrameworkPolyfills(win); } catch(e) { cb.log('[polyfill] framework: ' + String(e)); }
   try { installCompatPolyfills(win); } catch(e) { cb.log('[polyfill] compat: ' + String(e)); }
 
-  // ── Site-specific optimizations ───────────────────────────────────────────
-  var _siteProfile = JITBrowserEngine.getSiteProfile(cb.baseURL);
-  if (_siteProfile) {
-    cb.log('[browser] applying site profile: ' + _siteProfile.name);
-    // Pre-enable mutation batching for heavy-DOM sites
-    if (_siteProfile.optimizations.indexOf('fast-dom-mutation-batch') >= 0) {
-      JITBrowserEngine.beginMutationBatch();
-    }
-  }
+  // Site-specific optimization profiles removed — general-purpose implementation
+  // now handles all sites via proper web-standards compliance.
 
   // ── Flush script cache on full navigation (not back/forward) ──────────────
   // The cache persists across session to accelerate revisits, but we flush if

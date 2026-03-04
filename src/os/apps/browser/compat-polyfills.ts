@@ -239,9 +239,8 @@ export function installTailwindPolyfills(win: any): void {
  * Install all framework polyfills on the given window object.
  * Safe to call multiple times (each polyfill is idempotent).
  */
-export function installCompatPolyfills(win: any): void {
-  installReact18Polyfills(win);
-  installVue3Polyfills(win);
-  installBootstrapPolyfills(win);
-  installTailwindPolyfills(win);
+export function installCompatPolyfills(_win: any): void {
+  // No-op: real implementations live in jsruntime.ts (getComputedStyle, MutationObserver,
+  // ResizeObserver, matchMedia, CSS.supports). Installing these stubs would shadow the
+  // production-quality implementations already present in the page environment.
 }

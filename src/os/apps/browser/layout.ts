@@ -359,48 +359,97 @@ function _layoutNodesImpl(
     }
 
     if (nd.type === 'flex-row' && nd.children) {
-      // ── Flex-row: render children side by side ─────────────────────────────
+      var fDir = nd.flexDirection || 'row';
       var fChildren = nd.children;
       var gap       = nd.gap ?? 8;
       var fRowY0    = y;
-      var maxChildH = 0;
       var fxLeft    = xLeft + (nd.paddingLeft || 0);
       var fxAvail   = (nd.boxWidth ? Math.min(maxX, xLeft + nd.boxWidth) : maxX) - fxLeft - (nd.paddingRight || 0);
-      // Item 403: sort by 'order' property (stable sort, default order=0)
-      var fSorted = fChildren.slice().sort(function(a, b) {
-        return (a.order ?? 0) - (b.order ?? 0);
-      });
-      // Compute base sizes: explicit boxWidth if set, else a «1 grow unit» placeholder
-      var fxUsedGap = gap * Math.max(0, fSorted.length - 1);
-      var fxFreeInit = fxAvail - fxUsedGap;
-      // Two-pass flex algorithm (simplified): compute hypothetical main sizes
-      var fBaseW: number[] = [];
-      var fHypoW: number[] = [];
-      for (var fi = 0; fi < fSorted.length; fi++) {
-        var fBase = fSorted[fi].boxWidth ?? 0; // 0 = no explicit width
-        fBaseW.push(fBase);
+      var containerAlignItems = nd.alignItems || 'stretch';
+      var justCon  = nd.justifyContent || 'flex-start';
+      // Item 403: sort by 'order' property
+      var fSorted = fChildren.slice().sort(function(a, b) { return (a.order ?? 0) - (b.order ?? 0); });
+
+      // ── flex-direction: column / column-reverse ─────────────────────────────
+      if (fDir === 'column' || fDir === 'column-reverse') {
+        var fcColW  = fxAvail;
+        var fcItems = fDir === 'column-reverse' ? fSorted.slice().reverse() : fSorted;
+        var fcTotalH = 0;
+        // Measure children to compute total height for justify-content
+        var fcChildData: { childLines: RenderedLine[]; childH: number }[] = [];
+        for (var fcci = 0; fcci < fcItems.length; fcci++) {
+          var fcc = fcItems[fcci];
+          var fccW = fcc.boxWidth ? Math.min(fcc.boxWidth, fcColW) : fcColW;
+          var fccLines = flowSpans(transformSpans(fcc.spans, fcc.textTransform), 0, fccW, nodeLineH(fcc), CLR_BODY,
+            (fcc.bgColor !== undefined || fcc.bgGradient) ? { bgColor: fcc.bgColor, bgGradient: fcc.bgGradient } : undefined);
+          var fccH = fccLines.reduce(function(s, l) { return s + (l.lineH || LINE_H); }, 0);
+          fcChildData.push({ childLines: fccLines, childH: fccH });
+          fcTotalH += fccH + (fcci < fcItems.length - 1 ? gap : 0);
+        }
+        // Compute main-axis (vertical) free space and justify-content offsets
+        var fcContainerH = nd.height ?? 0;
+        var fcFreeH = fcContainerH > 0 ? Math.max(0, fcContainerH - fcTotalH) : 0;
+        var fcStartOffset = 0, fcGapExtra = 0;
+        if (fcFreeH > 0 && fcItems.length > 0) {
+          if (justCon === 'center') { fcStartOffset = Math.floor(fcFreeH / 2); }
+          else if (justCon === 'flex-end' || justCon === 'end') { fcStartOffset = fcFreeH; }
+          else if (justCon === 'space-between' && fcItems.length > 1) { fcGapExtra = Math.floor(fcFreeH / (fcItems.length - 1)); }
+          else if (justCon === 'space-around') { var fca1 = Math.floor(fcFreeH / fcItems.length); fcStartOffset = Math.floor(fca1 / 2); fcGapExtra = fca1; }
+          else if (justCon === 'space-evenly') { var fca2 = Math.floor(fcFreeH / (fcItems.length + 1)); fcStartOffset = fca2; fcGapExtra = fca2; }
+        }
+        // Stamp children
+        var fcCurY = fRowY0 + fcStartOffset;
+        var fcMaxX2 = 0;
+        for (var fcci2 = 0; fcci2 < fcChildData.length; fcci2++) {
+          var fccD = fcChildData[fcci2];
+          var fccItem = fcItems[fcci2];
+          var fccW2 = fccItem.boxWidth ? Math.min(fccItem.boxWidth, fcColW) : fcColW;
+          // Cross-axis (horizontal) alignment
+          var fccAlignSelf = fccItem.alignSelf || containerAlignItems;
+          var fccCrossX = fxLeft;
+          if (fccAlignSelf === 'center') fccCrossX = fxLeft + Math.floor((fcColW - fccW2) / 2);
+          else if (fccAlignSelf === 'flex-end' || fccAlignSelf === 'end') fccCrossX = fxLeft + fcColW - fccW2;
+          if (fccCrossX + fccW2 > fcMaxX2) fcMaxX2 = fccCrossX + fccW2;
+          for (var fccl = 0; fccl < fccD.childLines.length; fccl++) {
+            var fccLine = fccD.childLines[fccl];
+            var fccShifted = fccLine.nodes.map(function(n) { return { ...n, x: n.x + fccCrossX }; });
+            lines.push({ y: fcCurY, nodes: fccShifted, lineH: fccLine.lineH || LINE_H, bgColor: fccLine.bgColor, bgGradient: fccLine.bgGradient });
+            fcCurY += fccLine.lineH || LINE_H;
+          }
+          if (fcci2 < fcChildData.length - 1) fcCurY += gap + fcGapExtra;
+        }
+        y = fcCurY;
+        lastBottomMargin = nd.marginBottom || 0;
+        continue;
       }
-      // Total explicit widths + remaining free space distributed via grow/shrink
-      var fFixedTotal = 0;
-      var flexibleCount = 0;
+
+      // ── flex-direction: row / row-reverse (default) ─────────────────────────
+      if (fDir === 'row-reverse') fSorted.reverse();
+
+      var fxUsedGap  = gap * Math.max(0, fSorted.length - 1);
+      var fxFreeInit = fxAvail - fxUsedGap;
+      // Two-pass flex algorithm: compute hypothetical main sizes
+      var fBaseW: number[] = [];
+      for (var fi = 0; fi < fSorted.length; fi++) {
+        fBaseW.push(fSorted[fi].boxWidth ?? 0);
+      }
+      var fFixedTotal = 0, flexibleCount = 0;
       for (var fi2 = 0; fi2 < fSorted.length; fi2++) {
         if (fBaseW[fi2] > 0) fFixedTotal += fBaseW[fi2];
         else flexibleCount++;
       }
       var fFlexPool = fxFreeInit - fFixedTotal;
-      var fFreeSpace = fFlexPool;
-      if (flexibleCount > 0) fFreeSpace = fFlexPool / flexibleCount; // even base for flex items
-      // Assign hypothetical widths
+      var fFreeSpace = flexibleCount > 0 ? fFlexPool / flexibleCount : 0;
+      var fHypoW: number[] = [];
       for (var fi3 = 0; fi3 < fSorted.length; fi3++) {
         fHypoW.push(fBaseW[fi3] > 0 ? fBaseW[fi3] : Math.max(0, fFreeSpace));
       }
-      // Compute free space after hypothetical sizes
       var fHypoTotal = fHypoW.reduce(function(a, b) { return a + b; }, 0);
       var fFree = fxFreeInit - fHypoTotal;
-      // Item 402: Apply flex-grow (positive free space) or flex-shrink (negative)
+
+      // Item 402: Apply flex-grow (positive) or flex-shrink (negative)
       var fFinalW: number[] = [];
       if (fFree >= 0) {
-        // Positive free space → distribute via flex-grow
         var totalGrow = 0;
         for (var fi4 = 0; fi4 < fSorted.length; fi4++) totalGrow += (fSorted[fi4].flexGrow ?? 0);
         for (var fi5 = 0; fi5 < fSorted.length; fi5++) {
@@ -409,7 +458,6 @@ function _layoutNodesImpl(
           fFinalW.push(Math.max(0, Math.floor(fHypoW[fi5] + extra)));
         }
       } else {
-        // Negative free space → shrink via flex-shrink
         var totalShrinkFactor = 0;
         for (var fi6 = 0; fi6 < fSorted.length; fi6++) {
           totalShrinkFactor += (fSorted[fi6].flexShrink ?? 1) * fHypoW[fi6];
@@ -420,45 +468,80 @@ function _layoutNodesImpl(
           fFinalW.push(Math.max(0, Math.floor(fHypoW[fi7] - reduction)));
         }
       }
-      var fCurX = fxLeft;
-      var fChildLines: { x: number; cw: number; cl: RenderedLine[]; alignSelf?: string }[] = [];
-      var containerAlignItems = nd.alignItems || 'stretch';
-      // Collect each child's rendered lines
-      for (var fci = 0; fci < fSorted.length; fci++) {
-        var fc    = fSorted[fci];
-        var cw    = fFinalW[fci];
-        var cLines = flowSpans(transformSpans(fc.spans, fc.textTransform), 0, cw, nodeLineH(fc), CLR_BODY,
-                               (fc.bgColor !== undefined || fc.bgGradient) ? { bgColor: fc.bgColor, bgGradient: fc.bgGradient } : undefined);
-        // Item 403: record per-item alignSelf for cross-axis placement
-        var fcAlign = fc.alignSelf || containerAlignItems;
-        fChildLines.push({ x: fCurX, cw, cl: cLines, alignSelf: fcAlign });
-        var childH = cLines.length * nodeLineH(fc);
-        if (childH > maxChildH) maxChildH = childH;
-        fCurX += cw + gap;
-      }
-      // Stamp child lines at their x-offset, applying alignSelf vertical placement
-      for (var fci2 = 0; fci2 < fChildLines.length; fci2++) {
-        var fc2   = fChildLines[fci2];
-        var fcH2  = fc2.cl.length > 0 ? fc2.cl.length * (fc2.cl[0]!.lineH || LINE_H) : 0;
-        // Compute cross-axis (vertical) offset based on alignSelf / alignItems
-        var crossOffset = 0;
-        var fcAlignMode = fc2.alignSelf || 'stretch';
-        if (fcAlignMode === 'center') {
-          crossOffset = Math.floor((maxChildH - fcH2) / 2);
-        } else if (fcAlignMode === 'flex-end' || fcAlignMode === 'end') {
-          crossOffset = maxChildH - fcH2;
-        } else if (fcAlignMode === 'baseline') {
-          crossOffset = 0; // approximate: top of first line
+
+      // flex-wrap: split into lines if content overflows
+      var fDoWrap = nd.flexWrap === 'wrap' || nd.flexWrap === 'wrap-reverse';
+      var fWrapLines: { items: number[]; totalMainSize: number }[] = [];
+      if (fDoWrap) {
+        var fWrapCur: number[] = []; var fWrapTotal = 0;
+        for (var fwi = 0; fwi < fSorted.length; fwi++) {
+          var fwItemW = fFinalW[fwi];
+          var fwGap   = fWrapCur.length > 0 ? gap : 0;
+          if (fWrapCur.length > 0 && fWrapTotal + fwGap + fwItemW > fxAvail) {
+            fWrapLines.push({ items: fWrapCur.slice(), totalMainSize: fWrapTotal });
+            fWrapCur = [fwi]; fWrapTotal = fwItemW;
+          } else {
+            fWrapCur.push(fwi); fWrapTotal += fwGap + fwItemW;
+          }
         }
-        // 'flex-start', 'start', 'stretch', default → crossOffset = 0
-        for (var cli2 = 0; cli2 < fc2.cl.length; cli2++) {
-          var cl2 = fc2.cl[cli2]!;
-          var shifted = cl2.nodes.map(function(n) { return { ...n, x: n.x + fc2.x }; });
-          lines.push({ y: fRowY0 + crossOffset + cli2 * (cl2.lineH || LINE_H), nodes: shifted,
-                       lineH: cl2.lineH, bgColor: cl2.bgColor, bgGradient: cl2.bgGradient, preBg: cl2.preBg });
-        }
+        if (fWrapCur.length > 0) fWrapLines.push({ items: fWrapCur, totalMainSize: fWrapTotal });
+        if (nd.flexWrap === 'wrap-reverse') fWrapLines.reverse();
+      } else {
+        var allIdx: number[] = [];
+        var allTotal = 0;
+        for (var fwall = 0; fwall < fSorted.length; fwall++) { allIdx.push(fwall); allTotal += fFinalW[fwall]; }
+        fWrapLines.push({ items: allIdx, totalMainSize: allTotal });
       }
-      y = fRowY0 + maxChildH;
+
+      var fMaxH = 0; var fCurLineY = fRowY0;
+      for (var fwl = 0; fwl < fWrapLines.length; fwl++) {
+        var fwLine = fWrapLines[fwl];
+        var fwItems = fwLine.items;
+        var fwMainSize = fwLine.totalMainSize + gap * Math.max(0, fwItems.length - 1);
+        // justify-content: compute start offset and per-gap extra
+        var fwFree = fxAvail - fwMainSize;
+        var fJustStart = 0, fJustGapExtra = 0;
+        if (fwFree > 0 && fwItems.length > 0) {
+          if (justCon === 'center') { fJustStart = Math.floor(fwFree / 2); }
+          else if (justCon === 'flex-end' || justCon === 'end') { fJustStart = fwFree; }
+          else if (justCon === 'space-between' && fwItems.length > 1) { fJustGapExtra = Math.floor(fwFree / (fwItems.length - 1)); }
+          else if (justCon === 'space-around') { var fsa = Math.floor(fwFree / fwItems.length); fJustStart = Math.floor(fsa / 2); fJustGapExtra = fsa; }
+          else if (justCon === 'space-evenly') { var fse = Math.floor(fwFree / (fwItems.length + 1)); fJustStart = fse; fJustGapExtra = fse; }
+        }
+        var fCurX = fxLeft + fJustStart;
+        var lineMaxH = 0;
+        var fChildLines: { x: number; cw: number; cl: RenderedLine[]; alignSelf?: string }[] = [];
+        for (var fci = 0; fci < fwItems.length; fci++) {
+          var fIdx  = fwItems[fci];
+          var fc    = fSorted[fIdx];
+          var cw    = fFinalW[fIdx];
+          var cLines = flowSpans(transformSpans(fc.spans, fc.textTransform), 0, cw, nodeLineH(fc), CLR_BODY,
+                                 (fc.bgColor !== undefined || fc.bgGradient) ? { bgColor: fc.bgColor, bgGradient: fc.bgGradient } : undefined);
+          var fcAlign = fc.alignSelf || containerAlignItems;
+          fChildLines.push({ x: fCurX, cw, cl: cLines, alignSelf: fcAlign });
+          var childH = cLines.length * nodeLineH(fc);
+          if (childH > lineMaxH) lineMaxH = childH;
+          fCurX += cw + gap + fJustGapExtra;
+        }
+        // Stamp child lines
+        for (var fci2 = 0; fci2 < fChildLines.length; fci2++) {
+          var fc2  = fChildLines[fci2];
+          var fcH2 = fc2.cl.length > 0 ? fc2.cl.length * (fc2.cl[0]!.lineH || LINE_H) : 0;
+          var crossOffset = 0;
+          var fcAlignMode = fc2.alignSelf || 'stretch';
+          if (fcAlignMode === 'center') { crossOffset = Math.floor((lineMaxH - fcH2) / 2); }
+          else if (fcAlignMode === 'flex-end' || fcAlignMode === 'end') { crossOffset = lineMaxH - fcH2; }
+          for (var cli2 = 0; cli2 < fc2.cl.length; cli2++) {
+            var cl2 = fc2.cl[cli2]!;
+            var shifted = cl2.nodes.map(function(n) { return { ...n, x: n.x + fc2.x }; });
+            lines.push({ y: fCurLineY + crossOffset + cli2 * (cl2.lineH || LINE_H), nodes: shifted,
+                         lineH: cl2.lineH, bgColor: cl2.bgColor, bgGradient: cl2.bgGradient, preBg: cl2.preBg });
+          }
+        }
+        fCurLineY += lineMaxH + (fwl < fWrapLines.length - 1 ? gap : 0);
+        if (lineMaxH > fMaxH) fMaxH = lineMaxH;
+      }
+      y = fCurLineY;
       lastBottomMargin = nd.marginBottom || 0;
       continue;
     }
@@ -506,7 +589,20 @@ function _layoutNodesImpl(
         blank(2);
       } else {
         // Normal block flow
+        var yBeforeBlock = y;
         commit(flowSpans(ndSpans, blkLeft, blkMaxX, lh, CLR_BODY, makeFlowOpts()));
+        // Enforce min-height: pad with blank space if content is shorter
+        if (nd.minHeight && nd.minHeight > 0 && (y - yBeforeBlock) < nd.minHeight) {
+          blank(nd.minHeight - (y - yBeforeBlock));
+        }
+        // Enforce max-height: clip lines that overflow (remove lines past the limit)
+        if (nd.maxHeight && nd.maxHeight > 0) {
+          var yMaxEnd = yBeforeBlock + nd.maxHeight;
+          while (lines.length > 0 && lines[lines.length - 1].y >= yMaxEnd) {
+            lines.pop();
+          }
+          if (y > yMaxEnd) y = yMaxEnd;
+        }
       }
       lastBottomMargin = postMarginRaw;
       continue;
@@ -596,9 +692,16 @@ function _layoutNodesImpl(
   // ── Out-of-flow (position:absolute/fixed) node rendering ─────────────────
   for (var oi = 0; oi < oofNodes.length; oi++) {
     var oof      = oofNodes[oi];
-    var oofX     = oof.posLeft !== undefined ? (xLeft + oof.posLeft) : xLeft;
-    var oofY     = oof.posTop  !== undefined ? oof.posTop : 0;
-    var oofMaxX  = oof.boxWidth ? Math.min(oofX + oof.boxWidth, maxX) : maxX;
+    var oofW     = oof.boxWidth ?? (maxX - xLeft);
+    // right-anchor: position from right edge of containing block
+    var oofX     = oof.posLeft   !== undefined ? (xLeft + oof.posLeft)
+                 : oof.posRight  !== undefined ? Math.max(xLeft, maxX - oofW - oof.posRight)
+                 : xLeft;
+    // bottom-anchor: position from bottom of current content (approximation)
+    var oofY     = oof.posTop    !== undefined ? oof.posTop
+                 : oof.posBottom !== undefined ? Math.max(0, y - (oof.height ?? nodeLineH(oof)) - oof.posBottom)
+                 : 0;
+    var oofMaxX  = Math.min(oofX + oofW, maxX);
     var oofLh    = nodeLineH(oof);
     var oofSpans = transformSpans(oof.spans, oof.textTransform);
     var oofLines = flowSpans(oofSpans, oofX, oofMaxX, oofLh, CLR_BODY,

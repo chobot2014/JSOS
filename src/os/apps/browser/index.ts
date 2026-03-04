@@ -230,8 +230,8 @@ export class BrowserApp implements App {
   onMount(win: WMWindow): void {
     os.debug.log('[browser] onMount start');
     this._win = win;
-    // Initialize first tab — navigate to HN for JS-heavy SPA testing
-    var _startURL = 'https://news.ycombinator.com/';
+    // Start with a blank page; user can navigate to any URL via the address bar
+    var _startURL = 'about:blank';
     this._tabs = [this._makeBlankTab(_startURL)];
     this._curTab = 0;
     this._loadTab(0);
