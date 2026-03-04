@@ -456,6 +456,8 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     if (curCSS.paddingBottom)           blk.paddingBottom = curCSS.paddingBottom;
     if (curCSS.align)                   blk.textAlign    = curCSS.align;
     if (curCSS.width  && curCSS.width > 0) blk.boxWidth  = curCSS.width;
+    if (curCSS.widthPct && curCSS.widthPct > 0) blk.widthPct = curCSS.widthPct;
+    if (curCSS.marginLeftAuto || curCSS.marginRightAuto) blk.centerBlock = true;
     if (curCSS.height && curCSS.height > 0) blk.height   = curCSS.height;
     if (curCSS.minHeight !== undefined) blk.minHeight  = curCSS.minHeight;
     if (curCSS.maxHeight !== undefined) blk.maxHeight  = curCSS.maxHeight;

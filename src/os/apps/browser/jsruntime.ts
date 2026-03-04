@@ -1326,10 +1326,16 @@ export function createPageJS(
       var bodyStr: string | undefined;
       if (opts?.body) {
         if (opts.body instanceof FormData_) {
-          var pairs: string[] = [];
-          opts.body.forEach((v: string, k: string) => pairs.push(encodeURIComponent(k) + '=' + encodeURIComponent(v)));
-          bodyStr = pairs.join('&');
-          extraHeaders['content-type'] = extraHeaders['content-type'] || 'application/x-www-form-urlencoded';
+          // Per Fetch spec: FormData body uses multipart/form-data encoding (item 2.10)
+          var _boundary = '----JSFormBoundary' + Math.random().toString(36).slice(2);
+          var _parts: string[] = [];
+          opts.body.forEach((v: string, k: string, _fd: any) => {
+            _parts.push('--' + _boundary + '\r\n' +
+              'Content-Disposition: form-data; name="' + k + '"\r\n\r\n' + v + '\r\n');
+          });
+          bodyStr = _parts.join('') + '--' + _boundary + '--\r\n';
+          extraHeaders['content-type'] = extraHeaders['content-type'] ||
+            'multipart/form-data; boundary=' + _boundary;
         } else {
           bodyStr = String(opts.body);
         }
@@ -5975,14 +5981,7 @@ export function createPageJS(
       for (var _si = 0; _si < scripts.length; _si++) {
         if (scripts[_si].code) _loadedSources.push(scripts[_si].code);
       }
-      if (_loadedSources.length > 0) {
-        var _spa = JITBrowserEngine.detectSPA(_loadedSources);
-        if (_spa.framework !== 'unknown') {
-          cb.log('[browser] detected SPA: ' + _spa.framework +
-            (_spa.version ? ' v' + _spa.version : '') +
-            ' (bundler: ' + _spa.bundler + ')');
-        }
-      }
+      // (SPA detection removed — detectSPA is a no-op)
 
       // (site-specific mutation batch removed — no endMutationBatch needed)
 

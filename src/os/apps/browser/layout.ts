@@ -555,9 +555,22 @@ function _layoutNodesImpl(
 
       var bgColor   = nd.bgColor;
       var bgGradient = nd.bgGradient;
+      // Resolve percentage width against container (item 2.1)
+      var _effectBoxW = nd.boxWidth || 0;
+      if (nd.widthPct && nd.widthPct > 0) {
+        _effectBoxW = Math.floor((contentW - CONTENT_PAD * 2) * nd.widthPct / 100);
+      }
       var blkLeft   = xLeft + (nd.paddingLeft ? Math.round(nd.paddingLeft / CHAR_W) * CHAR_W : 0);
       var blkRight  = nd.paddingRight ? Math.round(nd.paddingRight / CHAR_W) * CHAR_W : 0;
-      var blkMaxX   = (nd.boxWidth ? Math.min(maxX, xLeft + nd.boxWidth) : maxX) - blkRight;
+      var blkMaxX   = (_effectBoxW ? Math.min(maxX, xLeft + _effectBoxW) : maxX) - blkRight;
+      // margin: auto centering — shift block inward when explicit width set (item 2.2)
+      if (nd.centerBlock && _effectBoxW > 0) {
+        var _centerOff = Math.max(0, Math.floor((contentW - _effectBoxW) / 2));
+        blkLeft += _centerOff;
+        blkMaxX  = blkLeft + _effectBoxW - blkRight;
+      }
+      // Track lines start for position:relative offset (item 2.3)
+      var _relStart  = nd.position === 'relative' ? lines.length : -1;
       var lh        = nodeLineH(nd);
       var ndSpans   = transformSpans(nd.spans, nd.textTransform);
 
@@ -602,6 +615,19 @@ function _layoutNodesImpl(
             lines.pop();
           }
           if (y > yMaxEnd) y = yMaxEnd;
+        }
+      }
+      // position:relative — shift generated lines by posTop/posLeft (item 2.3)
+      if (_relStart >= 0 && _relStart < lines.length) {
+        var _relDX = nd.posLeft ?? (nd.posRight !== undefined ? -(nd.posRight) : 0);
+        var _relDY = nd.posTop  ?? (nd.posBottom !== undefined ? -(nd.posBottom) : 0);
+        if (_relDX !== 0 || _relDY !== 0) {
+          for (var _ri = _relStart; _ri < lines.length; _ri++) {
+            lines[_ri].y += _relDY;
+            if (_relDX !== 0) {
+              lines[_ri] = { ...lines[_ri], nodes: lines[_ri].nodes.map(function(n) { return { ...n, x: n.x + _relDX }; }) };
+            }
+          }
         }
       }
       lastBottomMargin = postMarginRaw;

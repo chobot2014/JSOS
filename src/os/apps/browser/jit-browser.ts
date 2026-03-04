@@ -260,80 +260,7 @@ function _hashSource(src: string): number {
   return hash;
 }
 
-// ─── SPA Detection & Optimization ─────────────────────────────────────────────
-//
-// Detects common SPA patterns (React, Vue, Angular, Svelte) and applies
-// framework-specific optimizations for maximum compatibility.
-
-interface SPAProfile {
-  framework:    string;    // 'react' | 'vue' | 'angular' | 'svelte' | 'vanilla' | 'unknown'
-  version:      string;
-  usesRouter:   boolean;
-  usesVDom:     boolean;
-  bundler:      string;    // 'webpack' | 'vite' | 'rollup' | 'parcel' | 'none'
-  detectedAt:   number;
-}
-
-var _currentSPA: SPAProfile | null = null;
-
-/** Detect SPA framework from script content analysis. */
-function _detectSPAFramework(scripts: string[]): SPAProfile {
-  var profile: SPAProfile = {
-    framework: 'unknown', version: '', usesRouter: false,
-    usesVDom: false, bundler: 'none', detectedAt: Date.now(),
-  };
-
-  for (var src of scripts) {
-    var snippet = src.slice(0, 10000); // only scan first 10KB for signatures
-    // React detection
-    if (snippet.indexOf('__REACT_DEVTOOLS_GLOBAL_HOOK__') >= 0 ||
-        snippet.indexOf('react-dom') >= 0 ||
-        snippet.indexOf('React.createElement') >= 0 ||
-        snippet.indexOf('jsx(') >= 0 ||
-        snippet.indexOf('jsxs(') >= 0 ||
-        snippet.indexOf('_react') >= 0) {
-      profile.framework = 'react';
-      profile.usesVDom = true;
-      // Detect React version
-      var rv = snippet.match(/react[\/.](\d+\.\d+)/i);
-      if (rv) profile.version = rv[1];
-      // React Router detection
-      if (snippet.indexOf('react-router') >= 0 || snippet.indexOf('BrowserRouter') >= 0 ||
-          snippet.indexOf('createBrowserRouter') >= 0) {
-        profile.usesRouter = true;
-      }
-    }
-    // Vue detection
-    if (snippet.indexOf('__VUE__') >= 0 || snippet.indexOf('Vue.') >= 0 ||
-        snippet.indexOf('createApp') >= 0 || snippet.indexOf('vue@') >= 0) {
-      profile.framework = 'vue';
-      profile.usesVDom = true;
-      var vv = snippet.match(/vue[\/.](\d+)/i);
-      if (vv) profile.version = vv[1];
-      if (snippet.indexOf('vue-router') >= 0) profile.usesRouter = true;
-    }
-    // Angular detection
-    if (snippet.indexOf('@angular') >= 0 || snippet.indexOf('ng-') >= 0 ||
-        snippet.indexOf('platformBrowser') >= 0) {
-      profile.framework = 'angular';
-      profile.usesVDom = false;
-      profile.usesRouter = snippet.indexOf('@angular/router') >= 0;
-    }
-    // Svelte detection
-    if (snippet.indexOf('svelte') >= 0 || snippet.indexOf('SvelteComponent') >= 0) {
-      profile.framework = 'svelte';
-      profile.usesVDom = false;
-    }
-    // Bundler detection
-    if (snippet.indexOf('webpackJsonp') >= 0 || snippet.indexOf('__webpack_') >= 0) {
-      profile.bundler = 'webpack';
-    } else if (snippet.indexOf('/@vite/') >= 0 || snippet.indexOf('import.meta.hot') >= 0) {
-      profile.bundler = 'vite';
-    }
-  }
-
-  return profile;
-}
+// (SPA detection removed — no site-specific framework optimizations)
 
 // ─── Network Pipeline Acceleration ──────────────────────────────────────────
 //
@@ -680,19 +607,11 @@ export const JITBrowserEngine = {
   /** Get network pipeline statistics. */
   fetchStats(): typeof _fetchStats { return { ..._fetchStats }; },
 
-  // ── SPA detection ─────────────────────────────────────────────────────────
-
-  /**
-   * Analyze loaded scripts to detect the SPA framework in use.
-   * Returns the profile for framework-specific optimizations.
-   */
-  detectSPA(scripts: string[]): SPAProfile {
-    _currentSPA = _detectSPAFramework(scripts);
-    return _currentSPA;
-  },
-
-  /** Get the current detected SPA profile. */
-  get currentSPA(): SPAProfile | null { return _currentSPA; },
+  // ── SPA detection (removed — no site-specific optimizations) ─────────────
+  /** @deprecated SPA detection removed. Always returns null. */
+  detectSPA(_scripts: string[]): null { return null; },
+  /** @deprecated Always returns null. */
+  get currentSPA(): null { return null; },
 
   // ── DOM mutation batching ─────────────────────────────────────────────────
 
@@ -727,7 +646,7 @@ export const JITBrowserEngine = {
       scriptCacheEntries: _scriptCache.size,
       scriptCacheHitRate: _scriptCacheTotal > 0 ? _scriptCacheHits / _scriptCacheTotal : 0,
       fetchDedupRate: _fetchStats.total > 0 ? _fetchStats.deduplicated / _fetchStats.total : 0,
-      spaFramework: _currentSPA?.framework ?? 'none',
+      spaFramework: 'none',
     };
   },
 };

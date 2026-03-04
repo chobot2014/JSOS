@@ -610,6 +610,11 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
         var loc = resp.headers.get('location') || '';
         if (loc && f.redirects < f.maxRedirects) {
           f.redirects++;
+          // RFC 9110 §15.4: 301/302/303 demote method to GET and drop body;
+          // 307/308 preserve the original method and body.
+          if (resp.status === 301 || resp.status === 302 || resp.status === 303) {
+            f.opts = { ...f.opts, method: 'GET', body: undefined };
+          }
           var rURL    = _resolveHref(loc, f.currentURL);
           var rParsed = _parseURL(rURL);
           if (!rParsed) { f.callback(null, 'Invalid redirect URL: ' + rURL); return 'done'; }
@@ -746,6 +751,10 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
           var h2loc = h2headers.get('location') || '';
           if (h2loc && f.redirects < f.maxRedirects) {
             f.redirects++;
+            // RFC 9110 §15.4: 301/302/303 demote to GET; 307/308 preserve method.
+            if (h2status === 301 || h2status === 302 || h2status === 303) {
+              f.opts = { ...f.opts, method: 'GET', body: undefined };
+            }
             var h2rURL    = _resolveHref(h2loc, f.currentURL);
             var h2rParsed = _parseURL(h2rURL);
             if (!h2rParsed) { f.callback(null, 'Invalid redirect URL: ' + h2rURL); return 'done'; }

@@ -586,7 +586,10 @@ export function parseInlineStyle(style: string): CSSProps {
 
       // ── Dimensions ────────────────────────────────────────────────────────
       case 'width': {
-        if (vl !== 'auto') { var wv = parseLengthPx(vl); if (!isNaN(wv) && wv > 0) p.width = wv; } break;
+        if (vl !== 'auto') {
+          if (vl.endsWith('%')) { p.widthPct = parseFloat(vl); }
+          else { var wv = parseLengthPx(vl); if (!isNaN(wv) && wv > 0) p.width = wv; }
+        } break;
       }
       case 'height': {
         if (vl !== 'auto') { var hv = parseLengthPx(vl); if (!isNaN(hv) && hv > 0) p.height = hv; } break;
@@ -619,12 +622,19 @@ export function parseInlineStyle(style: string): CSSProps {
       // ── Margin ────────────────────────────────────────────────────────────
       case 'margin': {
         var [mt4,mr4,mb4,ml4] = parseBox4(val);
-        p.marginTop = mt4; p.marginRight = mr4; p.marginBottom = mb4; p.marginLeft = ml4; break;
+        p.marginTop = mt4; p.marginRight = mr4; p.marginBottom = mb4; p.marginLeft = ml4;
+        // Detect auto tokens for centering (margin: 0 auto, margin: auto, etc.)
+        var _mparts = val.trim().split(/\s+/);
+        var _mL = (_mparts[3] || _mparts[1] || _mparts[0] || '').toLowerCase();
+        var _mR = (_mparts[1] || _mparts[0] || '').toLowerCase();
+        if (_mL === 'auto') p.marginLeftAuto  = true;
+        if (_mR === 'auto') p.marginRightAuto = true;
+        break;
       }
       case 'margin-top':    case 'margin-block-start':  { var mtv = parseLengthPx(vl); if (!isNaN(mtv)) p.marginTop    = mtv; break; }
-      case 'margin-right':  case 'margin-inline-end':   { var mrv = parseLengthPx(vl); if (!isNaN(mrv)) p.marginRight  = mrv; break; }
+      case 'margin-right':  case 'margin-inline-end':   { if (vl === 'auto') { p.marginRightAuto = true; p.marginRight = 0; } else { var mrv = parseLengthPx(vl); if (!isNaN(mrv)) p.marginRight  = mrv; } break; }
       case 'margin-bottom': case 'margin-block-end':    { var mbv = parseLengthPx(vl); if (!isNaN(mbv)) p.marginBottom = mbv; break; }
-      case 'margin-left':   case 'margin-inline-start': { var mlv = parseLengthPx(vl); if (!isNaN(mlv)) p.marginLeft   = mlv; break; }
+      case 'margin-left':   case 'margin-inline-start': { if (vl === 'auto') { p.marginLeftAuto = true; p.marginLeft = 0; } else { var mlv = parseLengthPx(vl); if (!isNaN(mlv)) p.marginLeft   = mlv; } break; }
       case 'margin-block':  { var [mtb2,_mrb2,mbb2] = parseBox4(val); p.marginTop = mtb2; p.marginBottom = mbb2; break; }
       case 'margin-inline': { var [_mti2,mri2,_mbi2,mli2] = parseBox4(val); p.marginRight = mri2; p.marginLeft = mli2; break; }
 

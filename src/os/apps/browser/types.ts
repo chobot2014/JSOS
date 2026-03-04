@@ -59,6 +59,8 @@ export interface RenderNode {
   paddingTop?:   number;
   paddingBottom?: number;
   boxWidth?:    number;    // px — constrained column width (0=full)
+  widthPct?:    number;    // % — width as percentage of container (0-100)
+  centerBlock?: boolean;   // true when margin: auto centering should apply
   children?:    RenderNode[];  // sub-nodes (flex-row children)
   // Extended CSS box model
   height?:       number;
@@ -302,6 +304,7 @@ export interface CSSProps {
   display?:       'flex' | 'inline-flex' | 'grid' | 'inline-grid' | 'inline-block' | 'inline' | 'block' | 'none' | 'table' | 'table-row' | 'table-cell';
   boxSizing?:     'content-box' | 'border-box';
   width?:         number;    // px (0 = auto)
+  widthPct?:      number;    // % value for percentage widths (1-100)
   height?:        number;    // px (0 = auto)
   minWidth?:      number;
   minHeight?:     number;
@@ -315,6 +318,8 @@ export interface CSSProps {
   marginRight?:   number;
   marginBottom?:  number;
   marginLeft?:    number;
+  marginLeftAuto?: boolean;  // margin-left: auto was set
+  marginRightAuto?: boolean; // margin-right: auto was set
   indent?:        number;    // derived: paddingLeft / CHAR_W
   // ── Border ────────────────────────────────────────────────────────────────
   borderWidth?:   number;
