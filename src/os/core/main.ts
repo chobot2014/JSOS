@@ -26,9 +26,7 @@ import { createScreenCanvas } from '../ui/canvas.js';
 import { WindowManager, setWM } from '../ui/wm.js';
 import { terminalApp } from '../apps/terminal/index.js';
 import { browserApp } from '../apps/browser/index.js';
-import { dhcpDiscover } from '../net/dhcp.js';
-import { dnsResolve } from '../net/dns.js';
-import { httpsGet } from '../net/http.js';
+import { dhcpDiscoverAsync } from '../net/dhcp.js';
 import { registerCommands } from '../ui/commands.js';
 import { QJSJITHook } from '../process/qjs-jit.js';
 import { JITOSKernels } from '../process/jit-os.js';
@@ -205,6 +203,9 @@ function main(): void {
   kernel.serialPut('POSIX layer ready: devFS mounted, FDTable wired, syscalls active\n');
 
   // ── Phase 7: Real networking ────────────────────────────────────────────── //
+  // Detect and init the NIC immediately (fast — just reads MAC address).
+  // DHCP discovery runs later as a non-blocking background coroutine so the
+  // WM / browser start without waiting for a DHCP server (fixes boot freeze).
   function formatMac(b: number[]): string {
     var parts: string[] = [];
     for (var i = 0; i < 6; i++) {
@@ -218,54 +219,13 @@ function main(): void {
   if (nicOk) {
     var pciAddr = kernel.netPciAddr();
     kernel.serialPut('virtio-net found at PCI ' + pciAddr + '\n');
-
-    // Wire hardware MAC into the net stack
     net.initNIC();
     var macBytes = kernel.netMacAddress();
     kernel.serialPut('MAC: ' + formatMac(macBytes) + '\n');
-
-    // DHCP
-    var dhcpConf = dhcpDiscover();
-    if (dhcpConf) {
-      kernel.serialPut('DHCP: acquired ' + dhcpConf.ip + '/24 gw ' + dhcpConf.gateway + '\n');
-
-      // NTP
-      ntp.startPeriodicSync();
-      kernel.serialPut('[ntp] periodic sync started\n');
-
-      // DNS
-      var exampleIP = dnsResolve('example.com');
-      if (exampleIP) {
-        kernel.serialPut('DNS: resolved example.com \u2192 ' + exampleIP + '\n');
-
-        // TCP connect test
-        var tcpTestSock = net.createSocket('tcp');
-        var tcpOk = net.connect(tcpTestSock, exampleIP, 80);
-        kernel.serialPut('TCP connect to ' + exampleIP + ':80: ' +
-                          (tcpOk ? 'OK' : 'FAIL') + '\n');
-        if (tcpOk) net.close(tcpTestSock);
-
-        // HTTPS / TLS 1.3 test
-        var httpsResult = httpsGet('example.com', exampleIP, 443, '/');
-        kernel.serialPut('TLS handshake: ' +
-                          (httpsResult.tlsOk ? 'OK' : 'FAIL') + '\n');
-        if (httpsResult.tlsOk && httpsResult.response) {
-          kernel.serialPut('HTTPS GET /: ' + httpsResult.response.status +
-                            ' OK (received ' + httpsResult.response.body.length +
-                            ' bytes)\n');
-        } else if (httpsResult.tlsOk) {
-          kernel.serialPut('HTTPS GET /: no response\n');
-        }
-      } else {
-        kernel.serialPut('DNS: resolution failed (no internet?)\n');
-      }
-    } else {
-      kernel.serialPut('DHCP: no offer received\n');
-    }
+    kernel.serialPut('[net] NIC ready — DHCP will run in background\n');
   } else {
     kernel.serialPut('virtio-net: not present\n');
   }
-  kernel.serialPut('Socket test suite: PASS\n');
 
   // ── Phase 3: Framebuffer / WM ────────────────────────────────────────────
   var fbInfo = kernel.fbInfo();
@@ -310,6 +270,21 @@ function main(): void {
 
       // Register JIT stats providers so os.system.jitStats() returns live data.
       _registerJITStats(qjsJit, () => JITOSKernels.stats());
+
+      // ── Background network bootstrap (non-blocking) ────────────────────
+      // DHCP runs as a coroutine driven by kernel.yield() in the WM loop.
+      // The browser uses os.fetchAsync which is also coroutine-based, so
+      // it will naturally wait until the stack has an IP before succeeding.
+      if (nicOk) {
+        dhcpDiscoverAsync(function(conf) {
+          if (conf) {
+            kernel.serialPut('[net] DHCP ok: ' + conf.ip + ' gw ' + conf.gateway + '\n');
+            ntp.startPeriodicSync();
+          } else {
+            kernel.serialPut('[net] DHCP: no offer — no network\n');
+          }
+        });
+      }
 
       // ── Phase 9: JSOS Native Browser ──────────────────────────────────────
       // Launch the JSOS native TypeScript browser.  Written 100% in TypeScript

@@ -1979,14 +1979,15 @@ export class NetworkStack {
       var nextHop = this._lookupRoute(dst);
       dstMac = this.arpTable.get(nextHop) || '';
       if (!dstMac) {
-        dstMac = this.arpWait(nextHop, this.nicReady ? 100 : 0) || '';
-        if (!dstMac) {
-          var pendingQueue = this.arpPendingTx.get(nextHop);
-          if (!pendingQueue) { pendingQueue = []; this.arpPendingTx.set(nextHop, pendingQueue); }
-          pendingQueue.push({ dst: '00:00:00:00:00:00', src: this.mac, ethertype: ETYPE_IPV4, payload: buildIPv4(pkt) });
-          this._arpRequest(nextHop);
-          return;
-        }
+        // Non-blocking ARP: queue the packet immediately and fire an ARP request.
+        // _processArpReply() flushes arpPendingTx when the reply arrives
+        // (typically <1 ms on a LAN), so the packet goes out on the next poll
+        // without ever spinning or calling kernel.sleep().
+        var pendingQueue = this.arpPendingTx.get(nextHop);
+        if (!pendingQueue) { pendingQueue = []; this.arpPendingTx.set(nextHop, pendingQueue); }
+        pendingQueue.push({ dst: '00:00:00:00:00:00', src: this.mac, ethertype: ETYPE_IPV4, payload: buildIPv4(pkt) });
+        if (pendingQueue.length === 1) this._arpRequest(nextHop); // send ARP request once per host
+        return;
       }
     }
     this._sendEth({ dst: dstMac, src: this.mac, ethertype: ETYPE_IPV4, payload: buildIPv4(pkt) });
