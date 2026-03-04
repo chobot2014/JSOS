@@ -803,6 +803,34 @@ export class _Emit {
     else { this._w(0x89); this._w(0x81); this._u32(disp); }
   }
 
+  // ── Array IC / SIB-addressing primitives ───────────────────────────────────
+  /** XCHG EAX, ECX — atomically swap EAX and ECX (no temp register needed). */
+  xchgEaxEcx(): void { this._w(0x91); }
+  /** ADD EAX, ECX — EAX += ECX. */
+  addEaxEcx(): void { this._w(0x03); this._w(0xC1); }
+  /** SHL EAX, imm3 — logical left-shift EAX by n bits (multiply by 2^n, n in 0..7). */
+  shlEaxImm8(n: number): void { this._w(0xC1); this._w(0xE0); this._w(n & 7); }
+  /** CMP EAX, [ESP] — compare EAX with the 32-bit dword at the top of the C stack. */
+  cmpEaxEspInd(): void { this._w(0x3B); this._w(0x04); this._w(0x24); }
+  /** MOV EAX, [EAX + disp] — EAX-relative dereference (load struct field via EAX ptr). */
+  movEaxEaxDisp(disp: number): void {
+    if (disp === 0)                         { this._w(0x8B); this._w(0x00); }
+    else if (disp >= -128 && disp <= 127)  { this._w(0x8B); this._w(0x40); this._w(disp & 0xFF); }
+    else                                    { this._w(0x8B); this._w(0x80); this._u32(disp); }
+  }
+  /**
+   * MOV EAX, [ECX + EAX*4] — load int32 element from a dense Int32Array.
+   * Base = ECX (data pointer), index = EAX, scale = 4 (SIB encoding).
+   * Encoding: 8B 04 81 (ModRM=00 000 100, SIB=scale×4 index=EAX base=ECX).
+   */
+  movEaxEcxEaxScale4(): void { this._w(0x8B); this._w(0x04); this._w(0x81); }
+  /**
+   * MOV [ECX + EAX*4], EDX — store EDX into a dense Int32Array at index EAX.
+   * Base = ECX (data pointer), index = EAX, scale = 4 (SIB encoding).
+   * Encoding: 89 14 81 (MOV r/m32, r32 where r32=EDX, SIB same as above).
+   */
+  movEcxEaxScale4Edx(): void { this._w(0x89); this._w(0x14); this._w(0x81); }
+
   // ── Additional conditional jumps (32-bit relative, returns fixup offset) ────
   jl():  number { this._w(0x0F); this._w(0x8C); var o = this.here(); this._u32(0); return o; }
   jle(): number { this._w(0x0F); this._w(0x8E); var o = this.here(); this._u32(0); return o; }

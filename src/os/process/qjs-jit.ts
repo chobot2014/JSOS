@@ -79,7 +79,7 @@ export const JSVALUE_SIZE = 8;
 export const DEOPT_SENTINEL = 0x7FFFDEAD;
 
 /** Call count threshold at which a function is compiled. */
-export const JIT_THRESHOLD = 10;
+export const JIT_THRESHOLD = 5;
 
 /** Maximum allowed deoptimisations before a function is blacklisted. */
 export const MAX_DEOPTS = 3;
@@ -203,6 +203,12 @@ export class QJSBytecodeReader {
   cpoolInt(idx: number): number {
     if (!this._cpoolView || idx < 0 || idx >= this.cpoolCount) return 0;
     return this._cpoolView.getInt32(idx * 8 + 0, true);
+  }
+
+  /** Return the float64 value of constant pool entry idx (valid when cpoolTag===JS_TAG_FLOAT64). */
+  cpoolFloat64(idx: number): number {
+    if (!this._cpoolView || idx < 0 || idx >= this.cpoolCount) return 0;
+    return this._cpoolView.getFloat64(idx * 8, true);
   }
 }
 
@@ -740,21 +746,31 @@ export class QJSJITCompiler {
         // OP_get_array_el: [arr, idx] → [val]
         case OP_get_array_el: {
           const icEntry = this._icTable?.getArrayIC(entry_bcAddr + pc);
-          if (icEntry) {
-            // Monomorphic fast path: arr is a dense Int32Array-like object
-            e.popEcx();          // ECX = index (int32)
-            e.popEax();          // EAX = array pointer
-            // Bounds check: if idx >= arr->length, return 0
-            e.movEaxEcxDisp(icEntry.lengthOff);  // scratch: load arr->length
-            // swap/temp: we need arr ptr and idx; use EBX if available
-            // Simplified: just use a guarded index read via shape check
-            e.movEcxEax();                    // ECX = arr->length
-            // Reload index from earlier pop — not directly available.
-            // Emit a safety check pattern (no full IC without extra temps)
-            // For now emit a simpler non-IC path that reads from the array buffer
-            e.xorEaxEax();   // fallback: return 0 (safe)
+          if (icEntry && icEntry.dataOff > 0 && icEntry.elemSize === 4) {
+            // Fast path: dense Int32Array / Uint32Array — elemSize === 4 guarantees raw int32 backing.
+            // Stack on entry: [..., arr_ptr, idx]  (idx = TOS, arr_ptr = TOS-1)
+            e.popEcx();          // ECX = idx
+            e.popEax();          // EAX = arr_ptr
+            e.xchgEaxEcx();      // ECX = arr_ptr, EAX = idx  (no temp register needed)
+            e.pushEax();         // [ESP] = idx  (save for in-bounds path)
+            // Bounds check: load arr->length into EAX, compare against saved idx
+            e.movEaxEcxDisp(icEntry.lengthOff); // EAX = arr->length (field at known offset)
+            e.cmpEaxEspInd();    // CMP EAX, [ESP]  →  flags = (length - idx)
+            const oobJmp = e.jle(); // JLE: jump if length ≤ idx  (out-of-bounds)
+            // In-bounds path:
+            e.popEax();          // EAX = idx (restore)
+            // Load the backing data pointer: arr_ptr->data at icEntry.dataOff
+            e.movEcxEcxDisp(icEntry.dataOff); // ECX = arr->data (raw C int32_t* pointer)
+            // Read element: EAX = *(int32*)(&arr->data[idx * 4])
+            e.movEaxEcxEaxScale4();           // EAX = [ECX + EAX*4]  ← actual element value
+            const doneJmp = e.jmp();
+            // Out-of-bounds path: discard saved idx, return 0
+            e.patch(oobJmp, e.here());
+            e.addEsp(4);         // remove the saved idx
+            e.xorEaxEax();       // EAX = 0 (safe fallback)
+            e.patch(doneJmp, e.here());
           } else {
-            return null;
+            return null;  // no IC data or unsupported elemSize — bail
           }
           e.pushEax();
           pc++; break;
@@ -764,9 +780,35 @@ export class QJSJITCompiler {
         // OP_put_array_el: [arr, idx, val] → []
         case OP_put_array_el: {
           const icEntry = this._icTable?.getArrayIC(entry_bcAddr + pc);
-          if (icEntry) {
-            // Simplified: deopt on first miss; full IC requires register pressure management
-            if (this._deoptLogAddr) e.movByteAbsImm(this._deoptLogAddr, 1);
+          if (icEntry && icEntry.dataOff > 0 && icEntry.elemSize === 4) {
+            // Fast path: dense Int32Array — write val at arr->data[idx].
+            // Stack on entry: [..., arr_ptr, idx, val]  (val = TOS)
+            e.popEdx();          // EDX = val
+            e.popEcx();          // ECX = idx
+            e.popEax();          // EAX = arr_ptr
+            e.xchgEaxEcx();      // ECX = arr_ptr, EAX = idx
+            // Save both idx and val so we can restore after the bounds check
+            e.pushEdx();         // [ESP]   = val
+            e.pushEax();         // [ESP]   = idx,  [ESP+4] = val
+            // Bounds check
+            e.movEaxEcxDisp(icEntry.lengthOff); // EAX = arr->length
+            e.cmpEaxEspInd();    // CMP EAX, [ESP]  →  length - idx
+            const oobJmp = e.jle(); // JLE: jump if length ≤ idx
+            // In-bounds path:
+            e.popEax();          // EAX = idx
+            e.popEdx();          // EDX = val
+            e.movEcxEcxDisp(icEntry.dataOff); // ECX = arr->data (raw int32_t* pointer)
+            e.movEcxEaxScale4Edx();           // [ECX + EAX*4] = EDX  ← write val
+            const doneJmp = e.jmp();
+            // Out-of-bounds path: discard saved idx + val silently
+            e.patch(oobJmp, e.here());
+            e.addEsp(8);         // remove idx + val from stack
+            e.patch(doneJmp, e.here());
+          } else if (this._deoptLogAddr) {
+            // No IC — flag a deopt so the IC table gets populated
+            e.movByteAbsImm(this._deoptLogAddr, 1);
+            // Still must consume the 3 stack values so the stack stays balanced
+            e.addEsp(12);
           } else {
             return null;
           }
@@ -1672,20 +1714,29 @@ export class FloatJITCompiler extends QJSJITCompiler {
           const idx = bc.u32(pc + 1);
           const tag = bc.cpoolTag(idx);
           if (tag === JS_TAG_INT) {
-            // push int constant as double
+            // push int constant as double via FILD
             const val = bc.cpoolInt(idx);
-            e.subEsp(8);
-            // Store val as DWORD at [ESP+4] (high), 0 at [ESP] (low) — faster: use scratch area
-            // Simple approach: store constant via EAX into scratch then fild
             e.immEax(val >>> 0);
             e.pushEax();
             e.fildDwordEsp();
             e.addEsp(4);
-            // Now ST(0) has the int as float — push to eval stack
-            e.subEsp(8);
-            e.fstpQwordEsp();
+            pushST0();
+          } else if (tag === JS_TAG_FLOAT64) {
+            // Embed the IEEE 754 double literal directly in the generated code:
+            //   PUSH hi32 → PUSH lo32 → FLD QWORD [ESP] → ADD ESP,8 → push to float eval stack
+            const dval = bc.cpoolFloat64(idx);
+            const fbuf = new Float64Array([dval]);
+            const u32  = new Uint32Array(fbuf.buffer);
+            const lo   = u32[0] >>> 0;  // low 32 bits  (bytes 0-3 little-endian)
+            const hi   = u32[1] >>> 0;  // high 32 bits (bytes 4-7 little-endian)
+            // PUSH hi first so that after PUSH lo: [ESP]=lo, [ESP+4]=hi = correct LE layout
+            e.pushImm32(hi);
+            e.pushImm32(lo);
+            e.fldQwordEsp();
+            e.addEsp(8);
+            pushST0();
           } else {
-            return null; // float64 const needs cpool float support — skip for now
+            return null; // string/object/symbol constant — bail
           }
           pc += 5; break;
         }
@@ -1734,15 +1785,29 @@ export class FloatJITCompiler extends QJSJITCompiler {
         }
 
         case OP_post_inc: {
-          // TOS = double. Post-increment: leave original on stack, add 1 to local.
-          // QuickJS OP_post_inc: pops TOS, pushes (TOS), then increments TOS context.
-          // In practice: duplicate TOS, add 1, discard — push original.
-          // Here we just preserve TOS and do nothing for correctness (post-inc operand already resolved by get_loc before this).
-          // Full semantics: TOS is the variable value. Push it, then store TOS+1 back into variable.
-          // Since we can't know the variable index here, emit a nop but leave stack unchanged.
+          // TOS = val_old (8-byte double).  After: [..., val_old+1.0, val_old]
+          // val_old at TOS = expression result; val_old+1.0 below = assigned back to variable.
+          e.subEsp(8);                   // allocate a second 8-byte slot; old TOS moves to [ESP+8]
+          e.fldQwordEspDisp(8);         // ST(0) = val_old (from [ESP+8])
+          e.fstpQwordEsp();              // [ESP] = val_old (copy = expression result); pop FPU
+          // Now: [ESP]=val_old (new TOS), [ESP+8]=val_old (will become val_old+1)
+          e.fldQwordEspDisp(8);         // ST(0) = val_old again
+          e.fld1();                      // ST(0)=1.0, ST(1)=val_old
+          e.faddp();                     // ST(0) = val_old + 1.0
+          e.fstpQwordEspDisp(8);        // [ESP+8] = val_old+1.0
+          // Final layout: [ESP]=val_old (result), [ESP+8]=val_old+1.0 (to be stored) ✓
           pc++; break;
         }
         case OP_post_dec: {
+          // Same as post_inc but subtract 1.  Use fld1 + fchs + faddp = add(-1).
+          e.subEsp(8);
+          e.fldQwordEspDisp(8);
+          e.fstpQwordEsp();
+          e.fldQwordEspDisp(8);
+          e.fld1();
+          e.fchs();                      // ST(0) = -1.0
+          e.faddp();                     // ST(0) = val_old + (-1.0) = val_old - 1.0
+          e.fstpQwordEspDisp(8);
           pc++; break;
         }
 
