@@ -69,10 +69,11 @@ interface TabState {
   pageSource:    string;
   pageBaseURL:   string;
   // Favicon (item 628)
-  favicon?:      string;
-  faviconData?:  Uint32Array | null;
-  faviconW?:     number;
-  faviconH?:     number;
+  favicon?:        string;
+  faviconData?:    Uint32Array | null;
+  faviconW?:       number;
+  faviconH?:       number;
+  faviconScaled?:  Uint32Array;   // 8×8 pre-scaled favicon for per-frame blit (computed once)
   // Background image map: URL → decoded pixels (item 386)
   bgImageMap:    Map<string, DecodedImage | null>;
 }
@@ -120,6 +121,8 @@ export class BrowserApp implements App {
   private _imgsFetching = false;
   // Background-image cache: URL → decoded (item 386)
   private _bgImageMap  = new Map<string, DecodedImage | null>();
+  // External CSS cache: URL → parsed CSSRule[] (avoids re-fetch on same-site navigation)
+  private _cssCache    = new Map<string, CSSRule[]>();
 
   // Find in page
   private _findMode  = false;
@@ -634,14 +637,19 @@ export class BrowserApp implements App {
       var labelX = tx + 4;
       if (t.faviconData && t.faviconW && t.faviconH) {
         var fSz = 8;
-        for (var _fr = 0; _fr < fSz; _fr++) {
-          for (var _fc = 0; _fc < fSz; _fc++) {
-            var _fsr = Math.floor(_fr * t.faviconH / fSz);
-            var _fsc = Math.floor(_fc * t.faviconW / fSz);
-            var _fpx = t.faviconData[_fsr * t.faviconW + _fsc] ?? 0;
-            if (_fpx >>> 24 > 0) canvas.setPixel(tx + 4 + _fc, 5 + _fr, _fpx);
+        // Cache the scaled 8×8 favicon once to avoid per-frame pixel-loop overhead
+        if (!t.faviconScaled) {
+          var _ftmp = new Uint32Array(fSz * fSz);
+          for (var _fr = 0; _fr < fSz; _fr++) {
+            for (var _fc = 0; _fc < fSz; _fc++) {
+              var _fsr = Math.floor(_fr * t.faviconH! / fSz);
+              var _fsc = Math.floor(_fc * t.faviconW! / fSz);
+              _ftmp[_fr * fSz + _fc] = t.faviconData![_fsr * t.faviconW! + _fsc] ?? 0;
+            }
           }
+          t.faviconScaled = _ftmp;
         }
+        canvas.blitPixelsDirect(t.faviconScaled, fSz, fSz, tx + 4, 5);
         labelX = tx + 4 + fSz + 3;
         maxCh  = Math.max(1, Math.floor((tabW - 20 - fSz - 3) / CHAR_W));
         display = label.length > maxCh ? label.slice(0, maxCh - 1) + '\u2026' : label;
@@ -792,14 +800,17 @@ export class BrowserApp implements App {
         var _bgDec = this._bgImageMap.get(line.bgImageUrl);
         if (_bgDec && _bgDec.data) {
           var _bw = _bgDec.w, _bh = _bgDec.h;
-          for (var _br = 0; _br < line.lineH + 1; _br++) {
+          var _bHh = line.lineH + 1;
+          // Build the full tiled block once, then blit in one Uint32Array.set() call
+          var _blk = new Uint32Array(_bHh * w);
+          for (var _br = 0; _br < _bHh; _br++) {
             var _bsr = _br % _bh;
+            var _roff = _br * w;
             for (var _bc = 0; _bc < w; _bc++) {
-              var _bsc = _bc % _bw;
-              var _bpx = _bgDec.data[_bsr * _bw + _bsc];
-              if (_bpx !== undefined && (_bpx >>> 24) > 0) canvas.setPixel(_bc, absY - 1 + _br, _bpx);
+              _blk[_roff + _bc] = _bgDec.data[_bsr * _bw + (_bc % _bw)] ?? 0;
             }
           }
+          canvas.blitPixelsDirect(_blk, w, _bHh, 0, absY - 1);
         }
       }
       if (line.quoteBg) {
@@ -1001,11 +1012,8 @@ export class BrowserApp implements App {
       return;
     }
     if (wp.imgData) {
-      for (var row = 0; row < wp.ph; row++) {
-        for (var col = 0; col < wp.pw; col++) {
-          canvas.setPixel(wp.px + col, wy + row, wp.imgData[row * wp.pw + col]);
-        }
-      }
+      // Fast bulk blit: zero per-pixel overhead via Uint32Array.set() per row
+      canvas.blitPixelsDirect(wp.imgData, wp.pw, wp.ph, wp.px, wy);
     } else {
       canvas.fillRect(wp.px, wy, wp.pw, wp.ph, CLR_IMG_PH_BG);
       canvas.drawRect(wp.px, wy, wp.pw, wp.ph, 0xFFFF9999);
@@ -1930,7 +1938,20 @@ export class BrowserApp implements App {
       ? parseStylesheet(r.styles.join('\n'))
       : [];
 
-    // ── Pass 2: re-parse with inline CSS rules applied ────────────────────────
+    // ── Pre-apply cached external CSS — avoids deferred re-layout on same-site nav
+    var _uncachedCSSLinks: string[] = [];
+    for (var _cssi = 0; _cssi < r.styleLinks.length; _cssi++) {
+      var _cssHref = this._resolveHref(r.styleLinks[_cssi]!);
+      var _preCached = this._cssCache.get(_cssHref);
+      if (_preCached) {
+        // Already have this CSS — fold it into sheets right now
+        sheets = sheets.concat(_preCached);
+      } else {
+        _uncachedCSSLinks.push(_cssHref);
+      }
+    }
+
+    // ── Pass 2: re-parse with all available CSS (inline + any cached external) ─
     if (sheets.length > 0) {
       r = parseHTML(html, sheets);
       this._forms       = r.forms;
@@ -1969,30 +1990,33 @@ export class BrowserApp implements App {
       });
     }
 
-    // ── External stylesheets: fetch async, re-render when ready ───────────────
-    if (r.styleLinks.length > 0) {
+    // ── Fetch uncached external stylesheets; cache + re-render when all arrive ─
+    if (_uncachedCSSLinks.length > 0) {
       var self = this;
-      var linkSheetsCSS = '';
-      var pending = r.styleLinks.length;
-      for (var li = 0; li < r.styleLinks.length; li++) {
-        var lHref = this._resolveHref(r.styleLinks[li]!);
+      var _newCSSRules: CSSRule[] = [];
+      var _cssPending = _uncachedCSSLinks.length;
+      for (var _uli = 0; _uli < _uncachedCSSLinks.length; _uli++) {
         (function(cssURL: string) {
           os.fetchAsync(cssURL, function(resp: FetchResponse | null) {
-            if (resp && resp.status === 200) linkSheetsCSS += '\n' + resp.bodyText;
-            pending--;
-            if (pending === 0 && linkSheetsCSS.trim()) {
-              // Re-parse and re-layout with all sheets (inline + external).
+            if (resp && resp.status === 200 && resp.bodyText.trim()) {
+              var _fetchedRules = parseStylesheet(resp.bodyText);
+              // Cache rules by URL — instant application on next same-site navigation
+              self._cssCache.set(cssURL, _fetchedRules);
+              for (var _ri = 0; _ri < _fetchedRules.length; _ri++) _newCSSRules.push(_fetchedRules[_ri]);
+            }
+            _cssPending--;
+            if (_cssPending === 0 && _newCSSRules.length > 0) {
+              // Re-parse and re-layout with all sheets (inline + cached + newly fetched).
               // Update `sheets` in-place so the `rerender` closure (used when JS
               // mutates the DOM) also sees the external CSS — not just inline rules.
-              var extRules = parseStylesheet(linkSheetsCSS);
-              sheets = sheets.concat(extRules);
+              sheets = sheets.concat(_newCSSRules);
               var r3 = parseHTML(html, sheets);
               self._forms       = r3.forms;
               self._pageBaseURL = r3.baseURL ? self._resolveHref(r3.baseURL) : '';
               self._layoutPage(r3.nodes as any, r3.widgets as any, r3.title || fallbackTitle || url, url);
             }
           });
-        })(lHref);
+        })(_uncachedCSSLinks[_uli]!);
       }
     }
 
