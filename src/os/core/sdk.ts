@@ -421,26 +421,34 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       return 'pending';
     }
 
-    // ── TLS handshake (synchronous — typically < 200 ms) ──────────────────
+    // ── TLS handshake (async, non-blocking — coroutine polls each frame) ──
     if (f.stage === 'tls') {
-      var tls = new TLSSocket(f.parsed.host);
-      if (!tls.handshakeOnConnected(f.sock, f.fetchIP, +f.parsed.port)) {
+      if (!f.tls) {
+        // First entry: create TLSSocket and begin async handshake
+        var _tlsNew = new TLSSocket(f.parsed.host);
+        _tlsNew.beginHandshake(f.sock, f.fetchIP, +f.parsed.port);
+        f.tls = _tlsNew;
+        return 'pending';
+      }
+      // Subsequent frames: advance handshake state machine (never blocks)
+      var _hsRes = (f.tls as any).hsPoll();
+      if (_hsRes === 'failed') {
         _cleanupFetch(f);
         f.callback(null, 'TLS handshake failed with ' + f.fetchIP);
         return 'done';
       }
-      f.tls = tls;
-      // Check ALPN: if server negotiated h2, use HTTP/2 multiplexed connection
-      if (tls.alpnProtocol === 'h2') {
+      if (_hsRes === 'pending') return 'pending';
+      // 'connected' — handshake complete, inspect ALPN and advance stage
+      var _tlsDone = f.tls;
+      if (_tlsDone.alpnProtocol === 'h2') {
         var h2c = new HTTP2Connection(f.parsed.host);
-        if (!h2c.connectOnSocket(tls)) {
+        if (!h2c.connectOnSocket(_tlsDone)) {
           _cleanupFetch(f);
           f.callback(null, 'HTTP/2 setup failed with ' + f.fetchIP);
           return 'done';
         }
         f.h2conn = h2c;
         f.stage  = 'h2-sending';
-        // Store in H2 pool for future requests to this host
         _h2PoolPut(f.parsed.host, f.parsed.port, h2c);
         return 'pending';
       }

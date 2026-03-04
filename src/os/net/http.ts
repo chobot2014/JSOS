@@ -1201,31 +1201,33 @@ export class HTTP2Connection {
     }
   }
 
-  /** [Item 927] Receive frames until the given stream has END_STREAM. */
-  receive(streamId: number, timeoutTicks = 500): H2Stream | null {
-    var deadline = kernel.getTicks() + timeoutTicks;
-    while (kernel.getTicks() < deadline) {
-      // Use non-blocking read so the outer timeout actually works
-      var raw = this.tls.readNB();
-      if (raw && raw.length > 0) {
-        for (var i = 0; i < raw.length; i++) this.rxBuf.push(raw[i]);
-      }
-      // Drain all complete frames from rxBuf
-      while (this.rxBuf.length >= 9) {
-        var flen = (this.rxBuf[0] << 16) | (this.rxBuf[1] << 8) | this.rxBuf[2];
-        if (this.rxBuf.length < 9 + flen) break;
-        var type  = this.rxBuf[3];
-        var flags = this.rxBuf[4];
-        var sid   = ((this.rxBuf[5] & 0x7f) << 24) | (this.rxBuf[6] << 16) | (this.rxBuf[7] << 8) | this.rxBuf[8];
-        var payload = this.rxBuf.slice(9, 9 + flen);
-        this.rxBuf = this.rxBuf.slice(9 + flen);
-        this._handleFrame(type, flags, sid, payload);
-      }
-      var s = this.streams.get(streamId);
-      if (s && (s.state === 'half_closed_remote' || s.state === 'closed')) return s;
-      kernel.sleep(1);
+  /**
+   * [Item 927] Non-blocking single-pass receive: poll TLS once, drain all complete H2
+   * frames from the buffer, and return the stream if it has reached END_STREAM.
+   * Returns null if the stream is not yet complete — the caller's coroutine retries
+   * each frame without sleeping, so the WM loop is never blocked.
+   */
+  receive(streamId: number, _timeoutTicks = 500): H2Stream | null {
+    // Poll NIC once via non-blocking TLS read, accumulate into rxBuf
+    var raw = this.tls.readNB();
+    if (raw && raw.length > 0) {
+      for (var i = 0; i < raw.length; i++) this.rxBuf.push(raw[i]);
     }
-    return this.streams.get(streamId) || null;
+    // Drain all complete H2 frames from rxBuf in one pass (no blocking/sleep)
+    while (this.rxBuf.length >= 9) {
+      var flen = (this.rxBuf[0] << 16) | (this.rxBuf[1] << 8) | this.rxBuf[2];
+      if (this.rxBuf.length < 9 + flen) break;  // incomplete frame payload — wait more
+      var type    = this.rxBuf[3];
+      var flags   = this.rxBuf[4];
+      var sid     = ((this.rxBuf[5] & 0x7f) << 24) | (this.rxBuf[6] << 16) | (this.rxBuf[7] << 8) | this.rxBuf[8];
+      var payload = this.rxBuf.slice(9, 9 + flen);
+      this.rxBuf  = this.rxBuf.slice(9 + flen);
+      this._handleFrame(type, flags, sid, payload);
+    }
+    // Return stream only if it is fully done; otherwise caller retries next coroutine tick
+    var s = this.streams.get(streamId);
+    if (s && (s.state === 'half_closed_remote' || s.state === 'closed')) return s;
+    return null;
   }
 
   /** [Item 929] Send WINDOW_UPDATE to prevent stream-level flow control blocking. */

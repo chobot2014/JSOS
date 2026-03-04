@@ -386,6 +386,12 @@ export class TLSSocket {
   // Decrypted but not yet parsed handshake bytes (handles multi-message records)
   private _hsDataBuf: number[] = [];
 
+  // ── Async handshake state (beginHandshake / hsPoll) ──────────────────
+  private _hsPhase: string = 'idle';   // 'idle'|'wait-sh'|'wait-enc'|'need-reconnect'|'reconnecting'|'done'|'failed'
+  private _hsEncAttempts: number = 0;
+  private _hsRemoteIP: string = '';
+  private _hsRemotePort: number = 0;
+
   /** [Item 930] Cached session ticket for this hostname (populated post-handshake). */
   private _savedTicket: TLSSessionTicket | null = null;
   /** [Item 930] Resumption master secret derived after a completed handshake. */
@@ -447,6 +453,264 @@ export class TLSSocket {
     }
     if (ok && !this.useTLS12) this._tryReadSessionTicket();
     return ok;
+  }
+
+  /**
+   * Begin an async TLS handshake on an already-connected socket.
+   * Generates key material, sends ClientHello, records the remote address for
+   * TLS 1.2 reconnect retry.  Call hsPoll() each coroutine frame until it returns
+   * 'connected' or 'failed' — never blocks.
+   */
+  beginHandshake(sock: Socket, remoteIP?: string, remotePort?: number): void {
+    this.sock          = sock;
+    this._hsRemoteIP   = remoteIP   || '';
+    this._hsRemotePort = remotePort || 443;
+    this._hsPhase      = 'idle';
+    this._hsEncAttempts = 0;
+    this._got_pv_alert = false;
+    this.rxBuf        = [];
+    this.transcript   = [];
+    this.handshakeDone = false;
+    this.useTLS12     = false;
+    this.serverAppSeq = 0; this.clientAppSeq = 0;
+    this.serverHsSeq  = 0; this.clientHsSeq  = 0;
+    this._hsDataBuf   = [];
+    this._hs12Remainder = [];
+
+    // Generate key material (CPU bound — happens once per connection)
+    this.myPrivate     = generateKey32();
+    this.myPublic      = x25519PublicKey(this.myPrivate);
+    this.myP256Private = generateKey32Unclamped();
+    this.myP256Public  = p256PublicKey(this.myP256Private);
+
+    var clientHello = this._buildClientHello();
+    this.transcript = this.transcript.concat(clientHello.slice(5));  // skip 5-byte record hdr
+    if (!net.sendBytes(this.sock, clientHello)) {
+      this._hsPhase = 'failed';
+      return;
+    }
+    this._hsPhase = 'wait-sh';
+  }
+
+  /**
+   * Poll the async TLS handshake.  Call once per coroutine frame.
+   * Accumulates incoming data non-blocking (no kernel.sleep), advances the
+   * handshake state machine by one logical step, then returns:
+   *   'connected' — handshake complete, socket ready
+   *   'pending'   — waiting for more data or still processing
+   *   'failed'    — unrecoverable error
+   */
+  hsPoll(): 'connected' | 'pending' | 'failed' {
+    if (this._hsPhase === 'done')   return 'connected';
+    if (this._hsPhase === 'failed') return 'failed';
+
+    // Accumulate incoming bytes (non-blocking, no sleep)
+    var _nb = net.recvBytesNB(this.sock);
+    if (_nb && _nb.length > 0) {
+      for (var _i = 0; _i < _nb.length; _i++) this.rxBuf.push(_nb[_i]);
+    }
+
+    // ── Waiting for ServerHello ────────────────────────────────────────
+    if (this._hsPhase === 'wait-sh') {
+      if (this.rxBuf.length < 5) return 'pending';
+      var recType = u8(this.rxBuf, 0);
+      var recLen  = u16(this.rxBuf, 3);
+      if (this.rxBuf.length < 5 + recLen) return 'pending';  // record not yet complete
+
+      if (recType === 21 /* TLS_ALERT */) {
+        // Read alert level+desc if we have them
+        if (this.rxBuf.length >= 7) {
+          var alertDesc = u8(this.rxBuf, 6);
+          kernel.serialPut('[tls/async] alert desc=' + alertDesc + ' from ' + this.hostname + '\n');
+          if (alertDesc === 70 || alertDesc === 40) {
+            this._got_pv_alert = true;  // protocol_version / handshake_failure
+          }
+        }
+        this.rxBuf = this.rxBuf.slice(5 + recLen);
+        this._hsPhase = this._got_pv_alert ? 'need-reconnect' : 'failed';
+        return 'pending';  // transition handled next hsPoll()
+      }
+
+      if (recType !== 22 /* TLS_HANDSHAKE */) {
+        kernel.serialPut('[tls/async] unexpected record type=' + recType + ' in wait-sh\n');
+        this._hsPhase = 'failed'; return 'failed';
+      }
+
+      var recData       = this.rxBuf.slice(5, 5 + recLen);
+      this.rxBuf        = this.rxBuf.slice(5 + recLen);
+      if (recData.length < 4) { this._hsPhase = 'failed'; return 'failed'; }
+
+      var msgType = u8(recData, 0);
+      var msgLen  = u24(recData, 1);
+      var msgData = recData.slice(4, 4 + msgLen);
+
+      if (msgType !== HS_SERVER_HELLO) {
+        kernel.serialPut('[tls/async] expected ServerHello got type=' + msgType + '\n');
+        this._hsPhase = 'failed'; return 'failed';
+      }
+
+      var transcriptLenBeforeSH = this.transcript.length;
+      this.transcript = this.transcript.concat(recData.slice(0, 4 + msgLen));
+
+      // Detect HelloRetryRequest by comparing random field to HRR sentinel
+      var isHRR = msgData.length >= 34;
+      if (isHRR) {
+        for (var _hi = 0; _hi < 32; _hi++) {
+          if (msgData[2 + _hi] !== HRR_RANDOM[_hi]) { isHRR = false; break; }
+        }
+      }
+
+      if (isHRR) {
+        if (this.myP256Public.length === 0) this.myP256Public = p256PublicKey(this.myP256Private);
+        // Reconstruct transcript: message_hash(CH1) + HRR sentinel per RFC 8446 §4.4.1
+        var ch1Hash   = sha256(this.transcript.slice(0, transcriptLenBeforeSH));
+        var hashMsg   = [0xfe, 0x00, 0x00, 0x20].concat(ch1Hash);
+        this.transcript = hashMsg.concat(this.transcript.slice(transcriptLenBeforeSH));
+        var ch2 = this._buildClientHello();
+        this.transcript = this.transcript.concat(ch2.slice(5));
+        if (!net.sendBytes(this.sock, ch2)) { this._hsPhase = 'failed'; return 'failed'; }
+        // Stay in 'wait-sh' for the real ServerHello
+        return 'pending';
+      }
+
+      // Real ServerHello: parse extensions to get server key_share
+      var serverKeyInfo = this._parseServerHello(msgData);
+
+      if (!serverKeyInfo) {
+        if (this._got_pv_alert) {
+          // Server chose TLS 1.2 in-place (ServerHello has TLS 1.2 format, no reconnect needed)
+          this._got_pv_alert = false;
+          var ok12 = this._performHandshake12InPlace(msgData);
+          if (ok12) { this._hsPhase = 'done'; return 'connected'; }
+          this._hsPhase = 'failed'; return 'failed';
+        }
+        kernel.serialPut('[tls/async] _parseServerHello returned null for ' + this.hostname + '\n');
+        this._hsPhase = 'failed'; return 'failed';
+      }
+
+      // Derive TLS 1.3 handshake keys (CPU bound ECDH + HKDF)
+      if (!this._deriveHandshakeKeys(serverKeyInfo.key, serverKeyInfo.group)) {
+        this._hsPhase = 'failed'; return 'failed';
+      }
+
+      this._hsEncAttempts = 0;
+      this._hsPhase = 'wait-enc';
+      return 'pending';
+    }
+
+    // ── Waiting for encrypted server handshake messages ────────────────
+    if (this._hsPhase === 'wait-enc') {
+      // First, drain any messages from the previous coalesced-record remainder
+      if (this._hsDataBuf.length >= 4) {
+        var msgType0 = u8(this._hsDataBuf, 0);
+        var msgLen0  = u24(this._hsDataBuf, 1);
+        if (this._hsDataBuf.length >= 4 + msgLen0) {
+          var msgData0 = this._hsDataBuf.slice(4, 4 + msgLen0);
+          this.transcript = this.transcript.concat(this._hsDataBuf.slice(0, 4 + msgLen0));
+          this._hsDataBuf = this._hsDataBuf.slice(4 + msgLen0);
+          return this._processHsMsg13(msgType0, msgData0);
+        }
+      }
+
+      // Need the next encrypted TLS record from the wire
+      if (this.rxBuf.length < 5) return 'pending';
+      var outerType = u8(this.rxBuf, 0);
+      var recLen2   = u16(this.rxBuf, 3);
+      if (this.rxBuf.length < 5 + recLen2) return 'pending';
+
+      if (outerType === 20 /* TLS_CHANGE_CIPHER_SPEC */) {
+        this.rxBuf = this.rxBuf.slice(5 + recLen2);  // skip
+        return 'pending';
+      }
+
+      if (outerType === 21 /* TLS_ALERT */) {
+        kernel.serialPut('[tls/async] alert during wait-enc from ' + this.hostname + '\n');
+        this.rxBuf = this.rxBuf.slice(5 + recLen2);
+        this._hsPhase = 'failed'; return 'failed';
+      }
+
+      if (outerType !== 23 /* TLS_APPLICATION_DATA */) {
+        kernel.serialPut('[tls/async] unexpected type=' + outerType + ' in wait-enc\n');
+        this._hsPhase = 'failed'; return 'failed';
+      }
+
+      var record2 = this.rxBuf.slice(0, 5 + recLen2);
+      this.rxBuf  = this.rxBuf.slice(5 + recLen2);
+
+      var dec = tlsDecryptRecord(
+          this.serverHsKey, this.serverHsIV, this.serverHsSeq, record2, this.useChaCha20);
+      if (!dec || dec.type !== 22 /* TLS_HANDSHAKE */) {
+        kernel.serialPut('[tls/async] decrypt failed or wrong inner type in wait-enc\n');
+        // Allow a few retries for session-ticket records that arrive before the real HS msgs
+        this._hsEncAttempts++;
+        if (this._hsEncAttempts > 20) { this._hsPhase = 'failed'; return 'failed'; }
+        return 'pending';
+      }
+      this.serverHsSeq++;
+
+      // Extract first handshake message; save the rest in _hsDataBuf for next call
+      var msgType3 = u8(dec.data, 0);
+      var msgLen3  = u24(dec.data, 1);
+      var msgData3 = dec.data.slice(4, 4 + msgLen3);
+      this.transcript = this.transcript.concat(dec.data.slice(0, 4 + msgLen3));
+      this._hsDataBuf = dec.data.slice(4 + msgLen3);
+
+      return this._processHsMsg13(msgType3, msgData3);
+    }
+
+    // ── TLS 1.2 reconnect: close old socket, open new, start connectAsync ─
+    if (this._hsPhase === 'need-reconnect') {
+      kernel.serialPut('[tls/async] TLS 1.3 rejected by ' + this.hostname + ', retrying TLS 1.2\n');
+      net.close(this.sock);
+      this.sock         = net.createSocket('tcp');
+      this.rxBuf        = [];
+      this.transcript   = [];
+      this.useTLS12     = false;
+      this._got_pv_alert = false;
+      this.serverAppSeq = 0; this.clientAppSeq = 0;
+      this.serverHsSeq  = 0; this.clientHsSeq  = 0;
+      this._hsDataBuf   = [];
+      net.connectAsync(this.sock, this._hsRemoteIP, this._hsRemotePort);
+      this._hsPhase = 'reconnecting';
+      return 'pending';
+    }
+
+    // ── Waiting for the TLS 1.2 TCP reconnect to establish ──────────────
+    if (this._hsPhase === 'reconnecting') {
+      var cPoll = net.connectPoll(this.sock);
+      if (cPoll !== 'connected') return 'pending';
+      // TCP connected — now run TLS 1.2 handshake.
+      // Synchronous, but rare path; short-lived (<200 ms typical on SLIRP).
+      var ok12b = this._performHandshake12();
+      if (ok12b) { this._hsPhase = 'done'; return 'connected'; }
+      this._hsPhase = 'failed'; return 'failed';
+    }
+
+    return 'pending';
+  }
+
+  /**
+   * Process one TLS 1.3 encrypted handshake message during the async handshake.
+   * Returns 'connected' on Finished, 'pending' to continue, 'failed' on error.
+   */
+  private _processHsMsg13(msgType: number, msgData: number[]): 'connected' | 'pending' | 'failed' {
+    this._hsEncAttempts++;
+    if (this._hsEncAttempts > 25) { this._hsPhase = 'failed'; return 'failed'; }
+
+    if (msgType === 20 /* HS_FINISHED */ ) {
+      if (this._processServerFinished(msgData)) {
+        this.handshakeDone = true;
+        this._hsPhase = 'done';
+        return 'connected';
+      }
+      this._hsPhase = 'failed'; return 'failed';
+    }
+
+    if (msgType === 8 /* HS_ENCRYPTED_EXT */) {
+      this._parseEncryptedExtensions(msgData);
+    }
+    // Certificate (11), CertificateVerify (15) — skipped, we rely on TOFU/pinning
+    return 'pending';  // more messages to follow
   }
 
   /**
@@ -806,9 +1070,9 @@ export class TLSSocket {
   private _readHandshakeMsg(addToTranscript: boolean):
       { type: number; data: number[] } | null {
     // Read until we have at least 5 bytes (record header)
-    var deadline = kernel.getTicks() + 800;
+    var deadline = kernel.getTicks() + 50;
     while (this.rxBuf.length < 5 && kernel.getTicks() < deadline) {
-      var chunk = net.recvBytes(this.sock, 30);
+      var chunk = net.recvBytes(this.sock, 3);
       if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
     }
     if (this.rxBuf.length < 5) return null;
@@ -816,9 +1080,9 @@ export class TLSSocket {
     var recLen  = u16(this.rxBuf, 3);
     // If server sent an alert, wait for full alert record then log and bail
     if (recType === 21 /* TLS_ALERT */) {
-      var alertDeadline = kernel.getTicks() + 200;
+      var alertDeadline = kernel.getTicks() + 20;
       while (this.rxBuf.length < 5 + recLen && kernel.getTicks() < alertDeadline) {
-        var achunk = net.recvBytes(this.sock, 20);
+        var achunk = net.recvBytes(this.sock, 3);
         if (achunk && achunk.length > 0) for (var _ai = 0; _ai < achunk.length; _ai++) this.rxBuf.push(achunk[_ai]);
       }
       var alertLevel = this.rxBuf.length > 5 ? u8(this.rxBuf, 5) : 0;
@@ -832,9 +1096,9 @@ export class TLSSocket {
       return null;
     }
     // Wait for full record
-    deadline = kernel.getTicks() + 800;
+    deadline = kernel.getTicks() + 50;
     while (this.rxBuf.length < 5 + recLen && kernel.getTicks() < deadline) {
-      var chunk = net.recvBytes(this.sock, 30);
+      var chunk = net.recvBytes(this.sock, 3);
       if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
     }
     if (this.rxBuf.length < 5 + recLen) return null;
@@ -973,17 +1237,17 @@ export class TLSSocket {
 
     // Read a new encrypted TLS record, skipping ChangeCipherSpec records
     for (var skip = 0; skip < 5; skip++) {
-      var deadline = kernel.getTicks() + 800;
+      var deadline = kernel.getTicks() + 50;
       while (this.rxBuf.length < 5 && kernel.getTicks() < deadline) {
-        var chunk = net.recvBytes(this.sock, 50);
+        var chunk = net.recvBytes(this.sock, 3);
         if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
       }
       if (this.rxBuf.length < 5) return null;
       var outerType = u8(this.rxBuf, 0);
       var recLen    = u16(this.rxBuf, 3);
-      deadline = kernel.getTicks() + 800;
+      deadline = kernel.getTicks() + 50;
       while (this.rxBuf.length < 5 + recLen && kernel.getTicks() < deadline) {
-        var chunk = net.recvBytes(this.sock, 50);
+        var chunk = net.recvBytes(this.sock, 3);
         if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
       }
       if (this.rxBuf.length < 5 + recLen) return null;
@@ -1166,7 +1430,7 @@ export class TLSSocket {
         return { type: mt0, data: data0 };
       }
     }
-    var deadline = kernel.getTicks() + 600;
+    var deadline = kernel.getTicks() + 50;
     while (kernel.getTicks() < deadline) {
       if (this.rxBuf.length >= 5) {
         var rt  = u8(this.rxBuf, 0);
@@ -1192,7 +1456,7 @@ export class TLSSocket {
           return { type: mt, data: rd.slice(4, 4 + ml) };
         }
       }
-      var c = net.recvBytes(this.sock, 30);
+      var c = net.recvBytes(this.sock, 3);
       if (c && c.length > 0) for (var _pi = 0; _pi < c.length; _pi++) this.rxBuf.push(c[_pi]);
     }
     return null;
@@ -1200,17 +1464,17 @@ export class TLSSocket {
 
   /** Read an encrypted TLS 1.2 handshake message (after CCS). Handles type 22 (Handshake). */
   private _readEncryptedHS12(): { type: number; data: number[] } | null {
-    var deadline = kernel.getTicks() + 600;
+    var deadline = kernel.getTicks() + 50;
     while (this.rxBuf.length < 5 && kernel.getTicks() < deadline) {
-      var c = net.recvBytes(this.sock, 30);
+      var c = net.recvBytes(this.sock, 3);
       if (c && c.length > 0) for (var _pi = 0; _pi < c.length; _pi++) this.rxBuf.push(c[_pi]);
     }
     if (this.rxBuf.length < 5) return null;
     var rt  = u8(this.rxBuf, 0);
     var rl  = u16(this.rxBuf, 3);
-    deadline = kernel.getTicks() + 800;
+    deadline = kernel.getTicks() + 50;
     while (this.rxBuf.length < 5 + rl && kernel.getTicks() < deadline) {
-      var c = net.recvBytes(this.sock, 30);
+      var c = net.recvBytes(this.sock, 3);
       if (c && c.length > 0) for (var _pi = 0; _pi < c.length; _pi++) this.rxBuf.push(c[_pi]);
     }
     if (this.rxBuf.length < 5 + rl) return null;
@@ -1621,7 +1885,7 @@ export class TLSSocket {
    * TLS 1.3 session resumption (0-RTT early data path).
    */
   private _tryReadSessionTicket(): void {
-    var raw = net.recvBytes(this.sock, 80);  // short poll
+    var raw = net.recvBytes(this.sock, 3);  // short poll
     if (!raw || raw.length < 9) return;
     var ri = 0;
     for (; ri < raw.length; ) {
