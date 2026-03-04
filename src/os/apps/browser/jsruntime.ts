@@ -3059,6 +3059,16 @@ export function createPageJS(
       }
     }
 
+    // Also include adoptedStyleSheets (Constructable Stylesheets API: LitElement, Shadow DOM, etc.)
+    var _adoptedSS = (doc as any)._adoptedStyleSheets as unknown[];
+    if (Array.isArray(_adoptedSS)) {
+      for (var _asi = 0; _asi < _adoptedSS.length; _asi++) {
+        var _aSheet = _adoptedSS[_asi] as any as CSSStyleSheet_;
+        if (!_aSheet || _aSheet.disabled) continue;
+        walkRules(_aSheet.cssRules ?? []);
+      }
+    }
+
     // Sort: normal rules by layer (earlier layers first), then specificity, then source order
     // [Item 436] unlayered rules (layerIdx=0x7FFFFFFF) sort last = highest cascade priority
     matched.sort((a, b2) => {
@@ -5314,31 +5324,98 @@ export function createPageJS(
           }
         };
       }
+      // ── Intercept dynamic <style> element injection (CSS-in-JS, runtime styles)
+      if (tag.toLowerCase() === 'style') {
+        var _dynStyleText = '';
+        var _dynStyleSheet: CSSStyleSheet_ | null = null;
+        var _patchStyleText = function(v: string): void {
+          _dynStyleText = v;
+          if (_dynStyleSheet) {
+            _dynStyleSheet._parseText(v);
+            doc._dirty = true;
+          }
+        };
+        Object.defineProperty(el, 'textContent', {
+          get(): string { return _dynStyleText; },
+          set(v: string) { _patchStyleText(String(v)); },
+          configurable: true,
+        });
+        Object.defineProperty(el, 'innerHTML', {
+          get(): string { return _dynStyleText; },
+          set(v: string) { _patchStyleText(String(v)); },
+          configurable: true,
+        });
+        Object.defineProperty(el, 'sheet', {
+          get(): CSSStyleSheet_ | null { return _dynStyleSheet; },
+          configurable: true,
+        });
+        (el as any)._isDynamicStyle = true;
+        (el as any)._attachDynSheet = function(): void {
+          if (_dynStyleSheet) return; // already attached
+          _dynStyleSheet = new CSSStyleSheet_();
+          (_dynStyleSheet as any).ownerNode = el;
+          _dynStyleSheet._parseText(_dynStyleText);
+          doc._styleSheets.push(_dynStyleSheet);
+          doc._dirty = true;
+        };
+      }
       return el;
     };
   }
 
-  // ── Patch appendChild/insertBefore to detect dynamic <script> injection ───
+  // ── Patch appendChild/insertBefore to detect dynamic <script>/<style>/<link> ──
   {
+    // Handle a node immediately after it's inserted into the DOM
+    var _handleInsertedNode = function(child: any): void {
+      // Dynamic <script> injection (SPAs, analytics)
+      if (child && (child as any)._isDynamicScript && (child as any)._onAttach) {
+        (child as any)._onAttach();
+        (child as any)._isDynamicScript = false; // prevent double-execution
+      }
+      // Dynamic <style> injection (CSS-in-JS: emotion, styled-components, MUI, etc.)
+      if (child && (child as any)._isDynamicStyle && typeof (child as any)._attachDynSheet === 'function') {
+        (child as any)._attachDynSheet();
+        (child as any)._isDynamicStyle = false; // prevent double-registration
+      }
+      // Dynamic <link rel="stylesheet"> injection (lazy-loaded CSS, analytics widgets)
+      if (child && child.tagName && child.tagName.toLowerCase() === 'link') {
+        var _lkRel = (child.getAttribute ? child.getAttribute('rel') : '') || '';
+        if (String(_lkRel).toLowerCase().includes('stylesheet')) {
+          var _lkSheet = new CSSStyleSheet_();
+          (_lkSheet as any).ownerNode = child;
+          doc._styleSheets.push(_lkSheet);
+          var _lkHref = (child.getAttribute ? child.getAttribute('href') : '') || '';
+          if (_lkHref) {
+            (function(_sh: CSSStyleSheet_, _el: any, _href: string) {
+              var _url = _href.startsWith('http') ? _href : _resolveURL(_href, _baseHref);
+              os.fetchAsync(_url, (resp: FetchResponse | null) => {
+                if (resp && resp.status === 200) {
+                  _sh._parseText(resp.bodyText);
+                  doc._dirty = true;
+                  try { _el.dispatchEvent(new VEvent('load')); } catch(_) {}
+                } else {
+                  try { _el.dispatchEvent(new VEvent('error')); } catch(_) {}
+                }
+              });
+            })(_lkSheet, child, String(_lkHref));
+          }
+        }
+      }
+    };
+
     var _hookAppendChild = function(parent: any): void {
       if (!parent) return;
       var _origAppend2 = parent.appendChild.bind(parent);
       parent.appendChild = function(child: any) {
         var result = _origAppend2(child);
-        if (child && (child as any)._isDynamicScript && (child as any)._onAttach) {
-          (child as any)._onAttach();
-          (child as any)._isDynamicScript = false; // prevent double-execution
-        }
+        _handleInsertedNode(child);
         return result;
       };
       if (parent.insertBefore) {
         var _origInsert = parent.insertBefore.bind(parent);
         parent.insertBefore = function(newChild: any, refChild: any) {
           var result = _origInsert(newChild, refChild);
-          if (newChild && (newChild as any)._isDynamicScript && (newChild as any)._onAttach) {
-            (newChild as any)._onAttach();
-            (newChild as any)._isDynamicScript = false;
-          }
+          _handleInsertedNode(newChild);
           return result;
         };
       }
@@ -5974,6 +6051,17 @@ export function createPageJS(
   (doc as any)._defaultView = win;
   (doc as any)._url = cb.baseURL;
   (doc as any)._selectionRef = _selection;
+
+  // Wire document.adoptedStyleSheets (Constructable Stylesheets — LitElement, Shadow DOM, etc.)
+  Object.defineProperty(doc, 'adoptedStyleSheets', {
+    get(): unknown[] { return (doc as any)._adoptedStyleSheets ?? []; },
+    set(sheets: unknown[]): void {
+      (doc as any)._adoptedStyleSheets = Array.isArray(sheets) ? sheets : [];
+      bumpStyleGeneration();
+      doc._dirty = true;
+    },
+    configurable: true,
+  });
 
   // Wire document.cookie to the shared cookie jar (items 303-304)
   Object.defineProperty(doc, 'cookie', {
