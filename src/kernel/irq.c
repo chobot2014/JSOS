@@ -4,6 +4,16 @@
 #include "mouse.h"
 #include "platform.h"
 #include <stddef.h>
+#include <setjmp.h>
+
+/* ── JS execution fault recovery ────────────────────────────────────────── */
+/* Set by kernel.evalGuarded() in quickjs_binding.c before running untrusted JS.
+ * If a CPU exception (#PF, #GP, #UD) fires while active, we longjmp() to the
+ * recovery point instead of halting.  This allows the JS runtime to catch the
+ * fault as a JavaScript exception and continue running. */
+jmp_buf          _js_fault_buf;
+volatile int     _js_fault_active  = 0;
+volatile int     _js_fault_vector  = 0;
 
 /* ── CPU exception dispatcher ───────────────────────────────────────────── */
 
@@ -102,6 +112,21 @@ void exception_dispatch(exception_frame_t *f) {
     if (f->vector == 1) {
         extern int kprobes_db_handler(uint32_t eip, uint32_t *eflags_ptr);
         if (kprobes_db_handler(f->eip, &f->eflags)) return;
+    }
+
+    /* JS execution fault recovery — vectors 0(#DE), 6(#UD), 13(#GP), 14(#PF).
+     * If kernel.evalGuarded() set the recovery flag before executing untrusted
+     * JS, longjmp() back instead of halting.  The C stack between the setjmp
+     * and this point is abandoned; QuickJS's heap may be partially dirty but
+     * the GC can collect the garbage on the next cycle. */
+    if (_js_fault_active &&
+        (f->vector == 0 || f->vector == 6 || f->vector == 13 || f->vector == 14)) {
+        _js_fault_active = 0;
+        _js_fault_vector = (int)f->vector;
+        platform_serial_puts("[kernel] CPU fault in JS (vector=");
+        _exc_hex32(f->vector);
+        platform_serial_puts(") — recovering via longjmp\n");
+        longjmp(_js_fault_buf, (int)f->vector + 1);
     }
 
     platform_serial_puts("System halted.\n");

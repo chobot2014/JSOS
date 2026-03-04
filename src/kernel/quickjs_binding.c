@@ -18,6 +18,12 @@
 #include "io.h"
 #include "embedded_js.h"
 #include "ata.h"
+#include <setjmp.h>
+
+/* Recovery globals declared in irq.c */
+extern jmp_buf       _js_fault_buf;
+extern volatile int  _js_fault_active;
+extern volatile int  _js_fault_vector;
 #include "virtio_net.h"
 #include "jit.h"
 #include <stdint.h>
@@ -549,6 +555,48 @@ static JSValue js_eval(JSContext *c, JSValueConst this_val, int argc, JSValueCon
     if (str) JS_FreeCString(c, str);
     JS_FreeValue(c, result);
     return ret;
+}
+
+/*
+ * kernel.evalGuarded(code [, filename])
+ *
+ * Evaluate JavaScript code with CPU-fault recovery.  If the QuickJS
+ * interpreter triggers a hardware exception (#PF, #GP, #UD) during
+ * execution, the exception handler longjmp()s back here and we throw
+ * a catchable JavaScript InternalError instead of halting the kernel.
+ *
+ * Use this whenever executing untrusted third-party scripts (e.g.
+ * Google's JS bundles) that may use memory patterns our interpreter
+ * doesn't handle cleanly.
+ */
+static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    size_t len;
+    const char *code = JS_ToCStringLen(c, &len, argv[0]);
+    if (!code) return JS_EXCEPTION;
+    const char *filename = "<eval-guarded>";
+    /* Arm the recovery checkpoint */
+    _js_fault_active = 1;
+    _js_fault_vector = 0;
+    int recovered = setjmp(_js_fault_buf);
+    if (recovered != 0) {
+        /* CPU exception occurred during JS execution; longjmp brought us here */
+        _js_fault_active = 0;
+        JS_FreeCString(c, code);
+        /* NOTE: do NOT run GC here — partially-constructed heap objects from
+         * the crashed execution are unreachable and will be swept on the next
+         * normal GC cycle.  Forcing a GC now risks re-entering corrupt state. */
+        return JS_ThrowInternalError(c, "CPU exception #%d during script execution",
+                                     recovered - 1);
+    }
+    JSValue result = JS_Eval(c, code, len, filename, JS_EVAL_TYPE_GLOBAL);
+    _js_fault_active = 0;
+    JS_FreeCString(c, code);
+    if (JS_IsException(result)) {
+        return JS_EXCEPTION;  /* propagate normal JS exceptions as-is */
+    }
+    JS_FreeValue(c, result);
+    return JS_UNDEFINED;
 }
 
 /*  Function table  */
@@ -3177,7 +3225,8 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("serialPut",     1, js_serial_put),
     JS_CFUNC_DEF("serialGetchar", 0, js_serial_getchar),
     /* Eval */
-    JS_CFUNC_DEF("eval",   1, js_eval),
+    JS_CFUNC_DEF("eval",         1, js_eval),
+    JS_CFUNC_DEF("evalGuarded",  1, js_eval_guarded),
     /* ATA block device */
     JS_CFUNC_DEF("ataPresent",     0, js_ata_present),
     JS_CFUNC_DEF("ataSectorCount", 0, js_ata_sector_count),

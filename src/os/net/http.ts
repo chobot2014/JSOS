@@ -591,7 +591,7 @@ export function httpsGet(
       ['accept-encoding', 'gzip, deflate'],
       ['user-agent', 'Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/115.0'],
     ]);
-    var stream = h2conn.receive(h2sid, 500);
+    var stream = h2conn.receive(h2sid, 3000);
     if (!stream) { h2conn.close(); _wt2.finish(0, 0); return { tlsOk: true, response: hit2?.response ?? null }; }
     // Build HttpResponse from H2 stream
     var h2status = 200;
@@ -714,7 +714,7 @@ export function httpsPost(
       ['user-agent', 'Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/115.0'],
     ]);
     h2conn.sendData(h2sid, body, true);
-    var stream = h2conn.receive(h2sid, 500);
+    var stream = h2conn.receive(h2sid, 3000);
     if (!stream) { h2conn.close(); return { tlsOk: true, response: null }; }
     var h2status = 200;
     var h2hdrs = new Map<string, string>();
@@ -1113,20 +1113,47 @@ export class HTTP2Connection {
     // Client connection preface (RFC 9113 §3.4)
     var preface = strToBytes('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n');
     this.tls.write(preface);
-    // Send empty SETTINGS frame
-    this.tls.write(this._buildFrame(H2_SETTINGS, 0, 0, []));
+    // Send SETTINGS: advertise large initial stream window (16 MB)
+    var connSettPayload: number[] = [
+      0x00, 0x04, // SETTINGS_INITIAL_WINDOW_SIZE
+      0x01, 0x00, 0x00, 0x00, // 16777216 bytes
+    ];
+    this.tls.write(this._buildFrame(H2_SETTINGS, 0, 0, connSettPayload));
+    // Advertise large connection-level receive window
+    var connWinIncrC = 16 * 1024 * 1024 - 65535;
+    var cwPayloadC = [
+      (connWinIncrC >> 24) & 0x7f,
+      (connWinIncrC >> 16) & 0xff,
+      (connWinIncrC >> 8)  & 0xff,
+       connWinIncrC        & 0xff,
+    ];
+    this.tls.write(this._buildFrame(H2_WINDOW_UPDATE, 0, 0, cwPayloadC));
     return true;
   }
 
   /**
    * Adopt an existing TLS socket (already handshake-complete with ALPN h2).
-   * Sends the HTTP/2 connection preface + initial SETTINGS.
+   * Sends the HTTP/2 connection preface + initial SETTINGS + connection WINDOW_UPDATE.
    */
   connectOnSocket(tlsSock: TLSSocket): boolean {
     this.tls = tlsSock;
     var preface = strToBytes('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n');
     this.tls.write(preface);
-    this.tls.write(this._buildFrame(H2_SETTINGS, 0, 0, []));
+    // Send SETTINGS: advertise large initial stream window (16 MB)
+    var settPayload: number[] = [
+      0x00, 0x04, // SETTINGS_INITIAL_WINDOW_SIZE
+      0x01, 0x00, 0x00, 0x00, // 16777216 bytes
+    ];
+    this.tls.write(this._buildFrame(H2_SETTINGS, 0, 0, settPayload));
+    // Advertise a large connection-level receive window (16 MB - 65535 default)
+    var connWinIncr = 16 * 1024 * 1024 - 65535;
+    var cwPayload = [
+      (connWinIncr >> 24) & 0x7f,
+      (connWinIncr >> 16) & 0xff,
+      (connWinIncr >> 8)  & 0xff,
+       connWinIncr        & 0xff,
+    ];
+    this.tls.write(this._buildFrame(H2_WINDOW_UPDATE, 0, 0, cwPayload));
     return true;
   }
 
@@ -1152,6 +1179,15 @@ export class HTTP2Connection {
     this.tls.write(this._buildFrame(H2_HEADERS, flags, sid, block));
     var stream: H2Stream = { id: sid, state: 'open', headers: hdrs, body: [], pushed: false };
     this.streams.set(sid, stream);
+    // Advertise a large stream-level receive window (16 MB - 65535 default)
+    var streamWinIncr = 16 * 1024 * 1024 - 65535;
+    var swPayload = [
+      (streamWinIncr >> 24) & 0x7f,
+      (streamWinIncr >> 16) & 0xff,
+      (streamWinIncr >> 8)  & 0xff,
+       streamWinIncr        & 0xff,
+    ];
+    this.tls.write(this._buildFrame(H2_WINDOW_UPDATE, 0, sid, swPayload));
     return sid;
   }
 
@@ -1169,10 +1205,12 @@ export class HTTP2Connection {
   receive(streamId: number, timeoutTicks = 500): H2Stream | null {
     var deadline = kernel.getTicks() + timeoutTicks;
     while (kernel.getTicks() < deadline) {
-      var raw = this.tls.read(50);
+      // Use non-blocking read so the outer timeout actually works
+      var raw = this.tls.readNB();
       if (raw && raw.length > 0) {
         for (var i = 0; i < raw.length; i++) this.rxBuf.push(raw[i]);
       }
+      // Drain all complete frames from rxBuf
       while (this.rxBuf.length >= 9) {
         var flen = (this.rxBuf[0] << 16) | (this.rxBuf[1] << 8) | this.rxBuf[2];
         if (this.rxBuf.length < 9 + flen) break;
@@ -1323,8 +1361,12 @@ export class HTTP2Connection {
         if (flags & 0x08) { var dPad = payload[0]; dOff++; dEnd -= dPad; }
         for (var i = dOff; i < dEnd; i++) st2.body.push(payload[i]);
         if (flags & 0x01) { st2.state = sid > 0 ? 'half_closed_remote' : 'closed'; }
-        // Send WINDOW_UPDATE to keep connection flowing
-        if (payload.length > 0) this.windowUpdate(sid, payload.length);
+        // Send both stream-level and connection-level WINDOW_UPDATE to keep flow control open
+        var dataLen = dEnd - dOff;
+        if (dataLen > 0) {
+          this.windowUpdate(sid, dataLen);
+          this.connectionWindowUpdate(dataLen);
+        }
       }
     } else if (type === H2_PUSH_PROMISE) {
       // [Item 929] Server push: extract promised stream ID and request headers

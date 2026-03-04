@@ -5507,6 +5507,32 @@ export function createPageJS(
   }
 
   function execScript(code: string, scriptURL?: string): void {
+    // ── Script size guard ──────────────────────────────────────────────────────
+    // Very large scripts (minified bundles > 1 MB) risk crashing the QuickJS
+    // interpreter on certain memory-intensive patterns.  Use kernel.evalGuarded
+    // for them so a CPU fault produces a catchable JS error instead of a halt.
+    var _GUARD_THRESHOLD = 512 * 1024; // 512 KB
+    var _useGuarded = code.length > _GUARD_THRESHOLD && typeof (kernel as any).evalGuarded === 'function';
+    if (code.length > 2 * 1024 * 1024) {
+      // Absolute limit: skip scripts > 2 MB entirely — these are framework
+      // bundles that won't provide meaningful functionality in our runtime.
+      cb.log('[JS] skipping oversized script ' + code.length + ' chars from ' + (scriptURL || '(inline)'));
+      return;
+    }
+    // ── Guarded execution path for large/risky scripts ───────────────────────
+    if (_useGuarded) {
+      cb.log('[JS] using kernel.evalGuarded for ' + code.length + ' char script from ' + (scriptURL || '(inline)'));
+      _bridgeToGlobal();
+      try {
+        (kernel as any).evalGuarded(code);
+      } catch (e) {
+        _fireScriptError(e);
+      }
+      _bridgeToGlobal();
+      checkDirty();
+      return;
+    }
+
     // ── JIT script cache: check for pre-compiled Function ────────────────────
     var _cachedURL = scriptURL || _baseHref + '#exec';
     if (JITBrowserEngine.ready) {
