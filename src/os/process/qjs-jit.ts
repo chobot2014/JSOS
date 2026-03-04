@@ -422,7 +422,19 @@ export class QJSJITCompiler {
     let pc = 0;
     // Track which bytecode offsets are legal jump targets (for DCE item 853).
     const _jumpTargets = new Set<number>();
+
+    // Build a dead-end map: _deadCutoff[p] = first live pc after the dead range that contains p,
+    // or -1 if p is live.  Prevents bailing on unsupported opcodes in unreachable code (item 853).
+    const _preAnalysis = BytecodePreAnalysis.analyze(bc);
+    const _deadCutoff = new Int32Array(bc.bcLen).fill(-1);
+    for (const [dStart, dEnd] of _preAnalysis.deadRanges) {
+      for (let dp = dStart; dp < dEnd; dp++) _deadCutoff[dp] = dEnd;
+    }
+
     while (pc < bc.bcLen) {
+      // DCE: skip dead code ranges — avoids bail-outs on unreachable unsupported opcodes.
+      if (_deadCutoff[pc] >= 0) { pc = _deadCutoff[pc]; continue; }
+
       this._bcToNative.set(pc, e.here());
       const op = bc.u8(pc);
 
@@ -1829,6 +1841,86 @@ export class FloatJITCompiler extends QJSJITCompiler {
           pc++; break;
         }
 
+        // ── Extended float stack manipulation ─────────────────────────────────
+
+        case OP_dup2: {
+          // [..., a, b] (b=TOS, 8-byte doubles) → [..., a, b, a, b]
+          // After sub esp,16: old [ESP+16]=b, [ESP+24]=a relative to new ESP.
+          e.subEsp(16);
+          e.fldQwordEspDisp(24);   // ST(0) = a (old TOS-1)
+          e.fstpQwordEspDisp(8);   // [ESP+8..15] = a (copy)
+          e.fldQwordEspDisp(16);   // ST(0) = b (old TOS)
+          e.fstpQwordEsp();        // [ESP..7]  = b (copy) ← new TOS
+          pc++; break;
+        }
+
+        case OP_dup3: {
+          // [..., a, b, c, d] (d=TOS) → [..., a, b, c, d, a]  — duplicate TOS-3.
+          // TOS-3 = a is at [ESP+24]; after sub esp,8 it is at [ESP+32].
+          e.subEsp(8);
+          e.fldQwordEspDisp(32);   // ST(0) = a (the far-down entry)
+          e.fstpQwordEsp();        // [ESP..7] = a ← new TOS
+          pc++; break;
+        }
+
+        case OP_nip: {
+          // [..., a, b] (b=TOS) → [..., b]  — discard TOS-1, keep TOS.
+          e.fldQwordEsp();   // ST(0) = b (peek TOS; no ESP change)
+          e.addEsp(8);       // discard b's 8-byte stack slot (now [ESP..7] = a)
+          e.fstpQwordEsp();  // [ESP..7] = b (overwrites a) ← b is new TOS
+          pc++; break;
+        }
+
+        case OP_nip1: {
+          // [..., a, b, c] (c=TOS) → [..., a, c]  — remove middle element (TOS-2=b).
+          // c=[ESP..7], b=[ESP+8..15], a=[ESP+16..23].
+          // Load c, skip b by advancing ESP, write c back over where b was.
+          e.fldQwordEsp();    // ST(0) = c (peek TOS)
+          e.addEsp(8);        // discard c's slot; now [ESP..7]=b, [ESP+8..15]=a
+          e.fstpQwordEsp();   // [ESP..7] = c (overwrites b) ← c is new TOS
+          // Final: [ESP..7]=c, [ESP+8..15]=a — stack is one entry shorter ✓
+          pc++; break;
+        }
+
+        case OP_rot3l: {
+          // [..., a, b, c] (c=TOS) → [..., b, c, a]  (a=new TOS)
+          // c=[ESP..7], b=[ESP+8..15], a=[ESP+16..23].
+          // Load all three, then store in desired order using fxch to swap b↔c.
+          e.fldQwordEsp();          // ST(0)=c
+          e.fldQwordEspDisp(8);     // ST(0)=b, ST(1)=c
+          e.fldQwordEspDisp(16);    // ST(0)=a, ST(1)=b, ST(2)=c
+          e.fstpQwordEsp();         // [ESP..7]=a;   ST(0)=b, ST(1)=c
+          e.fxch();                 // swap b↔c: ST(0)=c, ST(1)=b
+          e.fstpQwordEspDisp(8);    // [ESP+8..15]=c; ST(0)=b
+          e.fstpQwordEspDisp(16);   // [ESP+16..23]=b ✓
+          pc++; break;
+        }
+
+        case OP_rot3r: {
+          // [..., a, b, c] (c=TOS) → [..., c, a, b]  (b=new TOS)
+          // c=[ESP..7], b=[ESP+8..15], a=[ESP+16..23].
+          // Load all three, fxch to bring b to top, then store b/a/c in order.
+          e.fldQwordEsp();          // ST(0)=c
+          e.fldQwordEspDisp(8);     // ST(0)=b, ST(1)=c
+          e.fldQwordEspDisp(16);    // ST(0)=a, ST(1)=b, ST(2)=c
+          e.fxch();                 // swap a↔b: ST(0)=b, ST(1)=a, ST(2)=c
+          e.fstpQwordEsp();         // [ESP..7]=b;    ST(0)=a, ST(1)=c
+          e.fstpQwordEspDisp(8);    // [ESP+8..15]=a; ST(0)=c
+          e.fstpQwordEspDisp(16);   // [ESP+16..23]=c ✓
+          pc++; break;
+        }
+
+        case OP_add_loc8: {
+          // local[u8_idx] += TOS (TOS consumed).  8-byte double eval stack.
+          const i = bc.u8(pc + 1);
+          e.fldQwordEsp();          // ST(0) = addend (TOS)
+          e.addEsp(8);              // pop eval stack
+          e.fld64Ebp(ldisp(i));     // ST(0)=local[i], ST(1)=addend
+          e.faddp();                // ST(0) = local[i] + addend; pop ST(1)
+          e.fstp64Ebp(ldisp(i));   // store result back to local[i]; pop FPU
+          pc += 2; break;
+        }
+
         default: return null;  // unsupported opcode — bail out
       }
     }
@@ -1905,7 +1997,7 @@ export class BytecodePreAnalysis {
       0x29: 3, // OP_set_var_ref
       0x42: 3, // OP_call0
       0x43: 3, // OP_call
-      0x45: 3, // OP_call_method (alias)
+      // 0x45 = OP_call_method — covered by [OP_call_method] above
       0x8C: 3, // OP_set_loc_uninitialized
       // 2-byte opcodes (opcode + u8)
       [OP_goto8]: 2, [OP_if_true8]: 2, [OP_if_false8]: 2,
