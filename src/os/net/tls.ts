@@ -387,10 +387,22 @@ export class TLSSocket {
   private _hsDataBuf: number[] = [];
 
   // ── Async handshake state (beginHandshake / hsPoll) ──────────────────
-  private _hsPhase: string = 'idle';   // 'idle'|'wait-sh'|'wait-enc'|'need-reconnect'|'reconnecting'|'done'|'failed'
+  private _hsPhase: string = 'idle';   // 'idle'|'wait-sh'|'wait-enc'|'need-reconnect'|'reconnecting'|'tls12-wait-sh'|'tls12-server-msgs'|'tls12-wait-ccs'|'tls12-wait-fin'|'done'|'failed'
   private _hsEncAttempts: number = 0;
   private _hsRemoteIP: string = '';
   private _hsRemotePort: number = 0;
+
+  // ── TLS 1.2 async handshake intermediate state ────────────────────────
+  /** Holds in-flight TLS 1.2 handshake state between hsPoll() frames. */
+  private _hs12S: {
+    ch: boolean;      // ChaCha20 cipher
+    s384: boolean;    // SHA-384 PRF (AES-256-GCM-SHA384)
+    ems: boolean;     // extended master secret (RFC 7627)
+    sRand: number[];  // server random bytes
+    pub: number[];    // server ECDHE public key (from ServerKeyExchange)
+    ms: number[];     // master secret (computed at ServerHelloDone)
+    cnt: number;      // message counter (for loop-bound safety)
+  } | null = null;
 
   /** [Item 930] Cached session ticket for this hostname (populated post-handshake). */
   private _savedTicket: TLSSessionTicket | null = null;
@@ -578,9 +590,16 @@ export class TLSSocket {
         if (this._got_pv_alert) {
           // Server chose TLS 1.2 in-place (ServerHello has TLS 1.2 format, no reconnect needed)
           this._got_pv_alert = false;
-          var ok12 = this._performHandshake12InPlace(msgData);
-          if (ok12) { this._hsPhase = 'done'; return 'connected'; }
-          this._hsPhase = 'failed'; return 'failed';
+          // Server chose TLS 1.2 in-place — kick off async TLS 1.2 handshake
+          // (transcript already has combined CH + ServerHello from _readHandshakeMsg)
+          this.useTLS12 = true;
+          this._hs12Remainder = [];
+          this.serverAppSeq = 0; this.clientAppSeq = 0;
+          // Fresh P-256 keypair for ClientKeyExchange
+          this.myP256Private = generateKey32Unclamped();
+          this.myP256Public  = p256PublicKey(this.myP256Private);
+          if (!this._hs12InitFromServerHello(msgData)) { this._hsPhase = 'failed'; return 'failed'; }
+          this._hsPhase = 'tls12-server-msgs'; return 'pending';
         }
         kernel.serialPut('[tls/async] _parseServerHello returned null for ' + this.hostname + '\n');
         this._hsPhase = 'failed'; return 'failed';
@@ -677,11 +696,130 @@ export class TLSSocket {
     if (this._hsPhase === 'reconnecting') {
       var cPoll = net.connectPoll(this.sock);
       if (cPoll !== 'connected') return 'pending';
-      // TCP connected — now run TLS 1.2 handshake.
-      // Synchronous, but rare path; short-lived (<200 ms typical on SLIRP).
-      var ok12b = this._performHandshake12();
-      if (ok12b) { this._hsPhase = 'done'; return 'connected'; }
-      this._hsPhase = 'failed'; return 'failed';
+      // TCP connected — start async TLS 1.2 handshake (send CH12, then wait for SH).
+      this.useTLS12 = true;
+      this.transcript = [];
+      this._hs12Remainder = [];
+      this.serverAppSeq = 0; this.clientAppSeq = 0;
+      this.myP256Private = generateKey32Unclamped();
+      this.myP256Public  = p256PublicKey(this.myP256Private);
+      var ch12 = this._buildClientHello12();
+      this.transcript = ch12.slice(5);  // skip 5-byte record header
+      if (!net.sendBytes(this.sock, ch12)) { this._hsPhase = 'failed'; return 'failed'; }
+      this._hs12S = { ch: false, s384: false, ems: false, sRand: [], pub: [], ms: [], cnt: 0 };
+      this._hsPhase = 'tls12-wait-sh'; return 'pending';
+    }
+
+    // ── TLS 1.2 async: waiting for ServerHello ────────────────────────────
+    if (this._hsPhase === 'tls12-wait-sh') {
+      var sh12nb = this._readHS12NB();
+      if (sh12nb === null) return 'pending';
+      if (sh12nb === 'alert' || (sh12nb as any).type === 20) { this._hsPhase = 'failed'; return 'failed'; }
+      if ((sh12nb as any).type !== HS_SERVER_HELLO) { this._hsPhase = 'failed'; return 'failed'; }
+      if (!this._hs12InitFromServerHello((sh12nb as any).data)) { this._hsPhase = 'failed'; return 'failed'; }
+      this._hsPhase = 'tls12-server-msgs'; return 'pending';
+    }
+
+    // ── TLS 1.2 async: reading Certificate, ServerKeyExchange, ServerHelloDone ──
+    if (this._hsPhase === 'tls12-server-msgs') {
+      var _s12 = this._hs12S!;
+      if (_s12.cnt > 15) { this._hsPhase = 'failed'; return 'failed'; }
+      var _sm = this._readHS12NB();
+      if (_sm === null) return 'pending';          // incomplete record — come back next frame
+      if (_sm === 'alert') { this._hsPhase = 'failed'; return 'failed'; }
+      _s12.cnt++;
+      if (_sm.type === 11) return 'pending';       // Certificate — skip (no cert validation)
+      if (_sm.type === 13) return 'pending';       // CertificateRequest — skip
+      if (_sm.type === 12) {
+        // ServerKeyExchange: curve_type(1), namedCurve(2), pubkey_len(1), pubkey(N)
+        var _ske = _sm.data;
+        if (_ske.length < 4) { this._hsPhase = 'failed'; return 'failed'; }
+        var _pkLen = u8(_ske, 3);
+        _s12.pub = _ske.slice(4, 4 + _pkLen);
+        return 'pending';
+      }
+      if (_sm.type === 14) {
+        // ServerHelloDone — compute keys then send ClientKeyExchange + CCS + Finished
+        if (_s12.pub.length === 0) {
+          kernel.serialPut('[tls12/nb] no ServerKeyExchange received\n');
+          this._hsPhase = 'failed'; return 'failed';
+        }
+        // Compute ECDHE shared secret
+        var _shar: number[];
+        if (_s12.pub.length === 32) {
+          this.myPrivate = generateKey32(); this.myPublic = x25519PublicKey(this.myPrivate);
+          _shar = x25519(this.myPrivate, _s12.pub);
+        } else {
+          _shar = ecdhP256(this.myP256Private, _s12.pub);
+        }
+        var _cRand: number[] = (this as any)._tls12ClientRandom;
+        // Build ClientKeyExchange
+        var _cke: number[] = [];
+        if (_s12.pub.length === 32) { putU8(_cke, 32); _cke = _cke.concat(this.myPublic); }
+        else { putU8(_cke, this.myP256Public.length); _cke = _cke.concat(this.myP256Public); }
+        var _ckeMsg: number[] = [16]; putU24(_ckeMsg, _cke.length); _ckeMsg = _ckeMsg.concat(_cke);
+        this.transcript = this.transcript.concat(_ckeMsg);
+        // Derive master secret (RFC 7627 EMS or standard)
+        var _prf12 = _s12.s384 ? tls12PRF384 : tls12PRF;
+        if (_s12.ems) {
+          var _sesH = _s12.s384 ? sha384(this.transcript) : sha256(this.transcript);
+          _s12.ms = _prf12(_shar, 'extended master secret', _sesH, 48);
+        } else {
+          _s12.ms = _prf12(_shar, 'master secret', _cRand.concat(_s12.sRand), 48);
+        }
+        // Derive key material
+        var _kSz = (_s12.ch || _s12.s384) ? 32 : 16;
+        var _iSz = _s12.ch ? 12 : 4;
+        var _km  = _prf12(_s12.ms, 'key expansion', _s12.sRand.concat(_cRand), _kSz*2 + _iSz*2);
+        this.clientAppKey       = _km.slice(0,         _kSz);
+        this.serverAppKey       = _km.slice(_kSz,      _kSz*2);
+        this.tls12ClientWriteIV = _km.slice(_kSz*2,         _kSz*2 + _iSz);
+        this.tls12ServerWriteIV = _km.slice(_kSz*2 + _iSz,  _kSz*2 + _iSz*2);
+        this.clientAppSeq = 0; this.serverAppSeq = 0;
+        // Send ClientKeyExchange
+        var _ckeRec = [TLS_HANDSHAKE, 0x03, 0x03]; putU16(_ckeRec, _ckeMsg.length);
+        if (!net.sendBytes(this.sock, _ckeRec.concat(_ckeMsg))) { this._hsPhase = 'failed'; return 'failed'; }
+        // Send ChangeCipherSpec
+        if (!net.sendBytes(this.sock, [TLS_CHANGE_CIPHER_SPEC, 0x03, 0x03, 0x00, 0x01, 0x01])) { this._hsPhase = 'failed'; return 'failed'; }
+        // Send Finished
+        var _finH = _s12.s384 ? sha384(this.transcript) : sha256(this.transcript);
+        var _vd   = _prf12(_s12.ms, 'client finished', _finH, 12);
+        var _finMsg: number[] = [HS_FINISHED]; putU24(_finMsg, 12); _finMsg = _finMsg.concat(_vd);
+        var _finRec = _s12.ch
+          ? tls12EncryptRecordChaCha(this.clientAppKey, this.tls12ClientWriteIV, this.clientAppSeq, TLS_HANDSHAKE, _finMsg)
+          : tls12EncryptRecord(this.clientAppKey, this.tls12ClientWriteIV, this.clientAppSeq, TLS_HANDSHAKE, _finMsg);
+        this.clientAppSeq++;
+        if (!net.sendBytes(this.sock, _finRec)) { this._hsPhase = 'failed'; return 'failed'; }
+        this._hsPhase = 'tls12-wait-ccs'; return 'pending';
+      }
+      return 'pending';  // unrecognised type — skip
+    }
+
+    // ── TLS 1.2 async: waiting for server ChangeCipherSpec ────────────────
+    if (this._hsPhase === 'tls12-wait-ccs') {
+      var _s12c = this._hs12S!;
+      if (_s12c.cnt > 25) { this._hsPhase = 'failed'; return 'failed'; }
+      var _cm = this._readHS12NB();
+      if (_cm === null) return 'pending';
+      if (_cm === 'alert') { this._hsPhase = 'failed'; return 'failed'; }
+      _s12c.cnt++;
+      if (_cm.type === 20) { this._hsPhase = 'tls12-wait-fin'; return 'pending'; }
+      // NewSessionTicket (type 4) or other pre-CCS messages — skip
+      return 'pending';
+    }
+
+    // ── TLS 1.2 async: waiting for encrypted server Finished ──────────────
+    if (this._hsPhase === 'tls12-wait-fin') {
+      var _fm = this._readEncryptedHS12NB();
+      if (_fm === null) return 'pending';
+      if (_fm.type !== HS_FINISHED) { this._hsPhase = 'failed'; return 'failed'; }
+      this.handshakeDone = true;
+      this._hsPhase = 'done';
+      this.useTLS12 = true;
+      var _cname = (this as any)._tls12ChaCha ? 'ChaCha20-Poly1305'
+                 : this._hs12S!.s384 ? 'AES-256-GCM' : 'AES-128-GCM';
+      kernel.serialPut('[tls12/nb] async handshake OK with ' + this.hostname + ' (' + _cname + ')\n');
+      return 'connected';
     }
 
     return 'pending';
@@ -1494,6 +1632,133 @@ export class TLSSocket {
     if (plain.length < 4) return null;
     var mt = u8(plain, 0); var ml = u24(plain, 1);
     return { type: mt, data: plain.slice(4, 4 + ml) };
+  }
+
+  // ── Non-blocking TLS 1.2 record readers (used by async hsPoll phases) ──
+
+  /**
+   * Non-blocking variant of _readHS12(): returns one complete handshake message
+   * if available in rxBuf right now, or null if the record is incomplete.
+   * Returns the string 'alert' if the server sent a TLS alert.
+   * Never spins or sleeps — safe to call from the WM main loop.
+   */
+  private _readHS12NB(): { type: number; data: number[] } | 'alert' | null {
+    // Consume leftover bytes from a previously split coalesced record first
+    if (this._hs12Remainder.length >= 4) {
+      var mt0 = u8(this._hs12Remainder, 0);
+      var ml0 = u24(this._hs12Remainder, 1);
+      if (this._hs12Remainder.length >= 4 + ml0) {
+        this.transcript = this.transcript.concat(this._hs12Remainder.slice(0, 4 + ml0));
+        var data0 = this._hs12Remainder.slice(4, 4 + ml0);
+        this._hs12Remainder = this._hs12Remainder.slice(4 + ml0);
+        return { type: mt0, data: data0 };
+      }
+    }
+    // Need at least a 5-byte record header
+    if (this.rxBuf.length < 5) return null;
+    var rt = u8(this.rxBuf, 0);
+    var rl = u16(this.rxBuf, 3);
+    // Need the complete record payload
+    if (this.rxBuf.length < 5 + rl) return null;
+    var rd = this.rxBuf.slice(5, 5 + rl);
+    this.rxBuf = this.rxBuf.slice(5 + rl);
+    if (rt === 21 /* TLS_ALERT */) {
+      var al = rd.length > 0 ? u8(rd, 0) : 0;
+      var ad = rd.length > 1 ? u8(rd, 1) : 0;
+      kernel.serialPut('[tls12/nb] alert from ' + this.hostname + ': level=' + al + ' desc=' + ad + '\n');
+      return 'alert';
+    }
+    if (rt === 20 /* TLS_CHANGE_CIPHER_SPEC */) return { type: 20, data: rd };
+    if (rt !== TLS_HANDSHAKE) return null;
+    if (rd.length < 4) return null;
+    var mt = u8(rd, 0);
+    var ml = u24(rd, 1);
+    this.transcript = this.transcript.concat(rd.slice(0, 4 + ml));
+    if (rd.length > 4 + ml) this._hs12Remainder = rd.slice(4 + ml);
+    return { type: mt, data: rd.slice(4, 4 + ml) };
+  }
+
+  /**
+   * Non-blocking variant of _readEncryptedHS12(): decrypts one record from rxBuf
+   * if a complete record is available, otherwise returns null.
+   * Never spins or sleeps.
+   */
+  private _readEncryptedHS12NB(): { type: number; data: number[] } | null {
+    if (this.rxBuf.length < 5) return null;
+    var rt = u8(this.rxBuf, 0);
+    var rl = u16(this.rxBuf, 3);
+    if (this.rxBuf.length < 5 + rl) return null;
+    var rec = this.rxBuf.slice(0, 5 + rl);
+    this.rxBuf = this.rxBuf.slice(5 + rl);
+    if (rt === 21) {
+      var al12nb = rec.length > 5 ? u8(rec, 5) : 0;
+      var ad12nb = rec.length > 6 ? u8(rec, 6) : 0;
+      kernel.serialPut('[tls12/nb] enc-phase alert from ' + this.hostname + ': level=' + al12nb + ' desc=' + ad12nb + '\n');
+      return null;
+    }
+    if (rt !== TLS_HANDSHAKE && rt !== TLS_APPLICATION_DATA) return null;
+    var plain = (this as any)._tls12ChaCha
+      ? tls12DecryptRecordChaCha(this.serverAppKey, this.tls12ServerWriteIV, this.serverAppSeq, rec)
+      : tls12DecryptRecord(this.serverAppKey, this.tls12ServerWriteIV, this.serverAppSeq, rec);
+    if (!plain) {
+      kernel.serialPut('[tls12/nb] Finished decrypt failed (recLen=' + rl + ')\n');
+      return null;
+    }
+    this.serverAppSeq++;
+    if (plain.length < 4) return null;
+    var mt = u8(plain, 0);
+    var ml = u24(plain, 1);
+    return { type: mt, data: plain.slice(4, 4 + ml) };
+  }
+
+  /**
+   * Parse a TLS 1.2 ServerHello payload and initialize _hs12S.
+   * Extracts cipher, EMS flag, ALPN, and server random.
+   * Returns false if the cipher is unsupported.
+   */
+  private _hs12InitFromServerHello(shData: number[]): boolean {
+    var sRand = shData.slice(2, 34);
+    (this as any)._tls12ServerRandom = sRand;
+    var useEMS = false;
+    var cipher = 0;
+    if (shData.length > 34) {
+      var sidLen = u8(shData, 34);
+      cipher = u16(shData, 35 + sidLen);
+      var extOff = 35 + sidLen + 3; // sid + cipher(2) + compression(1)
+      if (extOff + 2 <= shData.length) {
+        var extLen = u16(shData, extOff); extOff += 2;
+        var extEnd = extOff + extLen;
+        while (extOff + 4 <= extEnd) {
+          var et = u16(shData, extOff); extOff += 2;
+          var el = u16(shData, extOff); extOff += 2;
+          if (et === 0x0017) useEMS = true;  // extended_master_secret
+          if (et === EXT_ALPN && el >= 4) {
+            var alpnLL = u16(shData, extOff);
+            if (alpnLL > 0 && extOff + 3 <= extEnd) {
+              var alpnPL = u8(shData, extOff + 2);
+              if (extOff + 3 + alpnPL <= extEnd) {
+                var alpnStr = '';
+                for (var _ai = 0; _ai < alpnPL; _ai++) alpnStr += String.fromCharCode(shData[extOff + 3 + _ai]);
+                this.alpnProtocol = alpnStr;
+                kernel.serialPut('[tls12/nb] ALPN negotiated: ' + alpnStr + '\n');
+              }
+            }
+          }
+          extOff += el;
+        }
+      }
+    }
+    var isAES128 = (cipher === 0xc02f || cipher === 0xc02b);
+    var isAES256 = (cipher === 0xc030 || cipher === 0xc02c);
+    var isChacha = (cipher === 0xcca8 || cipher === 0xcca9);
+    if (!isAES128 && !isAES256 && !isChacha) {
+      kernel.serialPut('[tls12/nb] unsupported cipher 0x' + cipher.toString(16) + '\n');
+      return false;
+    }
+    (this as any)._tls12ChaCha = isChacha;
+    this._hs12S = { ch: isChacha, s384: isAES256, ems: useEMS, sRand, pub: [], ms: [], cnt: 0 };
+    kernel.serialPut('[tls12/nb] cipher=0x' + cipher.toString(16) + ' EMS=' + (useEMS ? 1 : 0) + '\n');
+    return true;
   }
 
   /**
