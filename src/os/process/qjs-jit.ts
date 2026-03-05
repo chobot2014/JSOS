@@ -530,12 +530,26 @@ export class QJSJITCompiler {
           // QJS stack is LIFO so TOS = b (divisor), below = a (dividend)
           e.popEcx();  // ECX = divisor (b)
           e.popEax();  // EAX = dividend (a)
+          // Guard: divisor == 0 → deopt. JS says 42/0 = Infinity (not an integer
+          // result), so bail to the interpreter which handles it correctly.
+          e.testCC();                         // TEST ECX, ECX
+          const divOk = e.jne();              // JNE: skip deopt if ECX != 0
+          e.immEax(DEOPT_SENTINEL >>> 0);     // MOV EAX, 0x7FFFDEAD
+          this._emitEpilogue();
+          e.patch(divOk, e.here());
           e.idivC();   // CDQ; IDIV ECX  → EAX = quotient
           e.pushEax(); pc++; break;
         }
         case OP_mod: {
-          e.popEcx(); e.popEax(); e.idivC();
-          e.movEaxEdx(); // remainder in EDX
+          e.popEcx(); e.popEax();
+          // Guard: divisor == 0 → deopt. JS says 42%0 = NaN.
+          e.testCC();                         // TEST ECX, ECX
+          const modOk = e.jne();              // JNE: skip deopt if ECX != 0
+          e.immEax(DEOPT_SENTINEL >>> 0);     // MOV EAX, 0x7FFFDEAD
+          this._emitEpilogue();
+          e.patch(modOk, e.here());
+          e.idivC();
+          e.movEaxEdx(); // remainder in EDX → EAX
           e.pushEax(); pc++; break;
         }
         case OP_or:  { e.popEcx(); e.popEax(); e.orAC();   e.pushEax(); pc++; break; }

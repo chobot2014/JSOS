@@ -556,6 +556,7 @@ export class _Emit {
   // ── Comparisons ──
   cmpAC(): void { this._w(0x39); this._w(0xC8); }           // CMP EAX, ECX
   testAA(): void { this._w(0x85); this._w(0xC0); }          // TEST EAX, EAX
+  testCC(): void { this._w(0x85); this._w(0xC9); }          // TEST ECX, ECX
 
   // SETcc AL then MOVZX EAX, AL
   private _setcc(cc: number): void {
