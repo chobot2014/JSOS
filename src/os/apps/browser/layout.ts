@@ -1,5 +1,5 @@
 import type { PixelColor } from '../../core/sdk.js';
-import type { RenderNode, InlineSpan, RenderedSpan, RenderedLine, WidgetBlueprint, PositionedWidget, LayoutResult } from './types.js';
+import type { RenderNode, InlineSpan, RenderedSpan, RenderedLine, WidgetBlueprint, PositionedWidget, LayoutResult, BoxDecoration } from './types.js';
 import {
   CHAR_W, CHAR_H, LINE_H, CONTENT_PAD,
   WIDGET_INPUT_H, WIDGET_BTN_H, WIDGET_CHECK_SZ, WIDGET_SELECT_H,
@@ -19,11 +19,17 @@ export function flowSpans(
   lineH:    number,
   baseClr:  PixelColor,
   opts?: { preBg?: boolean; quoteBg?: boolean; quoteBar?: boolean; bgColor?: number; bgGradient?: string;
-           bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean }
+           bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean;
+           /** Float text wrapping (item 4.8): narrow x for the first N lines of this flow */
+           floatFirstLines?: number; floatXLeft?: number; floatMaxX?: number; }
 ): RenderedLine[] {
   var lines:   RenderedLine[] = [];
   var curLine: RenderedSpan[] = [];
-  var curX = xLeft;
+  // Active x bounds — may switch from float-narrowed to full-width after floatFirstLines
+  var _floatFL  = (opts?.floatFirstLines  || 0);
+  var curXLeft  = (_floatFL > 0 && opts?.floatXLeft !== undefined) ? opts.floatXLeft : xLeft;
+  var curMaxX   = (_floatFL > 0 && opts?.floatMaxX  !== undefined) ? opts.floatMaxX  : maxX;
+  var curX = curXLeft;
   // word-break: break-all splits at every character boundary (item 421)
   var _breakAll = opts?.wordBreak === 'break-all';
 
@@ -47,22 +53,27 @@ export function flowSpans(
     if (opts?.bgGradient) ln.bgGradient = opts.bgGradient;
     if (opts?.bgImageUrl) ln.bgImageUrl = opts.bgImageUrl;
     lines.push(ln);
-    curLine = []; curX = xLeft;
+    curLine = [];
+    // After committing this line, check if float narrowing should end (item 4.8)
+    if (_floatFL > 0 && lines.length >= _floatFL) {
+      curXLeft = xLeft; curMaxX = maxX;
+    }
+    curX = curXLeft;
   }
 
   function addWord(word: string, sp: InlineSpan): void {
     var cw   = CHAR_W * (sp.fontScale || 1);  // scaled char width
     var clr  = spanColor(sp);
-    var nspc = curX > xLeft;
+    var nspc = curX > curXLeft;
     var spcW = nspc ? cw : 0;
-    if (curX + spcW + word.length * cw > maxX && curX > xLeft) {
+    if (curX + spcW + word.length * cw > curMaxX && curX > curXLeft) {
       commitLine(); nspc = false; spcW = 0;
     }
     while (word.length > 0) {
-      var avail = Math.max(1, Math.floor((maxX - curX - spcW) / cw));
-      if (avail <= 0 && curX > xLeft) {
+      var avail = Math.max(1, Math.floor((curMaxX - curX - spcW) / cw));
+      if (avail <= 0 && curX > curXLeft) {
         commitLine(); nspc = false; spcW = 0;
-        avail = Math.max(1, Math.floor((maxX - xLeft) / cw));
+        avail = Math.max(1, Math.floor((curMaxX - curXLeft) / cw));
       }
       var chunk   = word.slice(0, avail);
       var display = (nspc ? ' ' : '') + chunk;
@@ -211,6 +222,12 @@ function _layoutNodesImpl(
     lastBottomMargin = 0;
     return collapsed;
   }
+
+  // ── Active float state — narrows inline x for sibling wrap (item 4.8) ─────────
+  var _activeLeftFloatLines   = 0; // remaining lines siblings must wrap around left float
+  var _activeLeftFloatIndent  = 0; // px from blkLeft to reserve for left float
+  var _activeRightFloatLines  = 0; // remaining lines siblings must wrap around right float
+  var _activeRightFloatIndent = 0; // px from blkMaxX to reserve for right float
 
   for (var i = 0; i < nodes.length; i++) {
     var nd = nodes[i];
@@ -588,22 +605,48 @@ function _layoutNodesImpl(
       }
 
       if (nd.float === 'right') {
-        // Float right: render as a visually boxed right-side block
-        var asideW   = nd.boxWidth ? Math.min(nd.boxWidth, maxX - xLeft) : Math.min(maxX - xLeft, 200);
-        var asideX   = maxX - asideW;
-        var borderY0 = y;
+        // Float right — out-of-flow: lay out, record extents, reset y (item 4.8)
+        var asideW    = nd.boxWidth ? Math.min(nd.boxWidth, maxX - xLeft) : Math.min(maxX - xLeft, 200);
+        var asideX    = maxX - asideW;
+        var yBfRight  = y;
         commit(flowSpans(ndSpans, asideX + 4, maxX - 4, lh, CLR_BODY, makeFlowOpts()));
-        lines.push({ y: borderY0, nodes: [], lineH: 0 });
-        blank(2);
+        // Record right float extents for sibling wrapping
+        var _rfLines  = Math.ceil((y - yBfRight) / lh);
+        _activeRightFloatLines  = Math.max(_activeRightFloatLines, _rfLines);
+        _activeRightFloatIndent = Math.max(_activeRightFloatIndent, asideW + 4);
+        y = yBfRight; // float is out-of-flow
       } else if (nd.float === 'left') {
-        // Float left: render as an indented aside
-        var fLeftW = nd.boxWidth ? Math.min(nd.boxWidth, (maxX - xLeft) >> 1) : Math.min(160, (maxX - xLeft) >> 1);
+        // Float left — out-of-flow: lay out, record extents, reset y (item 4.8)
+        var fLeftW   = nd.boxWidth ? Math.min(nd.boxWidth, (maxX - xLeft) >> 1) : Math.min(160, (maxX - xLeft) >> 1);
+        var yBfLeft  = y;
         commit(flowSpans(ndSpans, xLeft + 4, xLeft + fLeftW - 4, lh, CLR_BODY, makeFlowOpts()));
-        blank(2);
+        // Record left float extents for sibling wrapping
+        var _lfLines  = Math.ceil((y - yBfLeft) / lh);
+        _activeLeftFloatLines   = Math.max(_activeLeftFloatLines, _lfLines);
+        _activeLeftFloatIndent  = Math.max(_activeLeftFloatIndent, fLeftW + 4);
+        y = yBfLeft; // float is out-of-flow
       } else {
         // Normal block flow
         var yBeforeBlock = y;
-        commit(flowSpans(ndSpans, blkLeft, blkMaxX, lh, CLR_BODY, makeFlowOpts()));
+        var _blockLineStart = lines.length;
+        // Apply active float indents for the first N lines (item 4.8)
+        var _baseFlowOpts = makeFlowOpts();
+        var _combinedOpts: Parameters<typeof flowSpans>[5] = _baseFlowOpts;
+        if (_activeLeftFloatLines > 0 || _activeRightFloatLines > 0) {
+          _combinedOpts = {
+            ...(_baseFlowOpts || {}),
+            floatFirstLines: Math.max(_activeLeftFloatLines, _activeRightFloatLines),
+            floatXLeft:  _activeLeftFloatLines  > 0 ? blkLeft + _activeLeftFloatIndent  : undefined,
+            floatMaxX:   _activeRightFloatLines > 0 ? blkMaxX - _activeRightFloatIndent : undefined,
+          };
+        }
+        commit(flowSpans(ndSpans, blkLeft, blkMaxX, lh, CLR_BODY, _combinedOpts));
+        // Consume overlap lines from active floats
+        var _newBlockLines = lines.length - _blockLineStart;
+        _activeLeftFloatLines  = Math.max(0, _activeLeftFloatLines  - _newBlockLines);
+        _activeRightFloatLines = Math.max(0, _activeRightFloatLines - _newBlockLines);
+        if (_activeLeftFloatLines  === 0) _activeLeftFloatIndent  = 0;
+        if (_activeRightFloatLines === 0) _activeRightFloatIndent = 0;
         // Enforce min-height: pad with blank space if content is shorter
         if (nd.minHeight && nd.minHeight > 0 && (y - yBeforeBlock) < nd.minHeight) {
           blank(nd.minHeight - (y - yBeforeBlock));
@@ -615,6 +658,41 @@ function _layoutNodesImpl(
             lines.pop();
           }
           if (y > yMaxEnd) y = yMaxEnd;
+        }
+        // Enforce overflow:hidden / scroll / auto — clip when explicit height set
+        if (nd.height && nd.height > 0
+            && (nd.overflow === 'hidden' || nd.overflow === 'scroll' || nd.overflow === 'auto')) {
+          var yOvEnd = yBeforeBlock + nd.height;
+          while (lines.length > 0 && lines[lines.length - 1].y >= yOvEnd) {
+            lines.pop();
+          }
+          if (y > yOvEnd) y = yOvEnd;
+        }
+        // Annotate first generated line with box decoration (items 3.7, 4.2)
+        // border-radius, border, box-shadow, opacity — painted before text in _drawContent
+        // Also emit a tracking-only record for elements with elId (enables getBoundingClientRect)
+        var _hasBoxDeco = nd.borderRadius || nd.borderWidth || nd.borderColor !== undefined
+                       || nd.boxShadow || nd.opacity !== undefined;
+        var _needsTracking = nd.elId && lines.length > _blockLineStart && !lines[_blockLineStart].boxDeco;
+        if ((_hasBoxDeco || _needsTracking) && lines.length > _blockLineStart) {
+          var _blkH = y - yBeforeBlock;
+          var _blkW = (blkMaxX - blkLeft) || (maxX - xLeft);
+          var _deco: BoxDecoration = { x: blkLeft, w: _blkW, h: _blkH };
+          if (nd.borderRadius !== undefined) _deco.borderRadius = nd.borderRadius;
+          if (nd.borderWidth)  _deco.borderWidth  = nd.borderWidth;
+          if (nd.borderColor !== undefined) _deco.borderColor = nd.borderColor;
+          if (nd.borderStyle)  _deco.borderStyle  = nd.borderStyle;
+          if (nd.boxShadow)    _deco.boxShadow    = nd.boxShadow;
+          if (bgColor !== undefined) _deco.bgColor = bgColor;
+          if (bgGradient)      _deco.bgGradient   = bgGradient;
+          if (nd.opacity !== undefined) _deco.opacity = nd.opacity;
+          // overflow:hidden: pixel-clip children to this box in paint pass (item 3.10)
+          if (nd.overflow === 'hidden' || nd.overflow === 'scroll' || nd.overflow === 'auto') {
+            _deco.overflowHidden = true;
+          }
+          lines[_blockLineStart].boxDeco = _deco;
+          // Attach element ID for layout rect writeback (getBoundingClientRect etc.)
+          if (nd.elId) (lines[_blockLineStart] as any)._decoElId = nd.elId;
         }
       }
       // position:relative — shift generated lines by posTop/posLeft (item 2.3)

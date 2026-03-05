@@ -1,5 +1,11 @@
 import type { CSSProps } from './types.js';
 
+// ── Viewport dimensions (updated before each page parse) ──────────────────────
+var _vpW = 1920;
+var _vpH = 1080;
+/** Call before parsing a page so vw/vh units resolve correctly. */
+export function setViewport(w: number, h: number): void { _vpW = w; _vpH = h; }
+
 // ── CSS Custom Properties (CSS variables) ─────────────────────────────────────
 
 /** Page-level CSS variable registry. Cleared on each navigation. */
@@ -252,7 +258,7 @@ export function parseCSSColor(val: string): number | undefined {
  * Handles: px arithmetic, %, em (1em=16px), rem (1rem=16px).
  * Returns NaN if expression is too complex to evaluate.
  */
-export function evalCalc(expr: string): number {
+export function evalCalc(expr: string, containerPx?: number): number {
   var s = expr.replace(/calc\(/g, '(').replace(/\s+/g, ' ').trim();
   // Replace env(safe-area-inset-*) and other env() calls with 0 (no safe area in OS)
   s = s.replace(/env\([^)]*\)/g, '0');
@@ -263,15 +269,25 @@ export function evalCalc(expr: string): number {
   s = s.replace(/([\d.]+)em/g,  (_m: string, n: string) => String(parseFloat(n) * 16));
   s = s.replace(/([\d.]+)px/g,  (_m: string, n: string) => n);
   s = s.replace(/([\d.]+)pt/g,  (_m: string, n: string) => String(parseFloat(n) * 1.333));
-  // Allow only safe characters: digits, spaces, +-*/(). 
-  if (/[^0-9.+\-*/ ()%]/.test(s)) return NaN;
+  s = s.replace(/([\d.]+)vmin/g,(_m: string, n: string) => String(parseFloat(n) * Math.min(_vpW, _vpH) / 100));
+  s = s.replace(/([\d.]+)vmax/g,(_m: string, n: string) => String(parseFloat(n) * Math.max(_vpW, _vpH) / 100));
+  s = s.replace(/([\d.]+)vw/g,  (_m: string, n: string) => String(parseFloat(n) * _vpW / 100));
+  s = s.replace(/([\d.]+)vh/g,  (_m: string, n: string) => String(parseFloat(n) * _vpH / 100));
+  // Resolve percentage values against containerPx when available
+  if (containerPx !== undefined && containerPx > 0) {
+    s = s.replace(/([\d.]+)%/g, (_m: string, n: string) => String(parseFloat(n) / 100 * containerPx));
+  } else {
+    s = s.replace(/([\d.]+)%/g, (_m: string, n: string) => String(parseFloat(n)));
+  }
+  // Allow only safe characters: digits, spaces, +-*/().
+  if (/[^0-9.+\-*/ ()]/.test(s)) return NaN;
   try { return Function('"use strict"; return (' + s + ')')() as number; }
   catch { return NaN; }
 }
 
 /**
  * Parse a CSS length value to pixels.
- * Supports: px, em, rem, pt, vw/vh (viewport 1920×1080), %, unitless.
+ * Supports: px, em, rem, pt, vw/vh (actual viewport), %, unitless.
  * Returns NaN if not a length.
  */
 function _splitCSSArgs(s: string): string[] {
@@ -289,7 +305,7 @@ export function parseLengthPx(val: string, containerPx?: number): number {
   if (v === 'auto' || v === 'none') return 0;
   if (v.startsWith('calc(') || v.includes('calc(')) {
     var inner = v.replace(/^calc\(/, '').replace(/\)$/, '');
-    return evalCalc(inner);
+    return evalCalc(inner, containerPx);
   }
   // min(), max(), clamp() CSS math functions (item 408)
   if (v.startsWith('min(')) {
@@ -305,13 +321,18 @@ export function parseLengthPx(val: string, containerPx?: number): number {
     var cMin = parseLengthPx(mc[0] || '0', containerPx); var cVal = parseLengthPx(mc[1] || '0', containerPx); var cMax = parseLengthPx(mc[2] || '0', containerPx);
     return isNaN(cMin) || isNaN(cVal) || isNaN(cMax) ? NaN : Math.max(cMin, Math.min(cVal, cMax));
   }
-  if (v.endsWith('px'))  return parseFloat(v);
-  if (v.endsWith('rem')) return parseFloat(v) * 16;
-  if (v.endsWith('em'))  return parseFloat(v) * 16;
-  if (v.endsWith('pt'))  return parseFloat(v) * 1.333;
-  if (v.endsWith('vw'))  return parseFloat(v) * 1920 / 100;
-  if (v.endsWith('vh'))  return parseFloat(v) * 1080 / 100;
-  if (v.endsWith('ch'))  return parseFloat(v) * 8;   // approx 1ch = 8px
+  if (v.endsWith('px'))   return parseFloat(v);
+  if (v.endsWith('rem'))  return parseFloat(v) * 16;
+  if (v.endsWith('em'))   return parseFloat(v) * 16;
+  if (v.endsWith('pt'))   return parseFloat(v) * 1.333;
+  if (v.endsWith('vw'))   return parseFloat(v) * _vpW / 100;
+  if (v.endsWith('vh'))   return parseFloat(v) * _vpH / 100;
+  if (v.endsWith('svh') || v.endsWith('dvh') || v.endsWith('lvh')) return parseFloat(v) * _vpH / 100;
+  if (v.endsWith('svw') || v.endsWith('dvw') || v.endsWith('lvw')) return parseFloat(v) * _vpW / 100;
+  if (v.endsWith('vmin')) return parseFloat(v) * Math.min(_vpW, _vpH) / 100;
+  if (v.endsWith('vmax')) return parseFloat(v) * Math.max(_vpW, _vpH) / 100;
+  if (v.endsWith('ch'))   return parseFloat(v) * 8;   // approx 1ch = 8px
+  if (v.endsWith('ex'))   return parseFloat(v) * 8;   // approx 1ex = 8px
   if (v.endsWith('%') && containerPx !== undefined)
     return parseFloat(v) * containerPx / 100;
   if (v.endsWith('%'))   return 0;  // can't resolve without container

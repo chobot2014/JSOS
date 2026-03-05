@@ -19,10 +19,10 @@
  */
 
 import type { CSSProps } from './types.js';
-import { parseCSSColor, parseInlineStyle, registerCSSVarBlock, resolveCSSVars, resetCSSVars } from './css.js';
+import { parseCSSColor, parseInlineStyle, registerCSSVarBlock, resolveCSSVars, resetCSSVars, setViewport } from './css.js';
 import { buildRuleIndex, candidateRules, type RuleIndex } from './cache.js';
 
-export { resetCSSVars };
+export { resetCSSVars, setViewport };
 export type { RuleIndex };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -72,18 +72,108 @@ export function selectorSpecificity(sel: string): number {
  * compound selector — a deliberate approximation that covers the majority of
  * rule matches without requiring ancestor context.
  */
+/** Element context for combinator matching (parent-first, outermost last). */
+export interface AncestorEl {
+  tag:   string;
+  id:    string;
+  cls:   string[];
+  attrs: Map<string, string>;
+}
+
+/**
+ * Split a selector string into compound parts and their combinators.
+ * Correctly skips paren-content (e.g. :not(.foo > div)).
+ * Returns { parts, combinators } where combinators[i] is between parts[i] and parts[i+1].
+ */
+function _parseSelectorParts(sel: string): { parts: string[]; combinators: string[] } {
+  var parts: string[] = [];
+  var combinators: string[] = [];
+  var depth = 0;
+  var cur = '';
+  var i = 0;
+  while (i < sel.length) {
+    var ch = sel[i]!;
+    if (ch === '(') { depth++; cur += ch; i++; continue; }
+    if (ch === ')') { depth--; cur += ch; i++; continue; }
+    if (depth > 0)  { cur += ch; i++; continue; }
+    if (ch === '>' || ch === '+' || ch === '~') {
+      if (cur.trim()) { parts.push(cur.trim()); combinators.push(ch); }
+      cur = ''; i++;
+      while (i < sel.length && sel[i] === ' ') i++;
+      continue;
+    }
+    if (ch === ' ') {
+      // peek past spaces — if next non-space is >, + or ~ that combinator wins
+      var j = i + 1;
+      while (j < sel.length && sel[j] === ' ') j++;
+      if (j < sel.length && (sel[j] === '>' || sel[j] === '+' || sel[j] === '~')) {
+        // flush part, let the next char handle the explicit combinator
+        if (cur.trim()) parts.push(cur.trim());
+        cur = ''; i = j; continue;
+      }
+      // Otherwise this is a descendant combinator ' '
+      if (cur.trim()) { parts.push(cur.trim()); combinators.push(' '); }
+      cur = ''; i = j; continue;
+    }
+    cur += ch; i++;
+  }
+  if (cur.trim()) parts.push(cur.trim());
+  return { parts, combinators };
+}
+
 export function matchesSingleSel(
   tag: string, id: string, cls: string[],
   attrs: Map<string, string>,
   sel: string,
+  ancestors?: AncestorEl[],
 ): boolean {
   sel = sel.trim();
   if (!sel) return false;
 
-  // Grab the rightmost compound selector after any combinator
-  var right = sel.split(/\s*[\s>+~]\s+|\s*[>+~]\s*/)[sel.split(/\s*[\s>+~]\s+|\s*[>+~]\s*/).length - 1]!.trim();
+  // Fast path: no combinator characters
+  if (!/[\s>+~]/.test(sel)) {
+    return matchesCompound(tag, id, cls, attrs, sel);
+  }
 
-  return matchesCompound(tag, id, cls, attrs, right);
+  var parsed = _parseSelectorParts(sel);
+  var parts  = parsed.parts;
+  var combs  = parsed.combinators;
+  if (parts.length === 0) return false;
+
+  // Rightmost compound must match the current element
+  if (!matchesCompound(tag, id, cls, attrs, parts[parts.length - 1]!)) return false;
+
+  // Only one part (no actual combinators after parsing) → done
+  if (parts.length === 1) return true;
+
+  // If no ancestor context available, fall back to optimistic match
+  if (!ancestors || ancestors.length === 0) return true;
+
+  // Walk right-to-left through the parsed combinator chain
+  var ancIdx = 0;   // 0 = immediate parent, 1 = grandparent, …
+  for (var pi = parts.length - 2; pi >= 0; pi--) {
+    var comb = combs[pi]!;
+    if (comb === '>') {
+      // Child combinator: immediate ancestor at ancIdx must match parts[pi]
+      if (ancIdx >= ancestors.length) return false;
+      var pa = ancestors[ancIdx]!;
+      if (!matchesCompound(pa.tag, pa.id, pa.cls, pa.attrs, parts[pi]!)) return false;
+      ancIdx++;
+    } else if (comb === ' ') {
+      // Descendant combinator: any ancestor at or after ancIdx must match parts[pi]
+      var found = false;
+      while (ancIdx < ancestors.length) {
+        var an = ancestors[ancIdx]!;
+        ancIdx++;
+        if (matchesCompound(an.tag, an.id, an.cls, an.attrs, parts[pi]!)) {
+          found = true; break;
+        }
+      }
+      if (!found) return false;
+    }
+    // + and ~ (sibling) combinators: optimistic pass (no sibling info available)
+  }
+  return true;
 }
 
 /**
@@ -580,6 +670,7 @@ export function getPseudoContent(
   sheets: CSSRule[],
   index?: RuleIndex | null,
   counters?: Map<string, number>,
+  ancestors?: AncestorEl[],
 ): { before: string; after: string } {
   var before = '';
   var after  = '';
@@ -596,7 +687,7 @@ export function getPseudoContent(
       if (!pem) continue;
       // Strip pseudo-element suffix → check if host element matches
       var hostSel = sel.slice(0, sel.length - pem[0].length).trim() || '*';
-      if (!matchesSingleSel(tag, id, cls, attrs, hostSel)) continue;
+      if (!matchesSingleSel(tag, id, cls, attrs, hostSel, ancestors)) continue;
       var which = pem[1]!.toLowerCase();
       var resolved = _resolveContentValue(rule.props.content, attrs, counters);
       if (which === 'before' && rule.spec > beforeSpec) {
@@ -630,6 +721,7 @@ export function computeElementStyle(
   sheets:      CSSRule[],
   inlineStyle: string,
   index?:      RuleIndex,
+  ancestors?:  AncestorEl[],
 ): CSSProps {
   // ── Inherited starting values (CSS-spec inheritable properties) ────────────
   var result: CSSProps = {
@@ -669,7 +761,7 @@ export function computeElementStyle(
   for (var ri = 0; ri < candidates.length; ri++) {
     var rule = candidates[ri]!;
     for (var si = 0; si < rule.sels.length; si++) {
-      if (matchesSingleSel(tag, id, cls, attrs, rule.sels[si]!)) {
+      if (matchesSingleSel(tag, id, cls, attrs, rule.sels[si]!, ancestors)) {
         var srcOrder = index ? sheets.indexOf(rule) : ri;
         matches.push({ props: rule.props, spec: rule.spec, order: srcOrder });
         break;

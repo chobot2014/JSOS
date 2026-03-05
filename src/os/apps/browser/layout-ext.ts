@@ -304,89 +304,148 @@ export function layoutTable(
   var rows     = (tableNode.children ?? []).filter(function(c) { return c.type === 'table-row'; });
   var layout   = tableNode.tableLayout ?? 'auto';
   var cellPad  = 4; // px padding inside each cell
-  // border-collapse: collapse → no gap between cells; border-spacing → explicit gap (items 418/419)
   var collapsed    = tableNode.borderCollapse === 'collapse';
   var borderW      = collapsed ? 0 : (tableNode.borderSpacing ?? tableNode.borderWidth ?? 1);
   var tableW   = tableNode.boxWidth ? Math.min(tableNode.boxWidth, contentW) : contentW;
 
   if (rows.length === 0) return [];
 
-  // Count columns (max cell count across all rows)
+  // ── Build column-placement grid with colspan/rowspan support ──────────────
+  // occupied[ri][ci] = true means that grid cell is taken by a spanning cell
+  var gridRows = rows.length;
+  var occupied: boolean[][] = [];
+  for (var _gi = 0; _gi < gridRows; _gi++) occupied.push([]);
+
+  // gridCells[ri][ci] = { cell: RenderNode, cspan, rspan } or null
+  interface _GridCell { cell: RenderNode; colStart: number; cspan: number; rspan: number; }
+  var gridCells: (_GridCell | null)[][] = [];
+  for (var _gr = 0; _gr < gridRows; _gr++) gridCells.push([]);
+
   var colCount = 0;
+
   for (var ri = 0; ri < rows.length; ri++) {
     var cells = (rows[ri].children ?? []).filter(function(c) { return c.type === 'table-cell'; });
-    if (cells.length > colCount) colCount = cells.length;
+    var ci = 0; // current column cursor
+    for (var celli = 0; celli < cells.length; celli++) {
+      var cell = cells[celli];
+      // Skip occupied columns
+      while (occupied[ri] && occupied[ri][ci]) ci++;
+      var cspan = Math.max(1, cell.colspan || 1);
+      var rspan = Math.max(1, cell.rowspan || 1);
+      // Mark occupied cells for this span
+      for (var r2 = ri; r2 < ri + rspan && r2 < gridRows; r2++) {
+        for (var c2 = ci; c2 < ci + cspan; c2++) {
+          if (!occupied[r2]) occupied[r2] = [];
+          occupied[r2][c2] = true;
+        }
+      }
+      gridCells[ri][ci] = { cell, colStart: ci, cspan, rspan };
+      if (ci + cspan > colCount) colCount = ci + cspan;
+      ci += cspan;
+    }
   }
+
   if (colCount === 0) return [];
 
   // ── Column widths ──────────────────────────────────────────────────────────
   var colWidths: number[] = new Array(colCount).fill(0);
 
   if (layout === 'fixed') {
-    // Equal distribution
     var equalW = Math.floor((tableW - borderW * (colCount + 1)) / colCount);
-    for (var ci = 0; ci < colCount; ci++) colWidths[ci] = equalW;
+    for (var ci3 = 0; ci3 < colCount; ci3++) colWidths[ci3] = Math.max(equalW, 20);
   } else {
-    // Auto: measure max-content of each column
+    // Auto: measure max-content of non-spanning cells first
     for (var ri2 = 0; ri2 < rows.length; ri2++) {
-      var rowCells = (rows[ri2].children ?? []).filter(function(c) { return c.type === 'table-cell'; });
-      for (var ci2 = 0; ci2 < rowCells.length && ci2 < colCount; ci2++) {
-        var mc = measureMaxContent(rowCells[ci2].spans);
-        if (mc > colWidths[ci2]) colWidths[ci2] = mc;
+      for (var ci4 = 0; ci4 < colCount; ci4++) {
+        var gc = gridCells[ri2][ci4];
+        if (!gc || gc.cspan > 1) continue; // skip spanning cells for now
+        var mc = measureMaxContent(gc.cell.spans);
+        if (mc > colWidths[ci4]) colWidths[ci4] = mc;
+      }
+    }
+    // Now handle spanning cells: ensure total width of spanned cols >= cell content
+    for (var ri3 = 0; ri3 < rows.length; ri3++) {
+      for (var ci5 = 0; ci5 < colCount; ci5++) {
+        var gc2 = gridCells[ri3][ci5];
+        if (!gc2 || gc2.cspan <= 1) continue;
+        var mc2 = measureMaxContent(gc2.cell.spans);
+        var spannedW = 0;
+        for (var s = ci5; s < ci5 + gc2.cspan; s++) spannedW += colWidths[s] || 0;
+        spannedW += borderW * (gc2.cspan - 1);
+        if (mc2 > spannedW) {
+          // Distribute extra width equally among spanned columns
+          var extra = Math.ceil((mc2 - spannedW) / gc2.cspan);
+          for (var s2 = ci5; s2 < ci5 + gc2.cspan; s2++) colWidths[s2] = (colWidths[s2] || 0) + extra;
+        }
       }
     }
     // Scale to fit tableW
     var totalW     = colWidths.reduce(function(a, b) { return a + b; }, 0) + borderW * (colCount + 1);
     var scaleFactor = totalW > tableW ? tableW / totalW : 1;
-    for (var ci3 = 0; ci3 < colCount; ci3++) {
-      colWidths[ci3] = Math.floor(colWidths[ci3] * scaleFactor);
+    for (var ci6 = 0; ci6 < colCount; ci6++) {
+      colWidths[ci6] = Math.max(1, Math.floor(colWidths[ci6] * scaleFactor));
     }
+  }
+
+  // Helper: compute x offset for a column
+  function _colX(c: number): number {
+    var x = borderW;
+    for (var i = 0; i < c; i++) x += colWidths[i] + borderW;
+    return x;
+  }
+  function _spannedW(colStart: number, cspan: number): number {
+    var w = 0;
+    for (var i = colStart; i < colStart + cspan; i++) w += colWidths[i] || 0;
+    w += borderW * (cspan - 1);
+    return w;
   }
 
   // ── Render rows + cells ────────────────────────────────────────────────────
   var allLines: RenderedLine[] = [];
   var tableY   = 0;
-  var tableX   = 0;
 
-  for (var ri3 = 0; ri3 < rows.length; ri3++) {
-    var row      = rows[ri3];
-    var rowCells2 = (row.children ?? []).filter(function(c) { return c.type === 'table-cell'; });
-    var rowMaxH  = 0;
-    var rowCellLines: { x: number; w: number; lines: RenderedLine[]; vAlign: string }[] = [];
+  // rowspan cells that continue beyond their start row
+  // rowspanPool[ri] = array of cells that span into row ri
+  var rowspanPool: { gc: _GridCell; startY: number; allocH: number }[][] = [];
+  for (var _rsi = 0; _rsi < rows.length; _rsi++) rowspanPool.push([]);
 
-    var cellX = tableX + borderW;
-    for (var ci4 = 0; ci4 < colCount; ci4++) {
-      var cell    = rowCells2[ci4];
-      var cw      = colWidths[ci4] ?? 0;
-      if (!cell) { cellX += cw + borderW; continue; }
+  for (var ri4 = 0; ri4 < rows.length; ri4++) {
+    var rowMaxH  = LINE_H + cellPad * 2;
+    var rowCellLines: { x: number; w: number; lines: RenderedLine[]; vAlign: string; rspan: number }[] = [];
 
-      var xLeft   = cellX + cellPad;
-      var maxX    = cellX + cw - cellPad;
-      var cellLines = layoutRowFn(cell.spans, xLeft, maxX, LINE_H);
-      var cellH   = cellLines.length * LINE_H + cellPad * 2;
-      if (cellH > rowMaxH) rowMaxH = cellH;
+    for (var ci7 = 0; ci7 < colCount; ci7++) {
+      var gc3 = gridCells[ri4][ci7];
+      if (!gc3) continue;
+      // Only process cells that START in this row
+      if (gc3.colStart !== ci7) continue;
 
-      rowCellLines.push({ x: cellX, w: cw, lines: cellLines, vAlign: cell.verticalAlign || 'top' });
-      cellX += cw + borderW;
+      var cxLeft  = _colX(ci7) + cellPad;
+      var cw      = _spannedW(ci7, gc3.cspan);
+      var cmaxX   = _colX(ci7) + cw - cellPad;
+      var cellLines2 = layoutRowFn(gc3.cell.spans, cxLeft, cmaxX, LINE_H);
+      var cellH2  = cellLines2.length * LINE_H + cellPad * 2;
+      if (gc3.rspan === 1 && cellH2 > rowMaxH) rowMaxH = cellH2;
+      rowCellLines.push({ x: _colX(ci7), w: cw, lines: cellLines2, vAlign: gc3.cell.verticalAlign || 'top', rspan: gc3.rspan });
     }
 
-    // Stamp all cell lines at correct Y, applying vertical-align offset (item 420)
+    // Stamp cell lines at correct Y
     for (var cci = 0; cci < rowCellLines.length; cci++) {
       var ccl = rowCellLines[cci];
-      var cellContentH = ccl.lines.length * LINE_H;
+      var cellContentH2 = ccl.lines.length * LINE_H;
       var vOff = 0;
-      if (ccl.vAlign === 'middle' || ccl.vAlign === 'center') {
-        vOff = Math.max(0, Math.floor((rowMaxH - cellPad * 2 - cellContentH) / 2));
-      } else if (ccl.vAlign === 'bottom') {
-        vOff = Math.max(0, rowMaxH - cellPad * 2 - cellContentH);
+      if (ccl.rspan === 1) {
+        if (ccl.vAlign === 'middle' || ccl.vAlign === 'center') {
+          vOff = Math.max(0, Math.floor((rowMaxH - cellPad * 2 - cellContentH2) / 2));
+        } else if (ccl.vAlign === 'bottom') {
+          vOff = Math.max(0, rowMaxH - cellPad * 2 - cellContentH2);
+        }
       }
       for (var li = 0; li < ccl.lines.length; li++) {
         var ln   = ccl.lines[li];
         var realY = tableY + cellPad + vOff + li * LINE_H;
         allLines.push({ ...ln, y: realY });
       }
-      // Bottom border line for cell (horizontal rule across cell width)
-      if (borderW > 0) {
+      if (borderW > 0 && ccl.rspan === 1) {
         allLines.push({ y: tableY + rowMaxH - borderW, nodes: [], lineH: borderW, hrLine: true });
       }
     }

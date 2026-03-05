@@ -4,7 +4,7 @@ import type {
 } from './types.js';
 import { parseInlineStyle, parseCSSColor } from './css.js';
 import { isGradient } from './gradient.js';
-import { type CSSRule, computeElementStyle, getPseudoContent } from './stylesheet.js';
+import { type CSSRule, type AncestorEl, computeElementStyle, getPseudoContent } from './stylesheet.js';
 import { renderSVG } from './svg.js';
 
 // ── HTML5 Named Entity Table (items 350–351) ──────────────────────────────────
@@ -285,6 +285,8 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
   // CSS inline style stack — pushed/popped on styled elements
   var cssStack: CSSProps[] = [];
   var curCSS:   CSSProps   = {};
+  // Ancestor element stack for CSS combinator matching (innermost first)
+  var ancestorStack: AncestorEl[] = [];
 
   function pushCSS(p: CSSProps): void {
     cssStack.push({ ...curCSS });
@@ -373,6 +375,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
       var prev = cssStack[cssStack.length - 1]!;
       if (curCSS.hidden && !prev.hidden) skipDepth = Math.max(0, skipDepth - 1);
       curCSS = cssStack.pop()!;
+      if (ancestorStack.length > 0) ancestorStack.pop();
     }
   }
 
@@ -519,6 +522,8 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     // Cursor / pointer-events (items 415, 416)
     if (curCSS.cursor        !== undefined)   blk.cursor        = curCSS.cursor;
     if (curCSS.pointerEvents !== undefined)   blk.pointerEvents = curCSS.pointerEvents;
+    // Element ID for layout rect tracking (getBoundingClientRect etc.)
+    if (curCSS._onclickElId) blk.elId = curCSS._onclickElId;
     nodes.push(blk);
     inlineSpans = [];
   }
@@ -577,25 +582,29 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
                  '';
     if (!inl && !hasPseudo) {
       cssStack.push({ ...curCSS });
-      if (jselId || curCSS._onclickElId) {
+      ancestorStack.push({ tag, id, cls, attrs });
+      if (jselId || id || curCSS._onclickElId) {
         curCSS = { ...curCSS };
         if (jselId) curCSS._onclickElId = attrs.get('data-jsos-el') || id || jselId;
+        else if (id && !curCSS._onclickElId) curCSS._onclickElId = id;  // propagate HTML id for layout rect tracking
         // Inherit parent _onclickElId if no override on this element.
       }
       return false;
     }
-    var ep = computeElementStyle(tag, id, cls, attrs, curCSS, sheets, inl);
+    var ep = computeElementStyle(tag, id, cls, attrs, curCSS, sheets, inl, undefined, ancestorStack);
     // Apply counter-reset / counter-increment from computed style (item 434)
     _applyCounters(ep);
     if (hasPseudo) {
-      var pseudo = getPseudoContent(tag, id, cls, attrs, sheets, undefined, _counters);
+      var pseudo = getPseudoContent(tag, id, cls, attrs, sheets, undefined, _counters, ancestorStack);
       if (pseudo.before) ep._pseudoBefore = pseudo.before;
       if (pseudo.after)  ep._pseudoAfter  = pseudo.after;
     }
     // Propagate click-dispatch ID into the CSS scope so pushSpan can attach it.
+    // Also propagate HTML id attribute for getBoundingClientRect() DOM writeback.
     if (jselId) ep._onclickElId = attrs.get('data-jsos-el') || id || jselId;
-    else        ep._onclickElId = ep._onclickElId || curCSS._onclickElId;  // inherit
+    else        ep._onclickElId = ep._onclickElId || curCSS._onclickElId || (id || undefined);  // inherit or use own id
     pushCSS(ep);
+    ancestorStack.push({ tag, id, cls, attrs });
     // Inject ::before span immediately (before element content)
     if (curCSS._pseudoBefore) pushSpan(curCSS._pseudoBefore);
     return true;

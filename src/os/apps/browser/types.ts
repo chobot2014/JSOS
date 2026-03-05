@@ -43,6 +43,7 @@ export type BlockType =
 export interface RenderNode {
   type:         BlockType;
   spans:        InlineSpan[];
+  elId?:        string;   // Element ID for layout rect tracking (id attr or data-jsos-el)
   indent?:      number;
   widget?:      WidgetBlueprint;
   textAlign?:   'left' | 'center' | 'right' | 'justify';
@@ -165,6 +166,27 @@ export interface RenderedLine {
   bgColor?:    number;   // custom background from CSS
   bgGradient?: string;   // CSS gradient string (item 487): linear/radial/conic-gradient(...)
   bgImageUrl?:  string;   // CSS background-image url() resolved URL (item 386)
+  // Box decorations (items 3.7, 4.2) — set on the FIRST line of a block element
+  boxDeco?: BoxDecoration;
+}
+
+/**
+ * Box decoration record attached to the first RenderedLine of a block.
+ * Carries full element rect + border-radius + box-shadow for the paint pass.
+ */
+export interface BoxDecoration {
+  x:            number;   // left edge in page space
+  w:            number;   // element width in px
+  h:            number;   // total element height in px (across all its lines)
+  borderRadius?: number;  // px
+  borderWidth?:  number;  // px
+  borderColor?:  number;  // ARGB
+  borderStyle?:  string;  // 'solid' | 'dashed' | 'dotted' etc.
+  boxShadow?:    string;  // raw CSS box-shadow string
+  bgColor?:      number;  // element background (overrides line.bgColor for rounding)
+  bgGradient?:   string;  // CSS gradient string
+  opacity?:      number;  // 0.0‒1.0
+  overflowHidden?: boolean; // overflow:hidden — pixel-clip children to this box (3.10)
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────

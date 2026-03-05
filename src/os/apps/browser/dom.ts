@@ -213,6 +213,9 @@ export class VNode extends VEventTarget {
     if (this.ownerDocument?._scriptInsertHook && child.nodeType === 1 && (child as VElement).tagName === 'SCRIPT') {
       this.ownerDocument._scriptInsertHook(child as VElement);
     }
+    if (this.ownerDocument?._ceInsertHook && child.nodeType === 1) {
+      this.ownerDocument._ceInsertHook(child as VElement);
+    }
     return child;
   }
   removeChild(child: VNode): VNode {
@@ -462,6 +465,18 @@ export class VStyleMap {
   constructor(owner: VElement) { this._owner = owner; }
   setProperty(prop: string, val: string, _priority?: string): void {
     var p = prop.trim(), v = val.trim();
+    // CSS transition hook — if hook returns true, it will animate the change
+    if (this._owner.ownerDocument) {
+      var _ssh = (this._owner.ownerDocument as VDocument)._styleSetHook;
+      if (_ssh) {
+        var _oldV = this._map.get(p) || '';
+        if (_oldV !== v && _ssh(this._owner, p, _oldV, v)) {
+          bumpStyleGeneration();
+          this._owner.ownerDocument._dirty = true;
+          return;
+        }
+      }
+    }
     this._map.set(p, v);
     this._owner._dirtyLayout = true; // item 891
     bumpStyleGeneration();           // item 944 — invalidate computed style cache
@@ -1650,21 +1665,28 @@ export class VElement extends VNode {
     });
   }
 
-  // ── Shadow DOM stub ─────────────────────────────────────────────────────────
+  // ── Shadow DOM ─────────────────────────────────────────────────────────────
 
   _shadowRoot: VElement | null = null;
   attachShadow(_opts: { mode: string }): VElement {
-    // Return a shadow root proxy: same element with `host` pointing back to it
-    this._shadowRoot = this;
-    // Ensure `.host` on the shadowRoot (this) points to itself
-    if (!(this as any)._shadowHost) (this as any)._shadowHost = this;
-    return this;
+    if (this._shadowRoot && (this._shadowRoot as any)._isShadowRoot) return this._shadowRoot;
+    var sr = new VElement('#shadow-root');
+    sr.ownerDocument = this.ownerDocument;
+    sr.parentNode = this as any;
+    (sr as any)._isShadowRoot = true;
+    (sr as any)._shadowHost = this;
+    (sr as any)._mode = _opts.mode || 'open';
+    this._shadowRoot = sr;
+    return sr;
   }
-  get shadowRoot(): VElement | null { return this._shadowRoot; }
+  get shadowRoot(): VElement | null {
+    var sr = this._shadowRoot;
+    return (sr && (sr as any)._isShadowRoot) ? sr : null;
+  }
   /** ShadowRoot.host — the element that owns this shadow root. */
   get host(): VElement { return (this as any)._shadowHost ?? this; }
   /** ShadowRoot.mode — always 'open' in our stub. */
-  get mode(): string { return 'open'; }
+  get mode(): string { return (this as any)._mode ?? 'open'; }
   adoptedStyleSheets: unknown[] = [];
 
   // ── next/prev element sibling ─────────────────────────────────────────────────
@@ -1890,6 +1912,11 @@ export class VDocument extends VNode {
   _mutationQueue: unknown[] = [];           // queued mutation records for MutationObserver
   /** Hook set by jsruntime.ts to auto-execute dynamically inserted <script> elements. */
   _scriptInsertHook: ((el: VElement) => void) | null = null;
+  /** Hook set by jsruntime.ts to fire Custom Element connectedCallback on insert. */
+  _ceInsertHook: ((el: VElement) => void) | null = null;
+  /** Hook set by jsruntime.ts to intercept inline-style mutations for CSS transitions.
+   *  Returns true if the hook will animate the change (caller should skip immediate apply). */
+  _styleSetHook: ((el: VElement, prop: string, oldVal: string, newVal: string) => boolean) | null = null;
   /** Lazy O(1) ID index — null means needs rebuild on next getElementById call. */
   _idIndex: Map<string, VElement> | null = null;
   head: VElement;
@@ -2247,7 +2274,16 @@ export class VDocument extends VNode {
 
 export function _walk(root: VNode, fn: (el: VElement) => void): void {
   for (var c of root.childNodes) {
-    if (c instanceof VElement) { fn(c); _walk(c, fn); }
+    if (c instanceof VElement) {
+      fn(c);
+      // Cross into open shadow roots for querySelector etc.
+      var _sr = (c as VElement)._shadowRoot;
+      if (_sr && (_sr as any)._isShadowRoot && (_sr as any)._mode !== 'closed') {
+        _walk(_sr, fn);
+      } else {
+        _walk(c, fn);
+      }
+    }
   }
 }
 
@@ -2256,7 +2292,9 @@ function _walkFind(root: VNode, fn: (el: VElement) => boolean): VElement | null 
   for (var c of root.childNodes) {
     if (c instanceof VElement) {
       if (fn(c)) return c;
-      var found = _walkFind(c, fn);
+      var _sr2 = (c as VElement)._shadowRoot;
+      var _subtree: VNode = (_sr2 && (_sr2 as any)._isShadowRoot && (_sr2 as any)._mode !== 'closed') ? _sr2 : c;
+      var found = _walkFind(_subtree, fn);
       if (found) return found;
     }
   }
@@ -2459,6 +2497,25 @@ function _matchPseudo(pseudo: string, _arg: string, el: VElement): boolean {
   }
   // pseudo-elements — don't filter elements by them
   if (pseudo === 'before' || pseudo === 'after' || pseudo === 'first-line' || pseudo === 'first-letter' || pseudo === 'selection' || pseudo === 'placeholder') return true;
+  // :host — matches the shadow host of the current shadow root context
+  if (pseudo === 'host') {
+    // el is the host if it has an open shadow root
+    var _srH = el._shadowRoot;
+    if (!_srH || !(_srH as any)._isShadowRoot) return false;
+    if (!_arg) return true; // :host without argument
+    return _matchSel(_arg, el); // :host(selector)
+  }
+  // :host-context — matches if any ancestor matches the argument selector
+  if (pseudo === 'host-context') {
+    var _hostEl = (el as any)._shadowHost as VElement | undefined;
+    if (!_hostEl) return false;
+    var _anc: VNode | null = _hostEl.parentNode;
+    while (_anc) {
+      if (_anc instanceof VElement && _matchSel(_arg, _anc as VElement)) return true;
+      _anc = (_anc as any).parentNode;
+    }
+    return false;
+  }
   return true; // unknown pseudo — ignore
 }
 
@@ -2480,6 +2537,24 @@ export function _serialize(nodes: VNode[]): string {
 export function _serializeEl(el: VElement): string {
   var tag = el.tagName.toLowerCase();
   if (tag === '#fragment') return _serialize(el.childNodes);
+  if (tag === '#shadow-root') return _serialize(el.childNodes);
+  // <slot>: distribute light DOM children from shadow host
+  if (tag === 'slot') {
+    // Walk up to find the shadow root and its host
+    var _cur: VNode | null = el.parentNode;
+    while (_cur && !(_cur as any)._isShadowRoot) _cur = (_cur as any).parentNode;
+    if (_cur && (_cur as any)._shadowHost) {
+      var _host = (_cur as any)._shadowHost as VElement;
+      var slotName = el._attrs.get('name') || '';
+      var slotted = _host.childNodes.filter(n => {
+        if (!slotName) return true; // default slot: take all non-named children
+        return (n instanceof VElement) && (n as VElement)._attrs.get('slot') === slotName;
+      });
+      if (slotted.length > 0) return _serialize(slotted);
+    }
+    // No slotted content: render <slot>'s own children (default content)
+    return _serialize(el.childNodes);
+  }
   // <template>: serialize content from _content fragment, not childNodes
   if (tag === 'template') {
     var _tmplInner = (el as any)._content ? _serialize(((el as any)._content as VElement).childNodes) : '';
@@ -2516,7 +2591,13 @@ export function _serializeEl(el: VElement): string {
     if (parts.length > 0) attrs += ' style="' + _escapeAttr(parts.join(';')) + '"';
   }
   if (_VOID.has(tag)) return '<' + tag + attrs + '>';
-  return '<' + tag + attrs + '>' + _serialize(el.childNodes) + '</' + tag + '>';
+  // If the element has a real shadow root, serialize shadow content.
+  // Light DOM children are kept internally for slot distribution.
+  var srRoot = el._shadowRoot;
+  var innerContent = (srRoot && (srRoot as any)._isShadowRoot)
+    ? _serialize(srRoot.childNodes)
+    : _serialize(el.childNodes);
+  return '<' + tag + attrs + '>' + innerContent + '</' + tag + '>';
 }
 
 function _escapeText(s: string): string { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }

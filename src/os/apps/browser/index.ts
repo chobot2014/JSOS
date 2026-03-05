@@ -37,7 +37,7 @@ import type {
 
 import { parseURL, urlEncode, encodeFormData, decodeBMP, readPNGDimensions, decodeBase64 } from './utils.js';
 import { parseHTML }    from './html.js';
-import { parseStylesheet, buildSheetIndex, type CSSRule, type RuleIndex, resetCSSVars } from './stylesheet.js';
+import { parseStylesheet, buildSheetIndex, type CSSRule, type RuleIndex, resetCSSVars, setViewport } from './stylesheet.js';
 import { decodePNG }    from './img-png.js';
 import { decodeJPEG }   from './img-jpeg.js';
 import { layoutNodes }  from './layout.js';
@@ -45,6 +45,68 @@ import { aboutJsosHTML, aboutJstestHTML, errorHTML, jsonViewerHTML } from './pag
 import { createPageJS, getBlobURLContent, type PageJS } from './jsruntime.js';
 import { flushAllCaches } from './cache.js';
 import { renderGradientCSS } from './gradient.js';
+
+// ── Box-shadow parser ─────────────────────────────────────────────────────────
+interface _BoxShadowLayer {
+  offsetX: number; offsetY: number; blur: number; spread: number;
+  color: number;   // ARGB
+  inset: boolean;
+}
+function _parseBoxShadow(css: string): _BoxShadowLayer[] {
+  var out: _BoxShadowLayer[] = [];
+  // Split on commas that are NOT inside parens (e.g. rgb(…))
+  var parts: string[] = [];
+  var depth = 0, cur = '';
+  for (var _ci = 0; _ci < css.length; _ci++) {
+    var _ch = css[_ci];
+    if      (_ch === '(') { depth++; cur += _ch; }
+    else if (_ch === ')') { depth--; cur += _ch; }
+    else if (_ch === ',' && depth === 0) { parts.push(cur.trim()); cur = ''; }
+    else cur += _ch;
+  }
+  if (cur.trim()) parts.push(cur.trim());
+  for (var _pi = 0; _pi < parts.length; _pi++) {
+    var p = parts[_pi].trim();
+    var inset = false;
+    if (p.startsWith('inset ')) { inset = true; p = p.slice(6).trim(); }
+    // Extract colour: anything starting with # or rgb/rgba/hsl or a named colour
+    var colorVal = 0xFF000000; // default black opaque
+    // Try to strip a trailing colour token or a leading one
+    p = p.replace(/(?:rgba?\([^)]+\)|hsla?\([^)]+\)|#[0-9a-fA-F]+|transparent)/g, (m) => {
+      // Parse colour
+      if (m === 'transparent') { colorVal = 0x00000000; return ''; }
+      if (m.startsWith('#')) {
+        var hex = m.slice(1);
+        if (hex.length === 3) hex = hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];
+        if (hex.length === 6) colorVal = 0xFF000000 | parseInt(hex, 16);
+        else if (hex.length === 8) {
+          // CSS #RRGGBBAA
+          var _rr = parseInt(hex.slice(0,2), 16);
+          var _gg = parseInt(hex.slice(2,4), 16);
+          var _bb = parseInt(hex.slice(4,6), 16);
+          var _aa = parseInt(hex.slice(6,8), 16);
+          colorVal = (_aa << 24) | (_rr << 16) | (_gg << 8) | _bb;
+        }
+      } else if (m.startsWith('rgb')) {
+        var nums = m.match(/[\d.]+/g) || [];
+        var _r2 = parseInt(nums[0]||'0');
+        var _g2 = parseInt(nums[1]||'0');
+        var _b2 = parseInt(nums[2]||'0');
+        var _a2 = nums[3] !== undefined ? Math.round(parseFloat(nums[3]) * 255) : 255;
+        colorVal = (_a2 << 24) | (_r2 << 16) | (_g2 << 8) | _b2;
+      }
+      return '';
+    });
+    // Remaining tokens should be length values
+    var lens = p.trim().split(/\s+/).filter(s => s.length > 0);
+    var offsetX = parseFloat(lens[0] || '0');
+    var offsetY = parseFloat(lens[1] || '0');
+    var blur    = parseFloat(lens[2] || '0');
+    var spread  = parseFloat(lens[3] || '0');
+    out.push({ offsetX, offsetY, blur, spread, color: colorVal, inset });
+  }
+  return out;
+}
 
 // ── TabState — per-tab browseable snapshot ────────────────────────────────────
 
@@ -780,20 +842,106 @@ export class BrowserApp implements App {
       if (_lines[_mid].y + _lines[_mid].lineH < _sv) _lo = _mid + 1;
       else _hi = _mid;
     }
+    // Clip stack for overflow:hidden containers (item 3.10)
+    var _clipStack: Array<{endY: number; saved: ReturnType<typeof canvas.saveClipRect>}> = [];
     for (var i = _lo; i < _lines.length; i++) {
       var line  = _lines[i];
       var lineY = line.y - _sv;
       if (lineY > ch) break;
       var absY = y0 + lineY;
+      // Pop expired overflow:hidden clips
+      while (_clipStack.length > 0 && absY > _clipStack[_clipStack.length - 1].endY) {
+        canvas.restoreClipRect(_clipStack.pop()!.saved);
+      }
 
       if (line.hrLine) {
         canvas.fillRect(CONTENT_PAD, absY + 1, w - CONTENT_PAD * 2, 1, CLR_HR); continue;
       }
+
+      // ── Box decoration — border-radius, borders, box-shadow (Tier 3.7 / 4.2) ──
+      if (line.boxDeco) {
+        var deco   = line.boxDeco;
+        var decoX  = deco.x;
+        var decoY  = absY - 1;
+        var decoW  = deco.w;
+        var decoH  = deco.h;
+        var decoR  = deco.borderRadius || 0;
+
+        // 1. Box-shadow (behind element)
+        if (deco.boxShadow) {
+          var _shLayers = _parseBoxShadow(deco.boxShadow);
+          for (var _sli = 0; _sli < _shLayers.length; _sli++) {
+            var _sl = _shLayers[_sli];
+            if (_sl.inset) continue; // inset shadows unsupported for now
+            var _slA = (_sl.color >>> 24) & 0xFF;
+            if (_sl.blur > 0 && _slA > 0) {
+              // Approximate blur by drawing 3 progressively-larger translucent rects
+              for (var _bk = 3; _bk >= 1; _bk--) {
+                var _bSpr  = _sl.blur * _bk / 3;
+                var _bAlph = Math.round(_slA * (1 - _bk / 4)) >>> 0;
+                var _bClr  = (_sl.color & 0x00FFFFFF) | (_bAlph << 24);
+                canvas.fillRect(
+                  Math.round(decoX + _sl.offsetX - _bSpr + _sl.spread),
+                  Math.round(decoY + _sl.offsetY - _bSpr + _sl.spread),
+                  Math.round(decoW + _bSpr * 2),
+                  Math.round(decoH + _bSpr * 2),
+                  _bClr,
+                );
+              }
+            } else {
+              // No blur — solid shadow rect
+              canvas.fillRect(
+                Math.round(decoX + _sl.offsetX + _sl.spread),
+                Math.round(decoY + _sl.offsetY + _sl.spread),
+                decoW, decoH,
+                _sl.color,
+              );
+            }
+          }
+        }
+
+        // 2. Background fill with border-radius (skip the plain fillRect below for this line)
+        if (decoR > 0) {
+          if (deco.bgColor !== undefined) {
+            canvas.fillRoundRect(decoX, decoY, decoW, decoH, decoR, deco.bgColor);
+          }
+          // gradient background handled below via line.bgGradient (which is already set on the line)
+        } else {
+          // No rounding — let the existing bgColor/bgGradient handling below paint normally
+          // (boxDeco still enables border + shadow without forcing rounded corners)
+        }
+
+        // 3. Border outline
+        if (deco.borderWidth && deco.borderWidth > 0 && deco.borderColor !== undefined) {
+          var _brd = deco.borderWidth;
+          canvas.drawRoundRect(decoX, decoY, decoW, decoH, decoR, deco.borderColor);
+          for (var _bi = 1; _bi < _brd; _bi++) {
+            canvas.drawRoundRect(
+              decoX + _bi, decoY + _bi,
+              decoW - _bi * 2, decoH - _bi * 2,
+              Math.max(0, decoR - _bi),
+              deco.borderColor,
+            );
+          }
+        }
+        // overflow:hidden: push canvas clip rect so children are clipped to this box (item 3.10)
+        if (deco.overflowHidden) {
+          var _savedClip = canvas.saveClipRect();
+          canvas.setClipRect(decoX, decoY, decoW, decoH);
+          _clipStack.push({ endY: decoY + decoH, saved: _savedClip });
+        }
+      }
+
       if (line.bgColor) {
-        canvas.fillRect(0, absY - 1, w, line.lineH + 1, line.bgColor);
+        // Skip full-width fill when boxDeco already painted a rounded background
+        if (!(line.boxDeco && (line.boxDeco.borderRadius || 0) > 0)) {
+          canvas.fillRect(0, absY - 1, w, line.lineH + 1, line.bgColor);
+        }
       }
       if (line.bgGradient) {
-        renderGradientCSS(canvas, 0, absY - 1, w, line.lineH + 1, line.bgGradient);
+        var _gx  = line.boxDeco ? line.boxDeco.x : 0;
+        var _gw  = line.boxDeco ? line.boxDeco.w : w;
+        renderGradientCSS(canvas, _gx, absY - 1, _gw, line.lineH + 1, line.bgGradient);
       }
       // CSS background-image url() tile (item 386)
       if (line.bgImageUrl) {
@@ -861,6 +1009,9 @@ export class BrowserApp implements App {
         }
       }
     }
+
+    // Clean up any remaining overflow:hidden clip rects
+    while (_clipStack.length > 0) { canvas.restoreClipRect(_clipStack.pop()!.saved); }
 
     this._drawWidgets(canvas, y0, ch);
 
@@ -1927,6 +2078,11 @@ export class BrowserApp implements App {
 
     // ── Reset CSS variable registry for new page ─────────────────────────────
     resetCSSVars();
+    // ── Update viewport dimensions for vw/vh unit resolution ─────────────────
+    setViewport(
+      this._win ? this._win.canvas.width : 1920,
+      this._win ? this._contentH()       : 1080,
+    );
 
     // ── Pass 1: collect <style> blocks + <link rel="stylesheet"> hrefs ────────
     var r = parseHTML(html);
@@ -2058,6 +2214,8 @@ export class BrowserApp implements App {
         getScrollY: () => self2._scrollY,
         scrollTo: (_x: number, y: number) => { self2._scrollBy(y - self2._scrollY); },
       });
+      // Push initial layout rects to the JS runtime so getBoundingClientRect() works
+      this._pushLayoutRects();
     }
   }
 
@@ -2115,7 +2273,49 @@ export class BrowserApp implements App {
     var hasBgImages = this._pageLines.some(ln => ln.bgImageUrl != null && !this._bgImageMap.has(ln.bgImageUrl));
     if (hasImages || hasBgImages) this._fetchImages();
 
+    // ── Write layout rects back to VElements for getBoundingClientRect() ──────
+    if (this._pageJS) this._pushLayoutRects();
+
     this._dirty = true;
+  }
+
+  /**
+   * Build a map of elId → {x, y, w, h} from the current RenderedLine[] and
+   * call PageJS.updateLayoutRects() so that getBoundingClientRect() etc. work.
+   */
+  private _pushLayoutRects(): void {
+    if (!this._pageJS) return;
+    var _rectMap = new Map<string, { x: number; y: number; w: number; h: number }>();
+    var _lines = this._pageLines;
+    for (var _li = 0; _li < _lines.length; _li++) {
+      var _ln = _lines[_li];
+      // Box decoration gives exact element rect (block elements with id/elId)
+      if (_ln.boxDeco && (_ln as any)._decoElId) {
+        var _bd = _ln.boxDeco;
+        var _bid = (_ln as any)._decoElId as string;
+        _rectMap.set(_bid, { x: _bd.x, y: _ln.y, w: _bd.w, h: _bd.h });
+      }
+      // Span-based rects for inline elements (carry elId from click-dispatch)
+      var _lnSpans = _ln.nodes;
+      for (var _si = 0; _si < _lnSpans.length; _si++) {
+        var _sp = _lnSpans[_si];
+        if (!_sp.elId || !_sp.text) continue;
+        var _sc = _sp.fontScale || 1;
+        var _spW = _sp.text.length * CHAR_W * _sc;
+        var existing = _rectMap.get(_sp.elId);
+        if (!existing) {
+          _rectMap.set(_sp.elId, { x: _sp.x, y: _ln.y, w: _spW, h: _ln.lineH });
+        } else {
+          var _newX = Math.min(existing.x, _sp.x);
+          var _newY = Math.min(existing.y, _ln.y);
+          var _newR = Math.max(existing.x + existing.w, _sp.x + _spW);
+          var _newB = Math.max(existing.y + existing.h, _ln.y + _ln.lineH);
+          existing.x = _newX; existing.y = _newY;
+          existing.w = _newR - _newX; existing.h = _newB - _newY;
+        }
+      }
+    }
+    if (_rectMap.size > 0) this._pageJS.updateLayoutRects(_rectMap);
   }
 
   // ── About / source page generators ────────────────────────────────────────

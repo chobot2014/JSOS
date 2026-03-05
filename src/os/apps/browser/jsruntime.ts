@@ -17,7 +17,7 @@ import { os } from '../../core/sdk.js';
 import type { FetchResponse } from '../../core/sdk.js';
 import {
   VDocument, VElement, VEvent, VNode, VText, VRange, VEventTarget,
-  buildDOM, serializeDOM, _serializeEl, _walk, _matchSel,
+  buildDOM, serializeDOM, _serializeEl, _walk, _matchSel, _cePending,
 } from './dom.js';
 import { BrowserPerformance, BrowserPerformanceObserver } from './perf.js';
 import { WorkerImpl, SharedWorkerImpl, MessageChannel, BroadcastChannelImpl, tickAllWorkers } from './workers.js';
@@ -27,6 +27,9 @@ import { JSAudioElement, JSVideoElement } from './audio-element.js';
 import { JITBrowserEngine } from './jit-browser.js';
 import { installFrameworkPolyfills } from './framework-polyfills.js';
 import { installCompatPolyfills } from './compat-polyfills.js';
+import type { CSSAnimation, AnimationKeyframe } from './advanced-css.js';
+import { sampleAnimation } from './advanced-css.js';
+import { buildWSFrame, parseWSFrame } from '../../net/http.js';
 
 // ── Script record (collected by html.ts during parsing) ───────────────────────
 
@@ -70,12 +73,21 @@ export interface PageJS {
   fireKeydown(id: string, key: string, keyCode: number): boolean;
   fireSubmit(formId: string): boolean;
   fireLoad(): boolean;
+  fireFocus(id: string): boolean;
+  fireBlur(id: string): boolean;
+  fireMouse(id: string, eventType: string): boolean;
   /** [Item 950] Fire resize event and trigger media query listeners whose match state changed. */
   fireResize(width: number, height: number): boolean;
   /** Called when the page is unloaded — fires beforeunload */
   dispose(): void;
   /** Synchronously tick any pending timers (called on each render frame) */
   tick(nowMs: number): void;
+  /**
+   * Write layout geometry back to VElement._layoutRect so that
+   * getBoundingClientRect / offsetWidth / offsetHeight etc. return real values.
+   * Called by BrowserApp after each layout pass.
+   */
+  updateLayoutRects(rects: Map<string, { x: number; y: number; w: number; h: number }>): void;
 }
 
 // ── Timer state ───────────────────────────────────────────────────────────────
@@ -302,20 +314,43 @@ export function createPageJS(
       if (!(form as any).checkFormValidity()) { ev.preventDefault(); return; }
     }
     var serialized = typeof (form as any).serializeForm === 'function' ? (form as any).serializeForm() : '';
+    var enctype = ((form as any).enctype || (form as VElement).getAttribute?.('enctype') || 'application/x-www-form-urlencoded').toLowerCase();
     var actionURL = action.startsWith('http') ? action : _resolveURL(action, _baseHref);
     if (method === 'get') {
       actionURL += (actionURL.includes('?') ? '&' : '?') + serialized;
       cb.navigate(actionURL);
     } else {
+      var _postBody: string;
+      var _postHeaders: Record<string, string>;
+      if (enctype === 'multipart/form-data') {
+        var _mfd = new FormData_(form as VElement);
+        var _mfBoundary = '----JSFormBoundary' + Math.random().toString(36).slice(2);
+        var _mfParts: string[] = [];
+        for (var _mfField of _mfd._fields) {
+          var _mfDisp = 'Content-Disposition: form-data; name="' + _mfField[0] + '"';
+          if (_mfField[2] !== undefined) _mfDisp += '; filename="' + _mfField[2] + '"';
+          _mfParts.push('--' + _mfBoundary + '\r\n' + _mfDisp + '\r\n\r\n' + _mfField[1] + '\r\n');
+        }
+        _postBody = _mfParts.join('') + '--' + _mfBoundary + '--\r\n';
+        _postHeaders = { 'Content-Type': 'multipart/form-data; boundary=' + _mfBoundary };
+      } else if (enctype === 'text/plain') {
+        var _tpParts: string[] = [];
+        var _tpFd = new FormData_(form as VElement);
+        for (var _tpField of _tpFd._fields) _tpParts.push(_tpField[0] + '=' + _tpField[1]);
+        _postBody = _tpParts.join('\r\n');
+        _postHeaders = { 'Content-Type': 'text/plain' };
+      } else {
+        _postBody = serialized;
+        _postHeaders = { 'Content-Type': 'application/x-www-form-urlencoded' };
+      }
       // POST — use fetchAsync, then navigate if redirect returned
       os.fetchAsync(actionURL, (resp: any) => {
         if (resp && resp.status >= 300 && resp.status < 400 && resp.headers?.location) {
           cb.navigate(resp.headers.location);
         } else if (resp) {
-          // Navigate to action URL with response body rendered
           cb.navigate(actionURL);
         }
-      }, { method: 'POST', body: serialized, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+      }, { method: 'POST', body: _postBody, headers: _postHeaders });
     }
   });
 
@@ -1329,10 +1364,16 @@ export function createPageJS(
           // Per Fetch spec: FormData body uses multipart/form-data encoding (item 2.10)
           var _boundary = '----JSFormBoundary' + Math.random().toString(36).slice(2);
           var _parts: string[] = [];
-          opts.body.forEach((v: string, k: string, _fd: any) => {
-            _parts.push('--' + _boundary + '\r\n' +
-              'Content-Disposition: form-data; name="' + k + '"\r\n\r\n' + v + '\r\n');
-          });
+          for (var _fdEntry of opts.body._fields) {
+            var _fdName = _fdEntry[0], _fdVal = _fdEntry[1], _fdFilename = _fdEntry[2];
+            var _dispHdr = 'Content-Disposition: form-data; name="' + _fdName + '"';
+            if (_fdFilename !== undefined) {
+              _dispHdr += '; filename="' + _fdFilename + '"';
+              _parts.push('--' + _boundary + '\r\n' + _dispHdr + '\r\nContent-Type: application/octet-stream\r\n\r\n' + _fdVal + '\r\n');
+            } else {
+              _parts.push('--' + _boundary + '\r\n' + _dispHdr + '\r\n\r\n' + _fdVal + '\r\n');
+            }
+          }
           bodyStr = _parts.join('') + '--' + _boundary + '--\r\n';
           extraHeaders['content-type'] = extraHeaders['content-type'] ||
             'multipart/form-data; boundary=' + _boundary;
@@ -2881,12 +2922,158 @@ export function createPageJS(
   }
   var DOMMatrixReadOnly_ = DOMMatrix_;
 
-  // ── WebSocket stub (item 542) ─────────────────────────────────────────────
+  // ── WebSocket (item 542) — real TCP + HTTP Upgrade implementation ─────────
+
+  /** Active WebSocket connections polled each tick. */
+  interface _WSEntry {
+    ws:          WebSocket_;
+    sock:        import('../../core/sdk.js').RawSocket;
+    recvBuf:     number[];
+    upgraded:    boolean;   // HTTP 101 received
+    headerBuf:   string;    // raw text before upgrade
+    fragOpcode:  number;    // current fragment opcode (for continuation frames)
+    fragBuf:     number[];  // accumulated fragment payload
+    pingInterval?: ReturnType<typeof setInterval_> | number;
+  }
+  var _wsSockets: _WSEntry[] = [];
+
+  /** Generate a random base64 Sec-WebSocket-Key (16 bytes). */
+  function _wsKey(): string {
+    var b = '';
+    for (var i = 0; i < 16; i++) b += String.fromCharCode(Math.floor(Math.random() * 256));
+    // base64-encode 16 bytes
+    var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    var out = '';
+    for (var j = 0; j < b.length; j += 3) {
+      var c1 = b.charCodeAt(j), c2 = b.charCodeAt(j+1) || 0, c3 = b.charCodeAt(j+2) || 0;
+      var n = (c1 << 16) | (c2 << 8) | c3;
+      out += chars[(n >> 18) & 63] + chars[(n >> 12) & 63] +
+             (j+1 < b.length ? chars[(n >> 6) & 63] : '=') +
+             (j+2 < b.length ? chars[n & 63] : '=');
+    }
+    return out;
+  }
+
+  /** Dispatch synthetic event to a WebSocket object. */
+  function _wsFireEvent(ws: WebSocket_, type: string, extra?: Record<string, unknown>): void {
+    var ev = Object.assign({ type, target: ws }, extra || {});
+    var arr = (ws as any)._listeners as Map<string, Array<(e: unknown) => void>>;
+    if (arr) { var fns = arr.get(type); if (fns) for (var fn of fns) try { fn(ev); } catch(_) {} }
+    var onFn = (ws as any)['on' + type];
+    if (typeof onFn === 'function') try { onFn.call(ws, ev); } catch(_) {}
+  }
+
+  /** Poll all active WebSocket connections for incoming data. */
+  function _tickWebSockets(): void {
+    for (var _wsi = _wsSockets.length - 1; _wsi >= 0; _wsi--) {
+      var entry = _wsSockets[_wsi];
+      var ws    = entry.ws;
+      var sock  = entry.sock;
+      if (!sock.connected) {
+        // Socket closed unexpectedly
+        if (ws.readyState < 3) {
+          ws.readyState = 3;
+          _wsFireEvent(ws, 'close', { code: 1006, reason: 'Connection dropped', wasClean: false });
+        }
+        _wsSockets.splice(_wsi, 1);
+        continue;
+      }
+      var avail = sock.available();
+      if (avail <= 0) continue;
+      var newBytes = sock.readBytes(avail);
+      for (var b of newBytes) entry.recvBuf.push(b);
+
+      if (!entry.upgraded) {
+        // Convert bytes to string and look for HTTP 101
+        var hStr = '';
+        for (var hb of entry.recvBuf) hStr += String.fromCharCode(hb);
+        entry.headerBuf += hStr;
+        entry.recvBuf = [];
+        var dblCRLF = entry.headerBuf.indexOf('\r\n\r\n');
+        if (dblCRLF >= 0) {
+          var statusLine = entry.headerBuf.split('\r\n')[0];
+          if (statusLine.indexOf('101') >= 0) {
+            entry.upgraded = true;
+            ws.readyState = 1; // OPEN
+            _wsFireEvent(ws, 'open');
+            // Any bytes after headers go into recvBuf
+            var remainder = entry.headerBuf.slice(dblCRLF + 4);
+            for (var i = 0; i < remainder.length; i++) entry.recvBuf.push(remainder.charCodeAt(i));
+            entry.headerBuf = '';
+          } else {
+            // Not a 101 — connection failed
+            ws.readyState = 3;
+            _wsFireEvent(ws, 'error', { message: 'WebSocket upgrade failed: ' + statusLine });
+            _wsFireEvent(ws, 'close', { code: 1006, reason: 'Upgrade failed', wasClean: false });
+            sock.close();
+            _wsSockets.splice(_wsi, 1);
+          }
+        }
+        continue;
+      }
+
+      // Parse WebSocket frames from recvBuf
+      while (entry.recvBuf.length > 0) {
+        var frame = parseWSFrame(entry.recvBuf);
+        if (!frame) break;
+        var totalLen = frame.headerLen + (frame.masked ? 4 : 0) + frame.payloadLen;
+        if (entry.recvBuf.length < frame.headerLen + (frame.masked ? 4 : 0) + frame.payloadLen) break;
+        var payloadStart = frame.headerLen + (frame.masked ? 4 : 0);
+        var payload2 = entry.recvBuf.slice(payloadStart, payloadStart + frame.payloadLen);
+        if (frame.masked && frame.maskKey.length === 4) {
+          for (var mi = 0; mi < payload2.length; mi++) payload2[mi] ^= frame.maskKey[mi % 4];
+        }
+        entry.recvBuf = entry.recvBuf.slice(totalLen);
+
+        var opcode = frame.opcode;
+        if (!frame.fin || opcode === 0x0) {
+          // Fragment handling
+          if (opcode !== 0x0) entry.fragOpcode = opcode;
+          for (var fb of payload2) entry.fragBuf.push(fb);
+          if (!frame.fin) continue;
+          // Final fragment — reassemble
+          opcode = entry.fragOpcode;
+          payload2 = entry.fragBuf;
+          entry.fragBuf = [];
+        }
+
+        if (opcode === 0x1 || opcode === 0x2) {
+          // Text or binary
+          var msgData: string | ArrayBuffer;
+          if (opcode === 0x1) {
+            var s2 = ''; for (var sc = 0; sc < payload2.length; sc++) s2 += String.fromCharCode(payload2[sc]);
+            msgData = s2;
+          } else {
+            var ab = new ArrayBuffer(payload2.length);
+            var view = new Uint8Array(ab);
+            for (var vi = 0; vi < payload2.length; vi++) view[vi] = payload2[vi];
+            msgData = ws.binaryType === 'arraybuffer' ? ab : new Blob([ab]) as unknown as ArrayBuffer;
+          }
+          ws.bufferedAmount = 0;
+          _wsFireEvent(ws, 'message', { data: msgData, origin: ws.url, lastEventId: '', ports: [] });
+        } else if (opcode === 0x8) {
+          // Close frame
+          var closeCode2 = payload2.length >= 2 ? (payload2[0] << 8) | payload2[1] : 1000;
+          var closeReason2 = '';
+          for (var cr = 2; cr < payload2.length; cr++) closeReason2 += String.fromCharCode(payload2[cr]);
+          ws.readyState = 3;
+          _wsFireEvent(ws, 'close', { code: closeCode2, reason: closeReason2, wasClean: true });
+          sock.close();
+          _wsSockets.splice(_wsi, 1);
+        } else if (opcode === 0x9) {
+          // Ping — send pong
+          var pongFrame = buildWSFrame(0xA, payload2);
+          sock.write(pongFrame);
+        }
+        // 0xA = Pong — ignored
+      }
+    }
+  }
 
   class WebSocket_ {
     static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
     CONNECTING = 0; OPEN = 1; CLOSING = 2; CLOSED = 3;
-    readyState = 3; // CLOSED by default (no real TCP available from runtime)
+    readyState = 0;
     url: string; protocol: string; binaryType = 'blob';
     bufferedAmount = 0; extensions = '';
     onopen:    ((ev: unknown) => void) | null = null;
@@ -2898,53 +3085,98 @@ export function createPageJS(
     constructor(url: string, protocols?: string | string[]) {
       this.url = url;
       this.protocol = Array.isArray(protocols) ? (protocols[0] ?? '') : (protocols ?? '');
-      this.readyState = 0; // CONNECTING
-      // Attempt connection via os.tcpConnect if available, else fire error
       var self = this;
-      setTimeout(() => {
-        if ((os as any).webSocketConnect) {
-          try { (os as any).webSocketConnect(url, protocols, self); return; } catch (_) {}
+      // Parse ws:// or wss:// URL
+      var parsed = _parseWsUrl(url);
+      if (!parsed) {
+        setTimeout_(() => {
+          self.readyState = 3;
+          _wsFireEvent(self, 'error', { message: 'Invalid WebSocket URL: ' + url });
+          _wsFireEvent(self, 'close', { code: 1006, reason: 'Invalid URL', wasClean: false });
+        }, 0);
+        return;
+      }
+      var { host, port, path, tls } = parsed;
+      // Connect via os.net.connect
+      (os.net as any).connect(host, port, function(sock: import('../../core/sdk.js').RawSocket | null, err?: string) {
+        if (!sock) {
+          self.readyState = 3;
+          _wsFireEvent(self, 'error', { message: err || 'Connection failed' });
+          _wsFireEvent(self, 'close', { code: 1006, reason: err || 'Connection failed', wasClean: false });
+          return;
         }
-        // Fallback: immediately fire error + close
-        self.readyState = 3;
-        var errEv = { type: 'error', target: self };
-        if (self.onerror) try { self.onerror(errEv); } catch(_) {}
-        for (var fn of (self._listeners.get('error') ?? [])) try { fn(errEv); } catch(_) {}
-        var closeEv = { type: 'close', target: self, code: 1006, reason: 'Connection failed', wasClean: false };
-        if (self.onclose) try { self.onclose(closeEv); } catch(_) {}
-        for (var fn2 of (self._listeners.get('close') ?? [])) try { fn2(closeEv); } catch(_) {}
-      }, 0);
+        // Send HTTP Upgrade request
+        var key = _wsKey();
+        var hosthdr = port === (tls ? 443 : 80) ? host : (host + ':' + port);
+        var protos = Array.isArray(protocols) ? protocols.join(', ') : (protocols || '');
+        var req = 'GET ' + path + ' HTTP/1.1\r\n' +
+          'Host: ' + hosthdr + '\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Key: ' + key + '\r\n' +
+          'Sec-WebSocket-Version: 13\r\n' +
+          (protos ? 'Sec-WebSocket-Protocol: ' + protos + '\r\n' : '') +
+          '\r\n';
+        sock.write(req);
+        _wsSockets.push({
+          ws: self, sock, recvBuf: [], upgraded: false, headerBuf: '',
+          fragOpcode: 0, fragBuf: [],
+        });
+      }, { timeoutMs: 8000 });
     }
 
-    send(_data: string | ArrayBuffer | Blob): void {
-      if (this.readyState !== 1) throw new Error('WebSocket is not open');
+    send(data: string | ArrayBuffer | Blob): void {
+      if (this.readyState !== 1) throw new DOMException('WebSocket is not open', 'InvalidStateError');
+      var payload: number[] = [];
+      var entry = _wsSockets.find(function(e) { return e.ws === this; }, this);
+      if (!entry) return;
+      if (typeof data === 'string') {
+        for (var i = 0; i < data.length; i++) payload.push(data.charCodeAt(i) & 0xFF);
+        entry.sock.write(buildWSFrame(0x1, payload));
+      } else if (data instanceof ArrayBuffer) {
+        var view2 = new Uint8Array(data);
+        for (var j = 0; j < view2.length; j++) payload.push(view2[j]);
+        entry.sock.write(buildWSFrame(0x2, payload));
+      }
     }
     close(code = 1000, reason = ''): void {
       if (this.readyState === 0 || this.readyState === 1) {
         this.readyState = 2;
-        setTimeout(() => {
-          this.readyState = 3;
-          var closeEv = { type: 'close', target: this, code, reason, wasClean: code === 1000 };
-          if (this.onclose) try { this.onclose(closeEv); } catch(_) {}
-          for (var fn of (this._listeners.get('close') ?? [])) try { fn(closeEv); } catch(_) {}
+        var entry2 = _wsSockets.find(function(e) { return e.ws === this; }, this);
+        if (entry2) {
+          var closePayload: number[] = [(code >> 8) & 0xFF, code & 0xFF];
+          for (var i = 0; i < reason.length; i++) closePayload.push(reason.charCodeAt(i) & 0xFF);
+          entry2.sock.write(buildWSFrame(0x8, closePayload));
+        }
+        var self = this;
+        setTimeout_(() => {
+          self.readyState = 3;
+          if (entry2) { entry2.sock.close(); _wsSockets.splice(_wsSockets.indexOf(entry2), 1); }
+          _wsFireEvent(self, 'close', { code, reason, wasClean: code === 1000 });
         }, 0);
       }
     }
     addEventListener(type: string, fn: (ev: unknown) => void, _opts?: unknown): void {
       if (!this._listeners.has(type)) this._listeners.set(type, []);
       this._listeners.get(type)!.push(fn);
-      if (type === 'open')    this.onopen    = fn;
-      if (type === 'close')   this.onclose   = fn;
-      if (type === 'message') this.onmessage = fn;
-      if (type === 'error')   this.onerror   = fn;
     }
     removeEventListener(type: string, fn: (ev: unknown) => void, _opts?: unknown): void {
-      var arr = this._listeners.get(type); if (arr) { var i = arr.indexOf(fn); if (i >= 0) arr.splice(i, 1); }
+      var arr = this._listeners.get(type); if (arr) { var i2 = arr.indexOf(fn); if (i2 >= 0) arr.splice(i2, 1); }
     }
     dispatchEvent(ev: { type: string }): boolean {
-      var arr = this._listeners.get(ev.type); if (arr) for (var fn of arr) try { fn(ev); } catch(_) {}
-      return true;
+      _wsFireEvent(this, ev.type, ev as Record<string, unknown>); return true;
     }
+  }
+
+  /** Parse a WebSocket URL into host, port, path, tls. Returns null if invalid. */
+  function _parseWsUrl(url: string): { host: string; port: number; path: string; tls: boolean } | null {
+    var m = url.match(/^(wss?):\/\/([^/:?#]+)(?::(\d+))?(\/[^?#]*)?(\?.*)?$/i);
+    if (!m) return null;
+    var tls  = m[1].toLowerCase() === 'wss';
+    var host = m[2];
+    var port = m[3] ? parseInt(m[3]) : (tls ? 443 : 80);
+    var path = (m[4] || '/') + (m[5] || '');
+    return { host, port, path, tls };
   }
 
   // ── Promise polyfills (item 510) ──────────────────────────────────────────
@@ -3207,6 +3439,257 @@ export function createPageJS(
   function requestAnimationFrame(fn: (ts: number) => void): number { var id = rafSeq++; rafCallbacks.push({ id, fn }); return id; }
   function cancelAnimationFrame(id: number): void { rafCallbacks = rafCallbacks.filter(r => r.id !== id); }
 
+  // ── CSS Transitions engine (Tier 4.3) ─────────────────────────────────────
+
+  interface _CSSTransition {
+    el:         VElement;
+    prop:       string;      // CSS property name (kebab-case)
+    fromVal:    string;
+    toVal:      string;
+    startMs:    number;
+    durationMs: number;
+    easing:     string;     // 'linear' | 'ease' | 'ease-in' | 'ease-out' | 'ease-in-out'
+    done:       boolean;
+  }
+
+  var _activeTrans: _CSSTransition[] = [];
+  var _transRunning = false;
+
+  /** Apply cubic-bezier easing approximations. */
+  function _cssEase(t: number, fn: string): number {
+    if (t <= 0) return 0;
+    if (t >= 1) return 1;
+    switch (fn) {
+      case 'ease':         { var u = 1-t; return 3*u*u*t*0.1 + 3*u*t*t*0.9 + t*t*t; }
+      case 'ease-in':      return t * t;
+      case 'ease-out':     { var v = 1-t; return 1 - v*v; }
+      case 'ease-in-out':  return t < 0.5 ? 2*t*t : 1 - 2*(1-t)*(1-t);
+      default:             return t; // linear
+    }
+  }
+
+  /** Interpolate a single CSS value string from `a` to `b` at progress `p` (0-1). */
+  function _lerpCSSValue(a: string, b: string, p: number): string {
+    if (a === b) return b;
+    // Color: #rrggbb or rgb(r,g,b)
+    function _hexToRGB(h: string): [number,number,number] | null {
+      h = h.trim();
+      var m6 = h.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+      if (m6) return [parseInt(m6[1],16), parseInt(m6[2],16), parseInt(m6[3],16)];
+      var m3 = h.match(/^#([0-9a-f])([0-9a-f])([0-9a-f])$/i);
+      if (m3) return [parseInt(m3[1]+m3[1],16), parseInt(m3[2]+m3[2],16), parseInt(m3[3]+m3[3],16)];
+      var mr = h.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+      if (mr) return [+mr[1], +mr[2], +mr[3]];
+      return null;
+    }
+    var ca = _hexToRGB(a), cb2 = _hexToRGB(b);
+    if (ca && cb2) {
+      var r = Math.round(ca[0] + (cb2[0]-ca[0])*p);
+      var g = Math.round(ca[1] + (cb2[1]-ca[1])*p);
+      var bl = Math.round(ca[2] + (cb2[2]-ca[2])*p);
+      return 'rgb('+r+','+g+','+bl+')';
+    }
+    // Numeric+unit: e.g. "120px", "0.5", "50%"
+    var ma = a.match(/^(-?[\d.]+)([a-z%]*)$/i);
+    var mb = b.match(/^(-?[\d.]+)([a-z%]*)$/i);
+    if (ma && mb) {
+      var va = parseFloat(ma[1]), vb = parseFloat(mb[1]);
+      var unit = mb[2] || ma[2] || '';
+      var interp = va + (vb - va) * p;
+      // Round to 3 decimal places for cleanliness
+      return (Math.round(interp * 1000) / 1000) + unit;
+    }
+    return p < 0.5 ? a : b;
+  }
+
+  /** Parse `transition` shorthand into per-property descriptors.
+   *  Returns a map of propertyName → {duration, easing}.
+   *  Handles: "property duration easing" or "property duration" or comma-separated list. */
+  function _parseTransition(css: string): Map<string, { durationMs: number; easing: string }> {
+    var result = new Map<string, { durationMs: number; easing: string }>();
+    if (!css || css === 'none' || css === 'initial') return result;
+    var parts = css.split(',');
+    for (var _pi = 0; _pi < parts.length; _pi++) {
+      var tokens = parts[_pi].trim().split(/\s+/);
+      var prop = tokens[0] || 'all';
+      var dur  = 0;
+      var ease = 'ease';
+      for (var _ti = 1; _ti < tokens.length; _ti++) {
+        var tok = tokens[_ti];
+        if (tok.endsWith('ms'))  { dur  = parseFloat(tok); continue; }
+        if (tok.endsWith('s'))   { dur  = parseFloat(tok) * 1000; continue; }
+        if (tok === 'linear' || tok === 'ease' || tok.startsWith('ease-') || tok.startsWith('cubic-bezier')) { ease = tok; continue; }
+      }
+      if (dur > 0) result.set(prop, { durationMs: dur, easing: ease });
+    }
+    return result;
+  }
+
+  // ── CSS Animations engine (Tier 4.4 / @keyframes) ─────────────────────────
+
+  /** Running animations: keyed by element, value = CSSAnimation */
+  var _activeAnims = new Map<VElement, CSSAnimation>();
+  var _lastAnimScanGen = -1;
+
+  /** Look up a @keyframes rule by name from all loaded stylesheets. */
+  function _getKeyframesRule(name: string): AnimationKeyframe[] | null {
+    for (var _ssi = 0; _ssi < doc._styleSheets.length; _ssi++) {
+      var _sh = doc._styleSheets[_ssi] as any;
+      if (!_sh || !_sh.cssRules) continue;
+      for (var _ri = 0; _ri < _sh.cssRules.length; _ri++) {
+        var _r = _sh.cssRules[_ri] as any;
+        if (_r && _r.type === 7 && _r.name === name && _r.cssRules) {
+          var _kfs: AnimationKeyframe[] = [];
+          for (var _ki = 0; _ki < _r.cssRules.length; _ki++) {
+            var _kf = _r.cssRules[_ki] as any;
+            if (!_kf || !_kf.keyText) continue;
+            var _offsets: number[] = [];
+            var _ks = _kf.keyText.split(',');
+            for (var _kti = 0; _kti < _ks.length; _kti++) {
+              var _kt = _ks[_kti].trim().toLowerCase();
+              if (_kt === 'from') _offsets.push(0);
+              else if (_kt === 'to') _offsets.push(1);
+              else { var _pct = parseFloat(_kt); if (!isNaN(_pct)) _offsets.push(_pct / 100); }
+            }
+            var _props: Record<string, string | number> = {};
+            var _kfSt = _kf.style as any;
+            if (_kfSt && _kfSt._map) {
+              (_kfSt._map as Map<string, string>).forEach(function(v: string, k: string) { _props[k] = v; });
+            } else if (_kfSt && _kfSt.cssText) {
+              _kfSt.cssText.split(';').forEach(function(decl: string) {
+                var _ci = decl.indexOf(':');
+                if (_ci >= 0) _props[decl.slice(0, _ci).trim()] = decl.slice(_ci + 1).trim();
+              });
+            }
+            for (var _oi = 0; _oi < _offsets.length; _oi++) {
+              _kfs.push({ offset: _offsets[_oi], properties: Object.assign({}, _props) });
+            }
+          }
+          _kfs.sort(function(a, b) { return a.offset - b.offset; });
+          return _kfs;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Parse the `animation` shorthand into a CSSAnimation, or null if not applicable. */
+  function _parseAnimationProp(animStr: string, nowMs: number): CSSAnimation | null {
+    if (!animStr || animStr === 'none') return null;
+    var tokens = animStr.trim().split(/\s+/);
+    var name = '';
+    var duration = 300;
+    var delay = 0;
+    var durationSet = false;
+    var iterations: number | 'infinite' = 1;
+    var direction: 'normal' | 'reverse' | 'alternate' | 'alternate-reverse' = 'normal';
+    var fillMode: 'none' | 'forwards' | 'backwards' | 'both' = 'none';
+    for (var _ai = 0; _ai < tokens.length; _ai++) {
+      var tok = tokens[_ai];
+      var tl = tok.toLowerCase();
+      if (tl.endsWith('ms'))       { var ms2 = parseFloat(tok); if (!durationSet) { duration = ms2; durationSet = true; } else { delay = ms2; } }
+      else if (tl.endsWith('s'))   { var s2 = parseFloat(tok)*1000; if (!durationSet) { duration = s2; durationSet = true; } else { delay = s2; } }
+      else if (tl === 'infinite')  { iterations = 'infinite'; }
+      else if (tl === 'normal' || tl === 'reverse' || tl === 'alternate' || tl === 'alternate-reverse') { direction = tl as 'normal' | 'reverse' | 'alternate' | 'alternate-reverse'; }
+      else if (tl === 'forwards' || tl === 'backwards' || tl === 'both') { fillMode = tl as 'forwards' | 'backwards' | 'both'; }
+      else if (/^[\d.]+$/.test(tok)) { iterations = parseFloat(tok) || 1; }
+      else if (tl !== 'linear' && !tl.startsWith('ease') && !tl.startsWith('cubic-bezier') && !tl.startsWith('step') && tl !== 'none') { name = tok; }
+    }
+    if (!name || name === 'none') return null;
+    var kfs = _getKeyframesRule(name);
+    if (!kfs || kfs.length < 2) return null;
+    return { id: name, keyframes: kfs, duration, delay, iterations, direction, fillMode, startTime: nowMs } as CSSAnimation;
+  }
+
+  /** Scan the whole DOM for elements with `animation` CSS, update _activeAnims. */
+  function _scanAnimations(nowMs: number): void {
+    _lastAnimScanGen = currentStyleGeneration();
+    function _walkAnimEl(node: VNode): void {
+      if (node.nodeType === 1) {
+        var el2 = node as VElement;
+        if (!_activeAnims.has(el2)) {
+          var cs2 = getComputedStyle(el2);
+          var animCss = cs2.getPropertyValue('animation') || cs2.getPropertyValue('animation-name') || '';
+          if (animCss && animCss !== 'none') {
+            var anim = _parseAnimationProp(animCss, nowMs);
+            if (anim) _activeAnims.set(el2, anim);
+          }
+        }
+        for (var ci = 0; ci < node.childNodes.length; ci++) _walkAnimEl(node.childNodes[ci]);
+      } else {
+        for (var cj = 0; cj < node.childNodes.length; cj++) _walkAnimEl(node.childNodes[cj]);
+      }
+    }
+    if (doc.documentElement) _walkAnimEl(doc.documentElement);
+  }
+
+  /** Advance active CSS animations; called from tick(). */
+  function _tickAnimations(nowMs: number): void {
+    if (_activeAnims.size === 0) return;
+    var toDelete: VElement[] = [];
+    _activeAnims.forEach(function(anim, el2) {
+      var values = sampleAnimation(anim, nowMs);
+      if (values === null) {
+        // Done — check fill-mode
+        if (anim.fillMode === 'forwards' || anim.fillMode === 'both') {
+          // Keep final-frame values (already set); don't delete from map yet
+          return;
+        }
+        toDelete.push(el2);
+        try {
+          var _aevt = new VEvent('animationend', { bubbles: true, cancelable: false });
+          (_aevt as any).animationName = anim.id; (_aevt as any).elapsedTime = anim.duration / 1000;
+          el2.dispatchEvent(_aevt);
+        } catch(_) {}
+        return;
+      }
+      var changed = false;
+      for (var _pk in values) {
+        var _pv = String(values[_pk]);
+        if (el2._style._map.get(_pk) !== _pv) { el2._style._map.set(_pk, _pv); changed = true; }
+      }
+      if (changed) {
+        el2._dirtyLayout = true; bumpStyleGeneration(); doc._dirty = true; needsRerender = true;
+      }
+    });
+    for (var _di = 0; _di < toDelete.length; _di++) _activeAnims.delete(toDelete[_di]);
+  }
+
+  /** Advance active CSS transitions; called from tick(). Returns true if any transition is live. */
+  function _tickTransitions(nowMs: number): boolean {
+    if (_activeTrans.length === 0) return false;
+    var stillActive = false;
+    for (var _ti2 = 0; _ti2 < _activeTrans.length; _ti2++) {
+      var tr = _activeTrans[_ti2];
+      if (tr.done) continue;
+      var elapsed2 = nowMs - tr.startMs;
+      var progress = Math.min(1, elapsed2 / tr.durationMs);
+      var easedP   = _cssEase(progress, tr.easing);
+      var interped = _lerpCSSValue(tr.fromVal, tr.toVal, easedP);
+      // Apply directly to _map (bypassing hook to avoid recursion)
+      tr.el._style._map.set(tr.prop, interped);
+      tr.el._dirtyLayout = true;
+      bumpStyleGeneration();
+      doc._dirty = true;
+      if (progress >= 1) {
+        tr.done = true;
+        // Fire transitionend event
+        try {
+          var _tevt = new VEvent('transitionend', { bubbles: true, cancelable: false });
+          ((_tevt as any) as any).propertyName = tr.prop;
+          ((_tevt as any) as any).elapsedTime = tr.durationMs / 1000;
+          tr.el.dispatchEvent(_tevt);
+        } catch(_) {}
+      } else {
+        stillActive = true;
+      }
+    }
+    // Clean up done transitions
+    _activeTrans = _activeTrans.filter(function(t) { return !t.done; });
+    if (_activeTrans.length > 0) needsRerender = true;
+    return stillActive;
+  }
+
   // ── Performance (real W3C Performance Timeline) ──────────────────────────
 
   var _perf = new BrowserPerformance();
@@ -3418,10 +3901,25 @@ export function createPageJS(
   // ── Custom Elements registry stub (item 550) ──────────────────────────────
 
   var _ceRegistry: Map<string, unknown> = new Map();
+  var _ceWhenDefined: Map<string, Array<(ctor: unknown) => void>> = new Map();
   var customElementsAPI = {
-    define(name: string, ctor: unknown, _opts?: unknown): void { _ceRegistry.set(name.toLowerCase(), ctor); },
+    define(name: string, ctor: unknown, _opts?: unknown): void {
+      var lower = name.toLowerCase();
+      _ceRegistry.set(lower, ctor);
+      // Resolve any pending whenDefined promises
+      var waiters = _ceWhenDefined.get(lower);
+      if (waiters) { waiters.forEach(fn => { try { fn(ctor); } catch(_) {} }); _ceWhenDefined.delete(lower); }
+    },
     get(name: string): unknown | undefined { return _ceRegistry.get(name.toLowerCase()); },
-    whenDefined(_name: string): Promise<unknown> { return Promise.resolve(undefined); },
+    whenDefined(name: string): Promise<unknown> {
+      var lower = name.toLowerCase();
+      if (_ceRegistry.has(lower)) return Promise.resolve(_ceRegistry.get(lower));
+      return new Promise<unknown>(function(resolve) {
+        var arr = _ceWhenDefined.get(lower);
+        if (!arr) { arr = []; _ceWhenDefined.set(lower, arr); }
+        arr.push(resolve);
+      });
+    },
     upgrade(_root: unknown): void {},
     getName(_ctor: unknown): string | null {
       for (var [k, v] of _ceRegistry) { if (v === _ctor) return k; }
@@ -5313,6 +5811,21 @@ export function createPageJS(
     var _origCreateElement = doc.createElement.bind(doc);
     doc.createElement = function(tag: string) {
       if (tag.toLowerCase() === 'canvas') return new HTMLCanvas() as any;
+      // ── Custom Elements: instantiate registered constructor ────────────────
+      var _ceTag = tag.toLowerCase();
+      if (_ceRegistry.has(_ceTag)) {
+        var _ceCtor = _ceRegistry.get(_ceTag) as new () => VElement;
+        _cePending.tag = _ceTag;
+        try {
+          var _ceInst = new _ceCtor() as VElement;
+          _ceInst.ownerDocument = doc;
+          _cePending.tag = '';
+          return _ceInst;
+        } catch (_ceErr) {
+          _cePending.tag = '';
+          // Fall through to normal element creation
+        }
+      }
       var el = _origCreateElement(tag);
       // Intercept dynamic <script> element injection — when SPAs/frameworks
       // create a <script> with .src and append it, we fetch+execute it.
@@ -6201,6 +6714,54 @@ export function createPageJS(
 
   cb.log('[browser] loading ' + scripts.length + ' script(s) for ' + (cb.baseURL || '').slice(0, 80));
 
+  // ── Custom Elements: connectedCallback / disconnectedCallback hook ────────
+  doc._ceInsertHook = function(el: VElement): void {
+    if (disposed) return;
+    var tagLower = el.tagName.toLowerCase();
+    var ceCtor = _ceRegistry.get(tagLower);
+    if (!ceCtor) return;
+    // Check if the element is a CE instance (has connectedCallback)
+    var cb2 = (el as any).connectedCallback;
+    if (typeof cb2 === 'function') {
+      try { cb2.call(el); } catch (err) { cb.log('[ce] connectedCallback error: ' + String(err)); }
+    } else {
+      // The element was created by _origCreateElement (not CE ctor) — upgrade it
+      // by copying methods from the prototype
+      var proto = (ceCtor as any).prototype;
+      if (proto) {
+        var ccFn = proto.connectedCallback;
+        if (typeof ccFn === 'function') {
+          try { ccFn.call(el); } catch (err) { cb.log('[ce] connectedCallback error: ' + String(err)); }
+        }
+      }
+    }
+  };
+
+  // ── CSS Transitions: intercept inline style mutations (Tier 4.3) ──────────
+  doc._styleSetHook = function(el: VElement, prop: string, oldVal: string, newVal: string): boolean {
+    if (disposed) return false;
+    // Get the computed transition for this element
+    var cs = getComputedStyle(el);
+    var transCss = cs['transition'] || cs.getPropertyValue('transition') || '';
+    if (!transCss || transCss === 'none') return false;
+    var tmap = _parseTransition(transCss);
+    var entry = tmap.get(prop) || tmap.get('all');
+    if (!entry || entry.durationMs <= 0) return false;
+    // Cancel any existing transition for this prop+el
+    for (var _ati = 0; _ati < _activeTrans.length; _ati++) {
+      var _at = _activeTrans[_ati];
+      if (_at.el === el && _at.prop === prop) { _at.done = true; }
+    }
+    // Use current animated value as fromVal if there's an in-progress transition
+    var actualFrom = el._style._map.get(prop) || oldVal || cs.getPropertyValue(prop) || '0';
+    _activeTrans.push({
+      el, prop, fromVal: actualFrom, toVal: newVal,
+      startMs: _perf.now(), durationMs: entry.durationMs, easing: entry.easing, done: false,
+    });
+    needsRerender = true;
+    return true; // handled; don't apply immediately
+  };
+
   // ── Install framework / compatibility polyfills before any scripts run ────
   // These fill gaps between our Web Platform API surface and what real-world
   // frameworks (jQuery, React, Vue, Angular, Bootstrap, Tailwind) expect.
@@ -6298,6 +6859,37 @@ export function createPageJS(
         var ev = new VEvent('load'); doc.dispatchEvent(ev);
       });
     },
+    fireFocus(id: string): boolean {
+      return fireAndCheck(() => {
+        var el = findEl(id);
+        if (!el) return;
+        var ev = new VEvent('focus', { bubbles: false, cancelable: false });
+        el.dispatchEvent(ev);
+        var ev2 = new VEvent('focusin', { bubbles: true, cancelable: false });
+        el.dispatchEvent(ev2);
+      });
+    },
+    fireBlur(id: string): boolean {
+      return fireAndCheck(() => {
+        var el = findEl(id);
+        if (!el) return;
+        var ev = new VEvent('blur', { bubbles: false, cancelable: false });
+        el.dispatchEvent(ev);
+        var ev2 = new VEvent('focusout', { bubbles: true, cancelable: false });
+        el.dispatchEvent(ev2);
+      });
+    },
+    fireMouse(id: string, eventType: string): boolean {
+      return fireAndCheck(() => {
+        var el = findEl(id);
+        if (!el) return;
+        var ev = new VEvent(eventType, { bubbles: true, cancelable: true });
+        (ev as any).clientX = 0; (ev as any).clientY = 0;
+        (ev as any).pageX = 0; (ev as any).pageY = 0;
+        (ev as any).button = 0; (ev as any).buttons = 0;
+        el.dispatchEvent(ev);
+      });
+    },
     fireResize(width: number, height: number): boolean {
       // [Item 950] Update viewport dimensions, fire resize event, check MQL listeners
       win['innerWidth']  = width;
@@ -6313,6 +6905,13 @@ export function createPageJS(
       disposed = true;
       _unbridgeFromGlobal();
       timers = []; rafCallbacks = [];
+      // Close active WebSocket connections
+      for (var _wsd = 0; _wsd < _wsSockets.length; _wsd++) {
+        var _wse = _wsSockets[_wsd];
+        try { _wse.sock.close(); } catch(_) {}
+        _wse.ws.readyState = 3;
+      }
+      _wsSockets.length = 0;
       // Log JIT browser engine stats for perf monitoring
       if (JITBrowserEngine.ready) {
         var _bs = JITBrowserEngine.stats();
@@ -6351,14 +6950,40 @@ export function createPageJS(
         }
       }
       if (fired) { checkDirty(); if (needsRerender) doRerender(); }
+      // Advance CSS transitions
+      if (_activeTrans.length > 0) {
+        _tickTransitions(nowMs);
+        checkDirty();
+        if (needsRerender) doRerender();
+      }
+      // Advance CSS @keyframes animations
+      if (currentStyleGeneration() !== _lastAnimScanGen) _scanAnimations(nowMs);
+      if (_activeAnims.size > 0) {
+        _tickAnimations(nowMs);
+        checkDirty();
+        if (needsRerender) doRerender();
+      }
       // Pump Intersection and Resize Observers
       var viewH = 768;
       for (var io of _ioObservers) io._tick(viewH);
       for (var ro of _roObservers) ro._tick();
+      // Poll WebSocket connections for incoming data
+      if (_wsSockets.length > 0) _tickWebSockets();
       // Pump all Web Workers
       tickAllWorkers();
       // Record frame timing
       _perf.recordFrame(frameStart, _perf.now() - frameStart);
+    },
+    updateLayoutRects(rects: Map<string, { x: number; y: number; w: number; h: number }>): void {
+      // Walk all VElements that have a data-jsos-el attribute and update their _layoutRect
+      // This enables getBoundingClientRect / offsetWidth / offsetHeight to return real values
+      rects.forEach(function(rect, elId) {
+        var el = doc.querySelector('[data-jsos-el="' + elId + '"]');
+        if (!el) el = doc.querySelector('#' + elId) as VElement | null;
+        if (el) {
+          (el as VElement)._layoutRect = rect;
+        }
+      });
     },
   };
 }
