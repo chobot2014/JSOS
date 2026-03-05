@@ -253,6 +253,9 @@ export function createPageJS(
   var timers: TimerEntry[] = [];
   var timerSeq = 1;
   var startTime = Date.now();
+  // Debug flag: when true, logs every script execution path and callback invocation.
+  // Toggle at runtime: window.__jsDebug = false  (or true to re-enable)
+  var _jsDebug = true;
 
   function setTimeout_(fn: () => void, delay: number): number {
     var id = timerSeq++;
@@ -1972,7 +1975,7 @@ export function createPageJS(
     _flush(): void {
       if (!this._active || this._records.length === 0) return;
       var r = this._records; this._records = [];
-      _callGuarded(this._fn, r, this);
+      _callGuardedCtx('mutation(' + r.length + ')', this._fn, r, this);
     }
     _shouldRecord(mut: any): boolean {
       if (this._watching.length === 0) return true; // no targets = observe all (legacy compat)
@@ -2048,7 +2051,7 @@ export function createPageJS(
           time: _perf.now(),
         });
       }
-      if (entries.length > 0) _callGuarded(this._fn, entries, this);
+      if (entries.length > 0) _callGuardedCtx('intersection(' + entries.length + ')', this._fn, entries, this);
     }
   }
 
@@ -2095,7 +2098,7 @@ export function createPageJS(
             contentBoxSize:[{ inlineSize: r.width, blockSize: r.height }] });
         }
       }
-      if (entries.length > 0) _callGuarded(this._fn, entries);
+      if (entries.length > 0) _callGuardedCtx('resize(' + entries.length + ')', this._fn, entries);
     }
   }
 
@@ -2119,7 +2122,7 @@ export function createPageJS(
       this.reason = reason !== undefined ? reason : new Error('AbortError');
       var ev = { type: 'abort', target: this };
       if (this.onabort) try { this.onabort(ev); } catch (_) {}
-      for (var fn of this._listeners) _callGuarded(fn, ev);
+      for (var fn of this._listeners) _callGuardedCtx('mql', fn, ev);
     }
     static timeout(ms: number): AbortSignalImpl {
       var s = new AbortSignalImpl();
@@ -2961,9 +2964,9 @@ export function createPageJS(
   function _wsFireEvent(ws: WebSocket_, type: string, extra?: Record<string, unknown>): void {
     var ev = Object.assign({ type, target: ws }, extra || {});
     var arr = (ws as any)._listeners as Map<string, Array<(e: unknown) => void>>;
-    if (arr) { var fns = arr.get(type); if (fns) for (var fn of fns) _callGuarded(fn, ev); }
+    if (arr) { var fns = arr.get(type); if (fns) for (var fn of fns) _callGuardedCtx('ws:' + type, fn, ev); }
     var onFn = (ws as any)['on' + type];
-    if (typeof onFn === 'function') _callGuarded(onFn, ev);
+    if (typeof onFn === 'function') _callGuardedCtx('ws:' + type, onFn, ev);
   }
 
   /** Poll all active WebSocket connections for incoming data. */
@@ -6122,7 +6125,10 @@ export function createPageJS(
 
   function _fireScriptError(e: any): void {
     var msg = String(e);
-    cb.log('[JS error] ' + msg);
+    // Include stack trace when available — critical for diagnosing JIT crashes
+    var stack = (e && typeof e === 'object' && typeof e.stack === 'string')
+      ? '\n  ' + e.stack.replace(/\n/g, '\n  ') : '';
+    cb.log('[JS error] ' + msg + stack);
     // window.onerror(message, source, lineno, colno, error)
     var onErr = (win as any).onerror;
     if (typeof onErr === 'function') {
@@ -6151,6 +6157,14 @@ export function createPageJS(
     }
   }
 
+  // Context-tagged version of _callGuarded: logs which callback type is about
+  // to fire (when _jsDebug is on) so errors in _fireScriptError can be correlated
+  // to the triggering callback in the serial log.
+  function _callGuardedCtx(ctx: string, fn: (...a: any[]) => any, ...args: any[]): void {
+    if (_jsDebug) cb.log('[jscb] ' + ctx);
+    _callGuarded(fn, ...args);
+  }
+
   function execScript(code: string, scriptURL?: string): void {
     // ── Script size guard ──────────────────────────────────────────────────────
     // Use kernel.evalGuarded for:
@@ -6164,14 +6178,12 @@ export function createPageJS(
     var _isExternal = !!scriptURL && (scriptURL.startsWith('http://') || scriptURL.startsWith('https://'));
     var _useGuarded = (_isExternal || code.length > _GUARD_THRESHOLD) && typeof (kernel as any).evalGuarded === 'function';
     if (code.length > 2 * 1024 * 1024) {
-      // Absolute limit: skip scripts > 2 MB entirely — these are framework
-      // bundles that won't provide meaningful functionality in our runtime.
-      cb.log('[JS] skipping oversized script ' + code.length + ' chars from ' + (scriptURL || '(inline)'));
+      cb.log('[JS exec] oversized-skip ' + (code.length / 1024 / 1024).toFixed(1) + 'MB ' + (scriptURL || '(inline)'));
       return;
     }
     // ── Guarded execution path for large/risky scripts ───────────────────────
     if (_useGuarded) {
-      cb.log('[JS] using kernel.evalGuarded for ' + code.length + ' char script from ' + (scriptURL || '(inline)'));
+      cb.log('[JS exec] guarded ' + (code.length / 1024).toFixed(1) + 'KB ' + (scriptURL || '(inline)'));
       _bridgeToGlobal();
       try {
         (kernel as any).evalGuarded(code);
@@ -6189,6 +6201,7 @@ export function createPageJS(
     if (JITBrowserEngine.ready) {
       var cached = JITBrowserEngine.getCachedScript(code, _cachedURL);
       if (cached) {
+        if (_jsDebug) cb.log('[JS exec] cached ' + (code.length / 1024).toFixed(1) + 'KB ' + _cachedURL);
         try {
           cached.call(win);
           _bridgeToGlobal();
@@ -6208,6 +6221,7 @@ export function createPageJS(
     //  - 'use strict' would make the function strict, and with() is illegal in strict mode
     var src1 = _prepareForWith(code);
     var stage1Err: any = null;
+    if (_jsDebug) cb.log('[JS exec] stage1 ' + (code.length / 1024).toFixed(1) + 'KB ' + (scriptURL || '(inline)'));
     try {
       var fn = new Function('__s__',
         'with(__s__){\n' + src1 + '\n}') as (s: any) => void;
@@ -6229,13 +6243,9 @@ export function createPageJS(
       }
       stage1Err = e;
     }
-    // Stage 2: with() wrapper caused a SyntaxError.
-    // This happens when the script contains syntax that QJS rejects inside a
-    // with() block (e.g. class static-init blocks, class declarations).
-    // Fall back to running the RAW code directly — no transforms, no scope proxy.
-    // `this` is bound to win so `this.foo = bar` persists as window.foo.
-    // Re-bridge globalThis first to pick up any properties added by earlier scripts.
-    _bridgeToGlobal();  // pick up newly-added win properties (e.g. google, AF_etc)
+    // Stage 2 fallback
+    cb.log('[JS exec] stage2-fallback ' + (code.length / 1024).toFixed(1) + 'KB ' + (scriptURL || '(inline)') + ' (stage1: ' + String(stage1Err) + ')');
+    _bridgeToGlobal();
     var raw2 = (code.charCodeAt(0) === 35 && code.charCodeAt(1) === 33)
       ? code.replace(/^#!.*/, '') : code;
     try {
@@ -6692,6 +6702,12 @@ export function createPageJS(
   // Expose dynamic-import helper on win so both stage-1 (with(_winScope)) and
   // stage-2 (globalThis bridge) scripts can call it as a bare identifier.
   (win as any).__jsos_dynamic_import__ = __jsos_dynamic_import__;
+  // Expose debug flag so pages / REPL can toggle: window.__jsDebug = false
+  Object.defineProperty(win, '__jsDebug', {
+    get() { return _jsDebug; },
+    set(v: boolean) { _jsDebug = !!v; cb.log('[jscb] debug ' + (_jsDebug ? 'ON' : 'OFF')); },
+    configurable: true, enumerable: false,
+  });
 
   // ── Dynamic script injection: auto-execute <script> elements added to DOM ─
   // Modern pages (Google, React apps, etc.) insert <script src="..."> via JS.
@@ -6952,7 +6968,7 @@ export function createPageJS(
       if (rafCallbacks.length) {
         var cbs = rafCallbacks.splice(0);
         for (var r of cbs) {
-          _callGuarded(r.fn, nowMs);
+          _callGuardedCtx('raf#' + r.id, r.fn, nowMs);
           _drainMicrotasks();
         }
         checkDirty();
@@ -6964,7 +6980,7 @@ export function createPageJS(
       for (var i = timers.length - 1; i >= 0; i--) {
         var t = timers[i];
         if (elapsed >= t.fireAt) {
-          _callGuarded(t.fn);
+          _callGuardedCtx((t.interval ? 'interval' : 'timeout') + '#' + t.id + '(' + t.delay + 'ms)', t.fn);
           _drainMicrotasks();
           if (t.interval) { t.fireAt = elapsed + t.delay; }
           else { timers.splice(i, 1); }
