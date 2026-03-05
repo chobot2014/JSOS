@@ -1103,6 +1103,14 @@ export class HTTP2Connection {
   /** [Item 929] Cache of server-pushed resources: url → body bytes. */
   readonly pushCache = new Map<string, number[]>();
 
+  // ── CONTINUATION frame reassembly (RFC 9113 §6.10) ─────────────────────
+  // A HEADERS frame without END_HEADERS (0x4) is followed by CONTINUATION
+  // frames on the same stream.  Buffer the partial header block here until
+  // END_HEADERS arrives in a CONTINUATION frame, then decode the complete block.
+  private _pendingHeaderSid       = -1;
+  private _pendingHeaderBlock: number[] = [];
+  private _pendingHeaderEndStream = false;
+
   constructor(host: string) {
     this.tls = new TLSSocket(host);
   }
@@ -1134,6 +1142,9 @@ export class HTTP2Connection {
   /**
    * Adopt an existing TLS socket (already handshake-complete with ALPN h2).
    * Sends the HTTP/2 connection preface + initial SETTINGS + connection WINDOW_UPDATE.
+   * Also drains any server frames (SETTINGS, WINDOW_UPDATE) that the server
+   * sent immediately after the TLS handshake so we send our SETTINGS_ACK before
+   * the first request is transmitted.
    */
   connectOnSocket(tlsSock: TLSSocket): boolean {
     this.tls = tlsSock;
@@ -1154,6 +1165,18 @@ export class HTTP2Connection {
        connWinIncr        & 0xff,
     ];
     this.tls.write(this._buildFrame(H2_WINDOW_UPDATE, 0, 0, cwPayload));
+
+    // Drain server frames already waiting in the TLS buffer.
+    // Google and other CDN servers send server SETTINGS immediately after the
+    // TLS handshake on the same flight.  Processing them here ensures we send
+    // SETTINGS_ACK *before* our first HEADERS request, which avoids a situation
+    // where a strict h2 server queues requests pending SETTINGS acknowledgement.
+    for (var _d = 0; _d < 16; _d++) {
+      var _raw = this.tls.readNB();
+      if (!_raw || _raw.length === 0) break;
+      for (var _ri = 0; _ri < _raw.length; _ri++) this.rxBuf.push(_raw[_ri]);
+    }
+    this._drainFrames();
     return true;
   }
 
@@ -1202,32 +1225,41 @@ export class HTTP2Connection {
   }
 
   /**
-   * [Item 927] Non-blocking single-pass receive: poll TLS once, drain all complete H2
-   * frames from the buffer, and return the stream if it has reached END_STREAM.
-   * Returns null if the stream is not yet complete — the caller's coroutine retries
-   * each frame without sleeping, so the WM loop is never blocked.
+   * [Item 927] Non-blocking receive: drain all available TLS data, process all
+   * complete H2 frames, and return the stream once it reaches END_STREAM.
+   * Returns null when the stream is not yet complete — the caller's coroutine
+   * retries each WM frame without sleeping, so the event loop is never blocked.
+   *
+   * We loop up to 32 TLS reads per call so that burst responses from fast CDNs
+   * (SETTINGS + HEADERS + DATA all arriving in the same NIC interrupt) are fully
+   * processed in a single coroutine step instead of spreading across 32 × 10 ms.
    */
   receive(streamId: number, _timeoutTicks = 500): H2Stream | null {
-    // Poll NIC once via non-blocking TLS read, accumulate into rxBuf
-    var raw = this.tls.readNB();
-    if (raw && raw.length > 0) {
+    // Drain all available TLS data in one coroutine step
+    for (var _r = 0; _r < 32; _r++) {
+      var raw = this.tls.readNB();
+      if (!raw || raw.length === 0) break;
       for (var i = 0; i < raw.length; i++) this.rxBuf.push(raw[i]);
     }
-    // Drain all complete H2 frames from rxBuf in one pass (no blocking/sleep)
-    while (this.rxBuf.length >= 9) {
-      var flen = (this.rxBuf[0] << 16) | (this.rxBuf[1] << 8) | this.rxBuf[2];
-      if (this.rxBuf.length < 9 + flen) break;  // incomplete frame payload — wait more
-      var type    = this.rxBuf[3];
-      var flags   = this.rxBuf[4];
-      var sid     = ((this.rxBuf[5] & 0x7f) << 24) | (this.rxBuf[6] << 16) | (this.rxBuf[7] << 8) | this.rxBuf[8];
-      var payload = this.rxBuf.slice(9, 9 + flen);
-      this.rxBuf  = this.rxBuf.slice(9 + flen);
-      this._handleFrame(type, flags, sid, payload);
-    }
-    // Return stream only if it is fully done; otherwise caller retries next coroutine tick
+    this._drainFrames();
+    // Return stream only if it is fully done; otherwise caller retries next tick
     var s = this.streams.get(streamId);
     if (s && (s.state === 'half_closed_remote' || s.state === 'closed')) return s;
     return null;
+  }
+
+  /** Process all complete H2 frames buffered in rxBuf. */
+  private _drainFrames(): void {
+    while (this.rxBuf.length >= 9) {
+      var flen = (this.rxBuf[0] << 16) | (this.rxBuf[1] << 8) | this.rxBuf[2];
+      if (this.rxBuf.length < 9 + flen) break;  // incomplete frame payload — wait more
+      var ftype    = this.rxBuf[3];
+      var fflags   = this.rxBuf[4];
+      var fsid     = ((this.rxBuf[5] & 0x7f) << 24) | (this.rxBuf[6] << 16) | (this.rxBuf[7] << 8) | this.rxBuf[8];
+      var fpayload = this.rxBuf.slice(9, 9 + flen);
+      this.rxBuf   = this.rxBuf.slice(9 + flen);
+      this._handleFrame(ftype, fflags, fsid, fpayload);
+    }
   }
 
   /** [Item 929] Send WINDOW_UPDATE to prevent stream-level flow control blocking. */
@@ -1343,17 +1375,49 @@ export class HTTP2Connection {
       // ACK server SETTINGS
       this.tls.write(this._buildFrame(H2_SETTINGS, 0x01, 0, []));
     } else if (type === H2_HEADERS) {
-      var padded = (flags & 0x08) !== 0;
-      var pr     = (flags & 0x20) !== 0;
-      var off    = 0;
-      var hEnd   = payload.length;
-      if (padded) { var padLen = payload[0]; off++; hEnd -= padLen; }
-      if (pr) off += 5;
-      var hdrs = this.hpackDec.decode(payload.slice(off, hEnd));
-      var st = this.streams.get(sid);
-      if (st) {
-        st.headers = hdrs;
-        if (flags & 0x01) st.state = 'half_closed_remote';
+      var padded     = (flags & 0x08) !== 0;
+      var pr         = (flags & 0x20) !== 0;
+      var endStream  = (flags & 0x01) !== 0;
+      var endHeaders = (flags & 0x04) !== 0;
+      var hOff = 0;
+      var hEnd = payload.length;
+      if (padded) { var padLen = payload[0]; hOff++; hEnd -= padLen; }
+      if (pr) hOff += 5;
+      var fragment = payload.slice(hOff, hEnd);
+
+      if (endHeaders) {
+        // Full header block available — decode immediately.
+        var hdrs = this.hpackDec.decode(fragment);
+        var st = this.streams.get(sid);
+        if (st) {
+          st.headers = hdrs;
+          if (endStream) st.state = 'half_closed_remote';
+        }
+      } else {
+        // Header block continues in CONTINUATION frames — buffer the fragment.
+        // RFC 9113 §6.10: do NOT call hpackDec.decode() on a partial block;
+        // doing so would corrupt the dynamic table and break all future decodes.
+        this._pendingHeaderSid       = sid;
+        this._pendingHeaderBlock     = fragment;
+        this._pendingHeaderEndStream = endStream;
+      }
+    } else if (type === H2_CONTINUATION) {
+      // RFC 9113 §6.10: append to the in-progress header block fragment.
+      if (sid === this._pendingHeaderSid) {
+        var cEndHeaders = (flags & 0x04) !== 0;
+        for (var ci = 0; ci < payload.length; ci++) this._pendingHeaderBlock.push(payload[ci]);
+        if (cEndHeaders) {
+          // Block is complete — now safe to decode.
+          var cHdrs = this.hpackDec.decode(this._pendingHeaderBlock);
+          var cSt   = this.streams.get(sid);
+          if (cSt) {
+            cSt.headers = cHdrs;
+            if (this._pendingHeaderEndStream) cSt.state = 'half_closed_remote';
+          }
+          this._pendingHeaderSid       = -1;
+          this._pendingHeaderBlock     = [];
+          this._pendingHeaderEndStream = false;
+        }
       }
     } else if (type === H2_DATA) {
       var st2 = this.streams.get(sid);
