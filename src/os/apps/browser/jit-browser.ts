@@ -215,6 +215,158 @@ function scanByte(physAddr, offset, len, target) {
 }
 `;
 
+/** Pack R, G, B (0-255 each) into an opaque 0xAARRGGBB pixel (alpha=0xFF). */
+const _SRC_RGB888 = `
+function rgb888(r, g, b) {
+  return -16777216 | ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff);
+}
+`;
+
+/**
+ * Single-pixel RGBA alpha blend: composite fg over bg.
+ * Used for off-screen element compositing where compositeRow would need a 1-px row.
+ */
+const _SRC_RGBA_BLEND = `
+function rgbaBlend(fg, bg) {
+  var sa = (fg >> 24) & 0xff;
+  if (sa === 255) { return fg; }
+  if (sa === 0)   { return bg; }
+  var ia = 256 - sa;
+  var b = (((fg & 0xff) * sa) + ((bg & 0xff) * ia)) >> 8;
+  var g = ((((fg >> 8) & 0xff) * sa) + (((bg >> 8) & 0xff) * ia)) >> 8;
+  var r = ((((fg >> 16) & 0xff) * sa) + (((bg >> 16) & 0xff) * ia)) >> 8;
+  var a = sa + ((((bg >> 24) & 0xff) * ia) >> 8);
+  return (a << 24) | (r << 16) | (g << 8) | b;
+}
+`;
+
+/** Count newline bytes (0x0A) in a physmem buffer — text height calculation. */
+const _SRC_COUNT_NL = `
+function countNL(physAddr, len) {
+  var count = 0;
+  var i = 0;
+  while (i < len) {
+    if ((mem8[physAddr + i] & 0xff) === 10) {
+      count = count + 1;
+    }
+    i = i + 1;
+  }
+  return count;
+}
+`;
+
+/** Skip ASCII spaces/tabs — CSS and HTML whitespace consumer. Returns first non-space offset. */
+const _SRC_SKIP_SPACES8 = `
+function skipSpaces8(physAddr, offset, len) {
+  var i = offset;
+  while (i < len) {
+    var c = mem8[physAddr + i] & 0xff;
+    if (c !== 32) {
+      if (c !== 9) {
+        return i;
+      }
+    }
+    i = i + 1;
+  }
+  return len;
+}
+`;
+
+/**
+ * Decode a single hex nibble at physAddr+offset.
+ * Returns 0-15 for '0'-'9', 'A'-'F', 'a'-'f', or -1 for non-hex.
+ * Used by the CSS #RRGGBB color parser and HTTP chunked transfer decoder.
+ */
+const _SRC_HEX_NIBBLE = `
+function hexNibble(physAddr, offset) {
+  var c = mem8[physAddr + offset] & 0xff;
+  if (c >= 48) {
+    if (c <= 57)  { return c - 48; }
+    if (c >= 65)  { if (c <= 70)  { return c - 55; } }
+    if (c >= 97)  { if (c <= 102) { return c - 87; } }
+  }
+  return -1;
+}
+`;
+
+/**
+ * Blend a pixel row from src onto dst with a constant alpha (0-255).
+ * Used to implement the CSS opacity property on arbitrary DOM elements.
+ * More efficient than compositeRow when the source doesn't have per-pixel alpha.
+ */
+const _SRC_BLEND_ROW_ALPHA = `
+function blendRowAlpha(dst, src, n, alpha) {
+  var i = 0;
+  var ia = 256 - alpha;
+  while (i < n) {
+    var sp = mem32[src + i * 4];
+    var dp = mem32[dst + i * 4];
+    var b = (((sp & 0xff) * alpha) + ((dp & 0xff) * ia)) >> 8;
+    var g = ((((sp >> 8) & 0xff) * alpha) + (((dp >> 8) & 0xff) * ia)) >> 8;
+    var r = ((((sp >> 16) & 0xff) * alpha) + (((dp >> 16) & 0xff) * ia)) >> 8;
+    mem32[dst + i * 4] = -16777216 | (r << 16) | (g << 8) | b;
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * Scan past an identifier or CSS/HTML word.
+ * Stops at the first byte that is not alphanumeric, '-', or '_'.
+ * Used by the CSS tokenizer and HTML attribute scanner.
+ */
+const _SRC_SCAN_NON_ALPHA8 = `
+function scanNonAlpha8(physAddr, offset, len) {
+  var i = offset;
+  while (i < len) {
+    var c = mem8[physAddr + i] & 0xff;
+    var ok = 0;
+    if (c >= 48) {
+      if (c <= 57) { ok = 1; }
+      else if (c >= 65) {
+        if (c <= 90) { ok = 1; }
+        else if (c >= 97) { if (c <= 122) { ok = 1; } }
+      }
+    }
+    if (c === 45) { ok = 1; }
+    if (c === 95) { ok = 1; }
+    if (ok === 0) { return i; }
+    i = i + 1;
+  }
+  return len;
+}
+`;
+
+/**
+ * Percent-decode a %XX escape from physmem — URL and href parser hot path.
+ * physAddr[offset] = high hex digit, physAddr[offset+1] = low hex digit.
+ * Returns the decoded byte value (0-255), or 0x3F ('?') on invalid input.
+ */
+const _SRC_UNESCAPE2B = `
+function unescape2B(physAddr, offset) {
+  var hi = mem8[physAddr + offset] & 0xff;
+  var lo = mem8[physAddr + offset + 1] & 0xff;
+  var h = 0;
+  var l = 0;
+  if (hi >= 48) {
+    if (hi <= 57) { h = hi - 48; }
+    else if (hi >= 65) {
+      if (hi <= 70) { h = hi - 55; }
+      else if (hi >= 97) { if (hi <= 102) { h = hi - 87; } }
+    }
+  }
+  if (lo >= 48) {
+    if (lo <= 57) { l = lo - 48; }
+    else if (lo >= 65) {
+      if (lo <= 70) { l = lo - 55; }
+      else if (lo >= 97) { if (lo <= 102) { l = lo - 87; } }
+    }
+  }
+  return (h << 4) | l;
+}
+`;
+
 // ─── Compiled function slots ───────────────────────────────────────────────
 
 type JITFn = ((...args: number[]) => number) | null;
@@ -225,8 +377,16 @@ var _scanTagOpen:   JITFn = null;
 var _scanTagClose:  JITFn = null;
 var _scanByte:      JITFn = null;
 var _parseCSSInt:   JITFn = null;
-var _compositeRow:  JITFn = null;
-var _textWidth:     JITFn = null;
+var _compositeRow:   JITFn = null;
+var _textWidth:      JITFn = null;
+var _rgb888:         JITFn = null;
+var _rgbaBlend:      JITFn = null;
+var _countNL:        JITFn = null;
+var _skipSpaces8:    JITFn = null;
+var _hexNibble:      JITFn = null;
+var _blendRowAlpha:  JITFn = null;
+var _scanNonAlpha8:  JITFn = null;
+var _unescape2B:     JITFn = null;
 var _ready = false;
 
 // ─── Script Pre-compilation Cache ─────────────────────────────────────────────
@@ -490,8 +650,16 @@ export const JITBrowserEngine = {
     _scanTagClose = tryCompile(_SRC_SCAN_TAG_CLOSE, 'scanTagClose');
     _scanByte     = tryCompile(_SRC_SCAN_BYTE,       'scanByte');
     _parseCSSInt  = tryCompile(_SRC_PARSE_CSS_INT,  'parseCSSInt');
-    _compositeRow = tryCompile(_SRC_COMPOSITE_ROW,  'compositeRow');
-    _textWidth    = tryCompile(_SRC_TEXT_WIDTH,      'textWidth');
+    _compositeRow    = tryCompile(_SRC_COMPOSITE_ROW,    'compositeRow');
+    _textWidth       = tryCompile(_SRC_TEXT_WIDTH,        'textWidth');
+    _rgb888          = tryCompile(_SRC_RGB888,            'rgb888');
+    _rgbaBlend       = tryCompile(_SRC_RGBA_BLEND,        'rgbaBlend');
+    _countNL         = tryCompile(_SRC_COUNT_NL,          'countNL');
+    _skipSpaces8     = tryCompile(_SRC_SKIP_SPACES8,      'skipSpaces8');
+    _hexNibble       = tryCompile(_SRC_HEX_NIBBLE,        'hexNibble');
+    _blendRowAlpha   = tryCompile(_SRC_BLEND_ROW_ALPHA,   'blendRowAlpha');
+    _scanNonAlpha8   = tryCompile(_SRC_SCAN_NON_ALPHA8,   'scanNonAlpha8');
+    _unescape2B      = tryCompile(_SRC_UNESCAPE2B,        'unescape2B');
 
     _browserJITStats.domOpsNative = _stringHash !== null;
     _browserJITStats.cssNative    = _parseCSSInt !== null;
@@ -555,6 +723,63 @@ export const JITBrowserEngine = {
   scanByte(physAddr: number, offset: number, len: number, target: number): number {
     if (_scanByte) return _scanByte(physAddr, offset, len, target);
     return len; // JIT unavailable — caller falls back to its own scanning code
+  },
+
+  // ── New Tier-2 kernels ────────────────────────────────────────────────────
+
+  /** Pack R,G,B (0-255) into opaque 0xFF_RR_GG_BB pixel. */
+  rgb888(r: number, g: number, b: number): number {
+    if (_rgb888) return _rgb888(r, g, b);
+    return 0xFF000000 | ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff);
+  },
+
+  /** Single-pixel RGBA alpha blend: fg over bg. */
+  rgbaBlend(fg: number, bg: number): number {
+    if (_rgbaBlend) return _rgbaBlend(fg, bg);
+    var sa = (fg >>> 24) & 0xff;
+    if (sa === 255) return fg;
+    if (sa === 0)   return bg;
+    var ia = 256 - sa;
+    var b = (((fg & 0xff) * sa) + ((bg & 0xff) * ia)) >> 8;
+    var g2 = ((((fg >> 8) & 0xff) * sa) + (((bg >> 8) & 0xff) * ia)) >> 8;
+    var r = ((((fg >> 16) & 0xff) * sa) + (((bg >> 16) & 0xff) * ia)) >> 8;
+    var a = sa + ((((bg >>> 24) & 0xff) * ia) >> 8);
+    return ((a << 24) | (r << 16) | (g2 << 8) | b) >>> 0;
+  },
+
+  /** Count newlines in a physmem buffer (text height). */
+  countNL(physAddr: number, len: number): number {
+    if (_countNL) return _countNL(physAddr, len);
+    return 0;
+  },
+
+  /** Skip ASCII spaces/tabs — returns first non-space offset. */
+  skipSpaces8(physAddr: number, offset: number, len: number): number {
+    if (_skipSpaces8) return _skipSpaces8(physAddr, offset, len);
+    return offset;
+  },
+
+  /** Decode hex nibble at physAddr+offset → 0-15 or -1. */
+  hexNibble(physAddr: number, offset: number): number {
+    if (_hexNibble) return _hexNibble(physAddr, offset);
+    return -1;
+  },
+
+  /** Blend row with constant alpha (CSS opacity). */
+  blendRowAlpha(dst: number, src: number, n: number, alpha: number): void {
+    if (_blendRowAlpha) { _blendRowAlpha(dst, src, n, alpha); return; }
+  },
+
+  /** Scan past identifier/word to first non-alphanumeric byte. */
+  scanNonAlpha8(physAddr: number, offset: number, len: number): number {
+    if (_scanNonAlpha8) return _scanNonAlpha8(physAddr, offset, len);
+    return offset;
+  },
+
+  /** Percent-decode %XX from physmem. Returns decoded byte. */
+  unescape2B(physAddr: number, offset: number): number {
+    if (_unescape2B) return _unescape2B(physAddr, offset);
+    return 0;
   },
 
   // ── Script cache ──────────────────────────────────────────────────────────

@@ -216,6 +216,137 @@ function fnv1a32(physAddr, len) {
 }
 `;
 
+/** XOR len bytes from src into dst — AES-GCM CTR-mode decryption, ChaCha20, HKDF XOR. */
+const _SRC_XOR_BUF = `
+function xorBuf(dst, src, len) {
+  var i = 0;
+  while (i < len) {
+    mem8[dst + i] = (mem8[dst + i] ^ mem8[src + i]) & 0xff;
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/** Store a big-endian uint32 at physAddr — net packet builder, TLS record header writer. */
+const _SRC_PACK_BE32 = `
+function packBE32(physAddr, val) {
+  mem8[physAddr]     = (val >> 24) & 0xff;
+  mem8[physAddr + 1] = (val >> 16) & 0xff;
+  mem8[physAddr + 2] = (val >>  8) & 0xff;
+  mem8[physAddr + 3] =  val        & 0xff;
+  return 0;
+}
+`;
+
+/** Load a big-endian uint32 from physAddr — net packet parser, IP/TCP field read. */
+const _SRC_UNPACK_BE32 = `
+function unpackBE32(physAddr) {
+  return ((mem8[physAddr] & 0xff) << 24) |
+         ((mem8[physAddr + 1] & 0xff) << 16) |
+         ((mem8[physAddr + 2] & 0xff) << 8) |
+          (mem8[physAddr + 3] & 0xff);
+}
+`;
+
+/** Load a big-endian uint16 from physAddr — TCP/IP header field (port, length, checksum). */
+const _SRC_UNPACK_BE16 = `
+function unpackBE16(physAddr) {
+  return ((mem8[physAddr] & 0xff) << 8) | (mem8[physAddr + 1] & 0xff);
+}
+`;
+
+/**
+ * LZ77 match copy — hot inner loop of DEFLATE inflate and LZ4 decompress.
+ * Byte-by-byte to handle overlapping back-references correctly.
+ */
+const _SRC_LZ_COPY_MATCH = `
+function lzCopyMatch(dst, src, len) {
+  var i = 0;
+  while (i < len) {
+    mem8[dst + i] = mem8[src + i] & 0xff;
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/** ASCII lowercase a physmem buffer in-place — HTTP/1.1 header name normalization. */
+const _SRC_TO_LOWER8 = `
+function toLower8(physAddr, len) {
+  var i = 0;
+  while (i < len) {
+    var c = mem8[physAddr + i] & 0xff;
+    if (c >= 65) {
+      if (c <= 90) {
+        mem8[physAddr + i] = c + 32;
+      }
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * Scan for CRLF (\r\n, bytes 13+10) in a physmem buffer.
+ * Returns offset of the \r or len if not found.
+ * Called on every HTTP response header line.
+ */
+const _SRC_SCAN_CRLF = `
+function scanCRLF(physAddr, offset, len) {
+  var i = offset;
+  var n = len - 1;
+  while (i < n) {
+    if ((mem8[physAddr + i] & 0xff) === 13) {
+      if ((mem8[physAddr + i + 1] & 0xff) === 10) {
+        return i;
+      }
+    }
+    i = i + 1;
+  }
+  return len;
+}
+`;
+
+/** Sum all bytes in a physmem region — ICMP auxiliary checksum, IP options scanner. */
+const _SRC_SUM_BUF = `
+function sumBuf(physAddr, len) {
+  var sum = 0;
+  var i = 0;
+  while (i < len) {
+    sum = sum + (mem8[physAddr + i] & 0xff);
+    i = i + 1;
+  }
+  return sum;
+}
+`;
+
+/** Clamp x to [lo, hi] — layout engine, CSS calc, audio sample clamping. */
+const _SRC_CLAMP32 = `
+function clamp32(x, lo, hi) {
+  if (x < lo) { return lo; }
+  if (x > hi) { return hi; }
+  return x;
+}
+`;
+
+/**
+ * Population count — number of set bits in an int32.
+ * Kernighan-Knuth bit-trick, O(1).
+ * Used by the bitmap block allocator (FAT free-cluster bitmap, inode bitmap).
+ */
+const _SRC_POP_COUNT32 = `
+function popCount32(x) {
+  var v = x;
+  v = v - ((v >>> 1) & 0x55555555);
+  v = (v & 0x33333333) + ((v >>> 2) & 0x33333333);
+  v = (v + (v >>> 4)) & 0x0f0f0f0f;
+  v = Math.imul(v, 0x01010101) >>> 24;
+  return v & 0x3f;
+}
+`;
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  CRC-32 table (256 × uint32)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -283,6 +414,16 @@ var _nativCRC32:     ((...a: number[]) => number) | null = null;
 var _nativStrcmp:    ((...a: number[]) => number) | null = null;
 var _nativMemchr:    ((...a: number[]) => number) | null = null;
 var _nativFNV1A32:   ((...a: number[]) => number) | null = null;
+var _nativXorBuf:    ((...a: number[]) => number) | null = null;
+var _nativPackBE32:  ((...a: number[]) => number) | null = null;
+var _nativUnpackBE32:((...a: number[]) => number) | null = null;
+var _nativUnpackBE16:((...a: number[]) => number) | null = null;
+var _nativLzCopy:    ((...a: number[]) => number) | null = null;
+var _nativToLower8:  ((...a: number[]) => number) | null = null;
+var _nativScanCRLF:  ((...a: number[]) => number) | null = null;
+var _nativSumBuf:    ((...a: number[]) => number) | null = null;
+var _nativClamp32:   ((...a: number[]) => number) | null = null;
+var _nativPopCount:  ((...a: number[]) => number) | null = null;
 
 /** Physical address of the CRC-32 table once copied to a shared kernel buffer. */
 var _crc32TablePhys: number = 0;
@@ -510,6 +651,94 @@ export const JITString = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  JITOps — general-purpose OS hot-paths (net, fs, layout, math)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * General-purpose JIT-compiled operations.
+ * All functions fall back gracefully to TypeScript when JIT is unavailable.
+ */
+export const JITOps = {
+  /** XOR src into dst, len bytes (AES-GCM CTR, ChaCha20 keystream, HKDF XOR). */
+  xorBuf(dst: number, src: number, len: number): void {
+    if (_nativXorBuf) { _nativXorBuf(dst, src, len); return; }
+    for (var i = 0; i < len; i++) kernel.writeMem8(dst + i, (kernel.readMem8(dst + i) ^ kernel.readMem8(src + i)) & 0xff);
+  },
+
+  /** Store big-endian uint32 at physAddr (net packet builder). */
+  packBE32(physAddr: number, val: number): void {
+    if (_nativPackBE32) { _nativPackBE32(physAddr, val); return; }
+    kernel.writeMem8(physAddr,     (val >> 24) & 0xff);
+    kernel.writeMem8(physAddr + 1, (val >> 16) & 0xff);
+    kernel.writeMem8(physAddr + 2, (val >>  8) & 0xff);
+    kernel.writeMem8(physAddr + 3,  val        & 0xff);
+  },
+
+  /** Load big-endian uint32 from physAddr (net packet parser). */
+  unpackBE32(physAddr: number): number {
+    if (_nativUnpackBE32) return _nativUnpackBE32(physAddr);
+    return ((kernel.readMem8(physAddr)     << 24) |
+            (kernel.readMem8(physAddr + 1) << 16) |
+            (kernel.readMem8(physAddr + 2) <<  8) |
+             kernel.readMem8(physAddr + 3)) >>> 0;
+  },
+
+  /** Load big-endian uint16 from physAddr (TCP/IP header fields). */
+  unpackBE16(physAddr: number): number {
+    if (_nativUnpackBE16) return _nativUnpackBE16(physAddr);
+    return ((kernel.readMem8(physAddr) << 8) | kernel.readMem8(physAddr + 1)) & 0xffff;
+  },
+
+  /** LZ77 match copy — hot inner loop of DEFLATE inflate / LZ4 decompress. */
+  lzCopyMatch(dst: number, src: number, len: number): void {
+    if (_nativLzCopy) { _nativLzCopy(dst, src, len); return; }
+    for (var i = 0; i < len; i++) kernel.writeMem8(dst + i, kernel.readMem8(src + i));
+  },
+
+  /** ASCII lowercase buffer in-place (HTTP header name normalization). */
+  toLower8(physAddr: number, len: number): void {
+    if (_nativToLower8) { _nativToLower8(physAddr, len); return; }
+    for (var i = 0; i < len; i++) {
+      var c = kernel.readMem8(physAddr + i);
+      if (c >= 65 && c <= 90) kernel.writeMem8(physAddr + i, c + 32);
+    }
+  },
+
+  /** Scan for CRLF in physmem. Returns offset of \r or len. */
+  scanCRLF(physAddr: number, offset: number, len: number): number {
+    if (_nativScanCRLF) return _nativScanCRLF(physAddr, offset, len);
+    for (var i = offset; i < len - 1; i++)
+      if (kernel.readMem8(physAddr + i) === 13 && kernel.readMem8(physAddr + i + 1) === 10) return i;
+    return len;
+  },
+
+  /** Sum all bytes in physmem region. */
+  sumBuf(physAddr: number, len: number): number {
+    if (_nativSumBuf) return _nativSumBuf(physAddr, len);
+    var s = 0; for (var i = 0; i < len; i++) s += kernel.readMem8(physAddr + i) & 0xff; return s;
+  },
+
+  /** Clamp x to [lo, hi]. */
+  clamp32(x: number, lo: number, hi: number): number {
+    if (_nativClamp32) return _nativClamp32(x, lo, hi);
+    return x < lo ? lo : x > hi ? hi : x;
+  },
+
+  /** Population count (number of set bits) of a 32-bit integer. */
+  popCount32(x: number): number {
+    if (_nativPopCount) return _nativPopCount(x);
+    var v = x >>> 0;
+    v = v - ((v >> 1) & 0x55555555);
+    v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
+    v = (v + (v >> 4)) & 0x0f0f0f0f;
+    return Math.imul(v, 0x01010101) >>> 24;
+  },
+
+  /** True when all JITOps are compiled to native code. */
+  isNative(): boolean { return _nativXorBuf !== null; },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  Boot initialisation
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -551,7 +780,17 @@ export const JITOSKernels = {
     _nativCRC32    = tryCompile(_SRC_CRC32,    'crc32');
     _nativStrcmp   = tryCompile(_SRC_STRCMP,   'strcmp8');
     _nativMemchr   = tryCompile(_SRC_MEMCHR,   'memchr8');
-    _nativFNV1A32  = tryCompile(_SRC_FNV1A32,  'fnv1a32');
+    _nativFNV1A32    = tryCompile(_SRC_FNV1A32,       'fnv1a32');
+    _nativXorBuf     = tryCompile(_SRC_XOR_BUF,        'xorBuf');
+    _nativPackBE32   = tryCompile(_SRC_PACK_BE32,      'packBE32');
+    _nativUnpackBE32 = tryCompile(_SRC_UNPACK_BE32,    'unpackBE32');
+    _nativUnpackBE16 = tryCompile(_SRC_UNPACK_BE16,    'unpackBE16');
+    _nativLzCopy     = tryCompile(_SRC_LZ_COPY_MATCH,  'lzCopyMatch');
+    _nativToLower8   = tryCompile(_SRC_TO_LOWER8,      'toLower8');
+    _nativScanCRLF   = tryCompile(_SRC_SCAN_CRLF,      'scanCRLF');
+    _nativSumBuf     = tryCompile(_SRC_SUM_BUF,        'sumBuf');
+    _nativClamp32    = tryCompile(_SRC_CLAMP32,        'clamp32');
+    _nativPopCount   = tryCompile(_SRC_POP_COUNT32,    'popCount32');
 
     // Write the CRC table into a shared ArrayBuffer so JIT native can access it
     if (_nativCRC32) {
