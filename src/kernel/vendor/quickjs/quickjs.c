@@ -2470,26 +2470,45 @@ void JS_UpdateStackTop(JSRuntime *rt)
 }
 
 /*
- * JS_ResetAfterFault(ctx)
+ * JS_GetCurrentStackFrame(ctx)
  *
- * Resets QuickJS runtime/context state after a hardware fault recovery
+ * Returns the current JS stack frame pointer as an opaque void*.  Call this
+ * immediately BEFORE a nested JS_Eval / JS_Call so the frame chain of the
+ * outer (still-running) JS context can be saved and later restored if a
+ * longjmp() recovery skips the normal frame teardown.
+ */
+void *JS_GetCurrentStackFrame(JSContext *ctx)
+{
+    return (void *)ctx->rt->current_stack_frame;
+}
+
+/*
+ * JS_ResetAfterFault(ctx, saved_stack_frame)
+ *
+ * Restores QuickJS runtime/context state after a hardware fault recovery
  * via longjmp().  longjmp() unwinds the C call stack without running
  * QuickJS's normal frame teardown, leaving:
  *
- *   rt->current_stack_frame  — dangling pointer to now-gone C stack frames;
- *                               next JS_CallInternal walk or write crashes.
+ *   rt->current_stack_frame  — dangling pointer to the now-gone eval frames.
+ *                               The OUTER frames (callers of the guarded
+ *                               eval) are still valid on the C stack; we
+ *                               restore the pointer to whatever it was just
+ *                               before JS_Eval/JS_Call was entered.
  *   rt->current_exception    — stale exception value; JS_Eval immediately
  *                               returns JS_EXCEPTION without executing code.
  *   current_exception_is_uncatchable, in_out_of_memory — may be set.
  *
- * Call this immediately after longjmp() returns, before any further
- * JS_Eval / JS_Call invocations.
+ * saved_stack_frame must be the value returned by JS_GetCurrentStackFrame()
+ * captured before the guarded JS_Eval / JS_Call.
  */
-void JS_ResetAfterFault(JSContext *ctx)
+void JS_ResetAfterFault(JSContext *ctx, void *saved_stack_frame)
 {
     JSRuntime *rt = ctx->rt;
-    /* Kill the dangling frame pointer chain */
-    rt->current_stack_frame = NULL;
+    /* Restore the outer frame chain — these frames are still valid on the
+     * C call stack because longjmp() only unwound up to the setjmp site,
+     * leaving every frame above it (the callers of evalGuarded/callGuarded)
+     * intact. */
+    rt->current_stack_frame = (JSStackFrame *)saved_stack_frame;
     /* Clear any sticky error flags */
     rt->current_exception_is_uncatchable = FALSE;
     rt->in_out_of_memory = FALSE;

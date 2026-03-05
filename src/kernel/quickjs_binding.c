@@ -575,24 +575,21 @@ static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JS
     const char *code = JS_ToCStringLen(c, &len, argv[0]);
     if (!code) return JS_EXCEPTION;
     const char *filename = "<eval-guarded>";
+    /* Save the outer JS frame chain BEFORE arming the setjmp.  After longjmp()
+     * unwinds the C stack back to this frame, the eval's JSStackFrame nodes
+     * (which lived on the now-gone portion of the stack) are dangling, but
+     * every frame ABOVE this setjmp site is still valid.  Restoring to
+     * _saved_frame brings current_stack_frame back to a consistent state so
+     * JS execution in the calling context can continue normally. */
+    void *_saved_frame = JS_GetCurrentStackFrame(c);
     /* Arm the recovery checkpoint */
     _js_fault_active = 1;
     _js_fault_vector = 0;
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
-        /* CPU exception occurred during JS execution; longjmp brought us here.
-         * The QuickJS runtime state must be fully reset before any further JS
-         * execution, or the next call will immediately fail / crash:
-         *
-         *  current_stack_frame: points to JSStackFrame nodes that lived on the
-         *    now-unwound C call stack.  Dangling — must be set to NULL.
-         *  current_exception / current_exception_is_uncatchable: stale exception
-         *    that would cause JS_Eval/JS_Call to return JS_EXCEPTION immediately.
-         *  in_out_of_memory: might be set if the fault happened during alloc.
-         */
         _js_fault_active = 0;
         JS_FreeCString(c, code);
-        JS_ResetAfterFault(c);
+        JS_ResetAfterFault(c, _saved_frame);
         return JS_ThrowInternalError(c, "CPU exception #%d during script execution",
                                      recovered - 1);
     }
@@ -623,13 +620,14 @@ static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JS
 static JSValue js_call_guarded(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
     if (argc < 1) return JS_UNDEFINED;
+    /* Same save/restore pattern as js_eval_guarded — see comment there. */
+    void *_saved_frame = JS_GetCurrentStackFrame(c);
     _js_fault_active = 1;
     _js_fault_vector = 0;
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
         _js_fault_active = 0;
-        /* Reset QuickJS runtime state — same reasoning as js_eval_guarded */
-        JS_ResetAfterFault(c);
+        JS_ResetAfterFault(c, _saved_frame);
         return JS_ThrowInternalError(c, "CPU exception #%d in guarded call",
                                      recovered - 1);
     }

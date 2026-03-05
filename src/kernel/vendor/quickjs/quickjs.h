@@ -388,7 +388,8 @@ JSContext *JS_DupContext(JSContext *ctx);
 void *JS_GetContextOpaque(JSContext *ctx);
 void JS_SetContextOpaque(JSContext *ctx, void *opaque);
 JSRuntime *JS_GetRuntime(JSContext *ctx);
-void JS_ResetAfterFault(JSContext *ctx); /* reset state after longjmp fault recovery */
+void *JS_GetCurrentStackFrame(JSContext *ctx); /* save frame chain before nested JS_Eval for longjmp recovery */
+void JS_ResetAfterFault(JSContext *ctx, void *saved_stack_frame); /* restore state after longjmp fault recovery */
 void JS_SetClassProto(JSContext *ctx, JSClassID class_id, JSValue obj);
 JSValue JS_GetClassProto(JSContext *ctx, JSClassID class_id);
 
