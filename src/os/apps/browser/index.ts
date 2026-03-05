@@ -2088,7 +2088,9 @@ export class BrowserApp implements App {
     );
 
     // ── Pass 1: collect <style> blocks + <link rel="stylesheet"> hrefs ────────
+    os.debug.log('[browser] showHTML', (html.length / 1024).toFixed(1) + 'KB', url.slice(0, 60));
     var r = parseHTML(html);
+    os.debug.log('[browser] pass1:', r.nodes.length, 'nodes', r.scripts.length, 'scripts', r.styles.length, 'styles', r.styleLinks.length, 'cssLinks');
     this._forms       = r.forms;
     this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
 

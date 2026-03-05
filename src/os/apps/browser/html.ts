@@ -161,6 +161,8 @@ export function tokenise(html: string): HtmlToken[] {
     return { kind, tag, text: '', attrs };
   }
 
+  // Hoisted: compute once instead of once-per-script/style-tag (was O(n×tags))
+  var htmlLC = html.toLowerCase();
   while (i < n) {
     if (html[i] === '<') {
       var tok = readTag();
@@ -173,7 +175,6 @@ export function tokenise(html: string): HtmlToken[] {
         // and the script content would be silently corrupted.
         if (tok.kind === 'open' && (tok.tag === 'script' || tok.tag === 'style')) {
           var closeTag = '</' + tok.tag;
-          var htmlLC = html.toLowerCase();
           var closeIdx = htmlLC.indexOf(closeTag, i);
           var rawEnd = closeIdx >= 0 ? closeIdx : n;
           var rawContent = html.slice(i, rawEnd);

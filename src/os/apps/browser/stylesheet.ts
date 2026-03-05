@@ -85,7 +85,10 @@ export interface AncestorEl {
  * Correctly skips paren-content (e.g. :not(.foo > div)).
  * Returns { parts, combinators } where combinators[i] is between parts[i] and parts[i+1].
  */
+const _selectorPartsCache = new Map<string, { parts: string[]; combinators: string[] }>();
 function _parseSelectorParts(sel: string): { parts: string[]; combinators: string[] } {
+  var cached = _selectorPartsCache.get(sel);
+  if (cached) return cached;
   var parts: string[] = [];
   var combinators: string[] = [];
   var depth = 0;
@@ -118,7 +121,9 @@ function _parseSelectorParts(sel: string): { parts: string[]; combinators: strin
     cur += ch; i++;
   }
   if (cur.trim()) parts.push(cur.trim());
-  return { parts, combinators };
+  var result = { parts, combinators };
+  if (_selectorPartsCache.size < 10000) _selectorPartsCache.set(sel, result);
+  return result;
 }
 
 export function matchesSingleSel(
