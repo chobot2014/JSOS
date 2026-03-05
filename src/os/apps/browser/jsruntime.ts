@@ -6580,7 +6580,7 @@ export function createPageJS(
           try {
             var _iFn = new Function('__jsos_dynamic_import__', '__get_module__', _iTrans) as
               (di: typeof __jsos_dynamic_import__, gm: typeof _iGet) => void;
-            _iFn.call(win, __jsos_dynamic_import__, _iGet);
+            _callGuardedCtx('inline-module#' + idx, _iFn.bind(win), __jsos_dynamic_import__, _iGet);
           } catch(e) { _fireScriptError(e); }
           checkDirty();
           runScripts(idx + 1);
@@ -6735,12 +6735,10 @@ export function createPageJS(
       // Inline script: execute text content synchronously
       var code = scriptEl.textContent || '';
       if (code.trim()) {
-        try {
-          execScript(code);
-          _drainMicrotasks();
-          checkDirty();
-          if (needsRerender) doRerender();
-        } catch(e) { _fireScriptError(e); }
+        execScript(code);
+        _drainMicrotasks();
+        checkDirty();
+        if (needsRerender) doRerender();
       }
     }
   };
