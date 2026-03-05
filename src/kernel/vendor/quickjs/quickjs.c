@@ -2482,6 +2482,14 @@ void *JS_GetCurrentStackFrame(JSContext *ctx)
     return (void *)ctx->rt->current_stack_frame;
 }
 
+#ifdef JSOS_JIT_HOOK
+/* Physical address of the JSFunctionBytecode that was actively dispatching to
+ * JIT-compiled native code when a CPU fault fired.  Set just before jit_call_i4/i8
+ * and cleared on success.  JS_ResetAfterFault() reads this to invalidate the
+ * function's jit_native_ptr so the faulty native code is never called again. */
+static void *_jit_faulting_bc = NULL;
+#endif
+
 /*
  * JS_ResetAfterFault(ctx, saved_stack_frame)
  *
@@ -2520,6 +2528,17 @@ void JS_ResetAfterFault(JSContext *ctx, void *saved_stack_frame)
      * halts the OS.  We intentionally leak the object — it's a one-per-crash
      * leak on an already-corrupted allocation, not a steady-state leak. */
     rt->current_exception = JS_UNINITIALIZED;
+#ifdef JSOS_JIT_HOOK
+    /* If the fault fired inside JIT-compiled native code, null the function's
+     * jit_native_ptr so that native code is never dispatched again — the
+     * function falls back to interpreted execution.  This prevents the same
+     * buggy JIT stub from being called again after recovery. */
+    if (_jit_faulting_bc) {
+        JSFunctionBytecode *_fbc = (JSFunctionBytecode *)_jit_faulting_bc;
+        _fbc->jit_native_ptr = NULL;
+        _jit_faulting_bc = NULL;
+    }
+#endif
 }
 
 static inline BOOL is_strict_mode(JSContext *ctx)
@@ -17524,11 +17543,15 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
 
 #ifdef JSOS_JIT_HOOK
     /* Step-5: native dispatch for JIT-compiled functions.
-     * JIT-compiled canvas functions use cdecl int32 calling convention:
-     *   int32_t fn(int32_t a0, int32_t a1, ..., int32_t a7)
-     * Extract integer values from the JSValue argv array and dispatch
-     * via jit_call_i4 / jit_call_i8 — never pass JSContext/JSValue. */
-    if (b->jit_native_ptr) {
+     * Suppressed when _js_in_page_eval != 0 (kernel.evalGuarded running a
+     * web page script) — page-script functions must NOT run as JIT-compiled
+     * native code because the JIT can misidentify GC-managed pointer values
+     * (string/object immediates) as numeric constants and emit stores to
+     * those addresses, causing write #PF.  The interpreter handles them
+     * correctly via tag-checked dispatch. */
+    {
+    extern volatile int _js_in_page_eval;
+    if (!_js_in_page_eval && b->jit_native_ptr) {
         extern int32_t jit_call_i4(void *fn,
                                    int32_t a0, int32_t a1,
                                    int32_t a2, int32_t a3);
@@ -17547,6 +17570,8 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                         : (int32_t)(uint32_t)JS_VALUE_GET_FLOAT64(argv[i])) \
             : 0)
         int32_t _jit_ret;
+        /* Track faulting bc for JS_ResetAfterFault to invalidate on recovery */
+        _jit_faulting_bc = (void *)b;
         if (argc <= 4)
             _jit_ret = jit_call_i4(b->jit_native_ptr,
                                    _JARG(0), _JARG(1), _JARG(2), _JARG(3));
@@ -17554,12 +17579,15 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             _jit_ret = jit_call_i8(b->jit_native_ptr,
                                    _JARG(0), _JARG(1), _JARG(2), _JARG(3),
                                    _JARG(4), _JARG(5), _JARG(6), _JARG(7));
+        _jit_faulting_bc = NULL;  /* clear on success */
 #undef _JARG
         return JS_NewInt32(caller_ctx, _jit_ret);
     }
-    /* Increment hot counter; fire this runtime's hook at threshold */
-    if (++b->call_count == JIT_THRESHOLD && rt->jit_hook)
+    /* Increment hot counter; fire this runtime's hook at threshold.
+     * Suppressed during page-eval so web-page functions never get compiled. */
+    if (!_js_in_page_eval && ++b->call_count == JIT_THRESHOLD && rt->jit_hook)
         rt->jit_hook(rt, caller_ctx, (void *)b, NULL, argc);
+    } /* end _js_in_page_eval block */
 #endif /* JSOS_JIT_HOOK */
 
     if (unlikely(argc < b->arg_count || (flags & JS_CALL_FLAG_COPY_ARGV))) {

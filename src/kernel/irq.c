@@ -14,6 +14,11 @@
 jmp_buf          _js_fault_buf;
 volatile int     _js_fault_active  = 0;
 volatile int     _js_fault_vector  = 0;
+/* Set to 1 while kernel.evalGuarded() is executing a page script.
+ * When non-zero, quickjs.c suppresses JIT native dispatch and JIT
+ * compilation so untrusted page-script functions never run as
+ * JIT-compiled native code (which can generate faulty stores). */
+volatile int     _js_in_page_eval  = 0;
 
 /* ── CPU exception dispatcher ───────────────────────────────────────────── */
 

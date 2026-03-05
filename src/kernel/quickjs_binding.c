@@ -24,6 +24,7 @@
 extern jmp_buf       _js_fault_buf;
 extern volatile int  _js_fault_active;
 extern volatile int  _js_fault_vector;
+extern volatile int  _js_in_page_eval;
 #include "virtio_net.h"
 #include "jit.h"
 #include <stdint.h>
@@ -585,9 +586,14 @@ static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JS
     /* Arm the recovery checkpoint */
     _js_fault_active = 1;
     _js_fault_vector = 0;
+    /* Signal to quickjs.c that we are evaluating a page script so JIT
+     * native dispatch and JIT compilation are suppressed for all functions
+     * encountered during this eval (prevents JIT-generated faulty stores). */
+    _js_in_page_eval = 1;
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
         _js_fault_active = 0;
+        _js_in_page_eval = 0;
         /* Restore interrupts: the ISR macro issued CLI and we longjmp'd out
          * before the normal 'sti; iret' epilogue ran.  We deliberately kept
          * interrupts disabled across the longjmp to prevent a timer IRQ from
@@ -599,6 +605,7 @@ static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JS
     }
     JSValue result = JS_Eval(c, code, len, filename, JS_EVAL_TYPE_GLOBAL);
     _js_fault_active = 0;
+    _js_in_page_eval = 0;
     JS_FreeCString(c, code);
     if (JS_IsException(result)) {
         return JS_EXCEPTION;  /* propagate normal JS exceptions as-is */
