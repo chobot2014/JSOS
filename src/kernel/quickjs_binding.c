@@ -588,13 +588,14 @@ static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JS
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
         _js_fault_active = 0;
-        JS_FreeCString(c, code);
+        /* Do NOT call JS_FreeCString here.  The fault may have occurred during
+         * a QuickJS heap allocation (e.g. object construction in the JIT path).
+         * The allocator's free-list could be mid-update and dirty.  Calling
+         * js_free() on that state triggers a second #PF with _js_fault_active
+         * already 0 — that goes to the halt path.  Accept the string leak;
+         * it is at most one JSString per fault, not a steady-state leak. */
         JS_ResetAfterFault(c, _saved_frame);
-        /* Return UNDEFINED (not JS_EXCEPTION) so the outer QJS interpreter
-         * sees a clean normal return and resumes executing the next opcode.
-         * Throwing here would run JS exception-dispatch machinery on a context
-         * whose heap may be partially corrupted — that path reliably hangs.
-         * The fault is already printed to serial by the kernel ISR. */
+        /* Return UNDEFINED (not JS_EXCEPTION) — see comment in js_call_guarded */
         return JS_UNDEFINED;
     }
     JSValue result = JS_Eval(c, code, len, filename, JS_EVAL_TYPE_GLOBAL);
