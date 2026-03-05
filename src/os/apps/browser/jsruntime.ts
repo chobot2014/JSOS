@@ -6130,11 +6130,16 @@ export function createPageJS(
 
   function execScript(code: string, scriptURL?: string): void {
     // ── Script size guard ──────────────────────────────────────────────────────
-    // Very large scripts (minified bundles > 1 MB) risk crashing the QuickJS
-    // interpreter on certain memory-intensive patterns.  Use kernel.evalGuarded
-    // for them so a CPU fault produces a catchable JS error instead of a halt.
+    // Use kernel.evalGuarded for:
+    //  (a) ALL network-fetched external scripts (any real http/https URL) —
+    //      untrusted third-party bundles (e.g. Google's JS) can contain JIT
+    //      patterns that trigger #PF/#GP in QuickJS; evalGuarded arms the CPU
+    //      fault recovery so a crash throws a catchable JS error instead of
+    //      halting the OS.
+    //  (b) Large inline scripts > 512 KB — these risk memory-intensive patterns.
     var _GUARD_THRESHOLD = 512 * 1024; // 512 KB
-    var _useGuarded = code.length > _GUARD_THRESHOLD && typeof (kernel as any).evalGuarded === 'function';
+    var _isExternal = !!scriptURL && (scriptURL.startsWith('http://') || scriptURL.startsWith('https://'));
+    var _useGuarded = (_isExternal || code.length > _GUARD_THRESHOLD) && typeof (kernel as any).evalGuarded === 'function';
     if (code.length > 2 * 1024 * 1024) {
       // Absolute limit: skip scripts > 2 MB entirely — these are framework
       // bundles that won't provide meaningful functionality in our runtime.
