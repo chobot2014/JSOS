@@ -622,6 +622,20 @@ export class WindowManager {
 
   tick(): void {
     this._pollInput();
+
+    // ── Cursor fast blit — runs BEFORE any app render ──────────────────────
+    // Gives the cursor immediate visual feedback even while browser.render()
+    // is working through a page-load paint that may take 10-50 ms.
+    // _cursorSaveValid becomes true at the end of the first full composite;
+    // until then we fall through to the normal full composite below.
+    if (this._cursorDirty && this._cursorSaveValid) {
+      this._restoreCursorSaveUnder();
+      this._saveCursorUnder();
+      this._drawCursor();
+      this._screen.flip();
+      this._cursorDirty = false;
+    }
+
     this._tickChildProcs();
     scheduler.tick();                 // process-level accounting, signals, time-slice
     threadManager.tickCoroutines();   // cooperative fetch / async coroutines
@@ -990,20 +1004,9 @@ export class WindowManager {
 
     if (!anyContentDirty && !this._cursorDirty) return; // ★ truly nothing changed
 
-    // ── Fast cursor path ─────────────────────────────────────────────────────
-    // When only the cursor moved (no window repainted, no WM state changed)
-    // restore the 11×19 pixels saved from the last full composite, draw the
-    // cursor at its new position, save the new under-pixels, and flip.
-    // This path takes ~0.1 ms vs ~20 ms for a full composite.
-    if (!anyContentDirty && this._cursorDirty && this._cursorSaveValid) {
-      this._restoreCursorSaveUnder();
-      this._saveCursorUnder();
-      this._drawCursor();
-      s.flip();
-      this._cursorDirty = false;
-      return;
-    }
-
+    // The cursor fast blit is handled in tick() before this method is called,
+    // so _cursorDirty is normally already false here.  Clear both dirty flags
+    // and proceed with the full composite.
     this._wmDirty       = false;
     this._cursorDirty   = false;
     this._cursorSaveValid = false; // will be rebuilt at end of full composite
