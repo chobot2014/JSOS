@@ -6167,16 +6167,11 @@ export function createPageJS(
 
   function execScript(code: string, scriptURL?: string): void {
     // ── Script size guard ──────────────────────────────────────────────────────
-    // Use kernel.evalGuarded for:
-    //  (a) ALL network-fetched external scripts (any real http/https URL) —
-    //      untrusted third-party bundles (e.g. Google's JS) can contain JIT
-    //      patterns that trigger #PF/#GP in QuickJS; evalGuarded arms the CPU
-    //      fault recovery so a crash throws a catchable JS error instead of
-    //      halting the OS.
-    //  (b) Large inline scripts > 512 KB — these risk memory-intensive patterns.
-    var _GUARD_THRESHOLD = 512 * 1024; // 512 KB
-    var _isExternal = !!scriptURL && (scriptURL.startsWith('http://') || scriptURL.startsWith('https://'));
-    var _useGuarded = (_isExternal || code.length > _GUARD_THRESHOLD) && typeof (kernel as any).evalGuarded === 'function';
+    // Always use kernel.evalGuarded when available — the JIT can generate bad
+    // native code from ANY script (inline or external, large or tiny) and a
+    // CPU fault with _js_fault_active == 0 halts the OS.  We want the setjmp
+    // frame up for every eval, not just external/large scripts.
+    var _useGuarded = typeof (kernel as any).evalGuarded === 'function';
     if (code.length > 2 * 1024 * 1024) {
       cb.log('[JS exec] oversized-skip ' + (code.length / 1024 / 1024).toFixed(1) + 'MB ' + (scriptURL || '(inline)'));
       return;
@@ -6203,7 +6198,7 @@ export function createPageJS(
       if (cached) {
         if (_jsDebug) cb.log('[JS exec] cached ' + (code.length / 1024).toFixed(1) + 'KB ' + _cachedURL);
         try {
-          cached.call(win);
+          _callGuardedCtx('cached:' + _cachedURL.slice(-40), cached.bind(win));
           _bridgeToGlobal();
           checkDirty();
           return;
@@ -6227,7 +6222,7 @@ export function createPageJS(
         'with(__s__){\n' + src1 + '\n}') as (s: any) => void;
       // Cache the compiled function for re-use on back/forward navigation
       if (JITBrowserEngine.ready) JITBrowserEngine.cacheScript(code, _cachedURL, fn, false);
-      fn(_winScope);
+      _callGuardedCtx('stage1:' + (scriptURL || '(inline)').slice(-40), fn, _winScope);
       _bridgeToGlobal();  // capture any new win properties set by this script
       var _batchDirty = JITBrowserEngine.endMutationBatch();
       checkDirty();
@@ -6252,7 +6247,7 @@ export function createPageJS(
       var fn2 = new Function(raw2) as () => void;
       // Cache the stage-2 fallback function too
       if (JITBrowserEngine.ready) JITBrowserEngine.cacheScript(code, _cachedURL, fn2, false);
-      fn2.call(win);
+      _callGuardedCtx('stage2:' + (scriptURL || '(inline)').slice(-40), fn2.bind(win));
     } catch (e2) {
       // Both stage 1 and stage 2 failed — report the stage-2 error since it
       // applies to the raw (un-wrapped) code and is more meaningful to the page.
