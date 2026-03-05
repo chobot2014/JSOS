@@ -1178,7 +1178,10 @@ export function createPageJS(
     }
     dispatchEvent(ev: VEvent): boolean {
       var arr = this._listeners.get(ev.type); if (!arr) return true;
-      for (var fn of arr) fn(ev); return !ev.defaultPrevented;
+      for (var fn of arr) {
+        try { fn(ev); } catch(e) { _fireScriptError(e); }
+      }
+      return !ev.defaultPrevented;
     }
   }
 
@@ -3706,7 +3709,7 @@ export function createPageJS(
     var limit = 1000;
     while (_microtaskQueue.length > 0 && limit-- > 0) {
       var fn = _microtaskQueue.shift()!;
-      try { fn(); } catch (e) { cb.log('[microtask error] ' + String(e)); }
+      try { fn(); } catch (e) { _fireScriptError(e); }
     }
     // Also drain native QuickJS Promise jobs (e.g. Promise.then() callbacks)
     // This is required because QuickJS's job queue is not drained automatically
@@ -6118,13 +6121,21 @@ export function createPageJS(
   // ── Execute a script code string in the window context ────────────────────
 
   function _fireScriptError(e: any): void {
-    cb.log('[JS error] ' + String(e));
+    var msg = String(e);
+    cb.log('[JS error] ' + msg);
+    // window.onerror(message, source, lineno, colno, error)
     var onErr = (win as any).onerror;
     if (typeof onErr === 'function') {
-      try { onErr(String(e), '', 0, 0, e); } catch(_) {}
+      try { onErr(msg, _baseHref || '', 0, 0, e); } catch(_) {}
     }
+    // Dispatch ErrorEvent on window first (many sites use window.addEventListener('error', ...))
     var errEv = new VEvent('error', { bubbles: false, cancelable: true });
-    (errEv as any).error = e; (errEv as any).message = String(e);
+    (errEv as any).error = e;
+    (errEv as any).message = msg;
+    (errEv as any).filename = _baseHref || '';
+    (errEv as any).lineno = 0;
+    (errEv as any).colno = 0;
+    try { (win['dispatchEvent'] as (e: VEvent) => void)(errEv); } catch(_) {}
     try { doc.dispatchEvent(errEv); } catch(_) {}
   }
 
@@ -6156,6 +6167,7 @@ export function createPageJS(
         _fireScriptError(e);
       }
       _bridgeToGlobal();
+      _drainMicrotasks();  // drain any Promise jobs queued by the script
       checkDirty();
       return;
     }
@@ -6220,16 +6232,9 @@ export function createPageJS(
       if (JITBrowserEngine.ready) JITBrowserEngine.cacheScript(code, _cachedURL, fn2, false);
       fn2.call(win);
     } catch (e2) {
-
-      var msg2 = String(e2);
-      if (msg2.indexOf('SyntaxError') !== -1) {
-        // Both stage 1 and stage 2 failed with SyntaxErrors.
-        // Report the stage-2 error (raw code) since it's more meaningful —
-        // stage-1 error includes the with() wrapper noise.
-        _fireScriptError(e2);
-      } else {
-        _fireScriptError(e2);
-      }
+      // Both stage 1 and stage 2 failed — report the stage-2 error since it
+      // applies to the raw (un-wrapped) code and is more meaningful to the page.
+      _fireScriptError(e2);
     }
     _bridgeToGlobal();  // capture any new win properties set by this script
     JITBrowserEngine.endMutationBatch();
@@ -6935,7 +6940,7 @@ export function createPageJS(
       if (rafCallbacks.length) {
         var cbs = rafCallbacks.splice(0);
         for (var r of cbs) {
-          try { r.fn(nowMs); } catch(e) { cb.log('[JS raf error] ' + String(e)); }
+          try { r.fn(nowMs); } catch(e) { _fireScriptError(e); }
           _drainMicrotasks();
         }
         checkDirty();
@@ -6947,7 +6952,7 @@ export function createPageJS(
       for (var i = timers.length - 1; i >= 0; i--) {
         var t = timers[i];
         if (elapsed >= t.fireAt) {
-          try { t.fn(); } catch(e) { cb.log('[JS timer error] ' + String(e)); }
+          try { t.fn(); } catch(e) { _fireScriptError(e); }
           _drainMicrotasks();
           if (t.interval) { t.fireAt = elapsed + t.delay; }
           else { timers.splice(i, 1); }
