@@ -126,12 +126,13 @@ void exception_dispatch(exception_frame_t *f) {
         platform_serial_puts("[kernel] CPU fault in JS (vector=");
         _exc_hex32(f->vector);
         platform_serial_puts(") — recovering via longjmp\n");
-        /* The ISR_ERR/ISR_NOERR macros issue CLI before jumping here.  We are
-         * about to longjmp() out of the exception handler without executing the
-         * normal 'sti; iret' epilogue.  Re-enable interrupts now so the CPU
-         * does not remain stuck with IF=0 after recovery, which would prevent
-         * the APIC timer and other hardware IRQs from ever firing again. */
-        __asm__ volatile("sti");
+        /* NOTE: deliberately keeping interrupts DISABLED across the longjmp.
+         * Re-enabling with sti before longjmp opens a race: the APIC timer
+         * can fire, run a JS callback that calls evalGuarded/callGuarded,
+         * overwrite _js_fault_buf with a new setjmp context, and then our
+         * longjmp jumps to the wrong frame -> crash.
+         * The recovery site (js_eval_guarded / js_call_guarded) issues sti
+         * after longjmp returns so interrupts are re-enabled promptly. */
         longjmp(_js_fault_buf, (int)f->vector + 1);
     }
 

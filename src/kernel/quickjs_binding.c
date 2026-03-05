@@ -588,14 +588,13 @@ static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JS
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
         _js_fault_active = 0;
-        /* Do NOT call JS_FreeCString here.  The fault may have occurred during
-         * a QuickJS heap allocation (e.g. object construction in the JIT path).
-         * The allocator's free-list could be mid-update and dirty.  Calling
-         * js_free() on that state triggers a second #PF with _js_fault_active
-         * already 0 — that goes to the halt path.  Accept the string leak;
-         * it is at most one JSString per fault, not a steady-state leak. */
+        /* Restore interrupts: the ISR macro issued CLI and we longjmp'd out
+         * before the normal 'sti; iret' epilogue ran.  We deliberately kept
+         * interrupts disabled across the longjmp to prevent a timer IRQ from
+         * overwriting _js_fault_buf mid-flight; now it is safe to re-enable. */
+        __asm__ volatile("sti");
+        /* Do NOT call JS_FreeCString here (see comment in js_call_guarded). */
         JS_ResetAfterFault(c, _saved_frame);
-        /* Return UNDEFINED (not JS_EXCEPTION) — see comment in js_call_guarded */
         return JS_UNDEFINED;
     }
     JSValue result = JS_Eval(c, code, len, filename, JS_EVAL_TYPE_GLOBAL);
@@ -632,9 +631,11 @@ static JSValue js_call_guarded(JSContext *c, JSValueConst this_val, int argc, JS
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
         _js_fault_active = 0;
+        /* Restore interrupts: ISR CLI was not paired with STI since we bypassed
+         * the normal iret epilogue.  Kept disabled across longjmp to prevent a
+         * timer IRQ from overwriting _js_fault_buf mid-flight. */
+        __asm__ volatile("sti");
         JS_ResetAfterFault(c, _saved_frame);
-        /* Same as js_eval_guarded — return UNDEFINED to avoid triggering
-         * exception dispatch in a post-longjmp QJS context. */
         return JS_UNDEFINED;
     }
     JSValue result = JS_Call(c, argv[0], JS_UNDEFINED,
