@@ -581,15 +581,18 @@ static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JS
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
         /* CPU exception occurred during JS execution; longjmp brought us here.
-         * The QuickJS context may have a partially-set exception flag — clear it
-         * so subsequent JS_Eval/JS_Call calls don't see a stale exception. */
+         * The QuickJS runtime state must be fully reset before any further JS
+         * execution, or the next call will immediately fail / crash:
+         *
+         *  current_stack_frame: points to JSStackFrame nodes that lived on the
+         *    now-unwound C call stack.  Dangling — must be set to NULL.
+         *  current_exception / current_exception_is_uncatchable: stale exception
+         *    that would cause JS_Eval/JS_Call to return JS_EXCEPTION immediately.
+         *  in_out_of_memory: might be set if the fault happened during alloc.
+         */
         _js_fault_active = 0;
         JS_FreeCString(c, code);
-        /* Drain any stale exception from the context so it is clean */
-        { JSValue _stale = JS_GetException(c); JS_FreeValue(c, _stale); }
-        /* NOTE: do NOT run GC here — partially-constructed heap objects from
-         * the crashed execution are unreachable and will be swept on the next
-         * normal GC cycle.  Forcing a GC now risks re-entering corrupt state. */
+        JS_ResetAfterFault(c);
         return JS_ThrowInternalError(c, "CPU exception #%d during script execution",
                                      recovered - 1);
     }
@@ -625,8 +628,8 @@ static JSValue js_call_guarded(JSContext *c, JSValueConst this_val, int argc, JS
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
         _js_fault_active = 0;
-        /* Drain any stale exception from the context so it is clean for next call */
-        { JSValue _stale = JS_GetException(c); JS_FreeValue(c, _stale); }
+        /* Reset QuickJS runtime state — same reasoning as js_eval_guarded */
+        JS_ResetAfterFault(c);
         return JS_ThrowInternalError(c, "CPU exception #%d in guarded call",
                                      recovered - 1);
     }

@@ -2469,6 +2469,35 @@ void JS_UpdateStackTop(JSRuntime *rt)
     update_stack_limit(rt);
 }
 
+/*
+ * JS_ResetAfterFault(ctx)
+ *
+ * Resets QuickJS runtime/context state after a hardware fault recovery
+ * via longjmp().  longjmp() unwinds the C call stack without running
+ * QuickJS's normal frame teardown, leaving:
+ *
+ *   rt->current_stack_frame  — dangling pointer to now-gone C stack frames;
+ *                               next JS_CallInternal walk or write crashes.
+ *   rt->current_exception    — stale exception value; JS_Eval immediately
+ *                               returns JS_EXCEPTION without executing code.
+ *   current_exception_is_uncatchable, in_out_of_memory — may be set.
+ *
+ * Call this immediately after longjmp() returns, before any further
+ * JS_Eval / JS_Call invocations.
+ */
+void JS_ResetAfterFault(JSContext *ctx)
+{
+    JSRuntime *rt = ctx->rt;
+    /* Kill the dangling frame pointer chain */
+    rt->current_stack_frame = NULL;
+    /* Clear any sticky error flags */
+    rt->current_exception_is_uncatchable = FALSE;
+    rt->in_out_of_memory = FALSE;
+    /* Drain the stale exception unconditionally (JS_GetException clears it) */
+    JSValue ex = JS_GetException(ctx);
+    JS_FreeValue(ctx, ex);
+}
+
 static inline BOOL is_strict_mode(JSContext *ctx)
 {
     JSStackFrame *sf = ctx->rt->current_stack_frame;

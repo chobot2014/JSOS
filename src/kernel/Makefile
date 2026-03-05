@@ -1,7 +1,9 @@
 CC = i686-elf-gcc
 CFLAGS = -ffreestanding -O2 -Wall -Wextra -std=c11 -DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK -fno-stack-protector
 LDFLAGS = -ffreestanding -O2 -nostartfiles -lgcc -lc -lnosys -lm -Wl,--allow-multiple-definition
-QUICKJS_DIR = /opt/quickjs
+# Use vendored QuickJS source directly so local changes (e.g. JS_ResetAfterFault)
+# are compiled without needing to rebuild the toolchain image.
+QUICKJS_DIR = vendor/quickjs
 
 # QuickJS source files (compiled separately for different warning settings)
 QJS_SOURCES = $(QUICKJS_DIR)/quickjs.c $(QUICKJS_DIR)/libregexp.c \
