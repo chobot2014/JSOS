@@ -348,6 +348,113 @@ function popCount32(x) {
 `;
 
 /**
+ * strlen — find NUL terminator in physmem, up to maxLen bytes.
+ * Returns the number of non-NUL bytes found (i.e. the string length), or maxLen.
+ * Heavily used by HTTP header parsing and path lookup.
+ */
+const _SRC_STRLEN8 = `
+function strlen8(physAddr, maxLen) {
+  var i = 0;
+  while (i < maxLen) {
+    if (mem8[physAddr + i] === 0) { return i; }
+    i = i + 1;
+  }
+  return maxLen;
+}
+`;
+
+/**
+ * byteSwap32 — in-place big-endian ↔ little-endian conversion of `count` uint32s
+ * at physAddr.  Used by the network stack (IPv4 header fields are big-endian)
+ * and by AES key expansion.
+ */
+const _SRC_BYTE_SWAP32 = `
+function byteSwap32(physAddr, count) {
+  var i = 0;
+  while (i < count) {
+    var a = physAddr + i * 4;
+    var b0 = mem8[a]     & 0xff;
+    var b1 = mem8[a + 1] & 0xff;
+    var b2 = mem8[a + 2] & 0xff;
+    var b3 = mem8[a + 3] & 0xff;
+    mem8[a]     = b3;
+    mem8[a + 1] = b2;
+    mem8[a + 2] = b1;
+    mem8[a + 3] = b0;
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * countByte8 — count occurrences of byte `b` in a physmem region.
+ * Used by HTTP parsers (count '\n' to know how many headers exist),
+ * and by the text renderer (count space characters for word-wrap).
+ */
+const _SRC_COUNT_BYTE8 = `
+function countByte8(physAddr, len, b) {
+  var n = 0;
+  var i = 0;
+  while (i < len) {
+    if ((mem8[physAddr + i] & 0xff) === b) { n = n + 1; }
+    i = i + 1;
+  }
+  return n;
+}
+`;
+
+/**
+ * minU8 — find the smallest byte value in a physmem region.
+ * Used by image processing (finding darkest pixel) and codec range checks.
+ */
+const _SRC_MIN_U8 = `
+function minU8(physAddr, len) {
+  var m = 255;
+  var i = 0;
+  while (i < len) {
+    var v = mem8[physAddr + i] & 0xff;
+    if (v < m) { m = v; }
+    i = i + 1;
+  }
+  return m;
+}
+`;
+
+/**
+ * maxU8 — find the largest byte value in a physmem region.
+ * Symmetric with minU8; used for codec range checks and gradient fills.
+ */
+const _SRC_MAX_U8 = `
+function maxU8(physAddr, len) {
+  var m = 0;
+  var i = 0;
+  while (i < len) {
+    var v = mem8[physAddr + i] & 0xff;
+    if (v > m) { m = v; }
+    i = i + 1;
+  }
+  return m;
+}
+`;
+
+/**
+ * diffOffset — find the first position where two physmem regions differ.
+ * Returns the offset [0, len), or len if they are identical.
+ * Used by dirty-region detection in the compositor and frame-buffer diff.
+ */
+const _SRC_DIFF_OFFSET = `
+function diffOffset(addrA, addrB, len) {
+  var i = 0;
+  while (i < len) {
+    if (mem8[addrA + i] !== mem8[addrB + i]) { return i; }
+    i = i + 1;
+  }
+  return len;
+}
+`;
+
+/**
  * SHA-256 block compression function.
  * Reads h[0..7] and W[0..63] from physmem, extends W[16..63] in-place,
  * runs 64 rounds, then accumulates the result back into h.
@@ -550,6 +657,12 @@ var _nativPopCount:     ((...a: number[]) => number) | null = null;
 var _nativSHA256Block:  ((...a: number[]) => number) | null = null;
 var _nativChaCha20Block:((...a: number[]) => number) | null = null;
 var _nativAdler32:      ((...a: number[]) => number) | null = null;
+var _nativStrlen8:      ((...a: number[]) => number) | null = null;
+var _nativByteSwap32:   ((...a: number[]) => number) | null = null;
+var _nativCountByte8:   ((...a: number[]) => number) | null = null;
+var _nativMinU8:        ((...a: number[]) => number) | null = null;
+var _nativMaxU8:        ((...a: number[]) => number) | null = null;
+var _nativDiffOffset:   ((...a: number[]) => number) | null = null;
 
 /** Physical address of the CRC-32 table once copied to a shared kernel buffer. */
 var _crc32TablePhys: number = 0;
@@ -949,6 +1062,50 @@ export const JITCrypto = {
   isNative(): boolean { return _nativSHA256Block !== null && _sha256KPhys !== 0; },
 };
 
+/** General-purpose physmem utility kernels compiled to native x86-32. */
+export const JITBufOps = {
+  /** Find NUL terminator; returns length (≤ maxLen) of null-terminated string at physAddr. */
+  strlen8(physAddr: number, maxLen: number): number {
+    if (_nativStrlen8) return _nativStrlen8(physAddr, maxLen);
+    for (var i = 0; i < maxLen; i++) if (kernel.readMem8(physAddr + i) === 0) return i;
+    return maxLen;
+  },
+  /** In-place byte-swap (big↔little endian) of `count` uint32s at physAddr. */
+  byteSwap32(physAddr: number, count: number): void {
+    if (_nativByteSwap32) { _nativByteSwap32(physAddr, count); return; }
+    for (var i = 0; i < count; i++) {
+      var a = physAddr + i * 4;
+      var b0 = kernel.readMem8(a); var b3 = kernel.readMem8(a + 3);
+      var b1 = kernel.readMem8(a + 1); var b2 = kernel.readMem8(a + 2);
+      kernel.writeMem8(a, b3); kernel.writeMem8(a + 1, b2);
+      kernel.writeMem8(a + 2, b1); kernel.writeMem8(a + 3, b0);
+    }
+  },
+  /** Count occurrences of byte `b` in a physmem region. */
+  countByte8(physAddr: number, len: number, b: number): number {
+    if (_nativCountByte8) return _nativCountByte8(physAddr, len, b);
+    var n = 0; for (var i = 0; i < len; i++) if (kernel.readMem8(physAddr + i) === (b & 0xff)) n++;
+    return n;
+  },
+  /** Minimum byte value in region. */
+  minU8(physAddr: number, len: number): number {
+    if (_nativMinU8) return _nativMinU8(physAddr, len);
+    var m = 255; for (var i = 0; i < len; i++) { var v = kernel.readMem8(physAddr + i); if (v < m) m = v; } return m;
+  },
+  /** Maximum byte value in region. */
+  maxU8(physAddr: number, len: number): number {
+    if (_nativMaxU8) return _nativMaxU8(physAddr, len);
+    var m = 0; for (var i = 0; i < len; i++) { var v = kernel.readMem8(physAddr + i); if (v > m) m = v; } return m;
+  },
+  /** First offset where two physmem regions differ, or len if equal. */
+  diffOffset(addrA: number, addrB: number, len: number): number {
+    if (_nativDiffOffset) return _nativDiffOffset(addrA, addrB, len);
+    for (var i = 0; i < len; i++) if (kernel.readMem8(addrA + i) !== kernel.readMem8(addrB + i)) return i;
+    return len;
+  },
+  isNative(): boolean { return _nativStrlen8 !== null; },
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Boot initialisation
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1005,6 +1162,12 @@ export const JITOSKernels = {
     _nativSHA256Block   = tryCompile(_SRC_SHA256_BLOCK,   'sha256Block');
     _nativChaCha20Block = tryCompile(_SRC_CHACHA20_BLOCK, 'chacha20Block');
     _nativAdler32       = tryCompile(_SRC_ADLER32,        'adler32');
+    _nativStrlen8        = tryCompile(_SRC_STRLEN8,        'strlen8');
+    _nativByteSwap32     = tryCompile(_SRC_BYTE_SWAP32,    'byteSwap32');
+    _nativCountByte8     = tryCompile(_SRC_COUNT_BYTE8,    'countByte8');
+    _nativMinU8          = tryCompile(_SRC_MIN_U8,         'minU8');
+    _nativMaxU8          = tryCompile(_SRC_MAX_U8,         'maxU8');
+    _nativDiffOffset     = tryCompile(_SRC_DIFF_OFFSET,    'diffOffset');
 
     // Write the CRC table into a shared ArrayBuffer so JIT native can access it
     if (_nativCRC32) {

@@ -367,7 +367,109 @@ function unescape2B(physAddr, offset) {
 }
 `;
 
-// ─── Compiled function slots ───────────────────────────────────────────────
+/**
+ * blendConstAlpha — blend src row into dst row with a constant global alpha [0,255].
+ * Used for CSS `opacity`, window fades, and overlay compositing.
+ * 4 params: dst physAddr, src physAddr, pixel count n, alpha 0-255.
+ */
+const _SRC_BLEND_CONST_ALPHA = `
+function blendConstAlpha(dst, src, n, alpha) {
+  var inv = 255 - alpha;
+  var i = 0;
+  while (i < n) {
+    var sp = mem32[src + i * 4];
+    var dp = mem32[dst + i * 4];
+    var r = (Math.imul(sp & 0xff, alpha) + Math.imul(dp & 0xff, inv)) >> 8;
+    var g = (Math.imul((sp >> 8) & 0xff, alpha) + Math.imul((dp >> 8) & 0xff, inv)) >> 8;
+    var b = (Math.imul((sp >> 16) & 0xff, alpha) + Math.imul((dp >> 16) & 0xff, inv)) >> 8;
+    mem32[dst + i * 4] = r | (g << 8) | (b << 16) | 0xff000000;
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * parseDecInt — parse an ASCII decimal integer from a physmem buffer.
+ * Handles optional leading '-'.  Returns int32 result.
+ * Called by CSS property parsers (px values, viewport dimensions, z-index).
+ */
+const _SRC_PARSE_DEC_INT = `
+function parseDecInt(physAddr, len) {
+  var n = 0;
+  var neg = 0;
+  var i = 0;
+  if (len > 0) {
+    if ((mem8[physAddr] & 0xff) === 45) { neg = 1; i = 1; }
+  }
+  while (i < len) {
+    var ch = mem8[physAddr + i] & 0xff;
+    if (ch < 48) { break; }
+    if (ch > 57) { break; }
+    n = Math.imul(n, 10) + (ch - 48);
+    i = i + 1;
+  }
+  if (neg) { return -n; }
+  return n;
+}
+`;
+
+/**
+ * scanWS — advance past ASCII whitespace (≤ 0x20) in a physmem buffer.
+ * Returns the offset of the first non-whitespace byte, or len.
+ * Used by the HTML tokenizer and CSS value parser on every token boundary.
+ */
+const _SRC_SCAN_WS = `
+function scanWS(physAddr, offset, len) {
+  var i = offset;
+  while (i < len) {
+    var c = mem8[physAddr + i] & 0xff;
+    if (c > 32) { return i; }
+    i = i + 1;
+  }
+  return len;
+}
+`;
+
+/**
+ * clampByte — clamp an integer to [0, 255].
+ * Hot in pixel-math: alpha multiply, gamma correction, brightness clamp.
+ */
+const _SRC_CLAMP_BYTE = `
+function clampByte(x) {
+  if (x < 0) { return 0; }
+  if (x > 255) { return 255; }
+  return x;
+}
+`;
+
+/**
+ * rgbLuma — compute perceived luminance from RGB components.
+ * Standard ITU-R BT.601 approximate weights: Y = (77r + 150g + 29b) >> 8.
+ * Used for grayscale text rendering and contrast ratio calculation.
+ */
+const _SRC_RGB_LUMA = `
+function rgbLuma(r, g, b) {
+  return (Math.imul(r, 77) + Math.imul(g, 150) + Math.imul(b, 29)) >> 8;
+}
+`;
+
+/**
+ * invertRow — XOR-invert each pixel's RGB channels (preserves alpha).
+ * An XOR with 0x00FFFFFF toggles all RGB bits; used for text selection
+ * highlighting and the text cursor blink effect.
+ */
+const _SRC_INVERT_ROW = `
+function invertRow(physAddr, n) {
+  var i = 0;
+  while (i < n) {
+    mem32[physAddr + i * 4] = mem32[physAddr + i * 4] ^ 0x00ffffff;
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
 
 type JITFn = ((...args: number[]) => number) | null;
 
@@ -387,6 +489,12 @@ var _hexNibble:      JITFn = null;
 var _blendRowAlpha:  JITFn = null;
 var _scanNonAlpha8:  JITFn = null;
 var _unescape2B:     JITFn = null;
+var _blendConstAlpha:JITFn = null;
+var _parseDecInt:    JITFn = null;
+var _scanWS:         JITFn = null;
+var _clampByte:      JITFn = null;
+var _rgbLuma:        JITFn = null;
+var _invertRow:      JITFn = null;
 var _ready = false;
 
 // ─── Script Pre-compilation Cache ─────────────────────────────────────────────
@@ -660,6 +768,12 @@ export const JITBrowserEngine = {
     _blendRowAlpha   = tryCompile(_SRC_BLEND_ROW_ALPHA,   'blendRowAlpha');
     _scanNonAlpha8   = tryCompile(_SRC_SCAN_NON_ALPHA8,   'scanNonAlpha8');
     _unescape2B      = tryCompile(_SRC_UNESCAPE2B,        'unescape2B');
+    _blendConstAlpha = tryCompile(_SRC_BLEND_CONST_ALPHA, 'blendConstAlpha');
+    _parseDecInt     = tryCompile(_SRC_PARSE_DEC_INT,     'parseDecInt');
+    _scanWS          = tryCompile(_SRC_SCAN_WS,           'scanWS');
+    _clampByte       = tryCompile(_SRC_CLAMP_BYTE,        'clampByte');
+    _rgbLuma         = tryCompile(_SRC_RGB_LUMA,          'rgbLuma');
+    _invertRow       = tryCompile(_SRC_INVERT_ROW,        'invertRow');
 
     _browserJITStats.domOpsNative = _stringHash !== null;
     _browserJITStats.cssNative    = _parseCSSInt !== null;
@@ -780,6 +894,48 @@ export const JITBrowserEngine = {
   unescape2B(physAddr: number, offset: number): number {
     if (_unescape2B) return _unescape2B(physAddr, offset);
     return 0;
+  },
+
+  /** Blend src row into dst with constant global alpha [0-255]. */
+  blendConstAlpha(dst: number, src: number, n: number, alpha: number): void {
+    if (_blendConstAlpha) _blendConstAlpha(dst, src, n, alpha);
+  },
+
+  /** Parse decimal integer from ASCII bytes at physAddr[0..len). */
+  parseDecInt(physAddr: number, len: number): number {
+    if (_parseDecInt) return _parseDecInt(physAddr, len);
+    var n = 0; var sign = 1;
+    for (var i = 0; i < len; i++) {
+      var ch = kernel.readMem8(physAddr + i);
+      if (i === 0 && ch === 45) { sign = -1; continue; }
+      if (ch < 48 || ch > 57) break;
+      n = n * 10 + (ch - 48);
+    }
+    return n * sign;
+  },
+
+  /** Skip whitespace (≤ 0x20) forward from offset; returns first non-space offset or len. */
+  scanWS(physAddr: number, offset: number, len: number): number {
+    if (_scanWS) return _scanWS(physAddr, offset, len);
+    for (var i = offset; i < len; i++) if (kernel.readMem8(physAddr + i) > 32) return i;
+    return len;
+  },
+
+  /** Clamp x to [0, 255]. */
+  clampByte(x: number): number {
+    if (_clampByte) return _clampByte(x);
+    return x < 0 ? 0 : x > 255 ? 255 : x;
+  },
+
+  /** ITU-R BT.601 luminance: (77r + 150g + 29b) >> 8. */
+  rgbLuma(r: number, g: number, b: number): number {
+    if (_rgbLuma) return _rgbLuma(r, g, b);
+    return ((r * 77 + g * 150 + b * 29) >> 8) & 0xff;
+  },
+
+  /** XOR-invert RGB channels of n pixels at physAddr (preserves alpha). */
+  invertRow(physAddr: number, n: number): void {
+    if (_invertRow) _invertRow(physAddr, n);
   },
 
   // ── Script cache ──────────────────────────────────────────────────────────

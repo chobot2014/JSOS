@@ -35,8 +35,32 @@ import { _registerJITStats } from './sdk.js';
 import { writebackTimer } from '../fs/buffer-cache.js';
 import { ntp } from '../net/ntp.js';
 import { detectHypervisor } from '../process/guest-addons.js';
+import { gunzip } from '../net/deflate.js';
 
 declare var kernel: import('./kernel.js').KernelAPI; // kernel.js is in core/
+
+/**
+ * Pre-warm gzip/DEFLATE inner loops so QJSJITHook auto-JITs them before the
+ * first real network response.  Uses a known-valid 21-byte gzip of "A"
+ * (single fixed-Huffman block).  Called 4× so every inner function
+ * (gunzip, inflateDEFLATE, inflateBlock, huffDecode, BitReader) exceeds
+ * JIT_THRESHOLD=2 and gets compiled to native code before DHCP finishes.
+ */
+function _prewarmDeflate(): void {
+  // gzip of the single ASCII byte 'A' (0x41), fixed-Huffman DEFLATE block.
+  // gunzip() skips the CRC32+ISIZE trailer so the last 8 bytes can be zero.
+  var _GZ: number[] = [
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, // gzip header
+    0x73, 0x04, 0x00,                                             // DEFLATE 'A' + EOB
+    0x43, 0xbe, 0xb7, 0xe8,                                       // CRC32 (not checked)
+    0x01, 0x00, 0x00, 0x00,                                       // ISIZE = 1
+  ];
+  // 4 calls: functions reached >=2 calls early; 3rd call triggers native compile.
+  try { gunzip(_GZ); } catch (_) {}
+  try { gunzip(_GZ); } catch (_) {}
+  try { gunzip(_GZ); } catch (_) {}
+  try { gunzip(_GZ); } catch (_) {}
+}
 
 /** Route console.log / .error / .warn through the TypeScript terminal */
 function setupConsole(): void {
@@ -267,6 +291,12 @@ function main(): void {
       // CSS int parse, composite row, text width, HTML scan) so the browser
       // renders pages at native speed from the very first page load.
       JITBrowserEngine.init();
+
+      // Pre-warm the gzip/DEFLATE pipeline so the first HTTP response is fast.
+      // This runs gunzip() 4x on a tiny synthetic payload, causing QJSJITHook
+      // to compile huffDecode/inflateBlock/BitReader to native before DHCP fires.
+      _prewarmDeflate();
+      kernel.serialPut('[boot] deflate pipeline pre-warmed\n');
 
       // Register JIT stats providers so os.system.jitStats() returns live data.
       _registerJITStats(qjsJit, () => JITOSKernels.stats());
