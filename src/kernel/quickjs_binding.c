@@ -590,8 +590,12 @@ static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JS
         _js_fault_active = 0;
         JS_FreeCString(c, code);
         JS_ResetAfterFault(c, _saved_frame);
-        return JS_ThrowInternalError(c, "CPU exception #%d during script execution",
-                                     recovered - 1);
+        /* Return UNDEFINED (not JS_EXCEPTION) so the outer QJS interpreter
+         * sees a clean normal return and resumes executing the next opcode.
+         * Throwing here would run JS exception-dispatch machinery on a context
+         * whose heap may be partially corrupted — that path reliably hangs.
+         * The fault is already printed to serial by the kernel ISR. */
+        return JS_UNDEFINED;
     }
     JSValue result = JS_Eval(c, code, len, filename, JS_EVAL_TYPE_GLOBAL);
     _js_fault_active = 0;
@@ -628,8 +632,9 @@ static JSValue js_call_guarded(JSContext *c, JSValueConst this_val, int argc, JS
     if (recovered != 0) {
         _js_fault_active = 0;
         JS_ResetAfterFault(c, _saved_frame);
-        return JS_ThrowInternalError(c, "CPU exception #%d in guarded call",
-                                     recovered - 1);
+        /* Same as js_eval_guarded — return UNDEFINED to avoid triggering
+         * exception dispatch in a post-longjmp QJS context. */
+        return JS_UNDEFINED;
     }
     JSValue result = JS_Call(c, argv[0], JS_UNDEFINED,
                              argc - 1,
