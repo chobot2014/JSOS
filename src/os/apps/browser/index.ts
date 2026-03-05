@@ -1590,6 +1590,9 @@ export class BrowserApp implements App {
 
   // ── Navigation ────────────────────────────────────────────────────────────
 
+  /** Public entry-point: navigate the browser to `url`. */
+  navigate(url: string): void { this._navigate(url); }
+
   private _navigate(url: string): void {
     // Flush all per-page caches (layout, styles, images) before loading new page
     flushAllCaches();

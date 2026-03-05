@@ -280,6 +280,8 @@ function main(): void {
           if (conf) {
             kernel.serialPut('[net] DHCP ok: ' + conf.ip + ' gw ' + conf.gateway + '\n');
             ntp.startPeriodicSync();
+            // Navigate the browser to HN now that the network stack has an IP.
+            browserApp.navigate('https://news.ycombinator.com/');
           } else {
             kernel.serialPut('[net] DHCP: no offer — no network\n');
           }

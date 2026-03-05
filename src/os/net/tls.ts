@@ -409,7 +409,6 @@ export class TLSSocket {
   handshake(remoteIP: string, remotePort: number): boolean {
     if (!net.connect(this.sock, remoteIP, remotePort)) return false;
     var ok = this._performHandshake();
-    kernel.serialPut('[dbg] pv_alert=' + (this._got_pv_alert ? 1 : 0) + ' ok=' + (ok ? 1 : 0) + '\n');
     if (!ok && this._got_pv_alert) {
       // Server rejected TLS 1.3 (protocol_version alert) â€” retry with TLS 1.2
       kernel.serialPut('[tls] TLS 1.3 rejected by ' + this.hostname + ', retrying with TLS 1.2\n');
@@ -436,7 +435,6 @@ export class TLSSocket {
   handshakeOnConnected(sock: Socket, remoteIP?: string, remotePort?: number): boolean {
     this.sock = sock;
     var ok = this._performHandshake();
-    kernel.serialPut('[dbg] pv_alert=' + (this._got_pv_alert ? 1 : 0) + ' ok=' + (ok ? 1 : 0) + '\n');
     if (!ok && this._got_pv_alert && remoteIP) {
       kernel.serialPut('[tls] TLS 1.3 rejected by ' + this.hostname + ', retrying with TLS 1.2\n');
       net.close(this.sock);
@@ -1045,14 +1043,6 @@ export class TLSSocket {
 
     putU16(body, exts.length);
     body = body.concat(exts);
-
-    // DEBUG: dump ALL extension bytes to serial for diagnosis
-    var _dbg = '[tls] CH exts(' + exts.length + '):';
-    for (var _di = 0; _di < exts.length; _di++) {
-      var _hx = exts[_di].toString(16);
-      _dbg += (_hx.length === 1 ? '0' : '') + _hx + ' ';
-    }
-    kernel.serialPut(_dbg + '\n');
 
     // Handshake header
     var hs: number[] = [];
@@ -1670,12 +1660,6 @@ export class TLSSocket {
     var ch = this._buildClientHello12();
     // transcript for TLS 1.2: all handshake messages (without record headers)
     this.transcript = ch.slice(5);  // skip 5-byte record header
-    // DEBUG: dump TLS 1.2 ClientHello bytes
-    var _ch12dbg = '[tls12] CH12(' + ch.length + '):';
-    for (var _ci = 0; _ci < ch.length && _ci < 80; _ci++) {
-      var _cx = ch[_ci].toString(16); _ch12dbg += (_cx.length === 1 ? '0' : '') + _cx + ' ';
-    }
-    kernel.serialPut(_ch12dbg + '\n');
     if (!net.sendBytes(this.sock, ch)) return false;
 
     // Read ServerHello
