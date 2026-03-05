@@ -1476,7 +1476,7 @@ export function createPageJS(
 
     _setState(state: number): void {
       this.readyState = state;
-      try { if (this.onreadystatechange) this.onreadystatechange({ target: this }); } catch(_) {}
+      if (this.onreadystatechange) _callGuarded(this.onreadystatechange, { target: this });
     }
 
     send(body?: string | FormData_ | null): void {
@@ -1836,8 +1836,8 @@ export function createPageJS(
     }
     _fire(type: string, extra?: Record<string, unknown>): void {
       var ev = { type, target: this, loaded: 0, total: 0, lengthComputable: false, ...extra };
-      var on = (this as any)['on' + type]; if (typeof on === 'function') on.call(this, ev);
-      var lst = this._listeners.get(type); if (lst) for (var fn of lst) fn.call(this, ev);
+      var on = (this as any)['on' + type]; if (typeof on === 'function') _callGuarded(on, ev);
+      var lst = this._listeners.get(type); if (lst) for (var fn of lst) _callGuarded(fn, ev);
     }
 
     _read(blob: Blob, asArrayBuffer: boolean, encoding?: string): void {
@@ -1972,7 +1972,7 @@ export function createPageJS(
     _flush(): void {
       if (!this._active || this._records.length === 0) return;
       var r = this._records; this._records = [];
-      try { this._fn(r, this); } catch (_) {}
+      _callGuarded(this._fn, r, this);
     }
     _shouldRecord(mut: any): boolean {
       if (this._watching.length === 0) return true; // no targets = observe all (legacy compat)
@@ -2048,7 +2048,7 @@ export function createPageJS(
           time: _perf.now(),
         });
       }
-      if (entries.length > 0) try { this._fn(entries, this); } catch (_) {}
+      if (entries.length > 0) _callGuarded(this._fn, entries, this);
     }
   }
 
@@ -2095,7 +2095,7 @@ export function createPageJS(
             contentBoxSize:[{ inlineSize: r.width, blockSize: r.height }] });
         }
       }
-      if (entries.length > 0) try { this._fn(entries); } catch (_) {}
+      if (entries.length > 0) _callGuarded(this._fn, entries);
     }
   }
 
@@ -2119,7 +2119,7 @@ export function createPageJS(
       this.reason = reason !== undefined ? reason : new Error('AbortError');
       var ev = { type: 'abort', target: this };
       if (this.onabort) try { this.onabort(ev); } catch (_) {}
-      for (var fn of this._listeners) try { fn(ev); } catch (_) {}
+      for (var fn of this._listeners) _callGuarded(fn, ev);
     }
     static timeout(ms: number): AbortSignalImpl {
       var s = new AbortSignalImpl();
@@ -2961,9 +2961,9 @@ export function createPageJS(
   function _wsFireEvent(ws: WebSocket_, type: string, extra?: Record<string, unknown>): void {
     var ev = Object.assign({ type, target: ws }, extra || {});
     var arr = (ws as any)._listeners as Map<string, Array<(e: unknown) => void>>;
-    if (arr) { var fns = arr.get(type); if (fns) for (var fn of fns) try { fn(ev); } catch(_) {} }
+    if (arr) { var fns = arr.get(type); if (fns) for (var fn of fns) _callGuarded(fn, ev); }
     var onFn = (ws as any)['on' + type];
-    if (typeof onFn === 'function') try { onFn.call(ws, ev); } catch(_) {}
+    if (typeof onFn === 'function') _callGuarded(onFn, ev);
   }
 
   /** Poll all active WebSocket connections for incoming data. */
@@ -3709,7 +3709,7 @@ export function createPageJS(
     var limit = 1000;
     while (_microtaskQueue.length > 0 && limit-- > 0) {
       var fn = _microtaskQueue.shift()!;
-      try { fn(); } catch (e) { _fireScriptError(e); }
+      _callGuarded(fn);  // re-arms _js_fault_active so JIT bugs in Promise callbacks are recoverable
     }
     // Also drain native QuickJS Promise jobs (e.g. Promise.then() callbacks)
     // This is required because QuickJS's job queue is not drained automatically
