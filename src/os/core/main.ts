@@ -367,7 +367,7 @@ function main(): void {
         wmInst.tick();           // poll input, render, composite, flip
         init.tick(kernel.getUptime());          // respawn crashed services (item 718)
         writebackTimer.tick(kernel.getTicks()); // flush dirty blocks every 30 s (item 189)
-        kernel.sleep(16);        // halt CPU until next ~2 timer ticks (~20 ms)
+        kernel.sleep(8);         // halt CPU until next timer tick (~10 ms at 100 Hz)
       }
     }
   }
