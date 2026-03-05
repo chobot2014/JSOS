@@ -1179,7 +1179,7 @@ export function createPageJS(
     dispatchEvent(ev: VEvent): boolean {
       var arr = this._listeners.get(ev.type); if (!arr) return true;
       for (var fn of arr) {
-        try { fn(ev); } catch(e) { _fireScriptError(e); }
+        _callGuarded(fn, ev);
       }
       return !ev.defaultPrevented;
     }
@@ -6139,6 +6139,18 @@ export function createPageJS(
     try { doc.dispatchEvent(errEv); } catch(_) {}
   }
 
+  // Helper: call fn with CPU-fault protection so JIT bugs in callbacks
+  // (RAF / timers / event listeners) throw catchable JS errors instead of
+  // halting the OS.  Falls back to a plain try/catch when the C binding is
+  // unavailable (e.g. unit-test environments).
+  function _callGuarded(fn: (...a: any[]) => any, ...args: any[]): void {
+    if (typeof (kernel as any).callGuarded === 'function') {
+      try { (kernel as any).callGuarded(fn, ...args); } catch(e) { _fireScriptError(e); }
+    } else {
+      try { (fn as any)(...args); } catch(e) { _fireScriptError(e); }
+    }
+  }
+
   function execScript(code: string, scriptURL?: string): void {
     // ── Script size guard ──────────────────────────────────────────────────────
     // Use kernel.evalGuarded for:
@@ -6940,7 +6952,7 @@ export function createPageJS(
       if (rafCallbacks.length) {
         var cbs = rafCallbacks.splice(0);
         for (var r of cbs) {
-          try { r.fn(nowMs); } catch(e) { _fireScriptError(e); }
+          _callGuarded(r.fn, nowMs);
           _drainMicrotasks();
         }
         checkDirty();
@@ -6952,7 +6964,7 @@ export function createPageJS(
       for (var i = timers.length - 1; i >= 0; i--) {
         var t = timers[i];
         if (elapsed >= t.fireAt) {
-          try { t.fn(); } catch(e) { _fireScriptError(e); }
+          _callGuarded(t.fn);
           _drainMicrotasks();
           if (t.interval) { t.fireAt = elapsed + t.delay; }
           else { timers.splice(i, 1); }

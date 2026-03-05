@@ -599,6 +599,42 @@ static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JS
     return JS_UNDEFINED;
 }
 
+/*
+ * kernel.callGuarded(fn [, arg1, arg2, ...])
+ *
+ * Call a JavaScript function with CPU-fault recovery.  If the execution
+ * of fn triggers a hardware exception (#PF, #GP, #UD, #DE) the handler
+ * longjmp()s back here and we throw a catchable InternalError instead
+ * of halting the OS.
+ *
+ * This is the companion to evalGuarded for callbacks — RAF handlers,
+ * setTimeout callbacks, and event listeners contain JIT-compiled code that
+ * runs between evalGuarded calls (where _js_fault_active == 0), so any JIT
+ * bug in a callback currently halts the OS.  callGuarded re-arms the fault
+ * checkpoint for each callback invocation.
+ */
+static JSValue js_call_guarded(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    _js_fault_active = 1;
+    _js_fault_vector = 0;
+    int recovered = setjmp(_js_fault_buf);
+    if (recovered != 0) {
+        _js_fault_active = 0;
+        return JS_ThrowInternalError(c, "CPU exception #%d in guarded call",
+                                     recovered - 1);
+    }
+    JSValue result = JS_Call(c, argv[0], JS_UNDEFINED,
+                             argc - 1,
+                             argc > 1 ? argv + 1 : (JSValueConst *)NULL);
+    _js_fault_active = 0;
+    if (JS_IsException(result)) {
+        return JS_EXCEPTION;
+    }
+    JS_FreeValue(c, result);
+    return JS_UNDEFINED;
+}
+
 /*  Function table  */
 /* ── Framebuffer bindings ──────────────────────────────────────────── */
 
@@ -3227,6 +3263,7 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     /* Eval */
     JS_CFUNC_DEF("eval",         1, js_eval),
     JS_CFUNC_DEF("evalGuarded",  1, js_eval_guarded),
+    JS_CFUNC_DEF("callGuarded",  1, js_call_guarded),
     /* ATA block device */
     JS_CFUNC_DEF("ataPresent",     0, js_ata_present),
     JS_CFUNC_DEF("ataSectorCount", 0, js_ata_sector_count),
