@@ -620,14 +620,27 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
           if (!rParsed) { f.callback(null, 'Invalid redirect URL: ' + rURL); return 'done'; }
           f.currentURL = rURL;
           f.parsed     = rParsed;
-          // Try pool for redirect target
+          // _returnOrClose() already cleared f.sock/f.tls; always reset pooled flag
+          // so _cleanupFetch() correctly owns any new socket we create below.
+          f.pooled = false;
+          // Try H2 pool first for https targets (avoids a full TCP+TLS handshake
+          // when we already have a live h2 connection to the redirect target).
+          if (rParsed.protocol === 'https') {
+            var rH2p = _h2PoolGet(rParsed.host, rParsed.port);
+            if (rH2p) {
+              f.h2conn = rH2p;
+              f.stage  = 'h2-sending';
+              return 'pending';
+            }
+          }
+          // Try HTTP/1.1 keep-alive pool
           var rPooled = _poolGet(rParsed.host, rParsed.port, rParsed.protocol === 'https');
           if (rPooled) {
-            f.sock   = rPooled.sock;
-            f.tls    = rPooled.tls;
+            f.sock    = rPooled.sock;
+            f.tls     = rPooled.tls;
             f.fetchIP = dnsResolveCached(rParsed.host) || f.fetchIP;
-            f.pooled = true;
-            f.stage  = 'sending';
+            f.pooled  = true;
+            f.stage   = 'sending';
             return 'pending';
           }
           var rIP = dnsResolveCached(rParsed.host);
@@ -769,9 +782,14 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
                 return 'pending';
               }
             }
-            // Fall back to normal connection flow
-            f.h2conn = null;
+            // Fall back to normal connection flow.
+            // Clear stale h2/tls references — the 'tls' stage checks if (f.tls)
+            // to decide whether to create a new TLS socket; leaving the old
+            // reference would make it try hsPoll() on the discarded socket.
+            f.h2conn     = null;
             f.h2streamId = 0;
+            f.tls        = null;   // ← must clear so 'tls' stage starts fresh
+            f.pooled     = false;  // ← new socket below is not pooled
             var h2rIP = dnsResolveCached(h2rParsed.host);
             if (h2rIP) {
               f.fetchIP  = h2rIP;
