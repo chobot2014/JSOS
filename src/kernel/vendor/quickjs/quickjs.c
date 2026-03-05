@@ -2512,9 +2512,14 @@ void JS_ResetAfterFault(JSContext *ctx, void *saved_stack_frame)
     /* Clear any sticky error flags */
     rt->current_exception_is_uncatchable = FALSE;
     rt->in_out_of_memory = FALSE;
-    /* Drain the stale exception unconditionally (JS_GetException clears it) */
-    JSValue ex = JS_GetException(ctx);
-    JS_FreeValue(ctx, ex);
+    /* Blast the stale exception WITHOUT calling JS_FreeValue / JS_GetException.
+     * The exception object (if any) was allocated in a heap that was
+     * mid-operation when the hardware fault fired.  Its refcount and internal
+     * pointers may be garbage.  Calling FreeValue dereferences them and
+     * triggers a second #PF (with _js_fault_active == 0 this time) which
+     * halts the OS.  We intentionally leak the object — it's a one-per-crash
+     * leak on an already-corrupted allocation, not a steady-state leak. */
+    rt->current_exception = JS_UNINITIALIZED;
 }
 
 static inline BOOL is_strict_mode(JSContext *ctx)
