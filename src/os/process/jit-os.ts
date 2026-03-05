@@ -347,6 +347,129 @@ function popCount32(x) {
 }
 `;
 
+/**
+ * SHA-256 block compression function.
+ * Reads h[0..7] and W[0..63] from physmem, extends W[16..63] in-place,
+ * runs 64 rounds, then accumulates the result back into h.
+ * "kAddr" must point to the 64-entry 256-byte K constant table.
+ */
+const _SRC_SHA256_BLOCK = `
+function sha256Block(hAddr, wAddr, kAddr) {
+  var i = 16;
+  while (i < 64) {
+    var w15 = mem32[wAddr + (i - 15) * 4];
+    var w2  = mem32[wAddr + (i -  2) * 4];
+    var s0 = ((w15 >>> 7) | (w15 << 25)) ^ ((w15 >>> 18) | (w15 << 14)) ^ (w15 >>> 3);
+    var s1 = ((w2  >>> 17) | (w2  << 15)) ^ ((w2  >>> 19) | (w2  << 13)) ^ (w2  >>> 10);
+    mem32[wAddr + i * 4] = (mem32[wAddr + (i - 16) * 4] + s0 + mem32[wAddr + (i - 7) * 4] + s1) | 0;
+    i = i + 1;
+  }
+  var a  = mem32[hAddr];
+  var b  = mem32[hAddr +  4];
+  var c  = mem32[hAddr +  8];
+  var d  = mem32[hAddr + 12];
+  var e  = mem32[hAddr + 16];
+  var f  = mem32[hAddr + 20];
+  var g  = mem32[hAddr + 24];
+  var hh = mem32[hAddr + 28];
+  var j = 0;
+  while (j < 64) {
+    var S1  = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+    var ch  = (e & f) ^ (~e & g);
+    var t1  = (hh + S1 + ch + mem32[kAddr + j * 4] + mem32[wAddr + j * 4]) | 0;
+    var S0  = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+    var maj = (a & b) ^ (a & c) ^ (b & c);
+    var t2  = (S0 + maj) | 0;
+    hh = g; g = f; f = e; e = (d + t1) | 0;
+    d = c; c = b; b = a; a = (t1 + t2) | 0;
+    j = j + 1;
+  }
+  mem32[hAddr]      = (mem32[hAddr]      + a)  | 0;
+  mem32[hAddr +  4] = (mem32[hAddr +  4] + b)  | 0;
+  mem32[hAddr +  8] = (mem32[hAddr +  8] + c)  | 0;
+  mem32[hAddr + 12] = (mem32[hAddr + 12] + d)  | 0;
+  mem32[hAddr + 16] = (mem32[hAddr + 16] + e)  | 0;
+  mem32[hAddr + 20] = (mem32[hAddr + 20] + f)  | 0;
+  mem32[hAddr + 24] = (mem32[hAddr + 24] + g)  | 0;
+  mem32[hAddr + 28] = (mem32[hAddr + 28] + hh) | 0;
+  return 0;
+}
+`;
+
+/**
+ * ChaCha20 block function (RFC 7539 §2.1).
+ * stateAddr — physmem address of 16-word initial state (64 bytes).
+ * outAddr   — physmem address of 64-byte output scratch (also used as
+ *             working copy during the 20 rounds; ends with byte output).
+ * rndTabAddr — physmem address of 32-byte QR index table (bytes: a,b,c,d × 8).
+ */
+const _SRC_CHACHA20_BLOCK = `
+function chacha20Block(stateAddr, outAddr, rndTabAddr) {
+  var i = 0;
+  while (i < 16) {
+    mem32[outAddr + i * 4] = mem32[stateAddr + i * 4];
+    i = i + 1;
+  }
+  var round = 0;
+  while (round < 10) {
+    var qr = 0;
+    while (qr < 8) {
+      var ia = mem8[rndTabAddr + qr * 4];
+      var ib = mem8[rndTabAddr + qr * 4 + 1];
+      var ic = mem8[rndTabAddr + qr * 4 + 2];
+      var id = mem8[rndTabAddr + qr * 4 + 3];
+      var sa = mem32[outAddr + ia * 4];
+      var sb = mem32[outAddr + ib * 4];
+      var sc = mem32[outAddr + ic * 4];
+      var sd = mem32[outAddr + id * 4];
+      sa = (sa + sb) | 0; sd = sd ^ sa; sd = (sd << 16) | (sd >>> 16);
+      sc = (sc + sd) | 0; sb = sb ^ sc; sb = (sb << 12) | (sb >>> 20);
+      sa = (sa + sb) | 0; sd = sd ^ sa; sd = (sd <<  8) | (sd >>> 24);
+      sc = (sc + sd) | 0; sb = sb ^ sc; sb = (sb <<  7) | (sb >>> 25);
+      mem32[outAddr + ia * 4] = sa;
+      mem32[outAddr + ib * 4] = sb;
+      mem32[outAddr + ic * 4] = sc;
+      mem32[outAddr + id * 4] = sd;
+      qr = qr + 1;
+    }
+    round = round + 1;
+  }
+  i = 0;
+  while (i < 16) {
+    var w = (mem32[outAddr + i * 4] + mem32[stateAddr + i * 4]) | 0;
+    mem8[outAddr + i * 4]     =  w         & 0xff;
+    mem8[outAddr + i * 4 + 1] = (w >>>  8) & 0xff;
+    mem8[outAddr + i * 4 + 2] = (w >>> 16) & 0xff;
+    mem8[outAddr + i * 4 + 3] = (w >>> 24) & 0xff;
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * Adler-32 checksum over a physmem region (RFC 1950 §2).
+ * s1/s2 are initial accumulator values (use 1/0 for a fresh hash).
+ * Returns (s2 << 16) | s1.
+ * ADLER_MOD = 65521 is the largest prime < 2^16.
+ */
+const _SRC_ADLER32 = `
+function adler32(physAddr, len, s1, s2) {
+  var ADLER_MOD = 65521;
+  var a = s1 & 0xffff;
+  var b = s2 & 0xffff;
+  var i = 0;
+  while (i < len) {
+    a = a + (mem8[physAddr + i] & 0xff);
+    if (a >= ADLER_MOD) a = a - ADLER_MOD;
+    b = b + a;
+    if (b >= ADLER_MOD) b = b - ADLER_MOD;
+    i = i + 1;
+  }
+  return (b << 16) | a;
+}
+`;
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  CRC-32 table (256 × uint32)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -423,10 +546,46 @@ var _nativToLower8:  ((...a: number[]) => number) | null = null;
 var _nativScanCRLF:  ((...a: number[]) => number) | null = null;
 var _nativSumBuf:    ((...a: number[]) => number) | null = null;
 var _nativClamp32:   ((...a: number[]) => number) | null = null;
-var _nativPopCount:  ((...a: number[]) => number) | null = null;
+var _nativPopCount:     ((...a: number[]) => number) | null = null;
+var _nativSHA256Block:  ((...a: number[]) => number) | null = null;
+var _nativChaCha20Block:((...a: number[]) => number) | null = null;
+var _nativAdler32:      ((...a: number[]) => number) | null = null;
 
 /** Physical address of the CRC-32 table once copied to a shared kernel buffer. */
 var _crc32TablePhys: number = 0;
+
+// SHA-256 K constants (64 × uint32, big-endian values as per FIPS 180-4)
+function _buildSHA256KTable(): Uint32Array {
+  return new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ]);
+}
+const _sha256KData = _buildSHA256KTable();
+/** Physical address of SHA-256 K table in shared physmem. */
+var _sha256KPhys: number = 0;
+
+// ChaCha20 quarter-round index table: 8 sets of (a,b,c,d) byte indices
+// Column rounds: (0,4,8,12),(1,5,9,13),(2,6,10,14),(3,7,11,15)
+// Diagonal rounds: (0,5,10,15),(1,6,11,12),(2,7,8,13),(3,4,9,14)
+const _chacha20QRIndexTab = new Uint8Array([
+  0,  4,  8, 12,
+  1,  5,  9, 13,
+  2,  6, 10, 14,
+  3,  7, 11, 15,
+  0,  5, 10, 15,
+  1,  6, 11, 12,
+  2,  7,  8, 13,
+  3,  4,  9, 14,
+]);
+/** Physical address of ChaCha20 QR index table in shared physmem. */
+var _chacha20QRTabPhys: number = 0;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Public API
@@ -738,6 +897,58 @@ export const JITOps = {
   isNative(): boolean { return _nativXorBuf !== null; },
 };
 
+/** Physmem-addressed crypto primitives compiled to native x86-32. */
+export const JITCrypto = {
+  /**
+   * SHA-256 block compression — reads/writes physmem directly.
+   * hAddr  : 32 bytes  — 8 × uint32 hash state (a..h), updated in-place.
+   * wAddr  : 256 bytes — 64 × uint32 message schedule (W[0..15] pre-filled;
+   *                      W[16..63] extended by the kernel).
+   * Requires JITOSKernels.init() to have been called first.
+   * Returns true if the native path was taken.
+   */
+  sha256Block(hAddr: number, wAddr: number): boolean {
+    if (_nativSHA256Block && _sha256KPhys) {
+      _nativSHA256Block(hAddr, wAddr, _sha256KPhys);
+      return true;
+    }
+    return false;
+  },
+
+  /**
+   * ChaCha20 64-byte block — reads initial state from physmem, writes
+   * serialised 64-byte output to physmem.
+   * stateAddr : 64 bytes — 16 × uint32 initial state (little-endian).
+   * outAddr   : 64 bytes — scratch + output (bytes on return).
+   * Returns true if the native path was taken.
+   */
+  chacha20Block(stateAddr: number, outAddr: number): boolean {
+    if (_nativChaCha20Block && _chacha20QRTabPhys) {
+      _nativChaCha20Block(stateAddr, outAddr, _chacha20QRTabPhys);
+      return true;
+    }
+    return false;
+  },
+
+  /**
+   * Adler-32 checksum over a physmem region.
+   * s1In/s2In are running accumulators (1/0 for a fresh hash).
+   * Returns (s2 << 16) | s1 packed result.
+   */
+  adler32(physAddr: number, len: number, s1In: number, s2In: number): number {
+    if (_nativAdler32) return _nativAdler32(physAddr, len, s1In, s2In);
+    var a = s1In & 0xffff; var b = s2In & 0xffff;
+    for (var i = 0; i < len; i++) {
+      a = (a + (kernel.readMem8(physAddr + i) & 0xff)) % 65521;
+      b = (b + a) % 65521;
+    }
+    return (b << 16) | a;
+  },
+
+  /** True when all crypto JIT kernels are compiled and physmem tables ready. */
+  isNative(): boolean { return _nativSHA256Block !== null && _sha256KPhys !== 0; },
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Boot initialisation
 // ─────────────────────────────────────────────────────────────────────────────
@@ -790,7 +1001,10 @@ export const JITOSKernels = {
     _nativScanCRLF   = tryCompile(_SRC_SCAN_CRLF,      'scanCRLF');
     _nativSumBuf     = tryCompile(_SRC_SUM_BUF,        'sumBuf');
     _nativClamp32    = tryCompile(_SRC_CLAMP32,        'clamp32');
-    _nativPopCount   = tryCompile(_SRC_POP_COUNT32,    'popCount32');
+    _nativPopCount      = tryCompile(_SRC_POP_COUNT32,    'popCount32');
+    _nativSHA256Block   = tryCompile(_SRC_SHA256_BLOCK,   'sha256Block');
+    _nativChaCha20Block = tryCompile(_SRC_CHACHA20_BLOCK, 'chacha20Block');
+    _nativAdler32       = tryCompile(_SRC_ADLER32,        'adler32');
 
     // Write the CRC table into a shared ArrayBuffer so JIT native can access it
     if (_nativCRC32) {
@@ -801,6 +1015,28 @@ export const JITOSKernels = {
       } else {
         // physAddrOf unavailable (old kernel) — disable JIT CRC
         _nativCRC32 = null;
+      }
+    }
+
+    // Wire SHA-256 K table into physmem
+    if (_nativSHA256Block) {
+      var sha256KAB = _sha256KData.buffer;
+      var sha256KPhys = kernel.physAddrOf ? kernel.physAddrOf(sha256KAB) : 0;
+      if (sha256KPhys) {
+        _sha256KPhys = sha256KPhys;
+      } else {
+        _nativSHA256Block = null;  // no physAddrOf — fall back to TS
+      }
+    }
+
+    // Wire ChaCha20 QR index table into physmem
+    if (_nativChaCha20Block) {
+      var qrTabAB = _chacha20QRIndexTab.buffer;
+      var qrTabPhys = kernel.physAddrOf ? kernel.physAddrOf(qrTabAB) : 0;
+      if (qrTabPhys) {
+        _chacha20QRTabPhys = qrTabPhys;
+      } else {
+        _nativChaCha20Block = null;  // no physAddrOf — fall back to TS
       }
     }
 

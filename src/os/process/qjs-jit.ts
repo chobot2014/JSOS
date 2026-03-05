@@ -79,7 +79,7 @@ export const JSVALUE_SIZE = 8;
 export const DEOPT_SENTINEL = 0x7FFFDEAD;
 
 /** Call count threshold at which a function is compiled. */
-export const JIT_THRESHOLD = 5;
+export const JIT_THRESHOLD = 2;
 
 /** Maximum allowed deoptimisations before a function is blacklisted. */
 export const MAX_DEOPTS = 3;
