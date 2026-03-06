@@ -455,6 +455,80 @@ function diffOffset(addrA, addrB, len) {
 `;
 
 /**
+ * AES block encrypt — full SubBytes/ShiftRows/MixColumns/AddRoundKey
+ * performed in physmem.  The block (16 bytes at blockAddr) is encrypted
+ * in-place using expanded key (at ekAddr) and S-box table (at sboxAddr).
+ * nr = number of rounds (10 for AES-128, 14 for AES-256).
+ *
+ * MixColumns uses branchless xtime:
+ *   xtime(x) = ((x << 1) ^ ((0 - ((x >> 7) & 1)) & 0x1b)) & 0xff
+ *   gmul(2,x) = xtime(x)
+ *   gmul(3,x) = xtime(x) ^ x
+ *
+ * Hot for every TLS record (called once per 16-byte block in GCM-CTR mode).
+ */
+const _SRC_AES_BLOCK = `
+function aesBlock(sboxAddr, ekAddr, blockAddr, nr) {
+  var i = 0;
+  while (i < 16) {
+    mem8[blockAddr + i] = mem8[blockAddr + i] ^ mem8[ekAddr + i];
+    i = i + 1;
+  }
+  var rnd = 1;
+  while (rnd <= nr) {
+    i = 0;
+    while (i < 16) {
+      mem8[blockAddr + i] = mem8[sboxAddr + (mem8[blockAddr + i] & 0xff)];
+      i = i + 1;
+    }
+    var t1 = mem8[blockAddr + 1];
+    mem8[blockAddr + 1] = mem8[blockAddr + 5];
+    mem8[blockAddr + 5] = mem8[blockAddr + 9];
+    mem8[blockAddr + 9] = mem8[blockAddr + 13];
+    mem8[blockAddr + 13] = t1;
+    var t2 = mem8[blockAddr + 2];
+    var t6 = mem8[blockAddr + 6];
+    mem8[blockAddr + 2] = mem8[blockAddr + 10];
+    mem8[blockAddr + 6] = mem8[blockAddr + 14];
+    mem8[blockAddr + 10] = t2;
+    mem8[blockAddr + 14] = t6;
+    var t3 = mem8[blockAddr + 3];
+    mem8[blockAddr + 3] = mem8[blockAddr + 15];
+    mem8[blockAddr + 15] = mem8[blockAddr + 11];
+    mem8[blockAddr + 11] = mem8[blockAddr + 7];
+    mem8[blockAddr + 7] = t3;
+    if (rnd < nr) {
+      var c = 0;
+      while (c < 4) {
+        var off = blockAddr + c * 4;
+        var a0 = mem8[off] & 0xff;
+        var a1 = mem8[off + 1] & 0xff;
+        var a2 = mem8[off + 2] & 0xff;
+        var a3 = mem8[off + 3] & 0xff;
+        var x0 = ((a0 << 1) ^ ((0 - ((a0 >> 7) & 1)) & 0x1b)) & 0xff;
+        var x1 = ((a1 << 1) ^ ((0 - ((a1 >> 7) & 1)) & 0x1b)) & 0xff;
+        var x2 = ((a2 << 1) ^ ((0 - ((a2 >> 7) & 1)) & 0x1b)) & 0xff;
+        var x3 = ((a3 << 1) ^ ((0 - ((a3 >> 7) & 1)) & 0x1b)) & 0xff;
+        mem8[off] = (x0 ^ x1 ^ a1 ^ a2 ^ a3) & 0xff;
+        mem8[off + 1] = (a0 ^ x1 ^ x2 ^ a2 ^ a3) & 0xff;
+        mem8[off + 2] = (a0 ^ a1 ^ x2 ^ x3 ^ a3) & 0xff;
+        mem8[off + 3] = (x0 ^ a0 ^ a1 ^ a2 ^ x3) & 0xff;
+        c = c + 1;
+      }
+    }
+    var rkOff = rnd * 16;
+    i = 0;
+    while (i < 16) {
+      mem8[blockAddr + i] = mem8[blockAddr + i] ^ mem8[ekAddr + rkOff + i];
+      i = i + 1;
+    }
+    rnd = rnd + 1;
+  }
+  return 0;
+}
+`;
+
+/**
  * SHA-256 block compression function.
  * Reads h[0..7] and W[0..63] from physmem, extends W[16..63] in-place,
  * runs 64 rounds, then accumulates the result back into h.
@@ -663,9 +737,41 @@ var _nativCountByte8:   ((...a: number[]) => number) | null = null;
 var _nativMinU8:        ((...a: number[]) => number) | null = null;
 var _nativMaxU8:        ((...a: number[]) => number) | null = null;
 var _nativDiffOffset:   ((...a: number[]) => number) | null = null;
+var _nativAESBlock:     ((...a: number[]) => number) | null = null;
 
 /** Physical address of the CRC-32 table once copied to a shared kernel buffer. */
 var _crc32TablePhys: number = 0;
+
+// AES S-box (256 bytes) — same values as crypto.ts, stored in a typed array
+// for physmem access by the JIT kernel.
+const _aesSboxData = new Uint8Array([
+  0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+  0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+  0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+  0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+  0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+  0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+  0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+  0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+  0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+  0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+  0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+  0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+  0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+  0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+  0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+  0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16,
+]);
+/** Physical address of AES S-box in shared physmem. */
+var _aesSboxPhys: number = 0;
+
+// Scratch buffers for JITAES.encryptBlock() — block (16 bytes) + key (240 bytes max)
+const _aesBlockBuf = new Uint8Array(16);
+const _aesKeyBuf   = new Uint8Array(240);
+var _aesBlockPhys: number = 0;
+var _aesKeyPhys:   number = 0;
+/** Reference-cache the last expanded key array to avoid re-copying. */
+var _aesLastEk: number[] | null = null;
 
 // SHA-256 K constants (64 × uint32, big-endian values as per FIPS 180-4)
 function _buildSHA256KTable(): Uint32Array {
@@ -1062,6 +1168,46 @@ export const JITCrypto = {
   isNative(): boolean { return _nativSHA256Block !== null && _sha256KPhys !== 0; },
 };
 
+/**
+ * AES block cipher — JIT-compiled SubBytes/ShiftRows/MixColumns/AddRoundKey.
+ *
+ * Provides a high-level `encryptBlock()` API that accepts JS arrays and handles
+ * physmem copy in/out transparently.  The expanded key is reference-cached so
+ * repeated calls with the same key object skip the 176/240-byte copy.
+ *
+ * Hot for every TLS record — called once per 16-byte block in GCM-CTR mode.
+ * A typical 16 KB TLS record = 1024 calls.
+ */
+export const JITAES = {
+  /**
+   * AES block encrypt (SubBytes + ShiftRows + MixColumns + AddRoundKey).
+   * block : 16-byte input (not modified).
+   * ek    : expanded key (176 bytes for AES-128, 240 for AES-256).
+   * Returns encrypted 16-byte result.
+   * Falls back to pure TypeScript when JIT is unavailable.
+   */
+  encryptBlock(block: number[], ek: number[]): number[] | null {
+    if (!_nativAESBlock || !_aesSboxPhys || !_aesBlockPhys || !_aesKeyPhys) return null;
+    // Copy expanded key only if it changed (reference equality = session reuse)
+    if (ek !== _aesLastEk) {
+      _aesLastEk = ek;
+      for (var i = 0; i < ek.length; i++) _aesKeyBuf[i] = ek[i];
+    }
+    // Copy input block
+    for (var i = 0; i < 16; i++) _aesBlockBuf[i] = block[i];
+    // Call JIT kernel (encrypts in-place at _aesBlockPhys)
+    var nr = (ek.length >> 4) - 1;  // 10 for AES-128, 14 for AES-256
+    _nativAESBlock(_aesSboxPhys, _aesKeyPhys, _aesBlockPhys, nr);
+    // Read result
+    var out: number[] = new Array(16);
+    for (var i = 0; i < 16; i++) out[i] = _aesBlockBuf[i];
+    return out;
+  },
+
+  /** True when AES JIT kernel is compiled and physmem tables ready. */
+  isNative(): boolean { return _nativAESBlock !== null && _aesSboxPhys !== 0; },
+};
+
 /** General-purpose physmem utility kernels compiled to native x86-32. */
 export const JITBufOps = {
   /** Find NUL terminator; returns length (≤ maxLen) of null-terminated string at physAddr. */
@@ -1168,6 +1314,7 @@ export const JITOSKernels = {
     _nativMinU8          = tryCompile(_SRC_MIN_U8,         'minU8');
     _nativMaxU8          = tryCompile(_SRC_MAX_U8,         'maxU8');
     _nativDiffOffset     = tryCompile(_SRC_DIFF_OFFSET,    'diffOffset');
+    _nativAESBlock       = tryCompile(_SRC_AES_BLOCK,      'aesBlock');
 
     // Write the CRC table into a shared ArrayBuffer so JIT native can access it
     if (_nativCRC32) {
@@ -1200,6 +1347,21 @@ export const JITOSKernels = {
         _chacha20QRTabPhys = qrTabPhys;
       } else {
         _nativChaCha20Block = null;  // no physAddrOf — fall back to TS
+      }
+    }
+
+    // Wire AES S-box, block scratch, and key scratch into physmem
+    if (_nativAESBlock) {
+      var sboxAB = _aesSboxData.buffer;
+      var sboxPhys = kernel.physAddrOf ? kernel.physAddrOf(sboxAB) : 0;
+      var blockPhys = kernel.physAddrOf ? kernel.physAddrOf(_aesBlockBuf.buffer) : 0;
+      var keyPhys   = kernel.physAddrOf ? kernel.physAddrOf(_aesKeyBuf.buffer) : 0;
+      if (sboxPhys && blockPhys && keyPhys) {
+        _aesSboxPhys  = sboxPhys;
+        _aesBlockPhys = blockPhys;
+        _aesKeyPhys   = keyPhys;
+      } else {
+        _nativAESBlock = null;  // no physAddrOf — fall back to TS
       }
     }
 

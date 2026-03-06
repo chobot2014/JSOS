@@ -14,6 +14,7 @@
  */
 
 import { strToBytes } from './net.js';
+import { JITAES } from '../process/jit-os.js';
 
 // ────────────────────────────────────────────────────── SHA-256 ──────────────
 
@@ -230,6 +231,10 @@ export function aesKeyExpand(key: number[]): number[] {
 }
 
 export function aesEncryptBlock(block: number[], ek: number[]): number[] {
+  // JIT fast path — native x86-32 SubBytes/ShiftRows/MixColumns/AddRoundKey
+  var jitResult = JITAES.encryptBlock(block, ek);
+  if (jitResult) return jitResult;
+  // TypeScript fallback
   var s = block.slice();
   var Nr = (ek.length >> 4) - 1;  // 10 for AES-128 (176B), 14 for AES-256 (240B)
   // AddRoundKey 0
