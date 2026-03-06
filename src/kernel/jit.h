@@ -3,8 +3,8 @@
  *
  * Provides the primitives used by the TypeScript JIT runtime:
  *
- *   jit_alloc          — carve RWX memory from the 8 MB main BSS pool.
- *   jit_proc_alloc     — carve memory from a per-child 512 KB slab.
+ *   jit_alloc          — carve RWX memory from the 64 MB main BSS pool.
+ *   jit_proc_alloc     — carve memory from a per-child 4 MB slab.
  *   jit_write          — bulk-copy machine code bytes into a JIT region.
  *   jit_call_i4    — call a JIT-compiled cdecl function with ≤4 int32 args.
  *   jit_used_bytes — diagnostic: bytes consumed in the pool.
@@ -12,6 +12,8 @@
  * On this bare-metal target all BSS pages are mapped with execute permission
  * (the GDT's flat code segment covers the full 4 GB address space), so no
  * mprotect / mmap trickery is needed.
+ *
+ * Pool layout: 128 MB total (64 MB main + 16 × 4 MB child slabs).
  */
 
 #ifndef JIT_H
@@ -61,12 +63,12 @@ double jit_call_d4(void *fn, double a0, double a1, double a2, double a3);
 
 /*
  * Return the number of bytes currently consumed in the main JIT pool.
- * The main pool capacity is 8 MB (8,388,608 bytes).
+ * The main pool capacity is 64 MB (67,108,864 bytes).
  */
 uint32_t jit_used_bytes(void);
 
 /*
- * Reset the main JIT pool bump pointer to zero, reclaiming all 8 MB.
+ * Reset the main JIT pool bump pointer to zero, reclaiming all 64 MB.
  * Must only be called AFTER the TypeScript JIT manager has cleared all
  * live jit_native_ptr fields via kernel.setJITNative(addr, 0).
  */

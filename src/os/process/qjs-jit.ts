@@ -6,7 +6,7 @@
  *   when a QuickJS function's call_count reaches JIT_THRESHOLD.  The hook callback
  *   triggers QJSJITCompiler to translate the function's bytecode into native i686
  *   machine code using the extended _Emit helpers.  The resulting code is placed in
- *   the 8 MB JIT pool (main context) or the per-process 512 KB slab (child context)
+ *   the 64 MB JIT pool (main context) or the per-process 4 MB slab (child context)
  *   via kernel.jitAlloc / kernel.jitProcAlloc.
  *
  *   kernel.setJITNative(bcAddr, nativeAddr) then writes the function pointer back
@@ -1326,7 +1326,7 @@ export class QJSJITHook {
   get floatCompiledCount(): number { return this._floatCompiled; }
 
   /**
-   * Full pool GC: clears all compiled native pointers and resets the 8 MB
+   * Full pool GC: clears all compiled native pointers and resets the 64 MB
    * bump allocator.  Compiled functions are re-eligible for compilation on
    * their next invocation.  O(n) in number of tracked functions.
    * Returns the number of bytes reclaimed.
@@ -1345,7 +1345,7 @@ export class QJSJITHook {
       }
     }
 
-    // Phase 2: reset the bump allocator — reclaims all 8 MB.
+    // Phase 2: reset the bump allocator — reclaims all 64 MB.
     const reclaimed = (kernel as any).jitMainReset() as number;
     this._resets++;
     if (typeof (kernel as any).serialPut === 'function') {

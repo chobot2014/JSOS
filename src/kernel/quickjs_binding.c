@@ -50,11 +50,11 @@ static JSContext *ctx = NULL;
 
 /* ── Phase 10: Multi-process pool ─────────────────────────────────────────
  * Each slot is an independent QuickJS runtime (separate GC, heap, globals).
- * Up to 8 concurrent child processes; up to 1 GB heap each (JS_SetMemoryLimit soft cap;
+ * Up to 16 concurrent child processes; up to 1 GB heap each (JS_SetMemoryLimit soft cap;
  * no pre-allocation — pages come from the shared 2 GB NOLOAD _sbrk window lazily).
  * IPC is done via ring-buffer message queues in BSS (parent ↔ child).
  */
-#define JSPROC_MAX       8
+#define JSPROC_MAX       16
 #define JSPROC_MSGSLOTS  8
 #define JSPROC_MSGSIZE   2048
 

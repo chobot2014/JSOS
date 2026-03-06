@@ -9,12 +9,21 @@
 #include "jit.h"
 #include <string.h>
 
-/* ── Pool layout (12 MB total) ──────────────────────────────────────────── */
+/* ── Pool layout (128 MB total) ─────────────────────────────────────────── */
+/*
+ * The pool needs to be large enough to JIT-compile complex web applications
+ * (YouTube's JS alone can produce 10+ MB of native code).  With 16 child
+ * slots at 4 MB each and a 64 MB main pool, the system can support multiple
+ * browser tabs + workers running JIT-compiled JS simultaneously.
+ *
+ * QEMU runs at -m 4G; the 2 GB NOLOAD sbrk window is separate from BSS.
+ * Total BSS with this pool ≈ 160 MB — well within the 4 GB address space.
+ */
 
-#define JIT_POOL_SIZE     (12u * 1024u * 1024u)  /* 12 MB total              */
-#define JIT_MAIN_SIZE     (8u  * 1024u * 1024u)  /* 8 MB for main runtime    */
-#define JIT_PROC_SLOTS    8u
-#define JIT_PROC_SIZE     (512u * 1024u)          /* 512 KB per child process */
+#define JIT_POOL_SIZE     (128u * 1024u * 1024u) /* 128 MB total             */
+#define JIT_MAIN_SIZE     (64u  * 1024u * 1024u) /* 64 MB for main runtime   */
+#define JIT_PROC_SLOTS    16u
+#define JIT_PROC_SIZE     (4u   * 1024u * 1024u) /* 4 MB per child process   */
 
 _Static_assert(JIT_MAIN_SIZE + JIT_PROC_SLOTS * JIT_PROC_SIZE == JIT_POOL_SIZE,
                "JIT pool partition sizes do not add up");
@@ -93,7 +102,7 @@ uint32_t jit_used_bytes(void) {
 }
 
 /*
- * Reset the main JIT pool bump pointer to zero, reclaiming all 8 MB.
+ * Reset the main JIT pool bump pointer to zero, reclaiming all 64 MB.
  * The caller is responsible for clearing all jit_native_ptr fields in
  * JSFunctionBytecode structs before calling this — otherwise stale native
  * pointers will be called on re-entry.  (TypeScript QJSJITHook does this.)
