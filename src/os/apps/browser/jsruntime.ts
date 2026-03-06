@@ -6176,14 +6176,55 @@ export function createPageJS(
       cb.log('[JS exec] oversized-skip ' + (code.length / 1024 / 1024).toFixed(1) + 'MB ' + (scriptURL || '(inline)'));
       return;
     }
-    // ── Guarded execution path for large/risky scripts ───────────────────────
+    // ── Guarded execution path ───────────────────────────────────────────────
+    // Previously this called kernel.evalGuarded(rawCode) which ran the page
+    // script as a JS_Eval in the OS global context.  That caused heap corruption
+    // because page `var` declarations and property sets landed directly on
+    // ctx->global_obj (the OS's own QJS heap object), and the _bridgeToGlobal()
+    // getter/setter descriptors on that same object confused QuickJS's property
+    // table writer → #PF at 0x726F6D71 (a live JSString in the OS heap).
+    //
+    // Fix: compile the page script inside a `with(_winScope)` wrapper (identical
+    // to the non-guarded stage-1 path), then call the resulting Function through
+    // kernel.callGuarded(fn, _winScope).  This routes all identifier reads/writes
+    // through the _winScope Proxy → win, which is a plain JS object with no
+    // getters/setters on ctx->global_obj.  Page vars stay in win, not the OS
+    // global object, and the OS heap is not written to during page script eval.
+    //
+    // If the with() compilation throws a SyntaxError (class bodies, etc.) we fall
+    // back to stage-2: new Function(rawCode) called guarded with win as `this`.
     if (_useGuarded) {
       cb.log('[JS exec] guarded ' + (code.length / 1024).toFixed(1) + 'KB ' + (scriptURL || '(inline)'));
       _bridgeToGlobal();
+      var _guardedSrc = _prepareForWith(code);
+      var _guardedErr: any = null;
+      // Stage-1 guarded: with(_winScope) wrapper keeps page vars off ctx->global_obj
       try {
-        (kernel as any).evalGuarded(code);
+        var _gfn = new Function('__s__',
+          'with(__s__){\n' + _guardedSrc + '\n}') as (s: any) => void;
+        _callGuardedCtx('guarded-s1:' + (scriptURL || '(inline)').slice(-40), _gfn, _winScope);
       } catch (e) {
-        _fireScriptError(e);
+        var _emsg = String(e);
+        if (_emsg.indexOf('SyntaxError') === -1) {
+          // Runtime error — report and stop (no stage-2 retry for runtime failures)
+          _fireScriptError(e);
+          _guardedErr = null; // suppress stage-2
+        } else {
+          _guardedErr = e;  // compile error → try stage-2 below
+        }
+      }
+      // Stage-2 guarded fallback for scripts that fail inside with() (class bodies etc.)
+      if (_guardedErr !== null) {
+        cb.log('[JS exec] guarded-s2-fallback ' + (code.length / 1024).toFixed(1) + 'KB '
+          + (scriptURL || '(inline)') + ' (s1: ' + String(_guardedErr) + ')');
+        var _raw2 = (code.charCodeAt(0) === 35 && code.charCodeAt(1) === 33)
+          ? code.replace(/^#!.*/, '') : code;
+        try {
+          var _gfn2 = new Function(_raw2) as () => void;
+          _callGuardedCtx('guarded-s2:' + (scriptURL || '(inline)').slice(-40), _gfn2.bind(win));
+        } catch (e2) {
+          _fireScriptError(e2);
+        }
       }
       _bridgeToGlobal();
       _drainMicrotasks();  // drain any Promise jobs queued by the script
