@@ -25,8 +25,6 @@ import { cookieJar } from '../../net/http.js';
 import { getCachedStyle, setCachedStyle, bumpStyleGeneration, currentStyleGeneration } from './cache.js';
 import { JSAudioElement, JSVideoElement } from './audio-element.js';
 import { JITBrowserEngine } from './jit-browser.js';
-import { installFrameworkPolyfills } from './framework-polyfills.js';
-import { installCompatPolyfills } from './compat-polyfills.js';
 import type { CSSAnimation, AnimationKeyframe } from './advanced-css.js';
 import { sampleAnimation } from './advanced-css.js';
 import { buildWSFrame, parseWSFrame } from '../../net/http.js';
@@ -6869,11 +6867,8 @@ export function createPageJS(
     return true; // handled; don't apply immediately
   };
 
-  // ── Install framework / compatibility polyfills before any scripts run ────
-  // These fill gaps between our Web Platform API surface and what real-world
-  // frameworks (jQuery, React, Vue, Angular, Bootstrap, Tailwind) expect.
-  try { installFrameworkPolyfills(win); } catch(e) { cb.log('[polyfill] framework: ' + String(e)); }
-  try { installCompatPolyfills(win); } catch(e) { cb.log('[polyfill] compat: ' + String(e)); }
+  // Phase 0 cleanup: conflicting polyfill files deleted — jsruntime.ts now
+  // provides all Web Platform APIs directly; no external shim layers.
 
   // Site-specific optimization profiles removed — general-purpose implementation
   // now handles all sites via proper web-standards compliance.
