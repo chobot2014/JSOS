@@ -1157,17 +1157,18 @@ export class QJSJITHook {
 
     // V1 scope: only compile integer-specialised functions.
     // Bool (0/1) is treated as int32 — same representation in cdecl.
-    // Float64 and Any arg types require a future float-specialised tier.
+    // Float64 and Any arg types require the float-specialised tier.
     if (!entry.speculator.allIntegerLike() && argc > 0) {
       // Float64-specialised tier (item 851): attempt x87 FPU double-cdecl compilation.
-      // We do NOT register the result with kernel.setJITNative() because the current
-      // QuickJS C dispatch only passes int32 args.  The compiled function is stored in
-      // _floatFuncs for explicit call via kernel.jitCallF4(addr, d0, d1, d2, d3).
+      // The compiled function is registered with kernel.setJITNative(bcAddr, addr|1)
+      // so QuickJS auto-dispatches to jit_call_d4() with double args.
       if (entry.speculator.hasFloat64() &&
-          !entry.speculator.allIntegerLike() &&
           !this._floatFuncs.has(bcAddr) &&
-          entry.speculator.callCount >= JIT_THRESHOLD) {
+          entry.speculator.callCount >= JIT_THRESHOLD &&
+          argc <= 4) {  // jit_call_d4 supports max 4 double args
         this._tryCompileFloat(entry);
+        // If _tryCompileFloat succeeded, entry.nativeAddr is now set (tagged).
+        if (entry.nativeAddr) return 1;
       }
       // Never permanently blacklist float64 functions — they run correctly in
       // the interpreter.  Only blacklist truly uncompilable Any-arg functions
@@ -1289,9 +1290,11 @@ export class QJSJITHook {
 
   /**
    * Attempt to compile a Float64-specialised native function via the x87 FPU tier.
-   * The native address is stored in _floatFuncs for explicit kernel.jitCallF4() invocation.
-   * NOT registered with kernel.setJITNative() — auto-dispatch still uses the interpreter
-   * (integer-ABI only until the C-side double-arg extraction is wired up).
+   * The compiled function is registered with kernel.setJITNative() using bit-0
+   * tagging (nativeAddr | 1) so that the QuickJS C dispatch path recognises it
+   * as float64-ABI and calls jit_call_d4() with double args / double return.
+   *
+   * The tag bit is safe because JIT pool addresses are always >= 4-byte aligned.
    */
   private _tryCompileFloat(entry: FuncEntry): void {
     let bc: QJSBytecodeReader;
@@ -1307,13 +1310,21 @@ export class QJSJITHook {
     if (!nativeAddr) return;  // pool exhausted
 
     kernel.jitWrite(nativeAddr, new Uint8Array(native).buffer);
+
+    // Tag bit 0 → tells the C-side dispatch to use float64-ABI (jit_call_d4).
+    const taggedAddr = (nativeAddr | 1) >>> 0;
+    kernel.setJITNative(entry.bcAddr, taggedAddr);
+    entry.nativeAddr = taggedAddr;
+    entry.bailCount  = 0;
+
     this._floatFuncs.set(entry.bcAddr, nativeAddr);
     this._floatCompiled++;
+    this._compiled++;
 
     if (typeof (kernel as any).serialPut === 'function') {
       (kernel as any).serialPut(
         `[JIT-f64] compiled bc@${entry.bcAddr.toString(16)} ` +
-        `→ native@${nativeAddr.toString(16)} (${native.length}B)\n`
+        `→ native@${nativeAddr.toString(16)} (${native.length}B) [auto-dispatch]\n`
       );
     }
   }
@@ -1344,6 +1355,8 @@ export class QJSJITHook {
         e.blacklisted = false;  // allow recompilation
       }
     }
+    // Also clear float-compiled function references
+    this._floatFuncs.clear();
 
     // Phase 2: reset the bump allocator — reclaims all 64 MB.
     const reclaimed = (kernel as any).jitMainReset() as number;
@@ -1364,6 +1377,8 @@ export class QJSJITHook {
     entry.deoptCount++;
     this._jitDeopts++;
     entry.nativeAddr = 0; // clear so it can be recompiled
+    // Also clear any float-compiled entry so it can be re-attempted
+    this._floatFuncs.delete(bcAddr);
     if (entry.deoptCount >= MAX_DEOPTS) {
       entry.blacklisted = true;
       kernel.setJITNative(entry.bcAddr, DEOPT_SENTINEL);
@@ -1649,6 +1664,20 @@ export class FloatJITCompiler extends QJSJITCompiler {
         }
         case OP_plus: { pc++; break; }   // no-op for numeric
 
+        // ── Modulo (truncated remainder, like JS %) ─────────────────────────
+        case OP_mod: {
+          // Stack: [..., a, b]  b=TOS.  Result: a % b (truncated, like fmod)
+          popToST0();   // ST(0) = b (divisor)
+          popToST0();   // ST(0) = a (dividend), ST(1) = b
+          // FPREM: ST(0) = ST(0) mod ST(1) (partial, may need iterations)
+          // FPREM loop handles large a/b ratios.
+          e.fpremLoop();
+          // After FPREM: ST(0) = a%b, ST(1) = b (untouched).  Discard b.
+          e.fxch();      // ST(0)=b, ST(1)=result
+          e.fstpSt0();   // discard b → ST(0) = result
+          pushST0(); pc++; break;
+        }
+
         // ── Comparisons (push 1.0 or 0.0) ──────────────────────────────────
         // FCOMIP ST(0), ST(1): compares a vs b (ST(0)=a, ST(1)=b after dual-load)
         //   CF=1 if a < b, ZF=1 if a == b, both 0 if a > b
@@ -1684,6 +1713,71 @@ export class FloatJITCompiler extends QJSJITCompiler {
           popToST0(); popToST0();
           e.fcomip(); e.fstpSt0();
           e.setae(); intToBoolDouble(); pc++; break;  // !CF → a >= b
+        }
+
+        // ── Logical / bitwise unary ─────────────────────────────────────────
+        case OP_lnot: {
+          // Logical NOT: 0.0 → 1.0, non-zero → 0.0
+          popToST0();    // ST(0) = val
+          e.fldz();      // ST(0) = 0.0, ST(1) = val
+          e.fcomip();    // compare 0.0 vs val; pop 0.0
+          e.fstpSt0();   // discard val
+          // ZF=1 if 0.0 == val → truthy result
+          e.sete(); intToBoolDouble(); pc++; break;
+        }
+        case OP_not: {
+          // Bitwise NOT: ~ToInt32(val)
+          // Convert double to int32 via FISTP, NOT, convert back via FILD
+          popToST0();              // ST(0) = val
+          e.subEsp(4);             // reserve 4 bytes on stack
+          e.fistDwordEsp();        // FISTP: store ST(0) rounded to int32 at [ESP] & pop FPU
+          // NOT DWORD [ESP]: F7 /2 mod=00 rm=100(SIB) SIB=0x24
+          e.buf.push(0xF7, 0x14, 0x24);
+          e.fildDwordEsp();        // load ~int back as double into ST(0)
+          e.addEsp(4);             // release temp
+          pushST0(); pc++; break;
+        }
+
+        // ── Bitwise binary ops (double→int32, operate, int32→double) ────────
+        // Helper pattern: pop two doubles as int32, operate, push result as double.
+        // Uses two FISTP writes to consecutive [ESP] / [ESP+4] slots.
+        case OP_and: case OP_or: case OP_xor:
+        case OP_shl: case OP_sar: case OP_shr: {
+          // Stack: [..., a, b]  b=TOS
+          popToST0();              // ST(0) = b
+          e.subEsp(4);
+          e.fistDwordEsp();        // FISTP b → [ESP], pop FPU
+          popToST0();              // ST(0) = a
+          e.subEsp(4);
+          e.fistDwordEsp();        // FISTP a → [ESP], pop FPU
+          // Now: [ESP]=a (int32), [ESP+4]=b (int32)
+          e.peekTOS();             // EAX = a
+          // MOV ECX, [ESP+4]
+          e.movEspDispEcx(4);      // ECX = b
+          if (op === OP_and) {
+            // AND EAX, ECX: 21 C8
+            e.buf.push(0x21, 0xC8);
+          } else if (op === OP_or) {
+            // OR  EAX, ECX: 09 C8
+            e.buf.push(0x09, 0xC8);
+          } else if (op === OP_xor) {
+            // XOR EAX, ECX: 31 C8
+            e.buf.push(0x31, 0xC8);
+          } else if (op === OP_shl) {
+            // SHL EAX, CL:  D3 E0
+            e.buf.push(0xD3, 0xE0);
+          } else if (op === OP_sar) {
+            // SAR EAX, CL:  D3 F8
+            e.buf.push(0xD3, 0xF8);
+          } else { // OP_shr
+            // SHR EAX, CL:  D3 E8
+            e.buf.push(0xD3, 0xE8);
+          }
+          // Store result at [ESP], convert back to double
+          e.storeEspEax(0);        // [ESP] = result
+          e.fildDwordEsp();        // ST(0) = (double)result
+          e.addEsp(8);             // release both temp slots
+          pushST0(); pc++; break;
         }
 
         // ── Conditional branches ────────────────────────────────────────────

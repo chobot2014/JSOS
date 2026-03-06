@@ -17548,10 +17548,46 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
      * native code because the JIT can misidentify GC-managed pointer values
      * (string/object immediates) as numeric constants and emit stores to
      * those addresses, causing write #PF.  The interpreter handles them
-     * correctly via tag-checked dispatch. */
+     * correctly via tag-checked dispatch.
+     *
+     * Float64-ABI dispatch (Phase 1.1):
+     * If jit_native_ptr has bit 0 set, the function was compiled by the
+     * FloatJITCompiler (x87 FPU tier) with a double-cdecl ABI:
+     *   - All args are doubles, passed on the C stack
+     *   - Return value is double in ST(0)
+     * The actual code pointer is jit_native_ptr & ~1.
+     */
     {
     extern volatile int _js_in_page_eval;
     if (!_js_in_page_eval && b->jit_native_ptr) {
+        uintptr_t _jit_raw = (uintptr_t)b->jit_native_ptr;
+
+        if (_jit_raw & 1u) {
+            /* ── Float64-ABI dispatch (x87 FPU tier) ───────────────── */
+            extern double jit_call_d4(void *fn,
+                                      double a0, double a1,
+                                      double a2, double a3);
+/* Extract double from JSValue: float64→direct, int/bool→cast, else→0.0 */
+#define _DARG(i) ((i) < argc ? \
+            (JS_VALUE_GET_TAG(argv[i]) == JS_TAG_FLOAT64 \
+                ? JS_VALUE_GET_FLOAT64(argv[i]) \
+                : JS_VALUE_GET_TAG(argv[i]) == JS_TAG_INT \
+                    ? (double)JS_VALUE_GET_INT(argv[i]) \
+                    : JS_VALUE_GET_TAG(argv[i]) == JS_TAG_BOOL \
+                        ? (double)JS_VALUE_GET_INT(argv[i]) \
+                        : 0.0) \
+            : 0.0)
+            void *_jit_fn = (void *)(_jit_raw & ~(uintptr_t)1u);
+            double _jit_dret;
+            _jit_faulting_bc = (void *)b;
+            _jit_dret = jit_call_d4(_jit_fn,
+                                    _DARG(0), _DARG(1), _DARG(2), _DARG(3));
+            _jit_faulting_bc = NULL;
+#undef _DARG
+            return JS_NewFloat64(caller_ctx, _jit_dret);
+        }
+
+        /* ── Int32-ABI dispatch (integer tier) ─────────────────────── */
         extern int32_t jit_call_i4(void *fn,
                                    int32_t a0, int32_t a1,
                                    int32_t a2, int32_t a3);

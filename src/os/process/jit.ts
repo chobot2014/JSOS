@@ -897,6 +897,55 @@ export class _Emit {
   fabs():         void { this._w(0xD9); this._w(0xE1); }
   /** FXCH ST(1) — exchange ST(0) and ST(1). */
   fxch():         void { this._w(0xD9); this._w(0xC9); }
+
+  // ── Phase 1.1c: Additional x87 FPU instructions ───────────────────────────
+
+  /** FPREM — partial truncated remainder: ST(0) = ST(0) mod ST(1).
+   *  May require multiple iterations; check C2 in FPU status word.
+   *  Emits the full FPREM loop: FPREM; FNSTSW AX; TEST AH,4; JNZ $-5. */
+  fpremLoop(): void {
+    // FPREM
+    const loopTop = this.here();
+    this._w(0xD9); this._w(0xF8);
+    // FNSTSW AX — store FPU status word in AX
+    this._w(0xDF); this._w(0xE0);
+    // TEST AH, 0x04 — check C2 (bit 10 of status = bit 2 of AH)
+    this._w(0xF6); this._w(0xC4); this._w(0x04);
+    // JNZ back to FPREM (short jump, rel8)
+    this._w(0x75);
+    this._w((loopTop - (this.here() + 1)) & 0xFF);
+  }
+
+  /** FSQRT — ST(0) = sqrt(ST(0)). */
+  fsqrt():        void { this._w(0xD9); this._w(0xFA); }
+  /** FRNDINT — ST(0) = round ST(0) to integer per current FPU rounding mode. */
+  frndint():      void { this._w(0xD9); this._w(0xFC); }
+  /** FSIN — ST(0) = sin(ST(0)). Requires argument reduction for |x| > 2^63. */
+  fsin():         void { this._w(0xD9); this._w(0xFE); }
+  /** FCOS — ST(0) = cos(ST(0)). */
+  fcos():         void { this._w(0xD9); this._w(0xFF); }
+  /** FLDPI — push π onto the FPU stack. */
+  fldpi():        void { this._w(0xD9); this._w(0xEB); }
+  /** FLDL2E — push log₂(e) onto FPU stack. */
+  fldl2e():       void { this._w(0xD9); this._w(0xEA); }
+  /** FLDLN2 — push ln(2) onto FPU stack. */
+  fldln2():       void { this._w(0xD9); this._w(0xED); }
+  /** FYL2X — ST(1) = ST(1) × log₂(ST(0)); pop → result in ST(0). */
+  fyl2x():        void { this._w(0xD9); this._w(0xF1); }
+  /** F2XM1 — ST(0) = 2^ST(0) - 1 (requires -1 ≤ ST(0) ≤ +1). */
+  f2xm1():        void { this._w(0xD9); this._w(0xF0); }
+  /** FPATAN — ST(1) = atan2(ST(1), ST(0)); pop → result in ST(0). */
+  fpatan():       void { this._w(0xD9); this._w(0xF3); }
+
+  /** FNSTCW [ESP-2] — store FPU control word to memory (no wait). */
+  fnstcwEspMinus2(): void {
+    this._w(0xD9); this._w(0x7C); this._w(0x24); this._w(0xFE); // FNSTCW [ESP-2]
+  }
+  /** FLDCW [ESP-2] — load FPU control word from memory. */
+  fldcwEspMinus2(): void {
+    this._w(0xD9); this._w(0x6C); this._w(0x24); this._w(0xFE); // FLDCW [ESP-2]
+  }
+
   /** SETB  AL — set if CF=1 (below, unsigned / float a < b after FCOMIP). */
   setb():  void { this._w(0x0F); this._w(0x92); this._w(0xC0); }
   /** SETBE AL — set if CF|ZF (float a <= b). */
