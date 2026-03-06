@@ -326,9 +326,10 @@ export class QJSJITCompiler {
    * Addresses of C helper functions used by property-access and call slow paths.
    * Set via constructor helperAddrs parameter; 0 = not available (bail on slow path).
    */
-  protected _helperGetPropI32: number = 0;
-  protected _helperSetPropI32: number = 0;
-  protected _helperCallFn:     number = 0;
+  protected _helperGetPropI32:    number = 0;
+  protected _helperSetPropI32:    number = 0;
+  protected _helperCallFn:        number = 0;
+  protected _helperResolveNative: number = 0;
   /** OSR entry-point map: bcOffset → nativeOffset.  Populated during compile (item 856). */
   readonly osrEntries: Map<number, number> = new Map();
 
@@ -336,7 +337,7 @@ export class QJSJITCompiler {
               icTable?: InlineCacheTable,
               regAlloc?: RegAllocInfo,
               deoptLogAddr?: number,
-              helperAddrs?: { getPropI32: number; setPropI32: number; callFn: number }) {
+              helperAddrs?: { getPropI32: number; setPropI32: number; callFn: number; resolveNative?: number }) {
     this._e    = new _Emit();
     this._bc   = bc;
     this._argN = bc.argCount;
@@ -345,9 +346,10 @@ export class QJSJITCompiler {
     if (regAlloc)    this._regAlloc    = regAlloc;
     if (deoptLogAddr) this._deoptLogAddr = deoptLogAddr;
     if (helperAddrs) {
-      this._helperGetPropI32 = helperAddrs.getPropI32;
-      this._helperSetPropI32 = helperAddrs.setPropI32;
-      this._helperCallFn     = helperAddrs.callFn;
+      this._helperGetPropI32    = helperAddrs.getPropI32;
+      this._helperSetPropI32    = helperAddrs.setPropI32;
+      this._helperCallFn        = helperAddrs.callFn;
+      this._helperResolveNative = helperAddrs.resolveNative ?? 0;
     }
   }
 
@@ -841,82 +843,153 @@ export class QJSJITCompiler {
           pc++; break;
         }
 
-        // ── Function calls via C helper slow path ─────────────────────────
+        // ── Function calls ─────────────────────────────────────────────────
         // OP_call0 (0x42) / OP_call (0x43): [fn, a0..a_{argc-1}] → [result]
         // u16 argc operand at pc+1.  Supported argc: 0–4 (bail on > 4 or no helper).
-        // Calls jit_js_call_fn(fn_ptr, a0, a1, a2, a3, argc) via C helper.
+        //
+        // FAST PATH: if callee has a JIT-compiled int32-ABI native, call it
+        // directly (native → native) skipping the JSValue wrapping round-trip.
+        // SLOW PATH: falls back to jit_js_call_fn C helper.
         case OP_call0:
         case OP_call: {
           const callArgc = bc.u16(pc + 1);
           if (!this._helperCallFn || callArgc > 4) return null;
 
-          // Build cdecl frame for jit_js_call_fn(fn, a0, a1, a2, a3, argc).
-          // Current eval stack TOS..bottom: [a_{callArgc-1}, ..., a_0, fn_ptr]
-          // cdecl push order = rightmost arg first:
-          //   argc, a3, a2, a1 (or 0), a0 (or 0), fn_ptr
+          // Eval stack TOS..bottom: [a_{N-1}, ..., a_0, fn_ptr]
 
-          // Step 1: PUSH argc (rightmost arg → deepest in cdecl frame)
-          e.pushImm32(callArgc);
+          if (this._helperResolveNative) {
+            // ── Fast-path probe: jit_resolve_native(fn_ptr) → native addr or 0 ──
+            e.peekN(callArgc);                 // EAX = fn_ptr
+            e.pushEax();                       // cdecl arg
+            e.immEcx(this._helperResolveNative);
+            e.callEcx();
+            e.addEsp(4);                       // clean cdecl arg
+            e.testAA();                        // TEST EAX, EAX
+            const fixSlow = e.je();            // JE → slow_path
 
-          // Step 2: push zero-padding for unused arg slots (i=3 downto callArgc)
-          for (let i = 3; i >= callArgc; i--) e.pushImm32(0);
+            // ── Fast path: direct native-to-native call ──
+            // EAX = callee native addr.  Save in ECX (preserved across peekN).
+            e.movEcxEax();                     // ECX = native addr
 
-          // Step 3: push actual args from eval stack.
-          // After steps 1+2 we pushed (5-callArgc) bytes-of-4 items.
-          // The k-th iteration (0-indexed) pushes a_{callArgc-1-k}.
-          // Peek offset for a_{callArgc-1-k}: (5-callArgc + 2*k) slots = [ESP+(5-N+2k)*4]
-          for (let k = 0; k < callArgc; k++) {
-            e.peekN(5 - callArgc + 2 * k);  // MOV EAX, [ESP + offset]
+            // Build 4-arg cdecl frame.  Push order: a3(pad), a2(pad), ..., a0.
+            for (let i = 3; i >= callArgc; i--) e.pushImm32(0);  // zero-pad unused
+            for (let k = 0; k < callArgc; k++) {
+              // a_{N-1-k} shifted by (4-N) pads + k prior pushes:
+              e.peekN(4 - callArgc + 2 * k);  // EAX = a_{N-1-k}
+              e.pushEax();
+            }
+            e.callEcx();                       // CALL callee native
+            e.addEsp(16);                      // clean 4-arg cdecl frame
+            e.addEsp((callArgc + 1) * 4);      // clean eval stack (fn + args)
+            e.pushEax();                       // push int32 result
+            const fixDone = e.jmp();           // JMP → done
+
+            // ── Slow path: jit_js_call_fn(fn, a0..a3, argc) ──
+            e.patch(fixSlow, e.here());
+            e.pushImm32(callArgc);
+            for (let i = 3; i >= callArgc; i--) e.pushImm32(0);
+            for (let k = 0; k < callArgc; k++) {
+              e.peekN(5 - callArgc + 2 * k);
+              e.pushEax();
+            }
+            e.peekN(5 + callArgc);
+            e.pushEax();
+            e.immEcx(this._helperCallFn);
+            e.callEcx();
+            e.addEsp(24);
+            e.addEsp((callArgc + 1) * 4);
+            e.pushEax();
+
+            // Patch JMP → done
+            e.patch(fixDone, e.here());
+          } else {
+            // No resolveNative helper — slow path only.
+            e.pushImm32(callArgc);
+            for (let i = 3; i >= callArgc; i--) e.pushImm32(0);
+            for (let k = 0; k < callArgc; k++) {
+              e.peekN(5 - callArgc + 2 * k);
+              e.pushEax();
+            }
+            e.peekN(5 + callArgc);
+            e.pushEax();
+            e.immEcx(this._helperCallFn);
+            e.callEcx();
+            e.addEsp(24);
+            e.addEsp((callArgc + 1) * 4);
             e.pushEax();
           }
-
-          // Step 4: push fn_ptr (leftmost arg → on top = closest to return addr).
-          // After all pushes fn_ptr is at peekN(5 + callArgc).
-          e.peekN(5 + callArgc);  // MOV EAX, [ESP + (5+N)*4]
-          e.pushEax();
-
-          // Step 5: CALL helper
-          e.immEcx(this._helperCallFn);
-          e.callEcx();
-
-          // Step 6: clean cdecl frame (6 params × 4 bytes = 24)
-          e.addEsp(24);
-
-          // Step 7: clean original eval stack items (fn_ptr + callArgc args)
-          e.addEsp((callArgc + 1) * 4);
-
-          // Step 8: push int32 result
-          e.pushEax();
 
           pc += 3; break;
         }
 
         // OP_call_method (like OP_call but `this` sits between fn and args on
         // the eval stack): [fn_ptr, this, a0 .. a_{N-1}] → [result]
-        // Only difference from OP_call:
-        //   • fn_ptr is one slot deeper → peekN(6 + callArgc) instead of peekN(5 + callArgc)
+        // Differences from OP_call:
+        //   • fn_ptr is one slot deeper → peekN(callArgc+1) for resolve
         //   • eval-stack cleanup removes fn + this + N args → (callArgc + 2) * 4
         case OP_call_method: {
           const callArgc = bc.u16(pc + 1);
           if (!this._helperCallFn || callArgc > 4) return null;
 
-          // Build cdecl frame for jit_js_call_fn(fn, a0, a1, a2, a3, argc).
-          e.pushImm32(callArgc);
-          for (let i = 3; i >= callArgc; i--) e.pushImm32(0);
-          for (let k = 0; k < callArgc; k++) {
-            e.peekN(5 - callArgc + 2 * k);
+          // Eval stack TOS..bottom: [a_{N-1}, ..., a_0, this, fn_ptr]
+
+          if (this._helperResolveNative) {
+            // ── Fast-path probe ──
+            e.peekN(callArgc + 1);             // EAX = fn_ptr (below this + args)
+            e.pushEax();                       // cdecl arg
+            e.immEcx(this._helperResolveNative);
+            e.callEcx();
+            e.addEsp(4);
+            e.testAA();
+            const fixSlow = e.je();
+
+            // ── Fast path: direct native call ──
+            e.movEcxEax();                     // ECX = callee native addr
+            for (let i = 3; i >= callArgc; i--) e.pushImm32(0);
+            for (let k = 0; k < callArgc; k++) {
+              e.peekN(4 - callArgc + 2 * k);
+              e.pushEax();
+            }
+            e.callEcx();
+            e.addEsp(16);                      // clean 4-arg cdecl
+            e.addEsp((callArgc + 2) * 4);      // fn + this + args
+            e.pushEax();
+            const fixDone = e.jmp();
+
+            // ── Slow path ──
+            e.patch(fixSlow, e.here());
+            e.pushImm32(callArgc);
+            for (let i = 3; i >= callArgc; i--) e.pushImm32(0);
+            for (let k = 0; k < callArgc; k++) {
+              e.peekN(5 - callArgc + 2 * k);
+              e.pushEax();
+            }
+            e.peekN(6 + callArgc);
+            e.pushEax();
+            e.immEcx(this._helperCallFn);
+            e.callEcx();
+            e.addEsp(24);
+            e.addEsp((callArgc + 2) * 4);
+            e.pushEax();
+
+            e.patch(fixDone, e.here());
+          } else {
+            // No resolveNative — slow path only.
+            e.pushImm32(callArgc);
+            for (let i = 3; i >= callArgc; i--) e.pushImm32(0);
+            for (let k = 0; k < callArgc; k++) {
+              e.peekN(5 - callArgc + 2 * k);
+              e.pushEax();
+            }
+            e.peekN(6 + callArgc);
+            e.pushEax();
+            e.immEcx(this._helperCallFn);
+            e.callEcx();
+            e.addEsp(24);
+            e.addEsp((callArgc + 2) * 4);
             e.pushEax();
           }
-          // fn_ptr is one extra slot deep because `this` sits above it
-          e.peekN(6 + callArgc);
-          e.pushEax();
 
-          e.immEcx(this._helperCallFn);
-          e.callEcx();
-          e.addEsp(24);                      // clean 6-param cdecl frame
-          e.addEsp((callArgc + 2) * 4);      // fn + this + N args
-
-          e.pushEax();
           pc += 3; break;
         }
 
@@ -1088,7 +1161,7 @@ export class QJSJITHook {
    * Cached addresses of C JIT helper functions (getprop, setprop, call).
    * Loaded lazily on first compile via kernel.jitHelperAddrs().
    */
-  private _helperAddrs: { getPropI32: number; setPropI32: number; callFn: number } | null = null;
+  private _helperAddrs: { getPropI32: number; setPropI32: number; callFn: number; resolveNative: number } | null = null;
 
   constructor() {
     this._offsets = initOffsets();
@@ -1110,13 +1183,18 @@ export class QJSJITHook {
   }
 
   /** Load C helper addresses once from kernel.jitHelperAddrs() and cache. */
-  private _ensureHelperAddrs(): { getPropI32: number; setPropI32: number; callFn: number } | null {
+  private _ensureHelperAddrs(): { getPropI32: number; setPropI32: number; callFn: number; resolveNative: number } | null {
     if (this._helperAddrs) return this._helperAddrs;
     if (typeof kernel !== 'undefined' && typeof (kernel as any).jitHelperAddrs === 'function') {
-      const h = (kernel as any).jitHelperAddrs() as { getPropI32: number; setPropI32: number; callFn: number };
+      const h = (kernel as any).jitHelperAddrs() as { getPropI32: number; setPropI32: number; callFn: number; resolveNative?: number };
       if (h && h.getPropI32 && h.callFn) {
-        this._helperAddrs = h;
-        return h;
+        this._helperAddrs = {
+          getPropI32: h.getPropI32,
+          setPropI32: h.setPropI32,
+          callFn: h.callFn,
+          resolveNative: h.resolveNative ?? 0,
+        };
+        return this._helperAddrs;
       }
     }
     return null;

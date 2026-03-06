@@ -509,6 +509,13 @@ static JSValue js_qjs_offsets(JSContext *c, JSValueConst this_val,
     JS_SetPropertyStr(c, o, "cpoolPtr",      JS_NewUint32(c, 64));
     JS_SetPropertyStr(c, o, "cpoolCount",    JS_NewUint32(c, 58)); /* uint16 at [58] */
     JS_SetPropertyStr(c, o, "structSize",    JS_NewUint32(c, 96));
+
+    /* JSObject layout offsets for inline JIT-to-JIT call dispatch (Phase 1.1.4).
+     * These let the JIT compiler dereference JSObject* → JSFunctionBytecode*
+     * → jit_native_ptr entirely in generated x86 code without a C helper call. */
+    JS_SetPropertyStr(c, o, "objClassId",      JS_NewUint32(c, 6));  /* uint16_t class_id in JSObject */
+    JS_SetPropertyStr(c, o, "objFuncBC",       JS_NewUint32(c, 28)); /* u.func.function_bytecode in JSObject */
+    JS_SetPropertyStr(c, o, "classIdBCFunc",   JS_NewUint32(c, 13)); /* JS_CLASS_BYTECODE_FUNCTION */
     return o;
 }
 
@@ -2093,9 +2100,32 @@ static int32_t jit_js_call_fn(uint32_t fn_ptr,
 }
 
 /*
- * kernel.jitHelperAddrs() → {getPropI32, setPropI32, callFn}
- * Returns an object containing the uint32 physical addresses of the three
- * JIT runtime helper functions above.  JIT'd x86 code loads these addresses
+ * jit_resolve_native(fn_ptr) → uint32 native address or 0.
+ * Given a raw JSObject* pointer (uint32 from the JIT eval stack), resolves
+ * the callee's jit_native_ptr.  Returns 0 if the object isn't a bytecode
+ * function, isn't JIT-compiled, or uses float64-ABI (tagged bit 0).
+ * Called from JIT code as a fast resolve + fallback guard.
+ */
+static uint32_t jit_resolve_native(uint32_t fn_ptr)
+{
+    if (!fn_ptr) return 0;
+    uint8_t *obj = (uint8_t *)(uintptr_t)fn_ptr;
+    /* class_id is uint16_t at offset 6 in JSObject */
+    uint16_t class_id = *(uint16_t *)(obj + 6);
+    if (class_id != 13) return 0; /* JS_CLASS_BYTECODE_FUNCTION */
+    /* u.func.function_bytecode pointer at offset 28 in JSObject */
+    uint8_t *bc = *(uint8_t **)(obj + 28);
+    if (!bc) return 0;
+    /* jit_native_ptr at offset 24 in JSFunctionBytecode */
+    uintptr_t native = *(uintptr_t *)(bc + 24);
+    if (!native || (native & 1u)) return 0; /* null or float64-tagged */
+    return (uint32_t)native;
+}
+
+/*
+ * kernel.jitHelperAddrs() → {getPropI32, setPropI32, callFn, resolveNative}
+ * Returns an object containing the uint32 physical addresses of the
+ * JIT runtime helper functions.  JIT'd x86 code loads these addresses
  * into ECX and executes CALL ECX to invoke the helper in cdecl fashion.
  */
 static JSValue js_jit_get_helper_addrs(JSContext *c, JSValueConst this_val,
@@ -2109,6 +2139,8 @@ static JSValue js_jit_get_helper_addrs(JSContext *c, JSValueConst this_val,
         JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_setprop_i32));
     JS_SetPropertyStr(c, o, "callFn",
         JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_call_fn));
+    JS_SetPropertyStr(c, o, "resolveNative",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_resolve_native));
     return o;
 }
 
