@@ -635,20 +635,33 @@ static JSValue js_call_guarded(JSContext *c, JSValueConst this_val, int argc, JS
     void *_saved_frame = JS_GetCurrentStackFrame(c);
     _js_fault_active = 1;
     _js_fault_vector = 0;
+    /* Suppress JIT dispatch and compilation for ALL functions called during
+     * this guarded call.  callGuarded is used for page-script callbacks (RAF,
+     * timers, event handlers, Proxy traps in with(_winScope), etc.).  Without
+     * this, hot functions like the Proxy has/get/set traps reach JIT_THRESHOLD
+     * and get compiled to native code that embeds stale GC pointer constants,
+     * crashing on dispatch after heap mutation or longjmp recovery. */
+    _js_in_page_eval = 1;
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
         _js_fault_active = 0;
+        _js_in_page_eval = 0;
         /* Restore interrupts: ISR CLI was not paired with STI since we bypassed
          * the normal iret epilogue.  Kept disabled across longjmp to prevent a
          * timer IRQ from overwriting _js_fault_buf mid-flight. */
         __asm__ volatile("sti");
         JS_ResetAfterFault(c, _saved_frame);
-        return JS_UNDEFINED;
+        /* Return JS_TRUE so the TypeScript caller can detect "fault recovery
+         * happened" and stop all further page-script execution (the heap is
+         * dirty after longjmp — any further JS on this heap risks a fatal
+         * second fault with _js_fault_active==0). */
+        return JS_TRUE;
     }
     JSValue result = JS_Call(c, argv[0], JS_UNDEFINED,
                              argc - 1,
                              argc > 1 ? argv + 1 : (JSValueConst *)NULL);
     _js_fault_active = 0;
+    _js_in_page_eval = 0;
     if (JS_IsException(result)) {
         return JS_EXCEPTION;
     }
@@ -1252,14 +1265,32 @@ static JSValue js_sched_tick(JSContext *c, JSValueConst this_val,
  * the main runtime.  Must be called periodically from the JS event loop
  * so that Promise .then() / async-await callbacks fire correctly.
  * Returns the number of jobs that were executed.
- * Without this, Promise callbacks in page scripts never run!                 */
+ * Without this, Promise callbacks in page scripts never run!
+ *
+ * Promise callbacks originating from page scripts can trigger the same
+ * JIT/heap corruption as direct script execution, so we suppress JIT
+ * dispatch during draining and run under fault guard. */
 static JSValue js_drain_jobs(JSContext *c, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
     if (!rt) return JS_NewInt32(c, 0);
+    void *_saved_frame = JS_GetCurrentStackFrame(c);
+    _js_fault_active = 1;
+    _js_fault_vector = 0;
+    _js_in_page_eval = 1;
+    int recovered = setjmp(_js_fault_buf);
+    if (recovered != 0) {
+        _js_fault_active = 0;
+        _js_in_page_eval = 0;
+        __asm__ volatile("sti");
+        JS_ResetAfterFault(c, _saved_frame);
+        return JS_NewInt32(c, -1);  /* negative = fault during drain */
+    }
     int count = 0;
     JSContext *job_ctx = NULL;
     while (JS_ExecutePendingJob(rt, &job_ctx) > 0 && count < 10000) count++;
+    _js_fault_active = 0;
+    _js_in_page_eval = 0;
     return JS_NewInt32(c, count);
 }
 

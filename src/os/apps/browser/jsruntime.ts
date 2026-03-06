@@ -272,6 +272,14 @@ export function createPageJS(
   function clearTimeout_(id: number): void { timers = timers.filter(t => t.id !== id); }
   function clearInterval_(id: number): void { clearTimeout_(id); }
 
+  // After a CPU fault recovery (longjmp) the QuickJS heap is in an
+  // inconsistent state.  Any further JS execution on this heap risks a
+  // fatal second fault (with _js_fault_active==0 → system halt).
+  // When set, ALL page-script execution is stopped: no more callbacks,
+  // timers, RAF, microtasks, or new script evals for this page.  The page
+  // is effectively "Aw, Snap!"'d — only a navigation away clears the flag.
+  var _pageFaulted = false;
+
   // Mutation flag — reset after re-render check
   var needsRerender = false;
   function checkDirty(): void {
@@ -3709,15 +3717,25 @@ export function createPageJS(
   function queueMicrotask_(fn: () => void): void { _microtaskQueue.push(fn); }
 
   function _drainMicrotasks(): void {
+    if (_pageFaulted) return;  // heap dirty — do not run any more JS
     var limit = 1000;
     while (_microtaskQueue.length > 0 && limit-- > 0) {
       var fn = _microtaskQueue.shift()!;
       _callGuarded(fn);  // re-arms _js_fault_active so JIT bugs in Promise callbacks are recoverable
+      if (_pageFaulted) { _microtaskQueue.length = 0; return; }
     }
     // Also drain native QuickJS Promise jobs (e.g. Promise.then() callbacks)
     // This is required because QuickJS's job queue is not drained automatically
     // between JS function calls - only JS_ExecutePendingJob() drains it.
-    try { (kernel as any).drainJobs(); } catch(_) {}
+    // drainJobs is now fault-guarded on the C side; a negative return means
+    // a fault occurred during Promise job execution.
+    try {
+      var _djr = (kernel as any).drainJobs();
+      if (_djr < 0) {
+        _pageFaulted = true;
+        cb.log('[JS] page faulted during microtask drain — stopping all page script execution');
+      }
+    } catch(_) {}
   }
 
   // ── Scheduler (postTask) ──────────────────────────────────────────────────
@@ -6150,8 +6168,17 @@ export function createPageJS(
   // halting the OS.  Falls back to a plain try/catch when the C binding is
   // unavailable (e.g. unit-test environments).
   function _callGuarded(fn: (...a: any[]) => any, ...args: any[]): void {
+    if (_pageFaulted) return;  // heap is dirty — no more JS execution
     if (typeof (kernel as any).callGuarded === 'function') {
-      try { (kernel as any).callGuarded(fn, ...args); } catch(e) { _fireScriptError(e); }
+      try {
+        var _r = (kernel as any).callGuarded(fn, ...args);
+        // callGuarded returns true on longjmp fault recovery.  The heap is
+        // now dirty — set _pageFaulted to stop ALL further page JS execution.
+        if (_r === true) {
+          _pageFaulted = true;
+          cb.log('[JS] page faulted — stopping all page script execution');
+        }
+      } catch(e) { _fireScriptError(e); }
     } else {
       try { (fn as any)(...args); } catch(e) { _fireScriptError(e); }
     }
@@ -6161,11 +6188,14 @@ export function createPageJS(
   // to fire (when _jsDebug is on) so errors in _fireScriptError can be correlated
   // to the triggering callback in the serial log.
   function _callGuardedCtx(ctx: string, fn: (...a: any[]) => any, ...args: any[]): void {
+    if (_pageFaulted) return;  // heap dirty — skip
     if (_jsDebug) cb.log('[jscb] ' + ctx);
     _callGuarded(fn, ...args);
   }
 
   function execScript(code: string, scriptURL?: string): void {
+    // After a fault recovery the heap is dirty — no more page JS execution.
+    if (_pageFaulted) return;
     // ── Script size guard ──────────────────────────────────────────────────────
     // Always use kernel.evalGuarded when available — the JIT can generate bad
     // native code from ANY script (inline or external, large or tiny) and a
@@ -6226,9 +6256,14 @@ export function createPageJS(
           _fireScriptError(e2);
         }
       }
-      _bridgeToGlobal();
-      _drainMicrotasks();  // drain any Promise jobs queued by the script
-      checkDirty();
+      // After a fault recovery, skip all post-eval cleanup — the heap is dirty.
+      // _bridgeToGlobal, _drainMicrotasks, and checkDirty all touch the QJS heap
+      // and can trigger a fatal second fault with _js_fault_active==0.
+      if (!_pageFaulted) {
+        _bridgeToGlobal();
+        _drainMicrotasks();  // drain any Promise jobs queued by the script
+        checkDirty();
+      }
       return;
     }
 
