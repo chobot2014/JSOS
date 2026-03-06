@@ -19,7 +19,7 @@
  */
 
 import type { CSSProps } from './types.js';
-import { parseCSSColor, parseInlineStyle, registerCSSVarBlock, resolveCSSVars, resetCSSVars, setViewport } from './css.js';
+import { parseCSSColor, parseInlineStyle, registerCSSVarBlock, resolveCSSVars, resetCSSVars, setViewport, getViewport } from './css.js';
 import { buildRuleIndex, candidateRules, type RuleIndex } from './cache.js';
 
 export { resetCSSVars, setViewport };
@@ -334,6 +334,156 @@ export function parseDeclBlock(block: string): CSSProps {
   return parseInlineStyle(block);
 }
 
+// ── Media query evaluator ─────────────────────────────────────────────────────
+
+/**
+ * Evaluate a CSS media query condition against current viewport.
+ * Supports: min-width, max-width, min-height, max-height, screen, all,
+ * prefers-color-scheme, orientation, and/or/not combinators.
+ * Returns true if condition matches (or is empty).
+ */
+function evalMediaQuery(condition: string): boolean {
+  if (!condition) return true;
+  var vp = getViewport();
+  var c = condition.trim().toLowerCase();
+
+  // "all" or "screen" — always matches
+  if (c === 'all' || c === 'screen' || c === '') return true;
+  if (c === 'print') return false;  // we're not a printer
+
+  // Handle "not" prefix
+  if (c.startsWith('not ')) return !evalMediaQuery(c.slice(4));
+
+  // Handle "and" — all sub-conditions must match
+  if (c.indexOf(' and ') !== -1) {
+    var parts = c.split(' and ');
+    for (var ai = 0; ai < parts.length; ai++) {
+      if (!evalMediaQuery(parts[ai].trim())) return false;
+    }
+    return true;
+  }
+
+  // Handle comma (or) — any sub-condition must match
+  if (c.indexOf(',') !== -1) {
+    var orParts = c.split(',');
+    for (var oi = 0; oi < orParts.length; oi++) {
+      if (evalMediaQuery(orParts[oi].trim())) return true;
+    }
+    return false;
+  }
+
+  // Strip parens: (min-width: 768px)
+  if (c.startsWith('(') && c.endsWith(')')) c = c.slice(1, -1).trim();
+
+  // Feature queries
+  var colonIdx = c.indexOf(':');
+  if (colonIdx !== -1) {
+    var feature = c.slice(0, colonIdx).trim();
+    var value   = c.slice(colonIdx + 1).trim();
+    var px = parseFloat(value);
+
+    if (feature === 'min-width')  return vp.w >= px;
+    if (feature === 'max-width')  return vp.w <= px;
+    if (feature === 'min-height') return vp.h >= px;
+    if (feature === 'max-height') return vp.h <= px;
+    if (feature === 'orientation') return value === 'landscape' ? vp.w >= vp.h : vp.w < vp.h;
+    if (feature === 'prefers-color-scheme') return value === 'dark';  // JSOS uses dark theme
+    if (feature === 'prefers-reduced-motion') return value === 'no-preference';
+    if (feature === '-webkit-min-device-pixel-ratio' || feature === 'min-resolution') return true;
+  }
+
+  // Bare media type
+  if (c === 'screen' || c === 'all') return true;
+  return true;  // unknown → include rules (fail-open)
+}
+
+// ── @supports query evaluator ─────────────────────────────────────────────────
+
+/** Set of CSS properties the browser engine knows how to parse. */
+var _supportedProps = new Set([
+  'display', 'position', 'flex', 'flex-direction', 'flex-wrap', 'flex-grow',
+  'flex-shrink', 'flex-basis', 'justify-content', 'align-items', 'align-self',
+  'align-content', 'order', 'gap', 'row-gap', 'column-gap',
+  'grid-template-columns', 'grid-template-rows', 'grid-template-areas',
+  'grid-column', 'grid-row', 'grid-area',
+  'width', 'height', 'min-width', 'max-width', 'min-height', 'max-height',
+  'margin', 'padding', 'border', 'border-radius', 'box-sizing',
+  'color', 'background', 'background-color', 'background-image',
+  'font-size', 'font-weight', 'font-family', 'font-style',
+  'text-align', 'text-decoration', 'text-transform', 'text-overflow',
+  'line-height', 'letter-spacing', 'word-spacing', 'white-space',
+  'overflow', 'z-index', 'opacity', 'visibility', 'cursor',
+  'transform', 'transition', 'animation',
+  'box-shadow', 'text-shadow', 'outline',
+  'float', 'clear', 'vertical-align',
+]);
+
+/**
+ * Evaluate a CSS @supports condition.
+ * Supports: (property: value), not, and, or combinators.
+ * Returns true if condition is supported (or unknown → fail-open).
+ */
+function evalSupportsQuery(condition: string): boolean {
+  if (!condition) return true;
+  var c = condition.trim();
+
+  // Handle "not" prefix
+  if (c.toLowerCase().startsWith('not ')) return !evalSupportsQuery(c.slice(4));
+
+  // Handle "and" — split only outside parens
+  if (c.toLowerCase().indexOf(' and ') !== -1) {
+    var parts = _splitOutsideParens(c, ' and ');
+    if (parts.length > 1) {
+      for (var i = 0; i < parts.length; i++) {
+        if (!evalSupportsQuery(parts[i].trim())) return false;
+      }
+      return true;
+    }
+  }
+
+  // Handle "or"
+  if (c.toLowerCase().indexOf(' or ') !== -1) {
+    var orParts = _splitOutsideParens(c, ' or ');
+    if (orParts.length > 1) {
+      for (var j = 0; j < orParts.length; j++) {
+        if (evalSupportsQuery(orParts[j].trim())) return true;
+      }
+      return false;
+    }
+  }
+
+  // Strip outer parens: (display: flex) → display: flex
+  if (c.startsWith('(') && c.endsWith(')')) c = c.slice(1, -1).trim();
+
+  // Property: value check
+  var colonIdx = c.indexOf(':');
+  if (colonIdx !== -1) {
+    var prop = c.slice(0, colonIdx).trim().toLowerCase();
+    return _supportedProps.has(prop);
+  }
+
+  return true;  // unknown → fail-open
+}
+
+/** Split string by delimiter but only outside parentheses. */
+function _splitOutsideParens(s: string, delim: string): string[] {
+  var parts: string[] = [];
+  var depth = 0;
+  var start = 0;
+  var dl = delim.length;
+  for (var i = 0; i <= s.length - dl; i++) {
+    if (s[i] === '(') depth++;
+    else if (s[i] === ')') depth--;
+    else if (depth === 0 && s.slice(i, i + dl).toLowerCase() === delim.toLowerCase()) {
+      parts.push(s.slice(start, i));
+      start = i + dl;
+      i += dl - 1;
+    }
+  }
+  parts.push(s.slice(start));
+  return parts;
+}
+
 // ── Stylesheet tokeniser ──────────────────────────────────────────────────────
 
 /**
@@ -393,7 +543,7 @@ export function parseStylesheet(css: string): CSSRule[] {
       if (i < css.length && css[i] === ';') { i++; continue; } // @import etc
       if (i < css.length && css[i] === '{') {
         i++;
-        // For @media — parse inner rules
+        // For @media — parse inner rules if query matches
         if (atKw.startsWith('media') || atKw.startsWith('supports') || atKw.startsWith('layer')) {
           // Read inner content (handles one level of nesting)
           var depth2 = 1;
@@ -404,9 +554,20 @@ export function parseStylesheet(css: string): CSSRule[] {
             i++;
           }
           var inner = css.slice(start2, i - 1);
-          // Recursively parse inner rules (e.g. @media body rules)
-          var innerRules = parseStylesheet(inner);
-          rules.push(...innerRules);
+          // Evaluate @media condition (skip on mismatch)
+          var shouldInclude = true;
+          if (atKw.startsWith('media')) {
+            var mediaCondition = atKw.slice(5).trim();
+            shouldInclude = evalMediaQuery(mediaCondition);
+          } else if (atKw.startsWith('supports')) {
+            var supportsCondition = atKw.slice(8).trim();
+            shouldInclude = evalSupportsQuery(supportsCondition);
+          }
+          // @layer — always include (layer ordering not implemented)
+          if (shouldInclude) {
+            var innerRules = parseStylesheet(inner);
+            rules.push(...innerRules);
+          }
         } else {
           // Skip other at-rule blocks (@keyframes, @font-face, etc.)
           var d3 = 1;
@@ -420,28 +581,96 @@ export function parseStylesheet(css: string): CSSRule[] {
       continue;
     }
 
-    // Regular rule: selector(s) { declarations }
+    // Regular rule: selector(s) { declarations (may contain nested rules) }
     var selText = readUntil('{};');
     if (i >= css.length || css[i] !== '{') { i++; continue; }
     i++; // consume {
-    var declBlock = readUntil('}');
+
+    // Read balanced block content (handles nested {})
+    var blockStart = i;
+    var blockDepth = 1;
+    while (i < css.length && blockDepth > 0) {
+      var bch = css[i]!;
+      if (bch === '{') blockDepth++;
+      else if (bch === '}') blockDepth--;
+      if (blockDepth > 0) i++;
+    }
+    var fullBlock = css.slice(blockStart, i);
     if (i < css.length && css[i] === '}') i++; // consume }
 
     selText = selText.trim();
-    if (!selText || !declBlock.trim()) continue;
+    if (!selText || !fullBlock.trim()) continue;
 
-    var props = parseDeclBlock(declBlock);
-    // Split by comma (but not inside parens/strings)
-    var sels  = splitSelectors(selText);
+    // Check if block contains nested rules (CSS nesting: & .child { ... })
+    if (fullBlock.indexOf('{') !== -1) {
+      // Separate declarations from nested rules
+      var decls = '';
+      var ni = 0;
+      while (ni < fullBlock.length) {
+        // Skip whitespace
+        while (ni < fullBlock.length && fullBlock[ni]! <= ' ') ni++;
+        if (ni >= fullBlock.length) break;
+        // Check if this is a nested rule (contains { before ;)
+        var nextBrace = fullBlock.indexOf('{', ni);
+        var nextSemi  = fullBlock.indexOf(';', ni);
+        if (nextBrace !== -1 && (nextSemi === -1 || nextBrace < nextSemi)) {
+          // This is a nested rule — extract selector and balanced body
+          var nestedSel = fullBlock.slice(ni, nextBrace).trim();
+          ni = nextBrace + 1;
+          var nd2 = 1;
+          var nBodyStart = ni;
+          while (ni < fullBlock.length && nd2 > 0) {
+            if (fullBlock[ni] === '{') nd2++;
+            else if (fullBlock[ni] === '}') nd2--;
+            if (nd2 > 0) ni++;
+          }
+          var nestedBody = fullBlock.slice(nBodyStart, ni);
+          if (ni < fullBlock.length) ni++; // skip }
 
-    // Compute max specificity across comma-grouped selectors
-    var spec = 0;
-    for (var si = 0; si < sels.length; si++) {
-      var s2 = selectorSpecificity(sels[si]!);
-      if (s2 > spec) spec = s2;
+          // Flatten: replace & with parent selector, or prepend parent + space
+          var parentSels = splitSelectors(selText);
+          for (var ps = 0; ps < parentSels.length; ps++) {
+            var pSel = parentSels[ps]!;
+            var flatSel: string;
+            if (nestedSel.indexOf('&') !== -1) {
+              flatSel = nestedSel.replace(/&/g, pSel);
+            } else {
+              flatSel = pSel + ' ' + nestedSel;
+            }
+            // Recursively parse nested rule (supports multi-level nesting)
+            var nestedRules = parseStylesheet(flatSel + '{' + nestedBody + '}');
+            rules.push(...nestedRules);
+          }
+        } else {
+          // Regular declaration — collect until ;
+          var dEnd = nextSemi !== -1 ? nextSemi + 1 : fullBlock.length;
+          decls += fullBlock.slice(ni, dEnd);
+          ni = dEnd;
+        }
+      }
+
+      // Emit parent rule with its own declarations (if any)
+      if (decls.trim()) {
+        var props = parseDeclBlock(decls);
+        var sels2 = splitSelectors(selText);
+        var spec2 = 0;
+        for (var si2 = 0; si2 < sels2.length; si2++) {
+          var s3 = selectorSpecificity(sels2[si2]!);
+          if (s3 > spec2) spec2 = s3;
+        }
+        rules.push({ sels: sels2, props, spec: spec2 });
+      }
+    } else {
+      // No nesting — simple rule
+      var props = parseDeclBlock(fullBlock);
+      var sels  = splitSelectors(selText);
+      var spec = 0;
+      for (var si = 0; si < sels.length; si++) {
+        var s2 = selectorSpecificity(sels[si]!);
+        if (s2 > spec) spec = s2;
+      }
+      rules.push({ sels, props, spec });
     }
-
-    rules.push({ sels, props, spec });
   }
 
   return rules;

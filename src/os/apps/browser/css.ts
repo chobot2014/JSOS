@@ -5,6 +5,8 @@ var _vpW = 1920;
 var _vpH = 1080;
 /** Call before parsing a page so vw/vh units resolve correctly. */
 export function setViewport(w: number, h: number): void { _vpW = w; _vpH = h; }
+/** Get current viewport dimensions (used by media query evaluator). */
+export function getViewport(): { w: number; h: number } { return { w: _vpW, h: _vpH }; }
 
 // ── CSS Custom Properties (CSS variables) ─────────────────────────────────────
 

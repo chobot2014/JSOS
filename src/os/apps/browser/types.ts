@@ -61,6 +61,8 @@ export interface RenderNode {
   paddingBottom?: number;
   boxWidth?:    number;    // px — constrained column width (0=full)
   widthPct?:    number;    // % — width as percentage of container (0-100)
+  minWidth?:    number;    // px — minimum width clamp
+  maxWidth?:    number;    // px — maximum width clamp
   centerBlock?: boolean;   // true when margin: auto centering should apply
   children?:    RenderNode[];  // sub-nodes (flex-row children)
   // Extended CSS box model
@@ -86,6 +88,8 @@ export interface RenderNode {
   textTransform?: 'none' | 'uppercase' | 'lowercase' | 'capitalize';
   textOverflow?:  'clip' | 'ellipsis';  // item 465
   lineHeight?:   number;
+  letterSpacing?: number;  // px — extra space between characters
+  wordSpacing?:   number;  // px — extra space between words
   // Flex container
   flexDirection?:  'row' | 'row-reverse' | 'column' | 'column-reverse';
   flexWrap?:       'nowrap' | 'wrap' | 'wrap-reverse';
@@ -95,8 +99,10 @@ export interface RenderNode {
   // Flex child
   flexGrow?:    number;
   flexShrink?:  number;
+  flexBasis?:   number;    // px — initial main size before grow/shrink
   order?:       number;
   alignSelf?:   string;
+  alignContent?: string;   // multi-line flex cross-axis alignment
   // Clear floats (item 400)
   clear?:       'left' | 'right' | 'both' | 'none';
   // Box sizing (item 448)

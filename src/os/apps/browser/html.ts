@@ -352,6 +352,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     if (p.flexWrap       !== undefined) curCSS.flexWrap       = p.flexWrap;
     if (p.justifyContent !== undefined) curCSS.justifyContent = p.justifyContent;
     if (p.alignItems     !== undefined) curCSS.alignItems     = p.alignItems;
+    if (p.alignContent   !== undefined) curCSS.alignContent   = p.alignContent;
     if (p.flexGrow       !== undefined) curCSS.flexGrow       = p.flexGrow;
     if (p.flexShrink     !== undefined) curCSS.flexShrink     = p.flexShrink;
     if (p.flexBasis      !== undefined) curCSS.flexBasis      = p.flexBasis;
@@ -461,6 +462,8 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     if (curCSS.align)                   blk.textAlign    = curCSS.align;
     if (curCSS.width  && curCSS.width > 0) blk.boxWidth  = curCSS.width;
     if (curCSS.widthPct && curCSS.widthPct > 0) blk.widthPct = curCSS.widthPct;
+    if (curCSS.minWidth !== undefined) blk.minWidth  = curCSS.minWidth;
+    if (curCSS.maxWidth !== undefined) blk.maxWidth  = curCSS.maxWidth;
     if (curCSS.marginLeftAuto || curCSS.marginRightAuto) blk.centerBlock = true;
     if (curCSS.height && curCSS.height > 0) blk.height   = curCSS.height;
     if (curCSS.minHeight !== undefined) blk.minHeight  = curCSS.minHeight;
@@ -484,14 +487,19 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
     if (curCSS.whiteSpace !== undefined) blk.whiteSpace = curCSS.whiteSpace;
     if (curCSS.textTransform !== undefined) blk.textTransform = curCSS.textTransform;
     if (curCSS.lineHeight !== undefined) blk.lineHeight = curCSS.lineHeight;
+    if (curCSS.letterSpacing !== undefined) blk.letterSpacing = curCSS.letterSpacing;
+    if (curCSS.wordSpacing !== undefined) blk.wordSpacing = curCSS.wordSpacing;
     if (curCSS.flexDirection)  blk.flexDirection  = curCSS.flexDirection;
     if (curCSS.flexWrap)       blk.flexWrap       = curCSS.flexWrap;
     if (curCSS.justifyContent) blk.justifyContent = curCSS.justifyContent;
     if (curCSS.alignItems)     blk.alignItems     = curCSS.alignItems;
     if (curCSS.gap !== undefined) blk.gap          = curCSS.gap;
-    if (curCSS.flexGrow  !== undefined) blk.flexGrow  = curCSS.flexGrow;
-    if (curCSS.alignSelf !== undefined) blk.alignSelf = curCSS.alignSelf;
-    if (curCSS.order     !== undefined) blk.order     = curCSS.order;
+    if (curCSS.flexGrow    !== undefined) blk.flexGrow    = curCSS.flexGrow;
+    if (curCSS.flexShrink  !== undefined) blk.flexShrink  = curCSS.flexShrink;
+    if (curCSS.flexBasis   !== undefined) blk.flexBasis   = curCSS.flexBasis;
+    if (curCSS.alignSelf   !== undefined) blk.alignSelf   = curCSS.alignSelf;
+    if (curCSS.order       !== undefined) blk.order       = curCSS.order;
+    if (curCSS.alignContent !== undefined) blk.alignContent = curCSS.alignContent;
     // Grid container (items 404-405)
     if (curCSS.display === 'grid' || curCSS.display === 'inline-grid') {
       blk.type = 'grid';

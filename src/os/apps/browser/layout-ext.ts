@@ -498,7 +498,11 @@ export function groupByZIndex(
 function expandRepeat(template: string): string {
   return template.replace(/repeat\(\s*([^,]+?)\s*,\s*([^)]+?)\s*\)/gi, function(_, count, track) {
     var n = parseInt(count, 10);
-    if (isNaN(n) || n < 1) n = 1;  // auto-fill/auto-fit → treat as 1
+    if (isNaN(n) || n < 1) {
+      // auto-fill / auto-fit — estimate count from common track pattern
+      // Will be re-resolved in parseGridTrack with available width context
+      n = 1;  // placeholder, resolved properly in parseGridTrackAutoFill
+    }
     var parts: string[] = [];
     for (var i = 0; i < n; i++) parts.push(track.trim());
     return parts.join(' ');
@@ -544,6 +548,22 @@ function resolveTrackSz(tok: string, available: number, frUnit: number): number 
  */
 export function parseGridTrack(template: string, available: number): number[] {
   if (!template || template === 'none') return [];
+
+  // 0. Handle auto-fill / auto-fit before generic repeat expansion
+  var autoFillMatch = template.match(/repeat\(\s*(auto-fill|auto-fit)\s*,\s*([^)]+?)\s*\)/i);
+  if (autoFillMatch && available > 0) {
+    var afTrack = autoFillMatch[2].trim();
+    var afSize = resolveTrackSz(afTrack, available, 0);
+    if (isNaN(afSize)) afSize = 100;  // fallback for fr inside auto-fill
+    var mmAF = parseMinMax(afTrack, available);
+    if (!isNaN(mmAF)) afSize = mmAF;
+    if (afSize > 0) {
+      var afCount = Math.max(1, Math.floor(available / afSize));
+      var afParts: string[] = [];
+      for (var afi = 0; afi < afCount; afi++) afParts.push(afTrack);
+      template = template.replace(autoFillMatch[0], afParts.join(' '));
+    }
+  }
 
   // 1. Expand repeat()
   var expanded = expandRepeat(template);
@@ -645,10 +665,14 @@ export function layoutGrid(
   var rowGap    = gridNode.rowGap   ?? gap;
   var colGap    = gridNode.columnGap ?? gap;
 
+  var padLeft  = gridNode.paddingLeft  ?? 0;
+  var padRight = gridNode.paddingRight ?? 0;
+  var padTop   = gridNode.paddingTop   ?? 0;
+
   // Resolve column tracks
   var colTmpl = gridNode.gridTemplateColumns || '';
-  var colSizes = parseGridTrack(colTmpl, contentW - (gridNode.paddingLeft ?? 0) - (gridNode.paddingRight ?? 0));
-  if (colSizes.length === 0) colSizes = [contentW];  // single-column default
+  var colSizes = parseGridTrack(colTmpl, contentW - padLeft - padRight);
+  if (colSizes.length === 0) colSizes = [contentW - padLeft - padRight];
 
   var colCount = colSizes.length;
 
@@ -656,7 +680,33 @@ export function layoutGrid(
   var rowTmpl  = gridNode.gridTemplateRows || '';
   var rowSizes = parseGridTrack(rowTmpl, 0);
 
-  // Place children into grid cells
+  // ── Parse grid-template-areas ─────────────────────────────────────────
+  // "header header" "sidebar main" "footer footer" → areaMap[name] = { colStart, colEnd, rowStart, rowEnd }
+  var areaMap: Record<string, { colStart: number; colEnd: number; rowStart: number; rowEnd: number }> = {};
+  var areaTmpl = gridNode.gridTemplateAreas;
+  if (areaTmpl) {
+    var areaRows = areaTmpl.match(/"([^"]+)"/g) || areaTmpl.match(/'([^']+)'/g);
+    if (areaRows) {
+      for (var ari = 0; ari < areaRows.length; ari++) {
+        var arCells = areaRows[ari].replace(/["']/g, '').trim().split(/\s+/);
+        for (var arc = 0; arc < arCells.length; arc++) {
+          var aName = arCells[arc];
+          if (aName === '.') continue;  // dot = empty cell
+          if (!areaMap[aName]) {
+            areaMap[aName] = { colStart: arc + 1, colEnd: arc + 2, rowStart: ari + 1, rowEnd: ari + 2 };
+          } else {
+            // Expand area bounds
+            if (arc + 1 < areaMap[aName].colStart) areaMap[aName].colStart = arc + 1;
+            if (arc + 2 > areaMap[aName].colEnd) areaMap[aName].colEnd = arc + 2;
+            if (ari + 1 < areaMap[aName].rowStart) areaMap[aName].rowStart = ari + 1;
+            if (ari + 2 > areaMap[aName].rowEnd) areaMap[aName].rowEnd = ari + 2;
+          }
+        }
+      }
+    }
+  }
+
+  // ── Place children into grid cells ────────────────────────────────────
   type CellPos = { colStart: number; colEnd: number; rowStart: number; rowEnd: number };
   var placements: CellPos[] = [];
   var autoRow = 1;
@@ -664,10 +714,18 @@ export function layoutGrid(
 
   for (var ci = 0; ci < children.length; ci++) {
     var child = children[ci];
+
+    // Check grid-area name first
+    var childArea = child.gridArea;
+    if (childArea && areaMap[childArea]) {
+      placements.push(areaMap[childArea]);
+      continue;
+    }
+
     var colLine = parseGridLine(child.gridColumn ?? child.gridColumnStart, colCount);
     var rowLine = parseGridLine(child.gridRow    ?? child.gridRowStart,    99);
 
-    if (!child.gridColumn && !child.gridColumnStart) {
+    if (!child.gridColumn && !child.gridColumnStart && !child.gridArea) {
       // Auto placement
       colLine = { start: autoCol, end: autoCol + 1 };
       rowLine = { start: autoRow, end: autoRow + 1 };
@@ -685,32 +743,27 @@ export function layoutGrid(
   if (rowCount === 0) rowCount = Math.ceil(children.length / colCount);
 
   // Fill auto row sizes
-  while (rowSizes.length < rowCount) rowSizes.push(0);  // 0 = auto (determined by content)
-
-  // Layout each child and stamp into its cell
-  var allLines: import('./types.js').RenderedLine[] = [];
-  var rowY: number[] = [];
-  var curRowY = gridNode.paddingTop ?? 0;
-  for (var ri2 = 0; ri2 < rowCount; ri2++) { rowY.push(curRowY); curRowY += (rowSizes[ri2] || LINE_H) + rowGap; }
+  while (rowSizes.length < rowCount) rowSizes.push(0);  // 0 = auto
 
   // Compute track X positions
   var colX: number[] = [];
-  var cx = gridNode.paddingLeft ?? 0;
+  var cx = padLeft;
   for (var cxi = 0; cxi < colCount; cxi++) { colX.push(cx); cx += colSizes[cxi] + colGap; }
 
+  // ── Pass 1: Measure all children to determine actual row heights ──────
   var rowHeights: number[] = new Array(rowCount).fill(0);
+  var childLayouts: { lines: import('./types.js').RenderedLine[]; cellW: number; rs: number; cs: number }[] = [];
 
   for (var gi = 0; gi < children.length; gi++) {
     var placement = placements[gi];
-    var cs = Math.max(0, placement.colStart - 1);
-    var ce = Math.min(colCount, placement.colEnd - 1);
-    var rs = Math.max(0, placement.rowStart - 1);
+    var cs2 = Math.max(0, placement.colStart - 1);
+    var ce2 = Math.min(colCount, placement.colEnd - 1);
+    var rs2 = Math.max(0, placement.rowStart - 1);
 
-    // Compute cell width (may span multiple columns)
     var cellW = 0;
-    for (var csi = cs; csi < ce; csi++) {
+    for (var csi = cs2; csi < ce2; csi++) {
       cellW += (colSizes[csi] || 0);
-      if (csi < ce - 1) cellW += colGap;
+      if (csi < ce2 - 1) cellW += colGap;
     }
     cellW = Math.max(CHAR_W, cellW);
 
@@ -718,17 +771,55 @@ export function layoutGrid(
     var childLines  = childResult.lines;
     var childH      = childLines.length * LINE_H;
 
-    // Track actual row height
-    if (childH > rowHeights[rs]) rowHeights[rs] = childH;
+    // Use explicit row size if given, otherwise content height
+    var effRowH = rowSizes[rs2] > 0 ? Math.max(rowSizes[rs2], childH) : childH;
+    if (effRowH > rowHeights[rs2]) rowHeights[rs2] = effRowH;
 
-    var xOff = colX[cs] ?? 0;
-    var yOff = rowY[rs] ?? 0;
+    childLayouts.push({ lines: childLines, cellW: cellW, rs: rs2, cs: cs2 });
+  }
 
-    for (var li = 0; li < childLines.length; li++) {
-      var ln = childLines[li];
+  // ── Pass 2: Compute row Y positions from actual heights ───────────────
+  var rowY: number[] = [];
+  var curRowY = padTop;
+  for (var ri2 = 0; ri2 < rowCount; ri2++) {
+    rowY.push(curRowY);
+    curRowY += (rowHeights[ri2] || LINE_H) + rowGap;
+  }
+
+  // ── Pass 3: Stamp children at correct positions ───────────────────────
+  var allLines: import('./types.js').RenderedLine[] = [];
+  var justifyItems = gridNode.justifyItems || 'stretch';
+  var alignItems   = gridNode.alignItems   || 'stretch';
+
+  for (var gi2 = 0; gi2 < childLayouts.length; gi2++) {
+    var cl2 = childLayouts[gi2];
+    var xOff = colX[cl2.cs] ?? 0;
+    var yOff = rowY[cl2.rs] ?? 0;
+
+    // justify-items: align child horizontally within cell
+    var jiChildW = 0;
+    for (var jli = 0; jli < cl2.lines.length; jli++) {
+      for (var jni = 0; jni < cl2.lines[jli].nodes.length; jni++) {
+        var jnx = cl2.lines[jli].nodes[jni].x + (cl2.lines[jli].nodes[jni].text?.length ?? 0) * CHAR_W;
+        if (jnx > jiChildW) jiChildW = jnx;
+      }
+    }
+    var jiOffset = 0;
+    if (justifyItems === 'center') jiOffset = Math.floor((cl2.cellW - jiChildW) / 2);
+    else if (justifyItems === 'end' || justifyItems === 'flex-end') jiOffset = cl2.cellW - jiChildW;
+
+    // align-items: align child vertically within cell
+    var aiChildH = cl2.lines.length * LINE_H;
+    var aiCellH  = rowHeights[cl2.rs] || LINE_H;
+    var aiOffset = 0;
+    if (alignItems === 'center') aiOffset = Math.floor((aiCellH - aiChildH) / 2);
+    else if (alignItems === 'end' || alignItems === 'flex-end') aiOffset = aiCellH - aiChildH;
+
+    for (var li = 0; li < cl2.lines.length; li++) {
+      var ln = cl2.lines[li];
       allLines.push({
-        y:      yOff + ln.y,
-        nodes:  ln.nodes.map(function(n) { return { ...n, x: n.x + xOff }; }),
+        y:      yOff + aiOffset + ln.y,
+        nodes:  ln.nodes.map(function(n) { return { ...n, x: n.x + xOff + jiOffset }; }),
         lineH:  ln.lineH,
         bgColor: ln.bgColor,
         bgGradient: ln.bgGradient,
