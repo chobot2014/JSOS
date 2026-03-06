@@ -1471,10 +1471,16 @@ export class VElement extends VNode {
 
   // ── Web Animations API stub (item 585) ────────────────────────────────────────
   animate(_keyframes: unknown[], _opts?: unknown): any {
+    // Determine animation duration for the finished promise
+    var dur = 0;
+    if (typeof _opts === 'number') dur = _opts;
+    else if (_opts && typeof (_opts as any).duration === 'number') dur = (_opts as any).duration;
+    var _finishResolve: ((v: unknown) => void) | null = null;
+    var _finishPromise = new Promise<unknown>(r => { _finishResolve = r; });
     var res: any = {
       id: '',
       currentTime: 0,
-      playState: 'finished' as string,
+      playState: 'running' as string,
       playbackRate: 1,
       pending: false,
       effect: null,
@@ -1483,9 +1489,13 @@ export class VElement extends VNode {
       onfinish: null as ((e: unknown) => void) | null,
       oncancel: null as ((e: unknown) => void) | null,
       onremove: null as ((e: unknown) => void) | null,
-      finished: Promise.resolve(undefined) as Promise<unknown>,
+      finished: _finishPromise,
       ready: Promise.resolve(undefined) as Promise<unknown>,
-      finish(): void { this.playState = 'finished'; if (this.onfinish) this.onfinish({}); },
+      finish(): void {
+        this.playState = 'finished';
+        if (_finishResolve) { _finishResolve(this); _finishResolve = null; }
+        if (this.onfinish) this.onfinish({});
+      },
       cancel(): void { this.playState = 'idle'; if (this.oncancel) this.oncancel({}); },
       pause(): void  { this.playState = 'paused'; },
       play(): void   { this.playState = 'running'; },
@@ -1497,9 +1507,18 @@ export class VElement extends VNode {
       removeEventListener(_type: string, _fn: (e: unknown) => void): void {},
       dispatchEvent(_e: unknown): boolean { return true; },
     };
-    // Immediately resolve 'finished' since text-mode has no animation loop
-    res.finished = new Promise<void>(resolve => { setTimeout(resolve, 0); });
-    res.ready    = Promise.resolve(res);
+    // Auto-finish after duration (or immediately for 0/unset duration)
+    // Use queueMicrotask or Promise.resolve to ensure async resolution
+    var finishDelay = dur > 0 ? dur : 0;
+    if (finishDelay > 0) {
+      // Schedule finish after duration — use Promise chain as portable timer
+      var _p = Promise.resolve(); for (var _i = 0; _i < Math.min(finishDelay, 10); _i++) _p = _p.then(() => {});
+      _p.then(() => res.finish());
+    } else {
+      // Resolve immediately on next microtask
+      Promise.resolve().then(() => res.finish());
+    }
+    res.ready = Promise.resolve(res);
     return res;
   }
   getAnimations(): unknown[] { return []; }

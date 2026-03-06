@@ -554,10 +554,11 @@ export function createPageJS(
       removeEventListener(_t: string, _fn: unknown): void {},
     },
     serviceWorker: {
-      register(_url: string): Promise<unknown> { return Promise.reject(new Error('Not supported')); },
-      ready: Promise.reject(new Error('Not supported')),
+      register(_url: string): Promise<unknown> { return Promise.resolve({ installing: null, waiting: null, active: null, scope: '/', unregister() { return Promise.resolve(true); }, update() { return Promise.resolve(this); }, addEventListener() {}, removeEventListener() {} }); },
+      ready: new Promise<unknown>(() => {}),  // never resolves (no SW support, but doesn't reject)
       controller: null,
       getRegistrations(): Promise<unknown[]> { return Promise.resolve([]); },
+      getRegistration(): Promise<unknown> { return Promise.resolve(undefined); },
       addEventListener() {}, removeEventListener() {},
     },
     sendBeacon(url: string, data?: unknown): boolean {
@@ -3938,6 +3939,78 @@ export function createPageJS(
     var timer = _idleCbs.get(id); if (timer != null) { clearTimeout_(timer); _idleCbs.delete(id); }
   }
 
+  // ── SHA-256 implementation for crypto.subtle.digest ───────────────────────
+
+  function _sha256(data: Uint8Array): ArrayBuffer {
+    var K = [
+      0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+      0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+      0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+      0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+      0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+      0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+      0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+      0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+    ];
+    var H0 = 0x6a09e667, H1 = 0xbb67ae85, H2 = 0x3c6ef372, H3 = 0xa54ff53a;
+    var H4 = 0x510e527f, H5 = 0x9b05688c, H6 = 0x1f83d9ab, H7 = 0x5be0cd19;
+    var ml = data.length;
+    var padLen = ((56 - (ml + 1) % 64) + 64) % 64;
+    var buf = new Uint8Array(ml + 1 + padLen + 8);
+    buf.set(data); buf[ml] = 0x80;
+    var bl = ml * 8;
+    buf[buf.length - 4] = (bl >>> 24) & 0xff;
+    buf[buf.length - 3] = (bl >>> 16) & 0xff;
+    buf[buf.length - 2] = (bl >>>  8) & 0xff;
+    buf[buf.length - 1] =  bl         & 0xff;
+    var W = new Array<number>(64);
+    for (var off = 0; off < buf.length; off += 64) {
+      for (var t = 0; t < 16; t++)
+        W[t] = (buf[off+t*4]!<<24)|(buf[off+t*4+1]!<<16)|(buf[off+t*4+2]!<<8)|buf[off+t*4+3]!;
+      for (var t = 16; t < 64; t++) {
+        var w15=W[t-15]!,w2=W[t-2]!;
+        var s0=((w15>>>7)|(w15<<25))^((w15>>>18)|(w15<<14))^(w15>>>3);
+        var s1=((w2>>>17)|(w2<<15))^((w2>>>19)|(w2<<13))^(w2>>>10);
+        W[t]=(W[t-16]!+s0+W[t-7]!+s1)|0;
+      }
+      var a=H0,b=H1,c=H2,d=H3,e=H4,f=H5,g=H6,h=H7;
+      for (var t = 0; t < 64; t++) {
+        var S1=((e>>>6)|(e<<26))^((e>>>11)|(e<<21))^((e>>>25)|(e<<7));
+        var ch=(e&f)^(~e&g);
+        var t1=(h+S1+ch+K[t]!+W[t]!)|0;
+        var S0=((a>>>2)|(a<<30))^((a>>>13)|(a<<19))^((a>>>22)|(a<<10));
+        var maj=(a&b)^(a&c)^(b&c);
+        var t2=(S0+maj)|0;
+        h=g;g=f;f=e;e=(d+t1)|0;d=c;c=b;b=a;a=(t1+t2)|0;
+      }
+      H0=(H0+a)|0;H1=(H1+b)|0;H2=(H2+c)|0;H3=(H3+d)|0;
+      H4=(H4+e)|0;H5=(H5+f)|0;H6=(H6+g)|0;H7=(H7+h)|0;
+    }
+    var res = new ArrayBuffer(32);
+    var dv = new DataView(res);
+    dv.setUint32(0,H0); dv.setUint32(4,H1); dv.setUint32(8,H2); dv.setUint32(12,H3);
+    dv.setUint32(16,H4); dv.setUint32(20,H5); dv.setUint32(24,H6); dv.setUint32(28,H7);
+    return res;
+  }
+
+  /** Convert digest input to Uint8Array */
+  function _toBytes(data: unknown): Uint8Array {
+    if (data instanceof Uint8Array) return data;
+    if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    if (ArrayBuffer.isView(data)) return new Uint8Array((data as any).buffer, (data as any).byteOffset, (data as any).byteLength);
+    if (typeof data === 'string') {
+      var enc = new Array<number>();
+      for (var i = 0; i < data.length; i++) {
+        var cp = data.charCodeAt(i);
+        if (cp < 0x80) enc.push(cp);
+        else if (cp < 0x800) { enc.push(0xc0|(cp>>6), 0x80|(cp&0x3f)); }
+        else { enc.push(0xe0|(cp>>12), 0x80|((cp>>6)&0x3f), 0x80|(cp&0x3f)); }
+      }
+      return new Uint8Array(enc);
+    }
+    return new Uint8Array(0);
+  }
+
   // ── window.crypto (basic) ─────────────────────────────────────────────────
 
   var crypto = {
@@ -3950,13 +4023,17 @@ export function createPageJS(
         var r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
       });
     },
-    // crypto.subtle stub (item 341) — returns valid Promises, not implemented fully
+    // crypto.subtle — real SHA-256, stubs for other algorithms
     subtle: {
       digest(algo: unknown, data: unknown): Promise<ArrayBuffer> {
-        cb.log('[crypto] subtle.digest algo=' + String(algo) + ' dataLen=' + ((data instanceof ArrayBuffer || ArrayBuffer.isView(data as any)) ? (data as any).byteLength ?? (data as any).length : '?'));
-        // Return 32 zero bytes for SHA-256, 16 for MD5, etc.
-        var _sz = String(algo).includes('512') ? 64 : String(algo).includes('1') ? 20 : 32;
-        return Promise.resolve(new ArrayBuffer(_sz));
+        var name = typeof algo === 'string' ? algo : (algo as any)?.name || '';
+        name = name.toUpperCase().replace(/[^A-Z0-9]/g, '');
+        var bytes = _toBytes(data);
+        if (name === 'SHA256') return Promise.resolve(_sha256(bytes));
+        // For other hash algorithms, return appropriately sized buffer
+        // SHA-1: 20 bytes, SHA-384: 48 bytes, SHA-512: 64 bytes, MD5: 16 bytes
+        var sz = name.includes('512') ? 64 : name.includes('384') ? 48 : name.includes('1') ? 20 : 32;
+        return Promise.resolve(new ArrayBuffer(sz));
       },
       sign(_algo: unknown, _key: unknown, _data: unknown): Promise<ArrayBuffer> { return Promise.resolve(new ArrayBuffer(64)); },
       verify(_algo: unknown, _key: unknown, _sig: unknown, _data: unknown): Promise<boolean> { return Promise.resolve(false); },
@@ -5568,7 +5645,23 @@ export function createPageJS(
     onpageshow: null as unknown,
     onmessage:  null as unknown,
     onmessageerror: null as unknown,
-    postMessage: (_data: unknown, _origin?: string): void => {},
+    postMessage: (data: unknown, _origin?: string): void => {
+      // Self-post: asynchronously dispatch a MessageEvent on this window
+      setTimeout_(() => {
+        var ev = new VEvent('message', { bubbles: false, cancelable: false });
+        (ev as any).data    = data;
+        (ev as any).origin  = win.origin || '';
+        (ev as any).source  = win;
+        (ev as any).lastEventId = '';
+        (ev as any).ports   = [];
+        // invoke window.onmessage if set
+        if (typeof win.onmessage === 'function') {
+          try { (win.onmessage as any)(ev); } catch(_) {}
+        }
+        // dispatch to addEventListener listeners
+        doc.dispatchEvent(ev);
+      }, 0);
+    },
     // reportError — report an error to the console and fire window error event
     reportError(err: unknown): void {
       cb.log('[reportError] ' + String(err));

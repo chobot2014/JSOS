@@ -293,6 +293,9 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
   var curCSS:   CSSProps   = {};
   // Ancestor element stack for CSS combinator matching (innermost first)
   var ancestorStack: AncestorEl[] = [];
+  // childCountStack tracks how many child elements have been seen at each
+  // ancestor level, so we can supply siblingIndex to CSS structural selectors.
+  var childCountStack: number[] = [0];
 
   function pushCSS(p: CSSProps): void {
     cssStack.push({ ...curCSS });
@@ -383,6 +386,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       if (curCSS.hidden && !prev.hidden) skipDepth = Math.max(0, skipDepth - 1);
       curCSS = cssStack.pop()!;
       if (ancestorStack.length > 0) ancestorStack.pop();
+      if (childCountStack.length > 1) childCountStack.pop();
     }
   }
 
@@ -408,6 +412,103 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
   var tableCellNode: RenderNode | null = null; // current <td>/<th>
   var tableCellSpans: InlineSpan[] = [];       // spans collected inside current cell
   var inTableCell   = false;
+
+  // ── Container nesting stack for flex/grid — items rendered as children ──────
+  interface ContainerFrame {
+    tag:       string;       // the HTML tag of this container (e.g. 'div')
+    display:   string;       // 'flex' or 'grid'
+    props:     Partial<RenderNode>;  // CSS props for the container node
+    savedNodes:   RenderNode[];
+    savedWidgets: WidgetBlueprint[];
+    // Track direct children
+    children:     RenderNode[];   // completed children
+    childStartIdx: number;       // nodes.length when current child started (-1 = none)
+    childProps:    Partial<RenderNode> | null;  // CSS props for current child
+  }
+  var containerStack: ContainerFrame[] = [];
+
+  function inContainer(): boolean { return containerStack.length > 0; }
+
+  function pushContainer(tag: string, display: string, props: Partial<RenderNode>): void {
+    flushInline();
+    if (openBlock) { nodes.push(openBlock); openBlock = null; }
+    containerStack.push({
+      tag, display, props,
+      savedNodes: nodes, savedWidgets: widgets,
+      children: [], childStartIdx: -1, childProps: null,
+    });
+    nodes = [];
+    widgets = [];
+  }
+
+  function startContainerChild(childProps: Partial<RenderNode>): void {
+    if (!containerStack.length) return;
+    var frame = containerStack[containerStack.length - 1]!;
+    // Close any previous child
+    if (frame.childStartIdx >= 0) {
+      flushInline();
+      if (openBlock) { nodes.push(openBlock); openBlock = null; }
+      var childNodes = nodes.splice(frame.childStartIdx);
+      var child: RenderNode = { type: 'block', spans: [], ...(frame.childProps || {}), children: childNodes.length > 0 ? childNodes : undefined };
+      // If child nodes are flat inline content with no sub-blocks, flatten spans
+      if (!child.children || child.children.length === 0) {
+        var _flatSpans: InlineSpan[] = [];
+        for (var _fsi = 0; _fsi < childNodes.length; _fsi++) {
+          for (var _fsj = 0; _fsj < childNodes[_fsi].spans.length; _fsj++) {
+            _flatSpans.push(childNodes[_fsi].spans[_fsj]);
+          }
+        }
+        child.spans = _flatSpans; child.children = undefined;
+      }
+      frame.children.push(child);
+    }
+    frame.childStartIdx = nodes.length;
+    frame.childProps = childProps;
+  }
+
+  function popContainer(): RenderNode | null {
+    if (!containerStack.length) return null;
+    var frame = containerStack.pop()!;
+    // Close any open child
+    flushInline();
+    if (openBlock) { nodes.push(openBlock); openBlock = null; }
+    if (frame.childStartIdx >= 0) {
+      var childNodes = nodes.splice(frame.childStartIdx);
+      var child: RenderNode = { type: 'block', spans: [], ...(frame.childProps || {}), children: childNodes.length > 0 ? childNodes : undefined };
+      if (!child.children || child.children.length === 0) {
+        var _flatSpans2: InlineSpan[] = [];
+        for (var _fsi2 = 0; _fsi2 < childNodes.length; _fsi2++) {
+          for (var _fsj2 = 0; _fsj2 < childNodes[_fsi2].spans.length; _fsj2++) {
+            _flatSpans2.push(childNodes[_fsi2].spans[_fsj2]);
+          }
+        }
+        child.spans = _flatSpans2; child.children = undefined;
+      }
+      frame.children.push(child);
+    } else if (nodes.length > 0) {
+      // Anonymous text content — wrap as single child
+      var anonChild: RenderNode = { type: 'block', spans: [] };
+      var _anonSpans: InlineSpan[] = [];
+      for (var _ani = 0; _ani < nodes.length; _ani++) {
+        for (var _anj = 0; _anj < nodes[_ani].spans.length; _anj++) {
+          _anonSpans.push(nodes[_ani].spans[_anj]);
+        }
+      }
+      anonChild.spans = _anonSpans;
+      if (_anonSpans.length > 0) frame.children.push(anonChild);
+    }
+    // Restore outer context
+    nodes = frame.savedNodes;
+    widgets = frame.savedWidgets;
+    // Build the container node
+    var containerType: BlockType = frame.display === 'grid' ? 'grid' : 'flex-row';
+    var containerNode: RenderNode = {
+      type: containerType, spans: [],
+      ...frame.props,
+      children: frame.children.length > 0 ? frame.children : undefined,
+    };
+    return containerNode;
+  }
 
   // Track open <p> tags for implicit auto-close (HTML5 tree builder rule, item 359)
   var pOpen = 0;
@@ -594,6 +695,10 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     var jselId = attrs.get('data-jsos-el') ||
                  (attrs.has('onclick') ? (attrs.get('id') || attrs.get('data-jsos-el') || '_ocl') : '') ||
                  '';
+    // Record sibling index for this element (0-based), then start a new child count for its children.
+    var _sibIdx = childCountStack.length > 0 ? childCountStack[childCountStack.length - 1]! : 0;
+    if (childCountStack.length > 0) childCountStack[childCountStack.length - 1]!++;
+    childCountStack.push(0);
     if (!inl && !hasPseudo) {
       cssStack.push({ ...curCSS });
       ancestorStack.push({ tag, id, cls, attrs });
@@ -605,11 +710,11 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       }
       return false;
     }
-    var ep = computeElementStyle(tag, id, cls, attrs, curCSS, sheets, inl, undefined, ancestorStack);
+    var ep = computeElementStyle(tag, id, cls, attrs, curCSS, sheets, inl, undefined, ancestorStack, _sibIdx);
     // Apply counter-reset / counter-increment from computed style (item 434)
     _applyCounters(ep);
     if (hasPseudo) {
-      var pseudo = getPseudoContent(tag, id, cls, attrs, sheets, undefined, _counters, ancestorStack);
+      var pseudo = getPseudoContent(tag, id, cls, attrs, sheets, undefined, _counters, ancestorStack, _sibIdx);
       if (pseudo.before) ep._pseudoBefore = pseudo.before;
       if (pseudo.after)  ep._pseudoAfter  = pseudo.after;
     }
@@ -1213,6 +1318,92 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
             if (P_CLOSERS.has(tok.tag)) autoClosePIfOpen();
             applyStyle(tok.tag, tok.attrs);
             if (tok.tag === 'p') pOpen++;  // track for implicit close
+
+            // display:contents — element generates no box; children render
+            // as if they were direct children of the parent container.
+            var _disp = curCSS.display;
+            if (_disp === 'contents') break;
+            if (_disp === 'flex' || _disp === 'inline-flex') {
+              // Build container props from curCSS
+              var _fp: Partial<RenderNode> = {};
+              if (curCSS.flexDirection) _fp.flexDirection = curCSS.flexDirection;
+              if (curCSS.flexWrap) _fp.flexWrap = curCSS.flexWrap;
+              if (curCSS.justifyContent) _fp.justifyContent = curCSS.justifyContent;
+              if (curCSS.alignItems) _fp.alignItems = curCSS.alignItems;
+              if (curCSS.alignContent) _fp.alignContent = curCSS.alignContent;
+              if (curCSS.gap !== undefined) _fp.gap = curCSS.gap;
+              if (curCSS.width && curCSS.width > 0) _fp.boxWidth = curCSS.width;
+              if (curCSS.widthPct && curCSS.widthPct > 0) _fp.widthPct = curCSS.widthPct;
+              if (curCSS.height && curCSS.height > 0) _fp.height = curCSS.height;
+              if (curCSS.minWidth !== undefined) _fp.minWidth = curCSS.minWidth;
+              if (curCSS.maxWidth !== undefined) _fp.maxWidth = curCSS.maxWidth;
+              if (curCSS.minHeight !== undefined) _fp.minHeight = curCSS.minHeight;
+              if (curCSS.maxHeight !== undefined) _fp.maxHeight = curCSS.maxHeight;
+              if (curCSS.bgColor !== undefined) _fp.bgColor = curCSS.bgColor;
+              if (curCSS.bgGradient) _fp.bgGradient = curCSS.bgGradient;
+              if (curCSS.paddingLeft) _fp.paddingLeft = curCSS.paddingLeft;
+              if (curCSS.paddingRight) _fp.paddingRight = curCSS.paddingRight;
+              if (curCSS.paddingTop) _fp.paddingTop = curCSS.paddingTop;
+              if (curCSS.paddingBottom) _fp.paddingBottom = curCSS.paddingBottom;
+              if (curCSS.marginTop) _fp.marginTop = curCSS.marginTop;
+              if (curCSS.marginBottom) _fp.marginBottom = curCSS.marginBottom;
+              if (curCSS.position && curCSS.position !== 'static') {
+                _fp.position = curCSS.position;
+                if (curCSS.top !== undefined) _fp.posTop = curCSS.top;
+                if (curCSS.right !== undefined) _fp.posRight = curCSS.right;
+                if (curCSS.bottom !== undefined) _fp.posBottom = curCSS.bottom;
+                if (curCSS.left !== undefined) _fp.posLeft = curCSS.left;
+              }
+              if (curCSS.overflow) _fp.overflow = curCSS.overflow;
+              if (curCSS.borderRadius !== undefined) _fp.borderRadius = curCSS.borderRadius;
+              if (curCSS.borderWidth !== undefined) _fp.borderWidth = curCSS.borderWidth;
+              if (curCSS.borderColor !== undefined) _fp.borderColor = curCSS.borderColor;
+              if (curCSS._onclickElId) _fp.elId = curCSS._onclickElId;
+              pushContainer(tok.tag, 'flex', _fp);
+              break;
+            }
+
+            // Inside a flex/grid container, each direct child starts a new flex item
+            if (inContainer()) {
+              var _cp: Partial<RenderNode> = {};
+              if (curCSS.flexGrow !== undefined) _cp.flexGrow = curCSS.flexGrow;
+              if (curCSS.flexShrink !== undefined) _cp.flexShrink = curCSS.flexShrink;
+              if (curCSS.flexBasis !== undefined) _cp.flexBasis = curCSS.flexBasis;
+              if (curCSS.alignSelf !== undefined) _cp.alignSelf = curCSS.alignSelf;
+              if (curCSS.order !== undefined) _cp.order = curCSS.order;
+              if (curCSS.width && curCSS.width > 0) _cp.boxWidth = curCSS.width;
+              if (curCSS.widthPct && curCSS.widthPct > 0) _cp.widthPct = curCSS.widthPct;
+              if (curCSS.height && curCSS.height > 0) _cp.height = curCSS.height;
+              if (curCSS.minWidth !== undefined) _cp.minWidth = curCSS.minWidth;
+              if (curCSS.maxWidth !== undefined) _cp.maxWidth = curCSS.maxWidth;
+              if (curCSS.bgColor !== undefined) _cp.bgColor = curCSS.bgColor;
+              if (curCSS.bgGradient) _cp.bgGradient = curCSS.bgGradient;
+              if (curCSS.paddingLeft) _cp.paddingLeft = curCSS.paddingLeft;
+              if (curCSS.paddingRight) _cp.paddingRight = curCSS.paddingRight;
+              if (curCSS.paddingTop) _cp.paddingTop = curCSS.paddingTop;
+              if (curCSS.paddingBottom) _cp.paddingBottom = curCSS.paddingBottom;
+              if (curCSS.marginTop) _cp.marginTop = curCSS.marginTop;
+              if (curCSS.marginBottom) _cp.marginBottom = curCSS.marginBottom;
+              if (curCSS.textAlign) _cp.textAlign = curCSS.align;
+              if (curCSS.overflow) _cp.overflow = curCSS.overflow;
+              if (curCSS.borderRadius !== undefined) _cp.borderRadius = curCSS.borderRadius;
+              if (curCSS.borderWidth !== undefined) _cp.borderWidth = curCSS.borderWidth;
+              if (curCSS.borderColor !== undefined) _cp.borderColor = curCSS.borderColor;
+              if (curCSS._onclickElId) _cp.elId = curCSS._onclickElId;
+              // If this child is also flex, push another container
+              if (_disp === 'flex' || _disp === 'inline-flex') {
+                if (curCSS.flexDirection) _cp.flexDirection = curCSS.flexDirection;
+                if (curCSS.flexWrap) _cp.flexWrap = curCSS.flexWrap;
+                if (curCSS.justifyContent) _cp.justifyContent = curCSS.justifyContent;
+                if (curCSS.alignItems) _cp.alignItems = curCSS.alignItems;
+                if (curCSS.gap !== undefined) _cp.gap = curCSS.gap;
+                pushContainer(tok.tag, 'flex', _cp);
+                break;
+              }
+              startContainerChild(_cp);
+              break;
+            }
+
             flushInline();
             if (openBlock) { nodes.push(openBlock); openBlock = null; }
             nodes.push({ type: 'p-break', spans: [] });
@@ -1365,9 +1556,18 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
 
         default:
           if (BLOCK_TAGS.has(tok.tag)) {
+            // Check if closing a container (flex/grid) scope
+            if (containerStack.length > 0 && containerStack[containerStack.length - 1]!.tag === tok.tag) {
+              var _cNode = popContainer();
+              if (_cNode) nodes.push(_cNode);
+              popCSS();
+              break;
+            }
+            // Check if closing a child within a container
+            // (child boundary will be handled by the next startContainerChild or popContainer)
             flushInline();
             if (openBlock) { nodes.push(openBlock); openBlock = null; }
-            nodes.push({ type: 'p-break', spans: [] });
+            if (!inContainer()) nodes.push({ type: 'p-break', spans: [] });
             popCSS();
           }
           break;

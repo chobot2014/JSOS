@@ -402,9 +402,16 @@ function _layoutNodesImpl(
         for (var fcci = 0; fcci < fcItems.length; fcci++) {
           var fcc = fcItems[fcci];
           var fccW = fcc.boxWidth ? Math.min(fcc.boxWidth, fcColW) : fcColW;
-          var fccLines = flowSpans(transformSpans(fcc.spans, fcc.textTransform), 0, fccW, nodeLineH(fcc), CLR_BODY,
-            (fcc.bgColor !== undefined || fcc.bgGradient) ? { bgColor: fcc.bgColor, bgGradient: fcc.bgGradient } : undefined);
-          var fccH = fccLines.reduce(function(s, l) { return s + (l.lineH || LINE_H); }, 0);
+          var fccLines: RenderedLine[];
+          if (fcc.children && fcc.children.length > 0) {
+            var _fccResult = _layoutNodesImpl(fcc.children, [], fccW);
+            fccLines = _fccResult.lines;
+            for (var _fccwi = 0; _fccwi < _fccResult.widgets.length; _fccwi++) widgets.push(_fccResult.widgets[_fccwi]);
+          } else {
+            fccLines = flowSpans(transformSpans(fcc.spans, fcc.textTransform), 0, fccW, nodeLineH(fcc), CLR_BODY,
+              (fcc.bgColor !== undefined || fcc.bgGradient) ? { bgColor: fcc.bgColor, bgGradient: fcc.bgGradient } : undefined);
+          }
+          var fccH = fccLines.length > 0 ? (fccLines[fccLines.length - 1].y + (fccLines[fccLines.length - 1].lineH || LINE_H) - fccLines[0].y) : 0;
           // flex-basis overrides natural content height (0 = auto → use content height)
           var _fcb = fcc.flexBasis;
           var fccBaseH = (_fcb && _fcb > 0) ? _fcb : fccH;
@@ -579,11 +586,19 @@ function _layoutNodesImpl(
           var fIdx  = fwItems[fci];
           var fc    = fSorted[fIdx];
           var cw    = fFinalW[fIdx];
-          var cLines = flowSpans(transformSpans(fc.spans, fc.textTransform), 0, cw, nodeLineH(fc), CLR_BODY,
-                                 (fc.bgColor !== undefined || fc.bgGradient) ? { bgColor: fc.bgColor, bgGradient: fc.bgGradient } : undefined);
+          // Recursive layout: if child has nested children (block structure), lay out recursively
+          var cLines: RenderedLine[];
+          if (fc.children && fc.children.length > 0) {
+            var _fcResult = _layoutNodesImpl(fc.children, [], cw);
+            cLines = _fcResult.lines;
+            for (var _fwi = 0; _fwi < _fcResult.widgets.length; _fwi++) widgets.push(_fcResult.widgets[_fwi]);
+          } else {
+            cLines = flowSpans(transformSpans(fc.spans, fc.textTransform), 0, cw, nodeLineH(fc), CLR_BODY,
+                                   (fc.bgColor !== undefined || fc.bgGradient) ? { bgColor: fc.bgColor, bgGradient: fc.bgGradient } : undefined);
+          }
           var fcAlign = fc.alignSelf || containerAlignItems;
           fChildLines.push({ x: fCurX, cw, cl: cLines, alignSelf: fcAlign });
-          var childH = cLines.length * nodeLineH(fc);
+          var childH = cLines.length > 0 ? (cLines[cLines.length - 1].y + (cLines[cLines.length - 1].lineH || LINE_H) - cLines[0].y) : 0;
           if (childH > lineMaxH) lineMaxH = childH;
           fCurX += cw + gap + fJustGapExtra;
         }
@@ -622,9 +637,12 @@ function _layoutNodesImpl(
           else if (fcAlignMode === 'flex-end' || fcAlignMode === 'end') { crossOffset = fml.lineMaxH - fcH2; }
           for (var cli2 = 0; cli2 < fc2.cl.length; cli2++) {
             var cl2 = fc2.cl[cli2]!;
+            // Remap: recursive layout produces absolute y; convert to relative offset
+            var _clRelY = fc2.cl.length > 0 ? (cl2.y - fc2.cl[0].y) : cli2 * (cl2.lineH || LINE_H);
             var shifted = cl2.nodes.map(function(n) { return { ...n, x: n.x + fc2.x }; });
-            lines.push({ y: fCurLineY + crossOffset + cli2 * (cl2.lineH || LINE_H), nodes: shifted,
-                         lineH: cl2.lineH, bgColor: cl2.bgColor, bgGradient: cl2.bgGradient, preBg: cl2.preBg });
+            lines.push({ y: fCurLineY + crossOffset + _clRelY, nodes: shifted,
+                         lineH: cl2.lineH, bgColor: cl2.bgColor, bgGradient: cl2.bgGradient, preBg: cl2.preBg,
+                         boxDeco: cl2.boxDeco });
           }
         }
         fCurLineY += fml.lineMaxH + gap + acGapExtra;
@@ -722,7 +740,30 @@ function _layoutNodesImpl(
             floatMaxX:   _activeRightFloatLines > 0 ? blkMaxX - _activeRightFloatIndent : undefined,
           };
         }
+        // Apply padding-top before block content
+        if (nd.paddingTop && nd.paddingTop > 0) blank(nd.paddingTop);
         commit(flowSpans(ndSpans, blkLeft, blkMaxX, lh, CLR_BODY, _combinedOpts));
+        // Apply padding-bottom after block content
+        if (nd.paddingBottom && nd.paddingBottom > 0) blank(nd.paddingBottom);
+        // text-align: shift committed line nodes for center / right / justify
+        var _ta = nd.textAlign;
+        if (_ta && _ta !== 'left' && lines.length > _blockLineStart) {
+          var _lineW = blkMaxX - blkLeft;
+          for (var _tai = _blockLineStart; _tai < lines.length; _tai++) {
+            var _taLine = lines[_tai];
+            if (!_taLine.nodes.length) continue;
+            // Compute used width of line content
+            var _taLast = _taLine.nodes[_taLine.nodes.length - 1]!;
+            var _taUsed = (_taLast.x - blkLeft) + _taLast.text.length * CHAR_W * (_taLast.fontScale || 1);
+            var _taFree = Math.max(0, _lineW - _taUsed);
+            var _taShift = 0;
+            if (_ta === 'center') _taShift = Math.floor(_taFree / 2);
+            else if (_ta === 'right') _taShift = _taFree;
+            if (_taShift > 0) {
+              lines[_tai] = { ..._taLine, nodes: _taLine.nodes.map(function(n) { return { ...n, x: n.x + _taShift }; }) };
+            }
+          }
+        }
         // Consume overlap lines from active floats
         var _newBlockLines = lines.length - _blockLineStart;
         _activeLeftFloatLines  = Math.max(0, _activeLeftFloatLines  - _newBlockLines);

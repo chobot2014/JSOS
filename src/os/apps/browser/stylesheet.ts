@@ -44,18 +44,20 @@ export interface CSSRule {
  *  C  = # of type/element       (×0x1)
  */
 export function selectorSpecificity(sel: string): number {
-  // Get the rightmost compound selector (split on descendant/child/sibling)
-  var parts = sel.split(/[\s>+~]+/);
-  var last  = parts[parts.length - 1] || '';
+  // Parse all compound selector parts and compute specificity across ALL of them
+  var parsed = _parseSelectorParts(sel);
   var a = 0, b = 0, c = 0;
-  // Count ID selectors
-  var ids = last.match(/#[^.#[\s:]+/g);
-  if (ids) a += ids.length;
-  // Count class, attribute, pseudo-class selectors
-  var clss = last.match(/\.[^.#[\s:]+|\[[^\]]+\]|:(?!:)[^.#[\s:]+/g);
-  if (clss) b += clss.length;
-  // Count type selectors (non-* identifiers at start)
-  if (last && last !== '*' && /^[a-zA-Z]/.test(last)) c++;
+  for (var pi = 0; pi < parsed.parts.length; pi++) {
+    var part = parsed.parts[pi]!;
+    // Count ID selectors
+    var ids = part.match(/#[^.#[\s:]+/g);
+    if (ids) a += ids.length;
+    // Count class, attribute, pseudo-class selectors
+    var clss = part.match(/\.[^.#[\s:]+|\[[^\]]+\]|:(?!:)[^.#[\s:(]+/g);
+    if (clss) b += clss.length;
+    // Count type selectors (non-* identifiers at start)
+    if (part && part !== '*' && /^[a-zA-Z]/.test(part)) c++;
+  }
   return (a << 16) | (b << 8) | c;
 }
 
@@ -78,6 +80,10 @@ export interface AncestorEl {
   id:    string;
   cls:   string[];
   attrs: Map<string, string>;
+  /** Sibling index (0-based) among parent's element children, -1 if unknown */
+  siblingIndex?: number;
+  /** Total sibling count (parent's element child count), -1 if unknown */
+  siblingCount?: number;
 }
 
 /**
@@ -126,18 +132,44 @@ function _parseSelectorParts(sel: string): { parts: string[]; combinators: strin
   return result;
 }
 
+/**
+ * Evaluate an An+B expression (e.g. 'odd', 'even', '3n+1', '5', '2n')
+ * against a 1-based child position.
+ */
+function _matchesNth(expr: string, pos: number): boolean {
+  expr = expr.trim().toLowerCase();
+  if (expr === 'odd') return pos % 2 === 1;
+  if (expr === 'even') return pos % 2 === 0;
+  // Parse An+B form
+  var m = expr.match(/^([+-]?\d*)?n\s*([+-]\s*\d+)?$/);
+  if (m) {
+    var a = m[1] === '' || m[1] === '+' ? 1 : m[1] === '-' ? -1 : parseInt(m[1]!, 10);
+    var b = m[2] ? parseInt(m[2].replace(/\s+/g, ''), 10) : 0;
+    if (a === 0) return pos === b;
+    // pos = a*n + b → n = (pos - b) / a, n >= 0 and integer
+    var n = (pos - b) / a;
+    return n >= 0 && Number.isInteger(n);
+  }
+  // Plain number (e.g. "3")
+  var plain = parseInt(expr, 10);
+  if (!isNaN(plain)) return pos === plain;
+  return true; // fallback: optimistic
+}
+
 export function matchesSingleSel(
   tag: string, id: string, cls: string[],
   attrs: Map<string, string>,
   sel: string,
   ancestors?: AncestorEl[],
+  sibIdx?: number,   // 0-based index among parent's element children
+  sibCount?: number, // total element children of parent
 ): boolean {
   sel = sel.trim();
   if (!sel) return false;
 
   // Fast path: no combinator characters
   if (!/[\s>+~]/.test(sel)) {
-    return matchesCompound(tag, id, cls, attrs, sel);
+    return matchesCompound(tag, id, cls, attrs, sel, sibIdx, sibCount);
   }
 
   var parsed = _parseSelectorParts(sel);
@@ -146,7 +178,7 @@ export function matchesSingleSel(
   if (parts.length === 0) return false;
 
   // Rightmost compound must match the current element
-  if (!matchesCompound(tag, id, cls, attrs, parts[parts.length - 1]!)) return false;
+  if (!matchesCompound(tag, id, cls, attrs, parts[parts.length - 1]!, sibIdx, sibCount)) return false;
 
   // Only one part (no actual combinators after parsing) → done
   if (parts.length === 1) return true;
@@ -189,6 +221,8 @@ function matchesCompound(
   tag: string, id: string, cls: string[],
   attrs: Map<string, string>,
   compound: string,
+  sibIdx?: number,
+  sibCount?: number,
 ): boolean {
   if (!compound || compound === '*') return true;
 
@@ -281,13 +315,31 @@ function matchesCompound(
         else if (psName === 'visited') {
           // can't tell — always miss to be safe
         }
-        // Structural pseudo-classes — pass: we don't have DOM sibling info here
-        else if (psName === 'first-child' || psName === 'last-child' ||
-                 psName === 'only-child'  || psName === 'first-of-type' ||
-                 psName === 'last-of-type' || psName === 'only-of-type' ||
-                 psName === 'nth-child'   || psName === 'nth-last-child' ||
+        // Structural pseudo-classes — use sibling info when available
+        else if (psName === 'first-child') {
+          if (sibIdx !== undefined && sibIdx !== 0) return false;
+        }
+        else if (psName === 'last-child') {
+          if (sibIdx !== undefined && sibCount !== undefined && sibIdx !== sibCount - 1) return false;
+        }
+        else if (psName === 'only-child') {
+          if (sibCount !== undefined && sibCount !== 1) return false;
+        }
+        else if (psName === 'nth-child') {
+          if (sibIdx !== undefined && psArg) {
+            if (!_matchesNth(psArg, sibIdx + 1)) return false;
+          }
+        }
+        else if (psName === 'nth-last-child') {
+          if (sibIdx !== undefined && sibCount !== undefined && psArg) {
+            if (!_matchesNth(psArg, sibCount - sibIdx)) return false;
+          }
+        }
+        else if (psName === 'first-of-type' || psName === 'last-of-type' ||
+                 psName === 'only-of-type' ||
                  psName === 'nth-of-type' || psName === 'nth-last-of-type') {
-          // Optimistic: assume match (rare false positives acceptable)
+          // -of-type selectors need type-specific sibling info we don't have
+          // optimistic: assume match
         }
         // :not() negation
         else if (psName === 'not' && psArg) {
@@ -905,6 +957,8 @@ export function getPseudoContent(
   index?: RuleIndex | null,
   counters?: Map<string, number>,
   ancestors?: AncestorEl[],
+  sibIdx?: number,
+  sibCount?: number,
 ): { before: string; after: string } {
   var before = '';
   var after  = '';
@@ -921,7 +975,7 @@ export function getPseudoContent(
       if (!pem) continue;
       // Strip pseudo-element suffix → check if host element matches
       var hostSel = sel.slice(0, sel.length - pem[0].length).trim() || '*';
-      if (!matchesSingleSel(tag, id, cls, attrs, hostSel, ancestors)) continue;
+      if (!matchesSingleSel(tag, id, cls, attrs, hostSel, ancestors, sibIdx, sibCount)) continue;
       var which = pem[1]!.toLowerCase();
       var resolved = _resolveContentValue(rule.props.content, attrs, counters);
       if (which === 'before' && rule.spec > beforeSpec) {
@@ -956,6 +1010,8 @@ export function computeElementStyle(
   inlineStyle: string,
   index?:      RuleIndex,
   ancestors?:  AncestorEl[],
+  sibIdx?:     number,
+  sibCount?:   number,
 ): CSSProps {
   // ── Inherited starting values (CSS-spec inheritable properties) ────────────
   var result: CSSProps = {
@@ -995,7 +1051,7 @@ export function computeElementStyle(
   for (var ri = 0; ri < candidates.length; ri++) {
     var rule = candidates[ri]!;
     for (var si = 0; si < rule.sels.length; si++) {
-      if (matchesSingleSel(tag, id, cls, attrs, rule.sels[si]!, ancestors)) {
+      if (matchesSingleSel(tag, id, cls, attrs, rule.sels[si]!, ancestors, sibIdx, sibCount)) {
         var srcOrder = index ? sheets.indexOf(rule) : ri;
         matches.push({ props: rule.props, spec: rule.spec, order: srcOrder });
         break;
