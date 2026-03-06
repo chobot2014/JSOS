@@ -7,7 +7,7 @@ import {
   CLR_DEL, CLR_MARK_TXT, CLR_PRE_TXT, CLR_H1, CLR_H2, CLR_H3,
   CLR_QUOTE_TXT,
 } from './constants.js';
-import { getLayoutCache, setLayoutCache, layoutFingerprint } from './cache.js';
+import { getLayoutCache, setLayoutCache, layoutFingerprint, getBlockLayoutCache, setBlockLayoutCache, blockFingerprint, type BlockLayoutCache } from './cache.js';
 import { layoutGrid, layoutTable } from './layout-ext.js';
 
 // ── Inline word-flow layout ───────────────────────────────────────────────────

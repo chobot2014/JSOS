@@ -226,6 +226,46 @@ export function layoutFingerprint(nodes: ReadonlyArray<{ type: string; spans: Re
   return h.toString(16);
 }
 
+// ── Per-block layout sub-cache (item 2.3 — incremental layout) ─────────────
+// Maps a per-block fingerprint to the array of RenderedLine[] that block
+// produced.  When a block's content + container width are identical to the
+// previous frame, the cached lines are reused (only y-offsets are patched).
+// This avoids re-running word-wrap / flex / grid for unchanged blocks.
+
+export interface BlockLayoutCache {
+  lines: any[];       // RenderedLine[] produced by this block
+  widgets: any[];     // PositionedWidget[] produced by this block
+  totalH: number;     // total height consumed by this block
+}
+
+var _blockLayoutCache = new Map<string, BlockLayoutCache>();
+
+export function getBlockLayoutCache(key: string): BlockLayoutCache | null {
+  return _blockLayoutCache.get(key) ?? null;
+}
+
+export function setBlockLayoutCache(key: string, result: BlockLayoutCache): void {
+  if (_blockLayoutCache.size > 256) _blockLayoutCache.clear();
+  _blockLayoutCache.set(key, result);
+}
+
+export function flushBlockLayoutCache(): void {
+  _blockLayoutCache.clear();
+}
+
+/** Fast hash for a single RenderNode block. */
+export function blockFingerprint(nd: { type: string; spans: ReadonlyArray<{ text: string }> }, width: number): string {
+  var h = width;
+  h = (h * 31 + nd.type.charCodeAt(0)) | 0;
+  for (var j = 0; j < nd.spans.length; j++) {
+    var t = nd.spans[j].text;
+    h = (h * 31 + t.length) | 0;
+    if (t.length > 0) h = (h * 31 + t.charCodeAt(0)) | 0;
+    if (t.length > 3) h = (h * 31 + t.charCodeAt(t.length - 1)) | 0;
+  }
+  return h.toString(16);
+}
+
 // ── CSS Rule Index (O(1) selector pre-bucketing) ────────────────────────────
 //
 // When the stylesheet is loaded, rules are indexed into three hash maps:

@@ -36,7 +36,7 @@ import type {
 } from './types.js';
 
 import { parseURL, urlEncode, encodeFormData, decodeBMP, readPNGDimensions, decodeBase64 } from './utils.js';
-import { parseHTML }    from './html.js';
+import { parseHTML, parseHTMLFromTokens } from './html.js';
 import { parseStylesheet, buildSheetIndex, type CSSRule, type RuleIndex, resetCSSVars, setViewport } from './stylesheet.js';
 import { decodePNG }    from './img-png.js';
 import { decodeJPEG }   from './img-jpeg.js';
@@ -170,6 +170,7 @@ export class BrowserApp implements App {
   private _loading     = false;
   private _status      = '';
   private _dirty       = true;
+  private _damage: { x: number; y: number; w: number; h: number } | null = null;  // item 2.4
   private _hoverHref   = '';
   private _hoverElId   = '';  // JS-element currently under the mouse pointer
   private _focusedWidgetName = '';  // name of currently JS-focused widget for blur tracking;
@@ -654,6 +655,8 @@ export class BrowserApp implements App {
     }
     if (!this._dirty) return false;
     this._dirty = false;
+    // Clear damage rect after each full render (item 2.4)
+    this._damage = null;
 
     this._drawTabBar(canvas);
     this._drawToolbar(canvas);
@@ -1028,6 +1031,36 @@ export class BrowserApp implements App {
       canvas.fillRect(sbXd, y0 + 2, sbW, trackH, 0xFFDDDDDD);
       canvas.fillRect(sbXd, y0 + 2 + thumbY, sbW, thumbH, CLR_BTN_BG);
       canvas.drawRect(sbXd, y0 + 2 + thumbY, sbW, thumbH, CLR_TOOLBAR_BD);
+    }
+
+    // ── Canvas element compositing (item 3.3) ─────────────────────────────────
+    // Blit canvas element pixel buffers into the browser viewport at their
+    // layout positions.  The canvas2d context renders into an RGBA Uint8Array;
+    // we convert to BGRA Uint32Array and blit directly.
+    if (this._pageJS) {
+      var _cbufs = this._pageJS.getCanvasBuffers();
+      for (var _ci = 0; _ci < _cbufs.length; _ci++) {
+        var _cb = _cbufs[_ci];
+        if (!_cb.rgba || _cb.width <= 0 || _cb.height <= 0) continue;
+        // Find layout rect for this canvas element
+        var _cRect: { x: number; y: number; w: number; h: number } | null = null;
+        for (var _wk = 0; _wk < this._widgets.length; _wk++) {
+          if (this._widgets[_wk].name === _cb.elId || (this._widgets[_wk] as any).elId === _cb.elId) {
+            _cRect = { x: this._widgets[_wk].px, y: this._widgets[_wk].py, w: this._widgets[_wk].pw, h: this._widgets[_wk].ph };
+            break;
+          }
+        }
+        if (!_cRect) continue;
+        // Convert RGBA → BGRA Uint32Array for blitPixelsDirect
+        var _cPixels = new Uint32Array(_cb.width * _cb.height);
+        var _rgba = _cb.rgba;
+        for (var _pi = 0; _pi < _cPixels.length; _pi++) {
+          var _ri = _pi * 4;
+          _cPixels[_pi] = (_rgba[_ri + 3] << 24) | (_rgba[_ri] << 16) | (_rgba[_ri + 1] << 8) | _rgba[_ri + 2];
+        }
+        var _cdy = y0 + _cRect.y - this._scrollY;
+        canvas.blitPixelsDirect(_cPixels, _cb.width, _cb.height, _cRect.x, _cdy);
+      }
     }
   }
 
@@ -1847,8 +1880,35 @@ export class BrowserApp implements App {
     });
   }
 
+  /** Expand the damage rectangle to include a new dirty region (item 2.4). */
+  private _expandDamage(x: number, y: number, w: number, h: number): void {
+    if (!this._damage) { this._damage = { x, y, w, h }; return; }
+    var rx = Math.min(this._damage.x, x);
+    var ry = Math.min(this._damage.y, y);
+    this._damage = {
+      x: rx, y: ry,
+      w: Math.max(this._damage.x + this._damage.w, x + w) - rx,
+      h: Math.max(this._damage.y + this._damage.h, y + h) - ry,
+    };
+  }
+
   private _scrollBy(delta: number): void {
+    var oldScroll = this._scrollY;
     this._scrollY = Math.max(0, Math.min(this._maxScrollY, this._scrollY + delta));
+    var actual = this._scrollY - oldScroll;
+    // Scroll-blit optimisation: shift existing pixels instead of full repaint (item 2.2)
+    if (actual !== 0 && this._win && !this._loading && Math.abs(actual) < this._contentH()) {
+      var y0 = TAB_BAR_H + TOOLBAR_H;
+      var ch = this._contentH();
+      this._win.canvas.scrollBlit(actual, y0, ch);
+      // Mark only the newly exposed strip as damaged (item 2.4)
+      var w = this._win.canvas.width;
+      if (actual > 0) {
+        this._expandDamage(0, y0 + ch - actual, w, actual);
+      } else {
+        this._expandDamage(0, y0, w, -actual);
+      }
+    }
     this._dirty   = true;
   }
 
@@ -2198,18 +2258,21 @@ export class BrowserApp implements App {
         alert:   (msg: string) => { self2._status = 'Alert: ' + msg; self2._dirty = true; os.debug.log('[browser alert]', msg); },
         confirm: (_msg: string): boolean => true,   // no blocking UI — default accept
         prompt:  (_msg: string, def: string): string => def,
-        rerender: (bodyHTML: string) => {
-          // Re-parse the mutated body and re-layout without re-running scripts.
+        rerender: (tokens: any[]) => {
+          // Re-parse the mutated body from pre-tokenised tokens (item 1.2).
+          // Wrap in synthetic <body> open/close for the parser.
+          var bodyTokens: any[] = [{ kind: 'open', tag: 'body', text: '', attrs: new Map() }];
+          for (var _ti = 0; _ti < tokens.length; _ti++) bodyTokens.push(tokens[_ti]);
+          bodyTokens.push({ kind: 'close', tag: 'body', text: '', attrs: new Map() });
           // Also extract any dynamically injected <style> tags (e.g. styled-components, MUI).
-          var newHTML  = '<body>' + bodyHTML + '</body>';
-          var rTmp = parseHTML(newHTML);
+          var rTmp = parseHTMLFromTokens(bodyTokens);
           // Merge any new inline styles from JS-injected <style> tags into sheets
           if (rTmp.styles.length > 0) {
             var _dynStyles = rTmp.styles.join('\n');
             var _dynRules  = parseStylesheet(_dynStyles);
             if (_dynRules.length > 0) sheets = sheets.concat(_dynRules);
           }
-          var r2 = parseHTML(newHTML, sheets);
+          var r2 = parseHTMLFromTokens(bodyTokens, sheets);
           self2._forms = r2.forms;
           self2._layoutPage(r2.nodes as any, r2.widgets as any, self2._pageTitle, self2._pageURL);
         },

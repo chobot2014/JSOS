@@ -207,8 +207,19 @@ function _parseColorCSS(val: string): number | undefined {
 
 // ── HTML parser ───────────────────────────────────────────────────────────────
 
+/** Parse pre-tokenised input (skips tokenise() allocation — item 1.2). */
+export function parseHTMLFromTokens(tokens: HtmlToken[], sheets: CSSRule[] = []): ParseResult {
+  return _parseTokens(tokens, sheets, false);
+}
+
 export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
   var tokens   = tokenise(html);
+  // Detect quirks mode from raw HTML (needs the source string)
+  var _dtMatch = /<!DOCTYPE\s+html\s*>/i.test(html.slice(0, 512));
+  return _parseTokens(tokens, sheets, !_dtMatch);
+}
+
+function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolean): ParseResult {
   var nodes:   RenderNode[]      = [];
   var title    = '';
   var forms:   FormState[]       = [];
@@ -218,12 +229,6 @@ export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
   var styleLinks: string[]       = [];
   var baseURL  = '';
   var favicon  = '';   // href from <link rel="icon"> (item 628)
-
-  // ── DOCTYPE quirks mode detection (item 349) ───────────────────────────────
-  // Standards mode requires a valid HTML5 DOCTYPE: <!DOCTYPE html>.
-  // Anything else (no DOCTYPE, legacy DOCTYPE) triggers quirks mode.
-  var _dtMatch = /<!DOCTYPE\s+html\s*>/i.test(html.slice(0, 512));
-  var quirksMode = !_dtMatch;
 
   // ── Template element support (item 357) ──────────────────────────────────── 
   var templates: Map<string, RenderNode[]> = new Map();

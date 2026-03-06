@@ -17,8 +17,9 @@ import { os } from '../../core/sdk.js';
 import type { FetchResponse } from '../../core/sdk.js';
 import {
   VDocument, VElement, VEvent, VNode, VText, VRange, VEventTarget,
-  buildDOM, serializeDOM, _serializeEl, _walk, _matchSel, _cePending,
+  buildDOM, serializeDOM, vdocToTokens, _serializeEl, _walk, _matchSel, _cePending,
 } from './dom.js';
+import type { HtmlToken } from './types.js';
 import { BrowserPerformance, BrowserPerformanceObserver } from './perf.js';
 import { WorkerImpl, SharedWorkerImpl, MessageChannel, BroadcastChannelImpl, tickAllWorkers } from './workers.js';
 import { cookieJar } from '../../net/http.js';
@@ -29,6 +30,7 @@ import type { CSSAnimation, AnimationKeyframe } from './advanced-css.js';
 import { sampleAnimation } from './advanced-css.js';
 import { buildWSFrame, parseWSFrame } from '../../net/http.js';
 import { cspAllows, logCSPViolation, type CSPPolicy } from './csp.js';
+import { CanvasRenderingContext2D as Canvas2DImpl } from './canvas2d.js';
 
 // ── Script record (collected by html.ts during parsing) ───────────────────────
 
@@ -47,8 +49,8 @@ export interface PageCallbacks {
   alert(msg: string): void;
   confirm(msg: string): boolean;
   prompt(msg: string, def: string): string;
-  /** Re-parse and re-layout the page with the new HTML body. */
-  rerender(bodyHTML: string): void;
+  /** Re-parse and re-layout the page with pre-tokenised body (item 1.2). */
+  rerender(tokens: HtmlToken[]): void;
   /** Write a line to the OS debug console (forward console.log etc.) */
   log(msg: string): void;
   /** Read or write the widget value for the given element id. */
@@ -87,6 +89,8 @@ export interface PageJS {
    * Called by BrowserApp after each layout pass.
    */
   updateLayoutRects(rects: Map<string, { x: number; y: number; w: number; h: number }>): void;
+  /** Get canvas element framebuffers for compositing into the browser viewport (item 3.3). */
+  getCanvasBuffers(): Array<{ elId: string; width: number; height: number; rgba: Uint8Array }>;
 }
 
 // ── Timer state ───────────────────────────────────────────────────────────────
@@ -309,9 +313,9 @@ export function createPageJS(
     needsRerender = false;
     // Update title if changed
     if (doc.title) cb.setTitle(doc.title);
-    var _bodyHTML = serializeDOM(doc);
+    var _bodyTokens = vdocToTokens(doc);
     _rerenderCount++;
-    cb.rerender(_bodyHTML);
+    cb.rerender(_bodyTokens);
     // Rebuild the DOM from the new HTML so subsequent JS keeps working
     // (we keep the existing doc object but sync values back from serialized form)
   }
@@ -5108,41 +5112,26 @@ export function createPageJS(
   // Wire document.getSelection() to the same selection object (item 581)
   (doc as any)._selectionRef = _selection;
 
-  // ── HTMLCanvasElement (2D context stub) ───────────────────────────────────
+  // ── HTMLCanvasElement (real 2D context — item 3.3) ───────────────────────
+
+  // Track all live canvas elements for compositing into the browser viewport
+  var _canvasElements: HTMLCanvas[] = [];
 
   class HTMLCanvas {
     width = 300; height = 150;
-    _ctx: any = null;
+    _ctx: Canvas2DImpl | null = null;
+    _elId: string = '';  // element ID for layout rect lookup
     getContext(type: string): any {
       if (type !== '2d') return null;
       if (this._ctx) return this._ctx;
-      var noop = () => {}; var self = this;
-      this._ctx = {
-        canvas: this,
-        fillStyle: '#000', strokeStyle: '#000', lineWidth: 1, globalAlpha: 1,
-        font: '10px sans-serif', textAlign: 'left', textBaseline: 'alphabetic',
-        shadowBlur: 0, shadowColor: 'transparent', shadowOffsetX: 0, shadowOffsetY: 0,
-        lineCap: 'butt', lineJoin: 'miter', miterLimit: 10, lineDashOffset: 0,
-        globalCompositeOperation: 'source-over',
-        save: noop, restore: noop,
-        scale: noop, rotate: noop, translate: noop, transform: noop, setTransform: noop, resetTransform: noop,
-        clearRect: noop, fillRect: noop, strokeRect: noop,
-        beginPath: noop, closePath: noop, moveTo: noop, lineTo: noop,
-        bezierCurveTo: noop, quadraticCurveTo: noop, arc: noop, arcTo: noop, ellipse: noop, rect: noop,
-        fill: noop, stroke: noop, clip: noop,
-        fillText: noop, strokeText: noop,
-        measureText: (text: string) => ({ width: text.length * 6, actualBoundingBoxAscent: 10, actualBoundingBoxDescent: 2, fontBoundingBoxAscent: 10, fontBoundingBoxDescent: 2 }),
-        drawImage: noop, putImageData: noop,
-        createImageData: (w: number, h: number) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
-        getImageData: (x: number, y: number, w: number, h: number) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
-        createPattern: () => ({}), createLinearGradient: () => ({ addColorStop: noop }), createRadialGradient: () => ({ addColorStop: noop }),
-        setLineDash: noop, getLineDash: () => [],
-        isPointInPath: () => false, isPointInStroke: () => false,
-        get width() { return self.width; }, get height() { return self.height; },
-      };
+      this._ctx = new Canvas2DImpl(this.width, this.height);
+      if (_canvasElements.indexOf(this) < 0) _canvasElements.push(this);
       return this._ctx;
     }
-    toDataURL(_type?: string): string { return 'data:image/png;base64,'; }
+    toDataURL(_type?: string): string {
+      if (this._ctx) return this._ctx.toDataURL(_type);
+      return 'data:image/png;base64,';
+    }
     toBlob(cb: (b: Blob | null) => void): void { cb(null); }
     getBoundingClientRect() { return { x:0, y:0, width:this.width, height:this.height, top:0, left:0, right:this.width, bottom:this.height }; }
   }
@@ -7215,6 +7204,16 @@ export function createPageJS(
           (el as VElement)._layoutRect = rect;
         }
       });
+    },
+    getCanvasBuffers(): Array<{ elId: string; width: number; height: number; rgba: Uint8Array }> {
+      var result: Array<{ elId: string; width: number; height: number; rgba: Uint8Array }> = [];
+      for (var ci = 0; ci < _canvasElements.length; ci++) {
+        var c = _canvasElements[ci];
+        if (c._ctx) {
+          result.push({ elId: c._elId, width: c.width, height: c.height, rgba: c._ctx.framebuffer });
+        }
+      }
+      return result;
     },
   };
 }

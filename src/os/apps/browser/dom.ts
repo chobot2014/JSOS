@@ -9,6 +9,7 @@
  */
 
 import { bumpStyleGeneration } from './cache.js';
+import type { HtmlToken } from './types.js';
 
 // ── HTML Sanitizer (item 370) ─────────────────────────────────────────────────
 /**
@@ -2605,6 +2606,101 @@ function _escapeAttr(s: string): string { return s.replace(/&/g, '&amp;').replac
 
 /** Serialize the document body back to an HTML string for re-parsing */
 export function serializeDOM(doc: VDocument): string { return _serialize(doc.body.childNodes); }
+
+// ── VDocument → HtmlToken[] (item 1.2 — eliminate serialize/reparse) ─────────
+// Walk the VDocument tree and emit HtmlToken[] directly, avoiding the
+// O(N) string allocation of serializeDOM() and O(N) re-tokenisation.
+
+export function vdocToTokens(doc: VDocument): HtmlToken[] {
+  var tokens: HtmlToken[] = [];
+  _emitTokens(doc.body.childNodes, tokens);
+  return tokens;
+}
+
+function _emitTokens(nodes: VNode[], out: HtmlToken[]): void {
+  for (var i = 0; i < nodes.length; i++) {
+    var n = nodes[i];
+    if (n instanceof VText) {
+      out.push({ kind: 'text', tag: '', text: (n as VText).data, attrs: new Map() });
+    } else if (n instanceof VElement) {
+      _emitElTokens(n as VElement, out);
+    }
+    // Comment nodes are ignored (not rendered)
+  }
+}
+
+function _emitElTokens(el: VElement, out: HtmlToken[]): void {
+  var tag = el.tagName.toLowerCase();
+  // Fragment / shadow-root wrappers: emit children only
+  if (tag === '#fragment' || tag === '#shadow-root') { _emitTokens(el.childNodes, out); return; }
+  // <slot>: distribute light DOM children from shadow host
+  if (tag === 'slot') {
+    var _cur: VNode | null = el.parentNode;
+    while (_cur && !(_cur as any)._isShadowRoot) _cur = (_cur as any).parentNode;
+    if (_cur && (_cur as any)._shadowHost) {
+      var _host = (_cur as any)._shadowHost as VElement;
+      var slotName = el._attrs.get('name') || '';
+      var slotted = _host.childNodes.filter(cn => {
+        if (!slotName) return true;
+        return (cn instanceof VElement) && (cn as VElement)._attrs.get('slot') === slotName;
+      });
+      if (slotted.length > 0) { _emitTokens(slotted, out); return; }
+    }
+    _emitTokens(el.childNodes, out);
+    return;
+  }
+  // <template>: emit from _content fragment
+  if (tag === 'template') {
+    out.push({ kind: 'open', tag: 'template', text: '', attrs: new Map() });
+    if ((el as any)._content) {
+      _emitTokens(((el as any)._content as VElement).childNodes, out);
+    }
+    out.push({ kind: 'close', tag: 'template', text: '', attrs: new Map() });
+    return;
+  }
+  // Build attrs map (same merge logic as _serializeEl)
+  var attrs = new Map<string, string>();
+  el._attrs.forEach((v, k) => {
+    if (k === 'style') return; // handled below
+    attrs.set(k, v);
+  });
+  // Merge style: original + _style._map overlay
+  var origStyle = el._attrs.get('style') || '';
+  var hasStyleMap = el._style._map.size > 0;
+  if (origStyle || hasStyleMap) {
+    var styleMap: Map<string, string> = new Map();
+    if (origStyle) {
+      origStyle.split(';').forEach(p => {
+        var ci = p.indexOf(':');
+        if (ci >= 0) {
+          var pk = p.slice(0, ci).trim();
+          var pv = p.slice(ci + 1).trim();
+          if (pk) styleMap.set(pk, pv);
+        }
+      });
+    }
+    el._style._map.forEach((v, k) => {
+      if (k && !k.startsWith('-webkit-') && !k.startsWith('-moz-') && !k.startsWith('-ms-') && !k.startsWith('-o-'))
+        styleMap.set(k, v);
+    });
+    var parts: string[] = [];
+    styleMap.forEach((v, k) => { if (v) parts.push(k + ':' + v); });
+    if (parts.length > 0) attrs.set('style', parts.join(';'));
+  }
+  if (_VOID.has(tag)) {
+    out.push({ kind: 'self', tag, text: '', attrs });
+    return;
+  }
+  out.push({ kind: 'open', tag, text: '', attrs });
+  // If element has a shadow root, serialize shadow content instead of light DOM
+  var srRoot = el._shadowRoot;
+  if (srRoot && (srRoot as any)._isShadowRoot) {
+    _emitTokens(srRoot.childNodes, out);
+  } else {
+    _emitTokens(el.childNodes, out);
+  }
+  out.push({ kind: 'close', tag, text: '', attrs: new Map() });
+}
 
 // ── Named HTML entity table (item 350) ───────────────────────────────────────
 

@@ -778,6 +778,21 @@ export class Canvas {
     var cols = Math.min(srcW, this.width  - dx);
     var rows = Math.min(srcH, this.height - dy);
     if (cols <= 0 || rows <= 0) return;
+    // JIT fast-path: use compiled blitRow kernel for each row (item 2.1)
+    if (_ensureJIT()) {
+      var dstBase = this.bufPhysAddr();
+      var srcBase = JITCanvas.physAddr(src.buffer as ArrayBuffer);
+      if (dstBase && srcBase) {
+        for (var row = 0; row < rows; row++) {
+          var dstY = dy + row;
+          if (dstY < 0 || dstY >= this.height) continue;
+          var srcOff = row * srcW;
+          var dstOff = dstY * this.width + dx;
+          JITCanvas.blitRow(dstBase + dstOff * 4, srcBase + srcOff * 4, cols);
+        }
+        return;
+      }
+    }
     for (var row = 0; row < rows; row++) {
       var dstY = dy + row;
       if (dstY < 0 || dstY >= this.height) continue;
@@ -785,6 +800,41 @@ export class Canvas {
         src.subarray(row * srcW, row * srcW + cols),
         dstY * this.width + dx,
       );
+    }
+  }
+
+  /**
+   * Scroll-blit: shift the pixel buffer vertically by deltaY pixels within a
+   * sub-region [y0..y0+h).  Avoids a full repaint for scroll-only frames.
+   * The caller must repaint the newly-exposed strip afterwards.  (Item 2.2)
+   */
+  scrollBlit(deltaY: number, y0: number, regionH: number): void {
+    if (deltaY === 0 || regionH <= 0) return;
+    var w      = this.width;
+    var absDy  = Math.abs(deltaY);
+    if (absDy >= regionH) return; // entire region changes, nothing to shift
+    if (deltaY > 0) {
+      // Scrolling down: copy rows upward (bottom content moves up)
+      for (var r = 0; r < regionH - absDy; r++) {
+        var srcRow = y0 + r + absDy;
+        var dstRow = y0 + r;
+        if (srcRow >= this.height || dstRow < 0) continue;
+        this._buf.set(
+          this._buf.subarray(srcRow * w, srcRow * w + w),
+          dstRow * w,
+        );
+      }
+    } else {
+      // Scrolling up: copy rows downward (iterate from bottom)
+      for (var r = regionH - absDy - 1; r >= 0; r--) {
+        var srcRow = y0 + r;
+        var dstRow = y0 + r + absDy;
+        if (srcRow < 0 || dstRow >= this.height) continue;
+        this._buf.set(
+          this._buf.subarray(srcRow * w, srcRow * w + w),
+          dstRow * w,
+        );
+      }
     }
   }
 

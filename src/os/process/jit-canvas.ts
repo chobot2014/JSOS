@@ -186,6 +186,33 @@ function compositeOver(dst, src, n, alpha) {
 }
 `;
 
+/**
+ * drawSpans — batch span-fill kernel (item 2.5 JIT line rasterizer).
+ * Reads packed span descriptors from a descriptor buffer:
+ *   [offset0, color0, len0, offset1, color1, len1, ...]
+ * and fills each span in the pixel buffer at physical address `dest`.
+ * `count` is the number of spans (each span = 3 int32s).
+ * `spans` is the physical address of the span descriptor Int32Array.
+ */
+const _SRC_DRAW_SPANS = `
+function drawSpans(dest, spans, count) {
+  var i = 0;
+  while (i < count) {
+    var base   = i * 3;
+    var offset = mem32[spans + base * 4];
+    var color  = mem32[spans + base * 4 + 4];
+    var len    = mem32[spans + base * 4 + 8];
+    var j = 0;
+    while (j < len) {
+      mem32[dest + (offset + j) * 4] = color;
+      j = j + 1;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
 // ─── Compiled function slots ──────────────────────────────────────────────────
 
 type JITFn = ((...args: number[]) => number) | null;
@@ -197,6 +224,7 @@ var _blitAlphaRow:  JITFn = null;
 var _glyphRow:      JITFn = null;
 var _blitScaledRow: JITFn = null;
 var _compositeOver: JITFn = null;
+var _drawSpans:     JITFn = null;
 var _ready = false;
 
 // ─── TypeScript fallbacks (used when JIT pool is unavailable) ─────────────────
@@ -228,6 +256,7 @@ export const JITCanvas = {
     _glyphRow     = JIT.compile(_SRC_GLYPH_ROW);
     _blitScaledRow = JIT.compile(_SRC_BLIT_SCALED_ROW);
     _compositeOver = JIT.compile(_SRC_COMPOSITE_OVER);
+    _drawSpans     = JIT.compile(_SRC_DRAW_SPANS);
     _ready = _fillBuffer !== null;
     return _ready;
   },
@@ -309,6 +338,16 @@ export const JITCanvas = {
    */
   compositeOver(dst: number, src: number, n: number, alpha: number): void {
     if (_compositeOver) _compositeOver(dst, src, n, alpha);
+  },
+
+  /**
+   * Batch span-fill: fill `count` spans described by packed descriptors
+   * at physical address `spans` into pixel buffer at `dest`.
+   * Each span descriptor = [pixelOffset, color, length] (3 × int32).
+   * (Item 2.5 — JIT line rasterizer)
+   */
+  drawSpans(dest: number, spans: number, count: number): void {
+    if (_drawSpans) _drawSpans(dest, spans, count);
   },
 
   /** Diagnostic: JIT pool usage after all canvas functions are compiled. */
