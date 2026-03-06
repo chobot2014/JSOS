@@ -470,6 +470,75 @@ function invertRow(physAddr, n) {
 }
 `;
 
+/**
+ * parseHexColor6 — parse 6 hex ASCII bytes at physAddr into 0xFFRRGGBB pixel.
+ * CSS parses thousands of #RRGGBB colors per page; this avoids parseInt/slice.
+ * Returns 0 on invalid input (any non-hex nibble).
+ */
+const _SRC_PARSE_HEX_COLOR6 = `
+function parseHexColor6(physAddr) {
+  var r1 = mem8[physAddr] & 0xff;
+  var r0 = mem8[physAddr + 1] & 0xff;
+  var g1 = mem8[physAddr + 2] & 0xff;
+  var g0 = mem8[physAddr + 3] & 0xff;
+  var b1 = mem8[physAddr + 4] & 0xff;
+  var b0 = mem8[physAddr + 5] & 0xff;
+  var rh = 0; var rl = 0; var gh = 0; var gl = 0; var bh = 0; var bl = 0;
+  if (r1 >= 48) { if (r1 <= 57) { rh = r1 - 48; } else if (r1 >= 65) { if (r1 <= 70) { rh = r1 - 55; } else if (r1 >= 97) { if (r1 <= 102) { rh = r1 - 87; } else { return 0; } } else { return 0; } } else { return 0; } }
+  if (r0 >= 48) { if (r0 <= 57) { rl = r0 - 48; } else if (r0 >= 65) { if (r0 <= 70) { rl = r0 - 55; } else if (r0 >= 97) { if (r0 <= 102) { rl = r0 - 87; } else { return 0; } } else { return 0; } } else { return 0; } }
+  if (g1 >= 48) { if (g1 <= 57) { gh = g1 - 48; } else if (g1 >= 65) { if (g1 <= 70) { gh = g1 - 55; } else if (g1 >= 97) { if (g1 <= 102) { gh = g1 - 87; } else { return 0; } } else { return 0; } } else { return 0; } }
+  if (g0 >= 48) { if (g0 <= 57) { gl = g0 - 48; } else if (g0 >= 65) { if (g0 <= 70) { gl = g0 - 55; } else if (g0 >= 97) { if (g0 <= 102) { gl = g0 - 87; } else { return 0; } } else { return 0; } } else { return 0; } }
+  if (b1 >= 48) { if (b1 <= 57) { bh = b1 - 48; } else if (b1 >= 65) { if (b1 <= 70) { bh = b1 - 55; } else if (b1 >= 97) { if (b1 <= 102) { bh = b1 - 87; } else { return 0; } } else { return 0; } } else { return 0; } }
+  if (b0 >= 48) { if (b0 <= 57) { bl = b0 - 48; } else if (b0 >= 65) { if (b0 <= 70) { bl = b0 - 55; } else if (b0 >= 97) { if (b0 <= 102) { bl = b0 - 87; } else { return 0; } } else { return 0; } } else { return 0; } }
+  return -16777216 | ((rh << 4 | rl) << 16) | ((gh << 4 | gl) << 8) | (bh << 4 | bl);
+}
+`;
+
+/**
+ * scanQuoted — find the closing quote character in an HTML attribute value.
+ * Starts at offset (byte AFTER the opening quote) and scans for the matching
+ * quote byte (34 = '"', 39 = "'"). Returns offset of closing quote or len.
+ * Hot in HTML tokenizer — every attribute with a value hits this.
+ */
+const _SRC_SCAN_QUOTED = `
+function scanQuoted(physAddr, offset, len, quote) {
+  var i = offset;
+  while (i < len) {
+    var ch = mem8[physAddr + i] & 0xff;
+    if (ch === quote) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return len;
+}
+`;
+
+/**
+ * cssSpecCmp — compare two CSS specificities packed as single int32s.
+ * Specificity = (ids << 20) | (classes << 10) | types.
+ * Returns: >0 if a wins, <0 if b wins, 0 if equal.
+ * Hot in CSS cascade — called once per rule per element.
+ */
+const _SRC_CSS_SPEC_CMP = `
+function cssSpecCmp(a, b) {
+  return a - b;
+}
+`;
+
+/**
+ * mulAlpha — multiply a pixel's alpha channel by a factor [0,255].
+ * Used for CSS opacity stacking: each nested opacity multiplies.
+ * Returns the pixel with adjusted alpha, RGB unchanged.
+ */
+const _SRC_MUL_ALPHA = `
+function mulAlpha(pixel, factor) {
+  var a = (pixel >> 24) & 0xff;
+  var na = Math.imul(a, factor) >> 8;
+  return (pixel & 0x00ffffff) | (na << 24);
+}
+`;
+
 
 type JITFn = ((...args: number[]) => number) | null;
 
@@ -495,6 +564,10 @@ var _scanWS:         JITFn = null;
 var _clampByte:      JITFn = null;
 var _rgbLuma:        JITFn = null;
 var _invertRow:      JITFn = null;
+var _parseHexColor6: JITFn = null;
+var _scanQuoted:     JITFn = null;
+var _cssSpecCmp:     JITFn = null;
+var _mulAlpha:       JITFn = null;
 var _ready = false;
 
 // ─── Script Pre-compilation Cache ─────────────────────────────────────────────
@@ -774,6 +847,10 @@ export const JITBrowserEngine = {
     _clampByte       = tryCompile(_SRC_CLAMP_BYTE,        'clampByte');
     _rgbLuma         = tryCompile(_SRC_RGB_LUMA,          'rgbLuma');
     _invertRow       = tryCompile(_SRC_INVERT_ROW,        'invertRow');
+    _parseHexColor6  = tryCompile(_SRC_PARSE_HEX_COLOR6,  'parseHexColor6');
+    _scanQuoted      = tryCompile(_SRC_SCAN_QUOTED,        'scanQuoted');
+    _cssSpecCmp      = tryCompile(_SRC_CSS_SPEC_CMP,       'cssSpecCmp');
+    _mulAlpha        = tryCompile(_SRC_MUL_ALPHA,          'mulAlpha');
 
     _browserJITStats.domOpsNative = _stringHash !== null;
     _browserJITStats.cssNative    = _parseCSSInt !== null;
@@ -936,6 +1013,33 @@ export const JITBrowserEngine = {
   /** XOR-invert RGB channels of n pixels at physAddr (preserves alpha). */
   invertRow(physAddr: number, n: number): void {
     if (_invertRow) _invertRow(physAddr, n);
+  },
+
+  /** Parse 6 hex ASCII bytes at physAddr into 0xFFRRGGBB pixel. Returns 0 on invalid hex. */
+  parseHexColor6(physAddr: number): number {
+    if (_parseHexColor6) return _parseHexColor6(physAddr);
+    return 0;
+  },
+
+  /** Find closing quote char (34=dquote, 39=squote) from offset. Returns offset or len. */
+  scanQuoted(physAddr: number, offset: number, len: number, quote: number): number {
+    if (_scanQuoted) return _scanQuoted(physAddr, offset, len, quote);
+    for (var i = offset; i < len; i++) if (kernel.readMem8(physAddr + i) === quote) return i;
+    return len;
+  },
+
+  /** Compare packed CSS specificities (ids<<20|classes<<10|types). >0 means a wins. */
+  cssSpecCmp(a: number, b: number): number {
+    if (_cssSpecCmp) return _cssSpecCmp(a, b);
+    return a - b;
+  },
+
+  /** Multiply pixel alpha by factor [0,255] for CSS opacity stacking. */
+  mulAlpha(pixel: number, factor: number): number {
+    if (_mulAlpha) return _mulAlpha(pixel, factor);
+    var a = (pixel >>> 24) & 0xff;
+    var na = (a * factor) >> 8;
+    return (pixel & 0x00ffffff) | (na << 24);
   },
 
   // ── Script cache ──────────────────────────────────────────────────────────

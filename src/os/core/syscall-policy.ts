@@ -69,6 +69,15 @@ const ALWAYS_DENIED: ReadonlyMap<string, Set<string>> = new Map<string, Set<stri
   ['vm',     new Set(['killAll', 'wipeMem'])],
 ]);
 
+/**
+ * Methods restricted to 'privileged' profile only.
+ * Non-privileged processes (standard, restricted, sandbox) are denied these.
+ */
+const PRIVILEGED_ONLY: ReadonlyMap<string, Set<string>> = new Map<string, Set<string>>([
+  ['kernel', new Set(['readPhysMem', 'writePhysMem', 'readMem8', 'writeMem8',
+                      'callNative', 'callNativeI', 'jitAlloc', 'jitWrite'])],
+]);
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  SyscallPolicy
 // ─────────────────────────────────────────────────────────────────────────────
@@ -135,6 +144,10 @@ export class SyscallPolicy {
 
     // Privileged wildcard: allow all (except always-denied above)
     if (this._allowed.has('*')) return true;
+
+    // Privileged-only methods: denied for non-privileged profiles
+    const privSet = PRIVILEGED_ONLY.get(namespace);
+    if (privSet?.has(method)) return false;
 
     // Check namespace-level allowlist
     return this._allowed.has(namespace);

@@ -2123,7 +2123,65 @@ static uint32_t jit_resolve_native(uint32_t fn_ptr)
 }
 
 /*
- * kernel.jitHelperAddrs() → {getPropI32, setPropI32, callFn, resolveNative}
+ * jit_js_string_eq(str_a, str_b) → int32 (1 = equal, 0 = not equal)
+ * Compare two JSString* pointers for equality.  Called from OP_strict_eq
+ * slow path when both operands are JS_TAG_STRING.
+ */
+static int32_t jit_js_string_eq(uint32_t str_a, uint32_t str_b)
+{
+    if (str_a == str_b) return 1;  /* same pointer → equal */
+    if (!str_a || !str_b) return 0;
+    uint8_t *a = (uint8_t *)(uintptr_t)str_a;
+    uint8_t *b = (uint8_t *)(uintptr_t)str_b;
+    /* len+is_wide_char packed at offset 4 */
+    uint32_t a_lenw = *(uint32_t *)(a + 4);
+    uint32_t b_lenw = *(uint32_t *)(b + 4);
+    if (a_lenw != b_lenw) return 0;  /* different len or char width */
+    uint32_t len = a_lenw & 0x7FFFFFFF;
+    uint32_t is_wide = a_lenw >> 31;
+    uint32_t byte_len = is_wide ? len * 2 : len;
+    /* character data starts at offset 16 */
+    const uint8_t *ad = a + 16;
+    const uint8_t *bd = b + 16;
+    for (uint32_t i = 0; i < byte_len; i++) {
+        if (ad[i] != bd[i]) return 0;
+    }
+    return 1;
+}
+
+/*
+ * jit_js_string_len(str_ptr) → int32 (string length in characters)
+ * Extract the length from a JSString* pointer.
+ */
+static int32_t jit_js_string_len(uint32_t str_ptr)
+{
+    if (!str_ptr) return 0;
+    uint8_t *s = (uint8_t *)(uintptr_t)str_ptr;
+    return (int32_t)(*(uint32_t *)(s + 4) & 0x7FFFFFFF);
+}
+
+/*
+ * jit_js_string_charat(str_ptr, idx) → int32 (char code or -1)
+ * Get the character code at the given index.
+ */
+static int32_t jit_js_string_charat(uint32_t str_ptr, int32_t idx)
+{
+    if (!str_ptr) return -1;
+    uint8_t *s = (uint8_t *)(uintptr_t)str_ptr;
+    uint32_t lenw = *(uint32_t *)(s + 4);
+    uint32_t len = lenw & 0x7FFFFFFF;
+    if (idx < 0 || (uint32_t)idx >= len) return -1;
+    if (lenw >> 31) {
+        /* 16-bit chars */
+        return (int32_t)((uint16_t *)(s + 16))[idx];
+    } else {
+        return (int32_t)s[16 + idx];
+    }
+}
+
+/*
+ * kernel.jitHelperAddrs() → {getPropI32, setPropI32, callFn, resolveNative,
+ *                             stringEq, stringLen, stringCharAt}
  * Returns an object containing the uint32 physical addresses of the
  * JIT runtime helper functions.  JIT'd x86 code loads these addresses
  * into ECX and executes CALL ECX to invoke the helper in cdecl fashion.
@@ -2141,6 +2199,12 @@ static JSValue js_jit_get_helper_addrs(JSContext *c, JSValueConst this_val,
         JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_call_fn));
     JS_SetPropertyStr(c, o, "resolveNative",
         JS_NewUint32(c, (uint32_t)(uintptr_t)jit_resolve_native));
+    JS_SetPropertyStr(c, o, "stringEq",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_string_eq));
+    JS_SetPropertyStr(c, o, "stringLen",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_string_len));
+    JS_SetPropertyStr(c, o, "stringCharAt",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_string_charat));
     return o;
 }
 

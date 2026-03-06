@@ -18,6 +18,7 @@ import { threadManager } from '../process/threads.js';
 import { scheduler } from '../process/scheduler.js';
 import { _serviceChildJIT, clearChildJITForProc } from '../process/qjs-jit.js';
 import { systemProfiler } from '../process/optimizer.js';
+import { SyscallPolicy, registerPolicy, unregisterPolicy } from '../core/syscall-policy.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -119,6 +120,7 @@ export class ChildProcApp implements App {
   onMount(_win: WMWindow): void { /* nothing */ }
 
   onUnmount(): void {
+    unregisterPolicy(this.procId);
     kernel.procDestroy(this.procId);
   }
 
@@ -376,6 +378,8 @@ export class WindowManager {
   launchApp(manifest: AppManifest): number {
     var procId = kernel.procCreate();
     if (procId < 0) { return -1; }
+    // Register a 'standard' syscall policy for the child process
+    registerPolicy(procId, new SyscallPolicy('standard', procId));
     kernel.procSetDimensions(procId, manifest.width, manifest.height);
     this.createWindow({
       title:     manifest.title,

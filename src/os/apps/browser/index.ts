@@ -45,6 +45,7 @@ import { aboutJsosHTML, aboutJstestHTML, errorHTML, jsonViewerHTML } from './pag
 import { createPageJS, getBlobURLContent, type PageJS } from './jsruntime.js';
 import { flushAllCaches } from './cache.js';
 import { renderGradientCSS } from './gradient.js';
+import { parseCSP, type CSPPolicy } from './csp.js';
 
 // ── Box-shadow parser ─────────────────────────────────────────────────────────
 interface _BoxShadowLayer {
@@ -208,6 +209,8 @@ export class BrowserApp implements App {
   // JavaScript runtime for the current page (null if page has no scripts)
   private _pageJS: PageJS | null = null;
   private _jsStartMs = 0;
+  // Content Security Policy for the current page (null if no CSP header)
+  private _cspPolicy: CSPPolicy | null = null;
 
   // ── Tabs ───────────────────────────────────────────────────────────────────
   private _tabs:    TabState[] = [];
@@ -1827,6 +1830,9 @@ export class BrowserApp implements App {
       os.debug.log('[browser] HTTP', resp.status, resp.body.length + 'B');
       if (err) { self._showError(finalURL, err); return; }
       self._pageSource = resp.bodyText;
+      // Parse Content-Security-Policy header if present
+      var cspHeader = resp.headers.get('content-security-policy');
+      self._cspPolicy = cspHeader ? parseCSP(cspHeader) : null;
       var ct = resp.headers.get('content-type') || 'text/html';
       if (ct.indexOf('application/json') >= 0 || ct.indexOf('text/json') >= 0) {
         self._showHTML(jsonViewerHTML(finalURL, resp.bodyText), 'JSON', finalURL);
@@ -2218,7 +2224,7 @@ export class BrowserApp implements App {
         },
         getScrollY: () => self2._scrollY,
         scrollTo: (_x: number, y: number) => { self2._scrollBy(y - self2._scrollY); },
-      });
+      }, this._cspPolicy);
       // Push initial layout rects to the JS runtime so getBoundingClientRect() works
       this._pushLayoutRects();
     }

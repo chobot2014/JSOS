@@ -28,6 +28,7 @@ import { JITBrowserEngine } from './jit-browser.js';
 import type { CSSAnimation, AnimationKeyframe } from './advanced-css.js';
 import { sampleAnimation } from './advanced-css.js';
 import { buildWSFrame, parseWSFrame } from '../../net/http.js';
+import { cspAllows, logCSPViolation, type CSPPolicy } from './csp.js';
 
 // ── Script record (collected by html.ts during parsing) ───────────────────────
 
@@ -161,11 +162,14 @@ var _sessionStorage = new VStorage();
 
 // ── Blob object URL store (item 639) ─────────────────────────────────────────
 // Maps blob: URLs → { content: string; type: string }
+// Per-tab blob stores are created inside createPageJS(); this module-level
+// instance is the "active" store forwarded by getBlobURLContent().
 var _blobStore = new Map<string, { content: string; type: string }>();
 
 /**
  * Look up the content of a blob: URL created via URL.createObjectURL().
  * Returns null if the URL is not found or has been revoked.
+ * Delegates to the active page's blob store.
  */
 export function getBlobURLContent(url: string): { content: string; type: string } | null {
   return _blobStore.get(url) ?? null;
@@ -177,10 +181,22 @@ export function createPageJS(
   fullHTML:  string,
   scripts:   ScriptRecord[],
   cb:        PageCallbacks,
+  cspPolicy: CSPPolicy | null = null,
 ): PageJS | null {
 
   // Skip pages with no JS
   if (scripts.length === 0) return null;
+
+  // ── Per-tab storage isolation ─────────────────────────────────────────────
+  // Each createPageJS() call gets its own localStorage, sessionStorage, and
+  // blob store.  This prevents cross-tab data leakage.  The module-level
+  // _localStorage / _sessionStorage / _blobStore refs are updated to point
+  // to the current tab's instances so getBlobURLContent() still works.
+
+  // Create per-tab storage instances
+  _localStorage  = new VStorage();
+  _sessionStorage = new VStorage();
+  _blobStore = new Map<string, { content: string; type: string }>();
 
   // ── Initialise per-origin localStorage (item 500) ─────────────────────────
   // Derive a VFS-safe origin key from the base URL (e.g. "http_example.com_80")
@@ -191,18 +207,13 @@ export function createPageJS(
                        (_originURL.port || (_originURL.protocol === 'https:' ? '443' : '80')))
                       .replace(/[^a-zA-Z0-9_.-]/g, '_');
     var _lsPath = '/user/localStorage/' + _originKey + '.json';
-    if (_localStorage._path !== _lsPath) {
-      _localStorage._data.clear();
-      _localStorage._path = _lsPath;
-      _localStorage._load();
-    }
+    _localStorage._path = _lsPath;
+    _localStorage._load();
   } catch (_) {
     // Non-URL base (e.g. file:///...) — in-memory only
     _localStorage._path = '';
-    _localStorage._data.clear();
   }
-  // sessionStorage is always cleared on new page load (session-scoped)
-  _sessionStorage._data.clear();
+  // sessionStorage is always fresh per tab (session-scoped)
   _sessionStorage._path = '';
 
   // Build virtual DOM from the full page HTML
@@ -303,6 +314,64 @@ export function createPageJS(
     cb.rerender(_bodyHTML);
     // Rebuild the DOM from the new HTML so subsequent JS keeps working
     // (we keep the existing doc object but sync values back from serialized form)
+  }
+
+  // ── CORS (Cross-Origin Resource Sharing) enforcement ─────────────────────
+  // Phase 2.1.2: enforce same-origin policy on fetch()/XMLHttpRequest.
+  var _pageOrigin: string = '';
+  {
+    // Extract origin from base URL without using URL class (not available in OS context)
+    var _poSchEnd = cb.baseURL.indexOf('://');
+    if (_poSchEnd >= 0) {
+      var _poScheme = cb.baseURL.slice(0, _poSchEnd);
+      var _poRest   = cb.baseURL.slice(_poSchEnd + 3);
+      var _poSlash  = _poRest.indexOf('/');
+      var _poHost   = _poSlash >= 0 ? _poRest.slice(0, _poSlash) : _poRest;
+      // Strip default ports
+      if (_poScheme === 'https' && _poHost.endsWith(':443')) _poHost = _poHost.slice(0, -4);
+      else if (_poScheme === 'http' && _poHost.endsWith(':80')) _poHost = _poHost.slice(0, -3);
+      _pageOrigin = _poScheme + '://' + _poHost;
+    }
+  }
+
+  /** Check if a URL is same-origin as the current page. */
+  function _isSameOrigin(url: string): boolean {
+    if (!_pageOrigin) return true; // about:blank etc = all same-origin
+    var schEnd = url.indexOf('://');
+    if (schEnd < 0) return true; // relative URL = same-origin
+    var scheme = url.slice(0, schEnd);
+    var rest2  = url.slice(schEnd + 3);
+    var slash  = rest2.indexOf('/');
+    var host   = slash >= 0 ? rest2.slice(0, slash) : rest2;
+    // Strip query/fragment from host
+    var qm = host.indexOf('?'); if (qm >= 0) host = host.slice(0, qm);
+    var hh = host.indexOf('#'); if (hh >= 0) host = host.slice(0, hh);
+    // Strip default ports
+    if (scheme === 'https' && host.endsWith(':443')) host = host.slice(0, -4);
+    else if (scheme === 'http' && host.endsWith(':80')) host = host.slice(0, -3);
+    return (scheme + '://' + host) === _pageOrigin;
+  }
+
+  /** Check CORS response headers for a cross-origin fetch/XHR.
+   *  Returns true if the response is allowed. */
+  function _checkCORS(respHeaders: { get(k: string): string | null }): boolean {
+    var acao = respHeaders.get('access-control-allow-origin');
+    if (!acao) return false;
+    return acao === '*' || acao === _pageOrigin;
+  }
+
+  /** Add Origin and Referer headers to outgoing cross-origin requests. */
+  function _addCORSHeaders(headers: Record<string, string>, url: string): void {
+    if (!_isSameOrigin(url) && _pageOrigin) {
+      headers['origin'] = headers['origin'] || _pageOrigin;
+    }
+    // Referer: the current page URL (stripped of fragment)
+    if (cb.baseURL && !headers['referer']) {
+      var _ref = cb.baseURL;
+      var _hashIdx = _ref.indexOf('#');
+      if (_hashIdx >= 0) _ref = _ref.slice(0, _hashIdx);
+      headers['referer'] = _ref;
+    }
   }
 
   // ── Form action/method wiring (items 602, 604) ─────────────────────────────
@@ -1400,6 +1469,18 @@ export function createPageJS(
         if (_ch) extraHeaders['cookie'] = extraHeaders['cookie'] || _ch;
       } catch (_) {}
 
+      // CORS: add Origin and Referer headers for cross-origin requests
+      _addCORSHeaders(extraHeaders, urlStr);
+      var _fetchCrossOrigin = !_isSameOrigin(urlStr);
+      var _fetchMode = opts?.mode || (_fetchCrossOrigin ? 'cors' : 'same-origin');
+
+      // CSP connect-src enforcement
+      if (cspPolicy && !cspAllows(cspPolicy, 'connect-src', urlStr, _pageOrigin, false, false)) {
+        logCSPViolation('connect-src', urlStr, cb.baseURL);
+        reject(new TypeError('[CSP] blocked fetch to ' + urlStr));
+        return;
+      }
+
       var aborted = false;
       if (signal) {
         signal.addEventListener('abort', () => { aborted = true; reject(signal.reason ?? new Error('AbortError')); });
@@ -1433,7 +1514,7 @@ export function createPageJS(
           statusText: String(resp.status),
           headers: respHeaders,
           redirected: false,
-          type: 'basic',
+          type: _fetchCrossOrigin ? 'cors' : 'basic',
           url: urlStr,
           text():        Promise<string>      { return Promise.resolve(text); },
           json():        Promise<unknown>     { try { return Promise.resolve(JSON.parse(text)); } catch(e) { return Promise.reject(e); } },
@@ -1449,6 +1530,11 @@ export function createPageJS(
           bodyUsed: false,
           get body()     { return _makeBodyStream(text); },
         };
+        // CORS enforcement: cross-origin responses without CORS headers are blocked
+        if (_fetchCrossOrigin && _fetchMode !== 'no-cors' && !_checkCORS(respHeaders)) {
+          reject(new TypeError('CORS error: no Access-Control-Allow-Origin header on ' + urlStr));
+          return;
+        }
         resolve(response);
       }, { method, headers: extraHeaders, body: bodyStr });
     });
@@ -1509,6 +1595,18 @@ export function createPageJS(
         if (_xhrCk) self._headers['cookie'] = self._headers['cookie'] || _xhrCk;
       } catch (_) {}
 
+      // CORS: add Origin/Referer headers for cross-origin XHR
+      _addCORSHeaders(self._headers, self._url);
+      var _xhrCrossOrigin = !_isSameOrigin(self._url);
+
+      // CSP connect-src enforcement for XHR
+      if (cspPolicy && !cspAllows(cspPolicy, 'connect-src', self._url, _pageOrigin, false, false)) {
+        logCSPViolation('connect-src', self._url, cb.baseURL);
+        self.status = 0;
+        try { if (self.onerror) self.onerror({ target: self }); } catch(_) {}
+        return;
+      }
+
       // Timeout enforcement: abort and fire ontimeout if response takes too long
       var _xhrTimer: any = null;
       if (self.timeout > 0) {
@@ -1533,6 +1631,15 @@ export function createPageJS(
           self.status = resp.status; self.statusText = String(resp.status);
           self.responseURL = self._url;
           resp.headers.forEach((v: string, k: string) => { self._responseHeaders[k.toLowerCase()] = v; });
+          // CORS: block cross-origin XHR responses without CORS headers
+          if (_xhrCrossOrigin && !_checkCORS({ get: (k: string) => self._responseHeaders[k.toLowerCase()] ?? null })) {
+            self.status = 0; self._setState(4);
+            var corsErr = { target: self };
+            try { if (self.onerror) self.onerror(corsErr); } catch(_) {}
+            var corsErrListeners = self._listeners.get('error');
+            if (corsErrListeners) for (var _cef of corsErrListeners) try { _cef(corsErr); } catch(_) {}
+            return;
+          }
           self._setState(2); // HEADERS_RECEIVED
           self._setState(3); // LOADING
           self.responseText = resp.bodyText;
@@ -6194,6 +6301,25 @@ export function createPageJS(
   function execScript(code: string, scriptURL?: string): void {
     // After a fault recovery the heap is dirty — no more page JS execution.
     if (_pageFaulted) return;
+
+    // ── CSP enforcement ──────────────────────────────────────────────────────
+    if (cspPolicy) {
+      var _isInline = !scriptURL;
+      if (_isInline) {
+        if (!cspAllows(cspPolicy, 'script-src', cb.baseURL, _pageOrigin, true, false)) {
+          logCSPViolation('script-src', '(inline)', cb.baseURL);
+          cb.log('[CSP] blocked inline script');
+          return;
+        }
+      } else {
+        if (!cspAllows(cspPolicy, 'script-src', scriptURL!, _pageOrigin, false, false)) {
+          logCSPViolation('script-src', scriptURL!, cb.baseURL);
+          cb.log('[CSP] blocked script: ' + scriptURL);
+          return;
+        }
+      }
+    }
+
     // ── Script size guard ──────────────────────────────────────────────────────
     // Always use kernel.evalGuarded when available — the JIT can generate bad
     // native code from ANY script (inline or external, large or tiny) and a
@@ -7024,6 +7150,9 @@ export function createPageJS(
       }
       // fire beforeunload
       try { var ev = new VEvent('beforeunload'); doc.dispatchEvent(ev); } catch(_) {}
+      // Per-tab cleanup: clear blob URLs, sessionStorage
+      _blobStore.clear();
+      _sessionStorage._data.clear();
     },
     tick(nowMs: number): void {
       if (disposed) return;

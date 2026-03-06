@@ -69,6 +69,7 @@ export const JS_TAG_NULL        = 2;
 export const JS_TAG_UNDEFINED   = 3;
 export const JS_TAG_UNINITIALIZED = 4;
 export const JS_TAG_FLOAT64     = 7;
+export const JS_TAG_STRING      = -7;
 export const JS_TAG_OBJECT      = -1;
 export const JS_TAG_FUNCTION_BYTECODE = -2;
 
@@ -330,6 +331,9 @@ export class QJSJITCompiler {
   protected _helperSetPropI32:    number = 0;
   protected _helperCallFn:        number = 0;
   protected _helperResolveNative: number = 0;
+  protected _helperStringEq:      number = 0;
+  protected _helperStringLen:     number = 0;
+  protected _helperStringCharAt:  number = 0;
   /** OSR entry-point map: bcOffset → nativeOffset.  Populated during compile (item 856). */
   readonly osrEntries: Map<number, number> = new Map();
 
@@ -337,7 +341,8 @@ export class QJSJITCompiler {
               icTable?: InlineCacheTable,
               regAlloc?: RegAllocInfo,
               deoptLogAddr?: number,
-              helperAddrs?: { getPropI32: number; setPropI32: number; callFn: number; resolveNative?: number }) {
+              helperAddrs?: { getPropI32: number; setPropI32: number; callFn: number;
+                              resolveNative?: number; stringEq?: number; stringLen?: number; stringCharAt?: number }) {
     this._e    = new _Emit();
     this._bc   = bc;
     this._argN = bc.argCount;
@@ -350,6 +355,9 @@ export class QJSJITCompiler {
       this._helperSetPropI32    = helperAddrs.setPropI32;
       this._helperCallFn        = helperAddrs.callFn;
       this._helperResolveNative = helperAddrs.resolveNative ?? 0;
+      this._helperStringEq      = helperAddrs.stringEq ?? 0;
+      this._helperStringLen     = helperAddrs.stringLen ?? 0;
+      this._helperStringCharAt  = helperAddrs.stringCharAt ?? 0;
     }
   }
 
@@ -1143,6 +1151,8 @@ export class QJSJITHook {
   private _jitDeopts: number = 0;
   /** Number of full pool GC resets performed. */
   private _resets:   number = 0;
+  /** Number of individual functions evicted via LRU GC. */
+  private _evictions: number = 0;
   /**
    * Float64-compiled native functions: bcAddr → nativeAddr.
    * These use the x87 FPU double-CDEcl convention and can be called explicitly
@@ -1161,7 +1171,8 @@ export class QJSJITHook {
    * Cached addresses of C JIT helper functions (getprop, setprop, call).
    * Loaded lazily on first compile via kernel.jitHelperAddrs().
    */
-  private _helperAddrs: { getPropI32: number; setPropI32: number; callFn: number; resolveNative: number } | null = null;
+  private _helperAddrs: { getPropI32: number; setPropI32: number; callFn: number; resolveNative: number;
+                         stringEq: number; stringLen: number; stringCharAt: number } | null = null;
 
   constructor() {
     this._offsets = initOffsets();
@@ -1183,16 +1194,20 @@ export class QJSJITHook {
   }
 
   /** Load C helper addresses once from kernel.jitHelperAddrs() and cache. */
-  private _ensureHelperAddrs(): { getPropI32: number; setPropI32: number; callFn: number; resolveNative: number } | null {
+  private _ensureHelperAddrs(): { getPropI32: number; setPropI32: number; callFn: number; resolveNative: number;
+                                  stringEq: number; stringLen: number; stringCharAt: number } | null {
     if (this._helperAddrs) return this._helperAddrs;
     if (typeof kernel !== 'undefined' && typeof (kernel as any).jitHelperAddrs === 'function') {
-      const h = (kernel as any).jitHelperAddrs() as { getPropI32: number; setPropI32: number; callFn: number; resolveNative?: number };
+      const h = (kernel as any).jitHelperAddrs() as any;
       if (h && h.getPropI32 && h.callFn) {
         this._helperAddrs = {
           getPropI32: h.getPropI32,
           setPropI32: h.setPropI32,
           callFn: h.callFn,
           resolveNative: h.resolveNative ?? 0,
+          stringEq: h.stringEq ?? 0,
+          stringLen: h.stringLen ?? 0,
+          stringCharAt: h.stringCharAt ?? 0,
         };
         return this._helperAddrs;
       }
@@ -1415,34 +1430,68 @@ export class QJSJITHook {
   get floatCompiledCount(): number { return this._floatCompiled; }
 
   /**
-   * Full pool GC: clears all compiled native pointers and resets the 64 MB
-   * bump allocator.  Compiled functions are re-eligible for compilation on
-   * their next invocation.  O(n) in number of tracked functions.
-   * Returns the number of bytes reclaimed.
+   * LRU pool GC: evicts the coldest ~50% of compiled functions by lastAccess,
+   * then resets the pool bump allocator and lets hot functions recompile on
+   * their next invocation.  This preserves recently-used compiled code while
+   * reclaiming pool space.  O(n log n) in number of tracked functions.
+   * Returns the number of bytes reclaimed (from bump reset).
    */
   private _poolGC(): number {
     if (typeof kernel === 'undefined') return 0;
     if (typeof (kernel as any).jitMainReset !== 'function') return 0;
 
-    // Phase 1: clear all live native pointers so QuickJS won't jump to
-    // stale addresses after the pool memory is reused.
+    // Phase 1: gather all live compiled functions with their access times.
+    const live: Array<{ bcAddr: number; lastAccess: number }> = [];
+    for (const e of this._funcs.values()) {
+      if (e.nativeAddr && e.nativeAddr !== DEOPT_SENTINEL) {
+        live.push({ bcAddr: e.bcAddr, lastAccess: e.lastAccess });
+      }
+    }
+
+    if (live.length === 0) {
+      // Nothing to evict; just reset the pool.
+      const reclaimed = (kernel as any).jitMainReset() as number;
+      this._resets++;
+      return reclaimed;
+    }
+
+    // Phase 2: sort by lastAccess ascending (coldest first).
+    live.sort((a, b) => a.lastAccess - b.lastAccess);
+
+    // Phase 3: evict the coldest 50% — clear their native pointers.
+    const evictCount = Math.max(1, Math.floor(live.length / 2));
+    const evicted = new Set<number>();
+    for (let i = 0; i < evictCount; i++) {
+      evicted.add(live[i].bcAddr);
+    }
+
+    // Phase 4: clear all native pointers (bump reset reclaims ALL memory).
+    // Hot functions (not evicted) will recompile quickly on next call.
+    // Evicted functions will need to re-warm their call count.
     for (const e of this._funcs.values()) {
       if (e.nativeAddr && e.nativeAddr !== DEOPT_SENTINEL) {
         kernel.setJITNative(e.bcAddr, 0);
-        e.nativeAddr  = 0;
-        e.blacklisted = false;  // allow recompilation
+        e.nativeAddr = 0;
+        if (evicted.has(e.bcAddr)) {
+          // Cold function: reset speculator so it re-warms
+          e.speculator = new TypeSpeculator(e.speculator.argCount);
+          e.bailCount = 0;
+        }
+        // Hot function: keep speculator/bailCount so it recompiles immediately
+        e.blacklisted = false;
       }
     }
-    // Also clear float-compiled function references
+    // Clear float-compiled function references
     this._floatFuncs.clear();
 
-    // Phase 2: reset the bump allocator — reclaims all 64 MB.
+    // Phase 5: reset the bump allocator.
     const reclaimed = (kernel as any).jitMainReset() as number;
     this._resets++;
+    this._evictions += evictCount;
     if (typeof (kernel as any).serialPut === 'function') {
       (kernel as any).serialPut(
-        `[JIT] pool GC #${this._resets}: ${(reclaimed / 1024).toFixed(0)} KB reclaimed, ` +
-        `${this._funcs.size} entries cleared\n`
+        `[JIT] LRU GC #${this._resets}: evicted ${evictCount}/${live.length} cold funcs, ` +
+        `${(reclaimed / 1024).toFixed(0)} KB reclaimed\n`
       );
     }
     return reclaimed;
@@ -1467,6 +1516,33 @@ export class QJSJITHook {
   get bailedCount():   number { return this._bailed;   }
   get deoptCount():    number { return this._jitDeopts; }
   get resetCount():    number { return this._resets;   }
+  get evictionCount(): number { return this._evictions; }
+
+  /** Return diagnostic stats for the JIT system. */
+  jitStats(): {
+    compiled: number; bailed: number; deopts: number;
+    resets: number; evictions: number; tracked: number;
+    floatCompiled: number; poolUtilKB: number;
+  } {
+    let liveCount = 0;
+    for (const e of this._funcs.values()) {
+      if (e.nativeAddr && e.nativeAddr !== DEOPT_SENTINEL) liveCount++;
+    }
+    let poolUsed = 0;
+    if (typeof kernel !== 'undefined' && typeof (kernel as any).jitPoolUsed === 'function') {
+      poolUsed = (kernel as any).jitPoolUsed() as number;
+    }
+    return {
+      compiled: this._compiled,
+      bailed: this._bailed,
+      deopts: this._jitDeopts,
+      resets: this._resets,
+      evictions: this._evictions,
+      tracked: this._funcs.size,
+      floatCompiled: this._floatCompiled,
+      poolUtilKB: Math.round(poolUsed / 1024),
+    };
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

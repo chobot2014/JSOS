@@ -136,6 +136,56 @@ function glyphRow(fb, rowByte, x, w, color, stride) {
 }
 `;
 
+/**
+ * blitScaledRow — nearest-neighbor scale a row of pixels.
+ * Reads srcW pixels from src, writes dstW pixels to dst.
+ * Uses 16.16 fixed-point step for sub-pixel source indexing.
+ * Hot for <img> rendering and CSS background-image scaling.
+ */
+const _SRC_BLIT_SCALED_ROW = `
+function blitScaledRow(dst, src, dstW, srcW) {
+  var step = Math.imul(srcW, 65536) / dstW;
+  var acc = 0;
+  var i = 0;
+  while (i < dstW) {
+    var si = acc >> 16;
+    mem32[dst + i * 4] = mem32[src + si * 4];
+    acc = acc + step;
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * compositeOver — Porter-Duff source-over composite with stride.
+ * Blends n pixels from src onto dst, both at specified offsets in their
+ * respective stride-wide framebuffers. Equivalent to compositeRow but
+ * with offset support for arbitrary rectangle positions.
+ */
+const _SRC_COMPOSITE_OVER = `
+function compositeOver(dst, src, n, alpha) {
+  var i = 0;
+  while (i < n) {
+    var sp = mem32[src + i * 4];
+    var sa = Math.imul((sp >> 24) & 0xff, alpha) >> 8;
+    if (sa >= 255) {
+      mem32[dst + i * 4] = sp;
+    } else if (sa > 0) {
+      var dp = mem32[dst + i * 4];
+      var ia = 256 - sa;
+      var b = (Math.imul(sp & 0xFF, sa) + Math.imul(dp & 0xFF, ia)) >> 8;
+      var g = (Math.imul((sp >> 8) & 0xFF, sa) + Math.imul((dp >> 8) & 0xFF, ia)) >> 8;
+      var r = (Math.imul((sp >> 16) & 0xFF, sa) + Math.imul((dp >> 16) & 0xFF, ia)) >> 8;
+      var a = sa + (Math.imul((dp >> 24) & 0xFF, ia) >> 8);
+      mem32[dst + i * 4] = (a << 24) | (r << 16) | (g << 8) | b;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
 // ─── Compiled function slots ──────────────────────────────────────────────────
 
 type JITFn = ((...args: number[]) => number) | null;
@@ -145,6 +195,8 @@ var _fillRect:      JITFn = null;
 var _blitRow:       JITFn = null;
 var _blitAlphaRow:  JITFn = null;
 var _glyphRow:      JITFn = null;
+var _blitScaledRow: JITFn = null;
+var _compositeOver: JITFn = null;
 var _ready = false;
 
 // ─── TypeScript fallbacks (used when JIT pool is unavailable) ─────────────────
@@ -174,6 +226,8 @@ export const JITCanvas = {
     _blitRow      = JIT.compile(_SRC_BLIT_ROW);
     _blitAlphaRow = JIT.compile(_SRC_BLIT_ALPHA_ROW);
     _glyphRow     = JIT.compile(_SRC_GLYPH_ROW);
+    _blitScaledRow = JIT.compile(_SRC_BLIT_SCALED_ROW);
+    _compositeOver = JIT.compile(_SRC_COMPOSITE_OVER);
     _ready = _fillBuffer !== null;
     return _ready;
   },
@@ -239,6 +293,22 @@ export const JITCanvas = {
   glyphRow(fb: number, rowByte: number, x: number,
            w: number, color: number): void {
     if (_glyphRow) _glyphRow(fb, rowByte, x, w, color, 0);
+  },
+
+  /**
+   * Nearest-neighbor scale a pixel row from srcW to dstW pixels.
+   * Both src and dst are physical addresses of BGRA pixel rows.
+   */
+  blitScaledRow(dst: number, src: number, dstW: number, srcW: number): void {
+    if (_blitScaledRow) _blitScaledRow(dst, src, dstW, srcW);
+  },
+
+  /**
+   * Porter-Duff source-over composite n pixels with global alpha [0-255].
+   * src and dst are physical addresses of BGRA pixel rows.
+   */
+  compositeOver(dst: number, src: number, n: number, alpha: number): void {
+    if (_compositeOver) _compositeOver(dst, src, n, alpha);
   },
 
   /** Diagnostic: JIT pool usage after all canvas functions are compiled. */
