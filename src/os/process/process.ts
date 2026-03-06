@@ -12,6 +12,7 @@
 import { FDTable } from '../core/fdtable.js';
 import { signalManager } from './signals.js';
 import { scheduler } from './scheduler.js';
+import { processAddressSpace } from './vmm.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -85,8 +86,17 @@ export class ProcessManager {
       // once the VMM is integrated per-process in Phase 9).
       p.vmas.length = 0;
 
+      // [Phase 2.2.1] Release the per-process page directory.
+      processAddressSpace.destroyForProcess(pid);
+
       // Mark dead in our own table so subsequent queries see the correct state.
       p.state = 'dead';
+    });
+
+    // ── Item 162: Bridge scheduler maxFDs limits to per-process FDTable ────
+    scheduler.setFDLimitHook((pid: number, maxFDs: number) => {
+      const p = this._procs.get(pid);
+      if (p) p.fdTable.setMaxFDs(maxFDs);
     });
   }
 
@@ -104,6 +114,10 @@ export class ProcessManager {
     child.name    = parent.name;
     child.cwd     = parent.cwd;
     child.fdTable = parent.fdTable.clone();
+    // Inherit maxFDs limit from parent (item 162)
+    if (parent.fdTable.maxFDs > 0) {
+      child.fdTable.setMaxFDs(parent.fdTable.maxFDs);
+    }
     for (var i = 0; i < parent.vmas.length; i++) {
       var v = parent.vmas[i];
       child.addVMA(v.start, v.end, v.prot, v.name);
@@ -136,6 +150,10 @@ export class ProcessManager {
       openFiles:     new Set([0, 1, 2]),
       fpuStateAddr:  0,
     });
+
+    // [Phase 2.2.1] Create an isolated page directory for the child process.
+    // This clones the kernel's PD so the child has its own address space.
+    processAddressSpace.createForProcess(child.pid);
 
     return child.pid;
   }

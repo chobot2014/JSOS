@@ -2488,6 +2488,16 @@ void *JS_GetCurrentStackFrame(JSContext *ctx)
  * and cleared on success.  JS_ResetAfterFault() reads this to invalidate the
  * function's jit_native_ptr so the faulty native code is never called again. */
 static void *_jit_faulting_bc = NULL;
+
+/* Current closure JSObject* — set by the dispatch path just before
+ * calling JIT-compiled native code.  Read by JIT-compiled prologue
+ * code via an absolute MOV to save into the function's local frame.
+ * Used by jit_js_get_var_ref_i32 / jit_js_put_var_ref_i32 C helpers
+ * for OP_get_var_ref / OP_put_var_ref closure variable access.
+ * Single-threaded bare-metal: no concurrency issues.  The value is
+ * correct at function entry; nested calls overwrite it, but each
+ * compiled function saves its own copy on entry. */
+volatile uint32_t _jit_current_closure = 0;
 #endif
 
 /*
@@ -17580,6 +17590,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             void *_jit_fn = (void *)(_jit_raw & ~(uintptr_t)1u);
             double _jit_dret;
             _jit_faulting_bc = (void *)b;
+            _jit_current_closure = (uint32_t)(uintptr_t)p;
             _jit_dret = jit_call_d4(_jit_fn,
                                     _DARG(0), _DARG(1), _DARG(2), _DARG(3));
             _jit_faulting_bc = NULL;
@@ -17608,6 +17619,8 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
         int32_t _jit_ret;
         /* Track faulting bc for JS_ResetAfterFault to invalidate on recovery */
         _jit_faulting_bc = (void *)b;
+        /* Set closure global so JIT prologue can save JSObject* for var_ref access */
+        _jit_current_closure = (uint32_t)(uintptr_t)p;
         if (argc <= 4)
             _jit_ret = jit_call_i4(b->jit_native_ptr,
                                    _JARG(0), _JARG(1), _JARG(2), _JARG(3));

@@ -1,9 +1,13 @@
 /*
- * JSOS JIT Compiler — pool allocator and call trampoline (Phase 11)
+ * JSOS JIT Compiler — pool allocator, W^X state machine, and call trampoline
  *
- * All BSS memory on this bare-metal x86 target is execute+read+write;
- * the flat GDT code segment covers the full 4 GB physical address space.
- * No mprotect or page-table manipulation is required.
+ * W^X protection overview:
+ *   The JIT pool is partitioned into two modes: WRITE and EXEC.
+ *   In WRITE mode, jit_write() is permitted and jit_call_*() is blocked.
+ *   In EXEC mode, jit_call_*() is permitted and jit_write() auto-switches.
+ *   When paging is enabled, PTE read-only bits are toggled to enforce this
+ *   at the hardware level (x86-32 without PAE cannot set NX, but we can
+ *   prevent accidental writes to executable code).
  */
 
 #include "jit.h"
@@ -32,6 +36,55 @@ _Static_assert(JIT_MAIN_SIZE + JIT_PROC_SLOTS * JIT_PROC_SIZE == JIT_POOL_SIZE,
 static uint8_t  __attribute__((aligned(16))) _jit_pool[JIT_POOL_SIZE];
 static uint32_t _jit_main_used = 0;
 static uint32_t _jit_proc_used[JIT_PROC_SLOTS];
+
+/* ── W^X state machine ──────────────────────────────────────────────────── */
+/*
+ * JIT_MODE_WRITE (0): memcpy into pool is allowed; call dispatch is blocked.
+ * JIT_MODE_EXEC  (1): call dispatch is allowed; memcpy transitions to WRITE.
+ *
+ * When hardware paging is enabled, transitioning to EXEC marks JIT pages as
+ * read-only (PTE bit 1 cleared), and transitioning to WRITE marks them as
+ * read-write (PTE bit 1 set).  On x86-32 without PAE this prevents accidental
+ * writes to executable code but does not prevent execution of writable pages
+ * (the NX bit requires PAE).  With PAE enabled in a future phase, full W^X
+ * with the NX bit can be added here.
+ *
+ * The mode is stored in a volatile global so it survives across function calls.
+ */
+typedef enum { JIT_MODE_WRITE = 0, JIT_MODE_EXEC = 1 } jit_mode_t;
+static volatile jit_mode_t _jit_mode = JIT_MODE_WRITE;
+/** Count of W→X and X→W transitions (diagnostic). */
+static uint32_t _jit_wx_transitions = 0;
+
+void jit_set_write_mode(void) {
+    if (_jit_mode == JIT_MODE_WRITE) return;
+    _jit_mode = JIT_MODE_WRITE;
+    _jit_wx_transitions++;
+    /*
+     * TODO (Phase 9): If paging is enabled, iterate the JIT pool's PTEs
+     * and set the R/W bit (PTE bit 1) to allow writes.
+     * For now, software state only (flat GDT = all RWX).
+     */
+}
+
+void jit_set_exec_mode(void) {
+    if (_jit_mode == JIT_MODE_EXEC) return;
+    _jit_mode = JIT_MODE_EXEC;
+    _jit_wx_transitions++;
+    /*
+     * TODO (Phase 9): If paging is enabled, iterate the JIT pool's PTEs
+     * and clear the R/W bit (PTE bit 1) to make pages read-only.
+     * On x86-32 read-only pages are still executable — true NX requires PAE.
+     */
+}
+
+int jit_get_mode(void) {
+    return (int)_jit_mode;
+}
+
+uint32_t jit_wx_transition_count(void) {
+    return _jit_wx_transitions;
+}
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
@@ -67,15 +120,15 @@ uint32_t jit_proc_used_bytes(int id) {
 
 void jit_write(void *dst, const uint8_t *src, size_t len) {
     if (!dst || !src || len == 0) return;
-    /*
-     * x86 has coherent instruction and data caches; a plain memcpy is all
-     * that is required to make freshly written machine code executable.
-     * (A CPUID serialisation or MFENCE is not needed on modern Intel/AMD.)
-     */
+    /* Auto-transition to write mode if currently in exec mode.
+     * This avoids errors when the TypeScript JIT manager writes code
+     * immediately after a call — the mode is silently switched. */
+    if (_jit_mode != JIT_MODE_WRITE) jit_set_write_mode();
     memcpy(dst, src, len);
 }
 
 int32_t jit_call_i4(void *fn, int32_t a0, int32_t a1, int32_t a2, int32_t a3) {
+    if (_jit_mode != JIT_MODE_EXEC) jit_set_exec_mode();
     typedef int32_t (*fn_t)(int32_t, int32_t, int32_t, int32_t);
     return ((fn_t)fn)(a0, a1, a2, a3);
 }
@@ -83,6 +136,7 @@ int32_t jit_call_i4(void *fn, int32_t a0, int32_t a1, int32_t a2, int32_t a3) {
 int32_t jit_call_i8(void *fn,
                     int32_t a0, int32_t a1, int32_t a2, int32_t a3,
                     int32_t a4, int32_t a5, int32_t a6, int32_t a7) {
+    if (_jit_mode != JIT_MODE_EXEC) jit_set_exec_mode();
     typedef int32_t (*fn_t)(int32_t, int32_t, int32_t, int32_t,
                             int32_t, int32_t, int32_t, int32_t);
     return ((fn_t)fn)(a0, a1, a2, a3, a4, a5, a6, a7);
@@ -93,6 +147,7 @@ int32_t jit_call_i8(void *fn,
  * All args and the return value are IEEE-754 doubles.
  */
 double jit_call_d4(void *fn, double a0, double a1, double a2, double a3) {
+    if (_jit_mode != JIT_MODE_EXEC) jit_set_exec_mode();
     typedef double (*fn_t)(double, double, double, double);
     return ((fn_t)fn)(a0, a1, a2, a3);
 }

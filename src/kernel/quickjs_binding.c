@@ -508,6 +508,7 @@ static JSValue js_qjs_offsets(JSContext *c, JSValueConst this_val,
     JS_SetPropertyStr(c, o, "stackSize",     JS_NewUint32(c, 54));
     JS_SetPropertyStr(c, o, "cpoolPtr",      JS_NewUint32(c, 64));
     JS_SetPropertyStr(c, o, "cpoolCount",    JS_NewUint32(c, 58)); /* uint16 at [58] */
+    JS_SetPropertyStr(c, o, "closureVarCount", JS_NewUint32(c, 56)); /* uint16 at [56] */
     JS_SetPropertyStr(c, o, "structSize",    JS_NewUint32(c, 96));
 
     /* JSObject layout offsets for inline JIT-to-JIT call dispatch (Phase 1.1.4).
@@ -2180,8 +2181,80 @@ static int32_t jit_js_string_charat(uint32_t str_ptr, int32_t idx)
 }
 
 /*
+ * jit_js_get_var_ref_i32(obj_ptr, idx) → int32
+ * Read a closure variable's value as int32 from JSObject's var_refs array.
+ * obj_ptr = JSObject* of the closure function (saved by JIT prologue from
+ * the _jit_current_closure global set by the dispatch path).
+ * idx     = closure variable index (u16 from OP_get_var_ref operand).
+ *
+ * Uses raw pointer arithmetic to avoid needing internal QuickJS types
+ * (JSVarRef, JSObject internal union, set_value) which are only available
+ * inside quickjs.c.  Offsets for 32-bit:
+ *   JSObject.u.func.var_refs = +32  (JSVarRef** pointer)
+ *   JSVarRef.pvalue           = +16  (JSValue* pointer, after GC header union)
+ */
+extern volatile uint32_t _jit_current_closure;
+
+#define JSOBJ_VAR_REFS_OFFSET   32
+#define JSVARREF_PVALUE_OFFSET  16
+
+static int32_t jit_js_get_var_ref_i32(uint32_t obj_ptr, uint32_t idx)
+{
+    if (!ctx || !obj_ptr) return 0;
+
+    /* p->u.func.var_refs (void** at offset 32) */
+    void **var_refs = *(void ***)((uint8_t *)(uintptr_t)obj_ptr + JSOBJ_VAR_REFS_OFFSET);
+    if (!var_refs) return 0;
+
+    /* var_refs[idx] (JSVarRef*) */
+    void *vr = var_refs[idx];
+    if (!vr) return 0;
+
+    /* vr->pvalue (JSValue* at offset 16) */
+    JSValue *pvalue = *(JSValue **)((uint8_t *)vr + JSVARREF_PVALUE_OFFSET);
+    if (!pvalue) return 0;
+
+    JSValue val = *pvalue;
+    int32_t r = 0;
+    if (JS_VALUE_GET_TAG(val) == JS_TAG_INT) {
+        r = JS_VALUE_GET_INT(val);
+    } else {
+        JSValue dup = JS_DupValue(ctx, val);
+        JS_ToInt32(ctx, &r, dup);
+        JS_FreeValue(ctx, dup);
+    }
+    return r;
+}
+
+/*
+ * jit_js_put_var_ref_i32(obj_ptr, idx, ival) → void
+ * Write an int32 value to a closure variable through JSObject's var_refs.
+ * Properly reference-counts the old value and installs the new one.
+ * Manual set_value: read old → write new → free old.
+ */
+static void jit_js_put_var_ref_i32(uint32_t obj_ptr, uint32_t idx, int32_t ival)
+{
+    if (!ctx || !obj_ptr) return;
+
+    void **var_refs = *(void ***)((uint8_t *)(uintptr_t)obj_ptr + JSOBJ_VAR_REFS_OFFSET);
+    if (!var_refs) return;
+
+    void *vr = var_refs[idx];
+    if (!vr) return;
+
+    JSValue *pvalue = *(JSValue **)((uint8_t *)vr + JSVARREF_PVALUE_OFFSET);
+    if (!pvalue) return;
+
+    /* Manual set_value: swap old for new, free old */
+    JSValue old_val = *pvalue;
+    *pvalue = JS_NewInt32(ctx, ival);
+    JS_FreeValue(ctx, old_val);
+}
+
+/*
  * kernel.jitHelperAddrs() → {getPropI32, setPropI32, callFn, resolveNative,
- *                             stringEq, stringLen, stringCharAt}
+ *                             stringEq, stringLen, stringCharAt,
+ *                             getVarRef, putVarRef, closureGlobal}
  * Returns an object containing the uint32 physical addresses of the
  * JIT runtime helper functions.  JIT'd x86 code loads these addresses
  * into ECX and executes CALL ECX to invoke the helper in cdecl fashion.
@@ -2205,6 +2278,12 @@ static JSValue js_jit_get_helper_addrs(JSContext *c, JSValueConst this_val,
         JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_string_len));
     JS_SetPropertyStr(c, o, "stringCharAt",
         JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_string_charat));
+    JS_SetPropertyStr(c, o, "getVarRef",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_get_var_ref_i32));
+    JS_SetPropertyStr(c, o, "putVarRef",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_put_var_ref_i32));
+    JS_SetPropertyStr(c, o, "closureGlobal",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)&_jit_current_closure));
     return o;
 }
 

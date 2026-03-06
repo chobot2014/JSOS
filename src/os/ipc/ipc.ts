@@ -19,6 +19,7 @@
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 import { SIG } from '../process/signals.js';
+import { scheduler } from '../process/scheduler.js';
 
 export type SignalNumber = number;
 export type SignalHandler = (signum: SignalNumber) => void;
@@ -136,18 +137,91 @@ export class MessageQueue {
   /** Queues keyed by recipient PID. */
   private queues = new Map<number, Message[]>();
 
+  // ── IPC hardening (Phase 2.3) ──────────────────────────────────────────
+  /** Maximum messages per recipient queue.  0 = unlimited. */
+  private _maxQueueDepth: number = 1024;
+  /** Maximum payload size in bytes (estimated via JSON.stringify).  0 = unlimited. */
+  private _maxPayloadBytes: number = 65536;
+  /** Per-sender sliding window rate limit: max msgs per window. */
+  private _rateLimitPerWindow: number = 100;
+  /** Rate limit window duration in ms. */
+  private _rateLimitWindowMs: number = 1000;
+  /** Per-sender rate tracking: senderPid → { count, windowStart }. */
+  private _senderRate = new Map<number, { count: number; windowStart: number }>();
+
+  /** Configure IPC limits.  Any field may be omitted to keep the current value. */
+  setLimits(opts: { maxQueueDepth?: number; maxPayloadBytes?: number;
+                    rateLimitPerWindow?: number; rateLimitWindowMs?: number }): void {
+    if (opts.maxQueueDepth !== undefined)     this._maxQueueDepth     = opts.maxQueueDepth;
+    if (opts.maxPayloadBytes !== undefined)   this._maxPayloadBytes   = opts.maxPayloadBytes;
+    if (opts.rateLimitPerWindow !== undefined) this._rateLimitPerWindow = opts.rateLimitPerWindow;
+    if (opts.rateLimitWindowMs !== undefined)  this._rateLimitWindowMs  = opts.rateLimitWindowMs;
+  }
+
+  /**
+   * Validate the sender PID against the scheduler's process table.
+   * Returns false if the PID does not correspond to a live process.
+   */
+  private _validateSender(pid: number): boolean {
+    if (pid <= 0) return false;
+    // Check against the scheduler's live process set
+    if (typeof scheduler !== 'undefined' && typeof scheduler.getProcess === 'function') {
+      const ctx = scheduler.getProcess(pid);
+      if (!ctx) return false;
+      if (ctx.state === 'dead') return false;
+    }
+    return true;
+  }
+
+  /** Check per-sender rate limit.  Returns true if allowed, false if rate-exceeded. */
+  private _checkRate(senderPid: number): boolean {
+    if (this._rateLimitPerWindow <= 0) return true;  // disabled
+    const now = kernel.getUptime();
+    let entry = this._senderRate.get(senderPid);
+    if (!entry || (now - entry.windowStart) > this._rateLimitWindowMs) {
+      // New window
+      entry = { count: 1, windowStart: now };
+      this._senderRate.set(senderPid, entry);
+      return true;
+    }
+    entry.count++;
+    return entry.count <= this._rateLimitPerWindow;
+  }
+
   /**
    * Send a message.  If `to` is 0 it is a broadcast to all registered queues.
+   * Returns true on success, false if validation/limits reject the message.
    */
-  send(msg: Omit<Message, 'timestamp'>): void {
+  send(msg: Omit<Message, 'timestamp'>): boolean {
+    // Sender PID validation (Phase 2.3)
+    if (!this._validateSender(msg.from)) return false;
+
+    // Payload size check
+    if (this._maxPayloadBytes > 0 && msg.payload !== undefined && msg.payload !== null) {
+      try {
+        const est = JSON.stringify(msg.payload);
+        if (est && est.length > this._maxPayloadBytes) return false;
+      } catch { /* non-serializable — allow but cap at 0-length */ }
+    }
+
+    // Per-sender rate limit
+    if (!this._checkRate(msg.from)) return false;
+
     var m: Message = { type: msg.type, from: msg.from, to: msg.to, payload: msg.payload, timestamp: kernel.getUptime() };
     if (m.to === 0) {
-      // Broadcast
-      this.queues.forEach(function(q) { q.push(m); });
+      // Broadcast — apply queue depth limit per recipient
+      this.queues.forEach((q) => {
+        if (this._maxQueueDepth > 0 && q.length >= this._maxQueueDepth) return; // skip full queues
+        q.push(m);
+      });
     } else {
       if (!this.queues.has(m.to)) this.queues.set(m.to, []);
-      this.queues.get(m.to)!.push(m);
+      const q = this.queues.get(m.to)!;
+      // Queue depth limit
+      if (this._maxQueueDepth > 0 && q.length >= this._maxQueueDepth) return false;
+      q.push(m);
     }
+    return true;
   }
 
   /** Receive the next message for `pid`, optionally filtered by `type`. */

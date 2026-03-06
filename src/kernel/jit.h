@@ -1,5 +1,5 @@
 /*
- * JSOS JIT Compiler — C interface (Phase 11)
+ * JSOS JIT Compiler — C interface
  *
  * Provides the primitives used by the TypeScript JIT runtime:
  *
@@ -8,10 +8,14 @@
  *   jit_write          — bulk-copy machine code bytes into a JIT region.
  *   jit_call_i4    — call a JIT-compiled cdecl function with ≤4 int32 args.
  *   jit_used_bytes — diagnostic: bytes consumed in the pool.
+ *   jit_set_write_mode — switch JIT pool to write mode (W^X).
+ *   jit_set_exec_mode  — switch JIT pool to execute mode (W^X).
  *
- * On this bare-metal target all BSS pages are mapped with execute permission
- * (the GDT's flat code segment covers the full 4 GB address space), so no
- * mprotect / mmap trickery is needed.
+ * W^X enforcement:
+ *   The pool starts in WRITE mode.  Before calling JIT code, the runtime
+ *   must switch to EXEC mode.  Before writing new code, switch to WRITE.
+ *   Mode transitions are auto-performed for convenience (jit_write
+ *   auto-switches to WRITE; jit_call_* auto-switch to EXEC).
  *
  * Pool layout: 128 MB total (64 MB main + 16 × 4 MB child slabs).
  */
@@ -78,5 +82,29 @@ void jit_main_reset(void);
 void    *jit_proc_alloc(int proc_id, size_t size);  /* allocate from child partition */
 void     jit_proc_reset(int proc_id);               /* O(1) reclaim on procDestroy   */
 uint32_t jit_proc_used_bytes(int proc_id);          /* diagnostic                    */
+
+/* ── W^X state management ──────────────────────────────────────────────── */
+
+/*
+ * Switch the JIT pool into write mode.  After this call, jit_write() is
+ * permitted.  When paging is enabled, PTEs are set to RW.
+ */
+void jit_set_write_mode(void);
+
+/*
+ * Switch the JIT pool into execute mode.  After this call, jit_call_*()
+ * will dispatch.  When paging is enabled, PTEs are set to RO.
+ */
+void jit_set_exec_mode(void);
+
+/*
+ * Return current mode: 0 = WRITE, 1 = EXEC.
+ */
+int jit_get_mode(void);
+
+/*
+ * Return the total number of W↔X mode transitions (diagnostic).
+ */
+uint32_t jit_wx_transition_count(void);
 
 #endif /* JIT_H */

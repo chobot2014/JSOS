@@ -21,6 +21,7 @@
 
 import { threadManager } from './threads.js';
 import { signalManager } from './signals.js';
+import { processAddressSpace } from './vmm.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -191,6 +192,17 @@ export class ProcessScheduler {
    * Registered by ProcessManager to release per-process resources (FDs, VMAs).
    */
   private _exitHooks: Array<(pid: number) => void> = [];
+
+  /**
+   * Optional hook to propagate maxFDs limits to the per-process FDTable.
+   * Registered by ProcessManager to bridge scheduler.setProcessLimits() → FDTable.setMaxFDs().
+   */
+  private _fdLimitHook: ((pid: number, maxFDs: number) => void) | null = null;
+
+  /** Register a callback to propagate maxFDs changes to the process's FDTable. */
+  setFDLimitHook(fn: (pid: number, maxFDs: number) => void): void {
+    this._fdLimitHook = fn;
+  }
 
   constructor() {
     // Wiring fatal signals: when signalManager would "default-terminate" a pid,
@@ -493,6 +505,12 @@ export class ProcessScheduler {
     if (next.fpuStateAddr) {
       kernel.fpuRestore && kernel.fpuRestore(next.fpuStateAddr);
     }
+
+    // ── Per-process CR3 switch (Phase 2.2.1) ────────────────────────────────
+    // Switch to the incoming process's page directory for address space isolation.
+    // This is a no-op if paging is disabled or the process has no dedicated PD.
+    processAddressSpace.switchTo(next.pid);
+
     if (next.threadId >= 0) threadManager.setCurrentTid(next.threadId);
 
     return next;
@@ -592,6 +610,12 @@ export class ProcessScheduler {
     if (limits.maxRSS    !== undefined) p.limits.maxRSS    = limits.maxRSS;
     if (limits.maxFDs    !== undefined) p.limits.maxFDs    = limits.maxFDs;
     if (limits.maxCPUMs  !== undefined) p.limits.maxCPUMs  = limits.maxCPUMs;
+
+    // Propagate maxFDs to the process's FDTable if a hook is registered.
+    // The hook is set by ProcessManager to bridge scheduler limits → FDTable.
+    if (limits.maxFDs !== undefined && this._fdLimitHook) {
+      this._fdLimitHook(pid, limits.maxFDs);
+    }
     return true;
   }
 

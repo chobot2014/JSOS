@@ -53,6 +53,10 @@ import {
   OP_call_method,
   // Call opcodes for slow-path helper dispatch
   OP_call, OP_call0,
+  // Closure variable access opcodes
+  OP_get_var_ref, OP_put_var_ref, OP_set_var_ref,
+  // Exception opcodes — handled via deopt
+  OP_throw, OP_throw_error,
 } from './qjs-opcodes.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
@@ -109,6 +113,7 @@ export interface QJSOffsets {
   stackSize:     number;
   cpoolPtr:      number;
   cpoolCount:    number;
+  closureVarCount: number;
   structSize:    number;
 }
 
@@ -132,6 +137,7 @@ export function initOffsets(): QJSOffsets {
     stackSize:    54,
     cpoolPtr:     64,
     cpoolCount:   58,
+    closureVarCount: 56,
     structSize:   96,
   };
 }
@@ -148,6 +154,7 @@ export class QJSBytecodeReader {
   readonly stackSize: number;
   readonly cpoolPtr:   number;  /** physical address of the constant pool array (JSValue[]) */
   readonly cpoolCount: number;  /** number of constant pool entries */
+  readonly closureVarCount: number; /** number of closure variables (from JSFunctionBytecode) */
   private readonly _bytes: ArrayBuffer;
   private readonly _view:  DataView;
   private readonly _cpoolView: DataView | null;
@@ -167,6 +174,7 @@ export class QJSBytecodeReader {
     // Constant pool
     this.cpoolPtr   = mv.getUint32(offsets.cpoolPtr,   true);
     this.cpoolCount = mv.getUint16(offsets.cpoolCount, true);
+    this.closureVarCount = mv.getUint16(offsets.closureVarCount, true);
     if (bcLen === 0 || bcLen > MAX_BC_LEN) {
       throw new Error(`QJSBytecodeReader: invalid bcLen ${bcLen}`);
     }
@@ -334,6 +342,12 @@ export class QJSJITCompiler {
   protected _helperStringEq:      number = 0;
   protected _helperStringLen:     number = 0;
   protected _helperStringCharAt:  number = 0;
+  /** C helper: jit_js_get_var_ref_i32(obj_ptr, idx) → int32 */
+  protected _helperGetVarRef:     number = 0;
+  /** C helper: jit_js_put_var_ref_i32(obj_ptr, idx, val) → void */
+  protected _helperPutVarRef:     number = 0;
+  /** Physical address of volatile uint32 _jit_current_closure global in quickjs.c */
+  protected _closureGlobalAddr:   number = 0;
   /** OSR entry-point map: bcOffset → nativeOffset.  Populated during compile (item 856). */
   readonly osrEntries: Map<number, number> = new Map();
 
@@ -342,7 +356,8 @@ export class QJSJITCompiler {
               regAlloc?: RegAllocInfo,
               deoptLogAddr?: number,
               helperAddrs?: { getPropI32: number; setPropI32: number; callFn: number;
-                              resolveNative?: number; stringEq?: number; stringLen?: number; stringCharAt?: number }) {
+                              resolveNative?: number; stringEq?: number; stringLen?: number; stringCharAt?: number;
+                              getVarRef?: number; putVarRef?: number; closureGlobal?: number }) {
     this._e    = new _Emit();
     this._bc   = bc;
     this._argN = bc.argCount;
@@ -358,6 +373,9 @@ export class QJSJITCompiler {
       this._helperStringEq      = helperAddrs.stringEq ?? 0;
       this._helperStringLen     = helperAddrs.stringLen ?? 0;
       this._helperStringCharAt  = helperAddrs.stringCharAt ?? 0;
+      this._helperGetVarRef     = helperAddrs.getVarRef ?? 0;
+      this._helperPutVarRef     = helperAddrs.putVarRef ?? 0;
+      this._closureGlobalAddr   = helperAddrs.closureGlobal ?? 0;
     }
   }
 
@@ -398,13 +416,25 @@ export class QJSJITCompiler {
     const entry_argTypes = argTypes;
     const e = this._e;
     const bc = this._bc;
-    const locals = this._argN + this._varN;
+
+    // Determine if this function accesses closure variables
+    const usesClosure = bc.closureVarCount > 0 && this._closureGlobalAddr > 0
+                        && this._helperGetVarRef > 0 && this._helperPutVarRef > 0;
+    const closureExtraSlot = usesClosure ? 1 : 0;
+
+    const locals = this._argN + this._varN + closureExtraSlot;
     const localBytes = (locals + 8) * 4;  // locals + extra eval-stack space
+
+    // Displacement of the saved closure pointer within the stack frame (negative from EBP).
+    // Stored right after the last local variable slot.
+    const closureDisp = usesClosure ? this._locDisp(this._varN) : 0;
 
     // IC-backed / slow-path opcodes accepted in addition to JIT_SUPPORTED_OPCODES
     // (items 848/849/852/858 + OP_call/OP_call0/OP_call_method via C helper slow path)
     const IC_OPCODES = new Set([OP_get_field, OP_put_field, OP_get_array_el, OP_put_array_el, OP_typeof,
-                                 OP_call, OP_call0, OP_call_method]);
+                                 OP_call, OP_call0, OP_call_method,
+                                 OP_get_var_ref, OP_put_var_ref, OP_set_var_ref,
+                                 OP_throw, OP_throw_error]);
 
     // Prologue — save EBX for reg-alloc path (item 855)
     if (this._regAlloc) {
@@ -429,6 +459,15 @@ export class QJSJITCompiler {
       e.movEbxEax();
     }
 
+    // ── Closure prologue: save _jit_current_closure global to local frame ──
+    // The C dispatch in quickjs.c writes the callee's JSObject* to this global
+    // before entering native code.  We save it to a local so it survives nested
+    // function calls (which overwrite the global for their own callee).
+    if (usesClosure) {
+      e.movEaxAbs(this._closureGlobalAddr);   // MOV EAX, [_jit_current_closure]
+      e.store(closureDisp);                    // MOV [EBP + closureDisp], EAX
+    }
+
     let pc = 0;
     // Track which bytecode offsets are legal jump targets (for DCE item 853).
     const _jumpTargets = new Set<number>();
@@ -441,9 +480,22 @@ export class QJSJITCompiler {
       for (let dp = dStart; dp < dEnd; dp++) _deadCutoff[dp] = dEnd;
     }
 
+    // Constant folding: pre-compute foldable push+push+arith triples (item 869)
+    const _constFolds = ConstantFolder.fold(bc);
+
     while (pc < bc.bcLen) {
       // DCE: skip dead code ranges — avoids bail-outs on unreachable unsupported opcodes.
       if (_deadCutoff[pc] >= 0) { pc = _deadCutoff[pc]; continue; }
+
+      // Constant folding: if this PC starts a foldable triple, emit the folded constant
+      const fold = _constFolds.get(pc);
+      if (fold) {
+        this._bcToNative.set(pc, e.here());
+        e.immEax(fold.result >>> 0);
+        e.pushEax();
+        pc += fold.skipLen;
+        continue;
+      }
 
       this._bcToNative.set(pc, e.here());
       const op = bc.u8(pc);
@@ -697,6 +749,21 @@ export class QJSJITCompiler {
           pc++; break;
         }
 
+        // ── Exception handling via deopt ──────────────────────────────
+        // OP_throw / OP_throw_error: cannot handle exceptions in native code.
+        // Return DEOPT_SENTINEL so QuickJS re-executes the function through
+        // the interpreter, where the exception path is fully handled.
+        case OP_throw: {
+          e.immEax(DEOPT_SENTINEL);
+          this._emitEpilogue();
+          pc++; break;
+        }
+        case OP_throw_error: {
+          e.immEax(DEOPT_SENTINEL);
+          this._emitEpilogue();
+          pc += 6; break;
+        }
+
         // ── IC-backed property read (item 848) ────────────────────────
         // OP_get_field: [obj] → [prop_value]  (atom = u32 at pc+1)
         case OP_get_field: {
@@ -879,6 +946,13 @@ export class QJSJITCompiler {
             // EAX = callee native addr.  Save in ECX (preserved across peekN).
             e.movEcxEax();                     // ECX = native addr
 
+            // Update _jit_current_closure global for the callee so its prologue
+            // can save the correct JSObject* to its own local frame.
+            if (this._closureGlobalAddr) {
+              e.peekN(callArgc);               // EAX = fn_ptr (callee's JSObject*)
+              e.movAbsEax(this._closureGlobalAddr); // _jit_current_closure = fn_ptr
+            }
+
             // Build 4-arg cdecl frame.  Push order: a3(pad), a2(pad), ..., a0.
             for (let i = 3; i >= callArgc; i--) e.pushImm32(0);  // zero-pad unused
             for (let k = 0; k < callArgc; k++) {
@@ -953,6 +1027,13 @@ export class QJSJITCompiler {
 
             // ── Fast path: direct native call ──
             e.movEcxEax();                     // ECX = callee native addr
+
+            // Update _jit_current_closure for the callee (call_method variant)
+            if (this._closureGlobalAddr) {
+              e.peekN(callArgc + 1);           // EAX = fn_ptr (below this + args)
+              e.movAbsEax(this._closureGlobalAddr); // _jit_current_closure = fn_ptr
+            }
+
             for (let i = 3; i >= callArgc; i--) e.pushImm32(0);
             for (let k = 0; k < callArgc; k++) {
               e.peekN(4 - callArgc + 2 * k);
@@ -1048,6 +1129,53 @@ export class QJSJITCompiler {
             return null;  // non-integer constant (string, object, float) — bail
           }
           pc += 5; break;
+        }
+
+        // ── Closure variable access ──────────────────────────────────────
+        // OP_get_var_ref: push closure var[idx] onto eval stack.
+        // Uses saved closure JSObject* from frame-local to call the C helper
+        // jit_js_get_var_ref_i32(obj_ptr, idx) → int32.
+        case OP_get_var_ref: {
+          const idx = bc.u16(pc + 1);
+          if (!usesClosure) return null;
+          e.pushImm32(idx);               // arg1: idx
+          e.load(closureDisp);            // EAX = saved closure ptr
+          e.pushEax();                    // arg0: obj_ptr
+          e.immEcx(this._helperGetVarRef);
+          e.callEcx();
+          e.addEsp(8);                    // clean 2 cdecl args
+          e.pushEax();                    // push result int32
+          pc += 3; break;
+        }
+
+        // OP_put_var_ref: pop TOS and write to closure var[idx].
+        case OP_put_var_ref: {
+          const idx = bc.u16(pc + 1);
+          if (!usesClosure) return null;
+          e.popEax();                     // EAX = value to store
+          e.pushEax();                    // arg2: val
+          e.pushImm32(idx);               // arg1: idx
+          e.load(closureDisp);            // EAX = saved closure ptr
+          e.pushEax();                    // arg0: obj_ptr
+          e.immEcx(this._helperPutVarRef);
+          e.callEcx();
+          e.addEsp(12);                   // clean 3 cdecl args
+          pc += 3; break;
+        }
+
+        // OP_set_var_ref: write TOS to closure var[idx] but keep TOS on stack.
+        case OP_set_var_ref: {
+          const idx = bc.u16(pc + 1);
+          if (!usesClosure) return null;
+          e.peekTOS();                    // EAX = value (keep on stack)
+          e.pushEax();                    // arg2: val
+          e.pushImm32(idx);               // arg1: idx
+          e.load(closureDisp);            // EAX = saved closure ptr
+          e.pushEax();                    // arg0: obj_ptr
+          e.immEcx(this._helperPutVarRef);
+          e.callEcx();
+          e.addEsp(12);                   // clean 3 cdecl args
+          pc += 3; break;
         }
 
         // ── Extended stack manipulation ───────────────────────────────────
@@ -1172,7 +1300,8 @@ export class QJSJITHook {
    * Loaded lazily on first compile via kernel.jitHelperAddrs().
    */
   private _helperAddrs: { getPropI32: number; setPropI32: number; callFn: number; resolveNative: number;
-                         stringEq: number; stringLen: number; stringCharAt: number } | null = null;
+                         stringEq: number; stringLen: number; stringCharAt: number;
+                         getVarRef: number; putVarRef: number; closureGlobal: number } | null = null;
 
   constructor() {
     this._offsets = initOffsets();
@@ -1195,7 +1324,8 @@ export class QJSJITHook {
 
   /** Load C helper addresses once from kernel.jitHelperAddrs() and cache. */
   private _ensureHelperAddrs(): { getPropI32: number; setPropI32: number; callFn: number; resolveNative: number;
-                                  stringEq: number; stringLen: number; stringCharAt: number } | null {
+                                  stringEq: number; stringLen: number; stringCharAt: number;
+                                  getVarRef: number; putVarRef: number; closureGlobal: number } | null {
     if (this._helperAddrs) return this._helperAddrs;
     if (typeof kernel !== 'undefined' && typeof (kernel as any).jitHelperAddrs === 'function') {
       const h = (kernel as any).jitHelperAddrs() as any;
@@ -1208,6 +1338,9 @@ export class QJSJITHook {
           stringEq: h.stringEq ?? 0,
           stringLen: h.stringLen ?? 0,
           stringCharAt: h.stringCharAt ?? 0,
+          getVarRef: h.getVarRef ?? 0,
+          putVarRef: h.putVarRef ?? 0,
+          closureGlobal: h.closureGlobal ?? 0,
         };
         return this._helperAddrs;
       }
@@ -2782,13 +2915,132 @@ export class JITCodeCache {
 //  requires a proper SSA IR (planned for a future compiler tier).
 // =============================================================================
 
-/** Item 867: Loop-invariant code motion (LICM) — moves loop-invariant loads
- *  outside the loop body so they execute once instead of every iteration. */
+/** Item 867: Loop-invariant code motion (LICM) — identifies bytecode PCs in
+ *  loop bodies whose results are invariant (only depend on values defined
+ *  outside the loop).  The compile() method can use this set to pre-compute
+ *  these values before the loop header, reducing redundant work per iteration.
+ *
+ *  Analysis approach (bytecode-level, no SSA):
+ *   1. Each back edge (target < source) defines a natural loop body [header, tail].
+ *   2. Collect all locals/args/var_refs WRITTEN inside the loop body.
+ *   3. Any read (OP_get_loc/OP_get_arg/OP_get_var_ref) of a variable NOT written
+ *      inside the loop is loop-invariant.
+ *   4. Constant pushes (OP_push_i32, OP_push_const with int tag) are always invariant.
+ */
 export class LICMPass {
   /** Returns set of bytecode PCs whose result is loop-invariant. */
-  static analyze(_bc: QJSBytecodeReader, _loopHeaders: Set<number>): Set<number> {
-    // Requires SSA / control-flow graph; returns empty set (safe conservative).
-    return new Set<number>();
+  static analyze(bc: QJSBytecodeReader, loopHeaders: Set<number>): Set<number> {
+    const invariant = new Set<number>();
+    if (loopHeaders.size === 0) return invariant;
+
+    // Build loop bodies: for each header find the furthest back edge source
+    // that jumps to it, defining the body range [header, tailEnd).
+    const loops: Array<{ header: number; tailEnd: number }> = [];
+
+    // Scan all backwards branches to find loop tails
+    let pc = 0;
+    while (pc < bc.bcLen) {
+      const op = bc.u8(pc);
+      let target = -1;
+      let instrEnd = pc + 1;
+      if (op === OP_goto8) {
+        instrEnd = pc + 2; target = pc + 2 + bc.i8(pc + 1);
+      } else if (op === OP_goto16) {
+        instrEnd = pc + 3; target = pc + 3 + bc.i16(pc + 1);
+      } else if (op === OP_goto) {
+        instrEnd = pc + 5; target = pc + 5 + bc.i32(pc + 1);
+      } else if (op === OP_if_true8 || op === OP_if_false8) {
+        instrEnd = pc + 2; target = pc + 2 + bc.i8(pc + 1);
+      } else if (op === OP_if_true || op === OP_if_false) {
+        instrEnd = pc + 5; target = pc + 5 + bc.i32(pc + 1);
+      } else {
+        pc += OPCODE_SIZE[op] ?? 1;
+        continue;
+      }
+
+      // Back edge: target is before current pc and is a known loop header
+      if (target >= 0 && target < pc && loopHeaders.has(target)) {
+        // Merge with existing loop for the same header
+        let merged = false;
+        for (const lp of loops) {
+          if (lp.header === target) {
+            lp.tailEnd = Math.max(lp.tailEnd, instrEnd);
+            merged = true;
+            break;
+          }
+        }
+        if (!merged) loops.push({ header: target, tailEnd: instrEnd });
+      }
+
+      pc = instrEnd;
+    }
+
+    // For each loop, determine invariant PCs
+    for (const loop of loops) {
+      // Collect written locals, written args, written var_refs inside loop body
+      const writtenLocals = new Set<number>();
+      const writtenArgs   = new Set<number>();
+      const writtenVarRefs = new Set<number>();
+
+      let lpc = loop.header;
+      while (lpc < loop.tailEnd && lpc < bc.bcLen) {
+        const op = bc.u8(lpc);
+        // Local writes
+        if (op === OP_put_loc || op === OP_set_loc || op === OP_inc_loc || op === OP_dec_loc || op === OP_add_loc) {
+          writtenLocals.add(bc.u16(lpc + 1));
+        } else if (op === OP_inc_loc8 || op === OP_dec_loc8 || op === OP_add_loc8) {
+          writtenLocals.add(bc.u8(lpc + 1));
+        } else if (op === OP_put_loc0 || op === OP_set_loc0) { writtenLocals.add(0); }
+        else if (op === OP_put_loc1 || op === OP_set_loc1) { writtenLocals.add(1); }
+        else if (op === OP_put_loc2 || op === OP_set_loc2) { writtenLocals.add(2); }
+        else if (op === OP_put_loc3 || op === OP_set_loc3) { writtenLocals.add(3); }
+        // Arg writes
+        else if (op === OP_put_arg || op === OP_set_arg) { writtenArgs.add(bc.u16(lpc + 1)); }
+        // Var ref writes
+        else if (op === OP_put_var_ref || op === OP_set_var_ref) { writtenVarRefs.add(bc.u16(lpc + 1)); }
+
+        lpc += OPCODE_SIZE[op] ?? 1;
+      }
+
+      // Second pass: mark invariant reads and constants
+      lpc = loop.header;
+      while (lpc < loop.tailEnd && lpc < bc.bcLen) {
+        const op = bc.u8(lpc);
+
+        // Constant pushes are always invariant
+        if (op === OP_push_i32 || op === OP_push_false || op === OP_push_true ||
+            op === OP_null || op === OP_undefined) {
+          invariant.add(lpc);
+        }
+        // OP_push_const with integer tag is invariant
+        else if (op === OP_push_const) {
+          const idx = bc.u32(lpc + 1);
+          if (bc.cpoolTag(idx) === JS_TAG_INT || bc.cpoolTag(idx) === JS_TAG_BOOL) {
+            invariant.add(lpc);
+          }
+        }
+        // Local reads of non-written locals
+        else if (op === OP_get_loc) {
+          if (!writtenLocals.has(bc.u16(lpc + 1))) invariant.add(lpc);
+        }
+        else if (op === OP_get_loc0 && !writtenLocals.has(0)) invariant.add(lpc);
+        else if (op === OP_get_loc1 && !writtenLocals.has(1)) invariant.add(lpc);
+        else if (op === OP_get_loc2 && !writtenLocals.has(2)) invariant.add(lpc);
+        else if (op === OP_get_loc3 && !writtenLocals.has(3)) invariant.add(lpc);
+        // Arg reads of non-written args
+        else if (op === OP_get_arg) {
+          if (!writtenArgs.has(bc.u16(lpc + 1))) invariant.add(lpc);
+        }
+        // Var ref reads of non-written var refs
+        else if (op === OP_get_var_ref) {
+          if (!writtenVarRefs.has(bc.u16(lpc + 1))) invariant.add(lpc);
+        }
+
+        lpc += OPCODE_SIZE[op] ?? 1;
+      }
+    }
+
+    return invariant;
   }
 }
 
@@ -2801,17 +3053,54 @@ export class RangeAnalysis {
   }
 }
 
-/** Item 869: Constant folding — evaluates constant sub-expressions at
- *  compile time and replaces them with OP_push_i32 constants. */
+/** Item 869: Constant folding — evaluates consecutive constant-push + arithmetic
+ *  sequences at compile time and replaces them with pre-computed results.
+ *
+ *  Pattern: OP_push_i32(a); OP_push_i32(b); OP_{add,sub,mul,shl,sar,shr,or,and,xor}
+ *  → folds to a single OP_push_i32(result).
+ *
+ *  Rather than mutating bytecode, returns a Map<pc, foldedValue> that the JIT
+ *  compile() loop can check: if pc+5+5+1 matches a foldable triple, emit only
+ *  the folded constant.
+ */
 export class ConstantFolder {
-  static fold(bc: QJSBytecodeReader): void {
-    // Without an IR, constant folding at bytecode level is limited.
-    // Pattern: OP_push_i32(a); OP_push_i32(b); OP_add → OP_push_i32(a+b); OP_nop; OP_nop
+  /**
+   * @returns Map from the PC of the FIRST push_i32 in a foldable triple →
+   *          { result: folded int32, skipLen: total bytecode bytes to skip }.
+   */
+  static fold(bc: QJSBytecodeReader): Map<number, { result: number; skipLen: number }> {
+    const folds = new Map<number, { result: number; skipLen: number }>();
     let pc = 0;
-    const buf = new Uint8Array(bc.bcLen);
-    // Copy bytecodes to mutable buffer (read-only in real kernel; stub only)
-    void buf; void pc;
-    // TODO: implement bytecode-level constant folding via kernel.qjsPatchBc()
+    while (pc + 10 < bc.bcLen) {
+      // Pattern: push_i32(a) [5B] + push_i32(b) [5B] + arith_op [1B]
+      if (bc.u8(pc) !== OP_push_i32 || bc.u8(pc + 5) !== OP_push_i32) {
+        pc += OPCODE_SIZE[bc.u8(pc)] ?? 1;
+        continue;
+      }
+      const a = bc.i32(pc + 1);
+      const b = bc.i32(pc + 6);
+      const arithOp = bc.u8(pc + 10);
+
+      let result: number | null = null;
+      switch (arithOp) {
+        case OP_add: result = (a + b) | 0; break;
+        case OP_sub: result = (a - b) | 0; break;
+        case OP_mul: result = Math.imul(a, b); break;
+        case OP_or:  result = a | b; break;
+        case OP_and: result = a & b; break;
+        case OP_xor: result = a ^ b; break;
+        case OP_shl: result = a << (b & 31); break;
+        case OP_sar: result = a >> (b & 31); break;
+        case OP_shr: result = (a >>> (b & 31)) | 0; break;
+      }
+      if (result !== null) {
+        folds.set(pc, { result, skipLen: 11 });  // 5 + 5 + 1
+        pc += 11;
+      } else {
+        pc += OPCODE_SIZE[bc.u8(pc)] ?? 1;
+      }
+    }
+    return folds;
   }
 }
 

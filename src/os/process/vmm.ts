@@ -729,6 +729,103 @@ export class VirtualMemoryManager {
 
 export const vmm = new VirtualMemoryManager();
 
+// ── Per-process address space isolation (Phase 2.2.1) ─────────────────────────
+
+/**
+ * [Phase 2.2.1] Per-process CR3 switching via cloneAddressSpace / setPDPT.
+ *
+ * Each process gets its own page directory (cloned from the kernel's master PD).
+ * On context switch the scheduler calls switchTo(pid) which writes the process's
+ * PD physical address into CR3 (via kernel.setPDPT), isolating each process's
+ * virtual address space from the others.
+ *
+ * The C layer provides:
+ *   - kernel.cloneAddressSpace() → physAddr of new PD (copies kernel PDEs)
+ *   - kernel.setPDPT(physAddr) → writes physAddr to CR3, flushes TLB
+ *   - kernel.flushTLB() → invalidates TLB without changing CR3
+ *
+ * Lifetime: created on fork, destroyed on process exit.  Max 32 concurrent
+ * address spaces (_user_pds[32] in quickjs_binding.c).
+ */
+export class ProcessAddressSpace {
+  /** Map from PID → physical address of the process's page directory. */
+  private _pdAddrs: Map<number, number> = new Map();
+  /** The master kernel PD physical address (PID 1). */
+  private _kernelPD: number = 0;
+  /** Currently active PID (whose PD is loaded in CR3). */
+  private _activePid: number = 0;
+  /** Whether hardware paging is enabled (enableHardwarePaging succeeded). */
+  private _pagingEnabled: boolean = false;
+
+  /** Indicate that hardware paging was enabled.  Must be called once
+   *  after vmm.enableHardwarePaging() succeeds. */
+  notifyPagingEnabled(): void {
+    this._pagingEnabled = true;
+    // The kernel PD is the one currently in CR3 — we don't track it here
+    // because PID 1 just uses the master paging_pd[] that was configured.
+    this._activePid = 1;
+  }
+
+  get pagingEnabled(): boolean { return this._pagingEnabled; }
+
+  /**
+   * Create an isolated address space for a new child process.
+   * Clones the kernel's page directory (copies all kernel-mapped pages)
+   * and records the physical address for later CR3 switches.
+   *
+   * @returns true if the address space was created, false on failure
+   *          (paging not enabled, out of PD slots, etc.).
+   */
+  createForProcess(pid: number): boolean {
+    if (!this._pagingEnabled) return false;
+    if (this._pdAddrs.has(pid)) return true;  // already created
+
+    if (typeof kernel === 'undefined' ||
+        typeof (kernel as any).cloneAddressSpace !== 'function') return false;
+
+    const pdPhys = (kernel as any).cloneAddressSpace() as number;
+    if (!pdPhys) return false;  // out of PD slots
+
+    this._pdAddrs.set(pid, pdPhys);
+    return true;
+  }
+
+  /**
+   * Switch to the process's address space by writing its PD to CR3.
+   * If the process has no dedicated PD (PID 1 or paging disabled), this
+   * is a no-op.
+   */
+  switchTo(pid: number): void {
+    if (!this._pagingEnabled) return;
+    if (pid === this._activePid) return;  // already active — skip TLB flush
+
+    const pdPhys = this._pdAddrs.get(pid);
+    if (pdPhys && typeof kernel !== 'undefined' &&
+        typeof (kernel as any).setPDPT === 'function') {
+      (kernel as any).setPDPT(pdPhys);
+      this._activePid = pid;
+    }
+  }
+
+  /**
+   * Release the address space for a terminated process.
+   * The PD slot in _user_pds[] is freed for reuse.
+   */
+  destroyForProcess(pid: number): void {
+    this._pdAddrs.delete(pid);
+    // NOTE: The C-side _user_pd_used[] flag should also be cleared.
+    // This requires a kernel binding (kernel.freeAddressSpace(pdPhys))
+    // which will be added in a follow-up Phase 9 patch.
+  }
+
+  /** Return the PD physical address for a process, or 0 if none. */
+  getPDPhysAddr(pid: number): number {
+    return this._pdAddrs.get(pid) ?? 0;
+  }
+}
+
+export const processAddressSpace = new ProcessAddressSpace();
+
 // ── Copy-On-Write (Item 133) ──────────────────────────────────────────────────
 
 /**
