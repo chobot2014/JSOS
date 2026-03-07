@@ -681,14 +681,20 @@ export function layoutGrid(
   // Resolve column tracks
   var colTmpl = gridNode.gridTemplateColumns || '';
   var _gAvail  = contentW - padLeft - padRight;
-  var _gKey    = gridNode.elId ? gridNode.elId + ':' + colTmpl + ':' + (_gAvail | 0) : '';
   var colSizes: number[];
-  if (_gKey && _gridTrackCache.has(_gKey)) {
-    colSizes = (_gridTrackCache.get(_gKey) as number[]).slice();
+  // CSS Grid subgrid [Item 931]: inherit parent's column track sizes when
+  // gridTemplateColumns === 'subgrid' and parent has passed _subgridColSizes.
+  if (colTmpl === 'subgrid' && gridNode._subgridColSizes && gridNode._subgridColSizes.length > 0) {
+    colSizes = gridNode._subgridColSizes.slice();
   } else {
-    colSizes = parseGridTrack(colTmpl, _gAvail);
-    if (colSizes.length === 0) colSizes = [_gAvail];
-    if (_gKey) _gridTrackCache.set(_gKey, colSizes.slice());
+    var _gKey = gridNode.elId ? gridNode.elId + ':' + colTmpl + ':' + (_gAvail | 0) : '';
+    if (_gKey && _gridTrackCache.has(_gKey)) {
+      colSizes = (_gridTrackCache.get(_gKey) as number[]).slice();
+    } else {
+      colSizes = parseGridTrack(colTmpl, _gAvail);
+      if (colSizes.length === 0) colSizes = [_gAvail];
+      if (_gKey) _gridTrackCache.set(_gKey, colSizes.slice());
+    }
   }
 
   var colCount = colSizes.length;
@@ -783,6 +789,11 @@ export function layoutGrid(
       if (csi < ce2 - 1) cellW += colGap;
     }
     cellW = Math.max(CHAR_W, cellW);
+
+    // Subgrid [Item 931]: propagate resolved column sizes to child subgrid containers
+    if (children[gi].gridTemplateColumns === 'subgrid') {
+      children[gi]._subgridColSizes = colSizes.slice(cs2, ce2);
+    }
 
     var childResult = layoutFn([children[gi]], cellW);
     var childLines  = childResult.lines;

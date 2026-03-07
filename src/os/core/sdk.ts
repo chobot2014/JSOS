@@ -4087,6 +4087,33 @@ const sdk = {
   // ── Backward-compatibility aliases ────────────────────────────────────────────
 
   /**
+   * Warm up a function for JIT compilation and return a Promise that resolves
+   * with the same function once it has been compiled.
+   *
+   * The JIT compiler promotes functions after 2 calls (JIT_THRESHOLD).  This
+   * wrapper calls the function 3 times with no arguments (errors silently
+   * swallowed) to trigger tier-1 → tier-2 promotion, then resolves with the
+   * original function reference so callers can `await` and then invoke it
+   * with confidence that the first real call hits native code.
+   *
+   * @example
+   *   var fast = await os.run_optimized(heavyLoop);
+   *   fast(bigArray);  // first real call is JIT-compiled native code
+   *
+   * @example  (no-await variant for fire-and-forget warmup)
+   *   os.run_optimized(parseJSON);
+   */
+  run_optimized<T extends (...args: any[]) => any>(fn: T): Promise<T> {
+    return new Promise<T>(function(resolve) {
+      // Three warmup calls: enough to trigger tier-1 and tier-2 JIT promotion.
+      // Errors are swallowed so functions that require arguments don't crash.
+      for (var _wi = 0; _wi < 3; _wi++) { try { (fn as any)(); } catch (_) {} }
+      // Resolve synchronously on the next microtask tick so `await` works naturally.
+      resolve(fn);
+    });
+  },
+
+  /**
    * @deprecated Use os.net.fetch() instead.
    * Kept for backward compatibility with existing apps.
    */

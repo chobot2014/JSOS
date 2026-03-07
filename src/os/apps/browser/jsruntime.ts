@@ -873,13 +873,43 @@ export function createPageJS(
     maxTouchPoints: 0,
     geolocation: { getCurrentPosition(_s: unknown, e: ((err: unknown) => void) | undefined) { if (e) e({ code: 1, message: 'Not supported' }); }, watchPosition(_s: unknown, e: ((err: unknown) => void) | undefined) { if (e) e({ code: 1, message: 'Not supported' }); return 0; }, clearWatch() {} },
     clipboard: {
-      readText(): Promise<string> { return Promise.reject(new DOMException('NotAllowedError')); },
-      writeText(_t: string): Promise<void> { return Promise.resolve(); },
-      read(): Promise<unknown[]> { return Promise.reject(new DOMException('NotAllowedError')); },
-      write(_items: unknown[]): Promise<void> { return Promise.resolve(); },
+      readText(): Promise<string> {
+        // Read from WM system clipboard
+        try { return Promise.resolve(os.clipboard.read()); } catch (_e) { return Promise.resolve(''); }
+      },
+      writeText(t: string): Promise<void> {
+        try { os.clipboard.write(t); return Promise.resolve(); } catch (_e) { return Promise.resolve(); }
+      },
+      read(): Promise<unknown[]> {
+        // Return as ClipboardItem array
+        try {
+          var _txt = os.clipboard.read();
+          return Promise.resolve([new ClipboardItem_({ 'text/plain': new Blob([_txt], { type: 'text/plain' }) })]);
+        } catch (_e) { return Promise.resolve([]); }
+      },
+      write(items: unknown[]): Promise<void> {
+        // Extract first text/plain item and write to clipboard
+        try {
+          var _item = (items as ClipboardItem_[])[0];
+          if (_item && typeof _item.getType === 'function') {
+            return _item.getType('text/plain').then(function(blob: Blob) {
+              return (blob as any).text ? (blob as any).text() : Promise.resolve('');
+            }).then(function(t: string) { os.clipboard.write(t); });
+          }
+        } catch (_e) {}
+        return Promise.resolve();
+      },
     },
     permissions: {
-      query(_desc: { name: string }): Promise<{ state: string }> { return Promise.resolve({ state: 'denied', addEventListener() {}, removeEventListener() {} } as any); },
+      query(desc: { name: string }): Promise<{ state: string; addEventListener(): void; removeEventListener(): void }> {
+        // Grant clipboard read/write (we own the clipboard) and push notifications.
+        // All other permissions default to 'prompt'.
+        var _pname = desc && desc.name ? desc.name.toLowerCase() : '';
+        var _state = (_pname === 'clipboard-read' || _pname === 'clipboard-write' ||
+                      _pname === 'notifications'  || _pname === 'persistent-storage' ||
+                      _pname === 'geolocation') ? 'granted' : 'prompt';
+        return Promise.resolve({ state: _state, addEventListener() {}, removeEventListener() {} });
+      },
     },
     mediaDevices: {
       getUserMedia(_c: unknown): Promise<unknown> { return Promise.reject(new DOMException('NotSupportedError', 'NotSupportedError')); },
@@ -2504,18 +2534,27 @@ export function createPageJS(
       if (_ii >= 0) _ioObservers.splice(_ii, 1);
     }
     /** Called by tick to fire entries for elements that have entered the viewport. */
-    _tick(viewportH: number): void {
+    _tick(viewportH: number, viewportW = 1024): void {
       if (this._elements.length === 0) return;
       var entries: unknown[] = [];
       for (var el of this._elements) {
         var rect = el.getBoundingClientRect?.() ?? { top: 0, bottom: 0, height: 0, width: 0, left: 0, right: 0 };
-        var intersecting = rect.bottom > 0 && rect.top < viewportH;
+        var intersecting = rect.bottom > 0 && rect.top < viewportH &&
+                           rect.right  > 0 && rect.left < viewportW;
+        // Compute ratio: fraction of boundingClientRect visible in viewport
+        var iTop    = Math.max(rect.top,    0);
+        var iBottom = Math.min(rect.bottom, viewportH);
+        var iLeft   = Math.max(rect.left,   0);
+        var iRight  = Math.min(rect.right,  viewportW);
+        var iArea   = (iBottom > iTop && iRight > iLeft) ? (iBottom - iTop) * (iRight - iLeft) : 0;
+        var elArea  = (rect.height * rect.width) || 1;
+        var ratio   = Math.min(1, iArea / elArea);
         entries.push({
-          isIntersecting: intersecting,
-          intersectionRatio: intersecting ? 1 : 0,
+          isIntersecting: ratio >= (this._threshold || 0),
+          intersectionRatio: ratio,
           boundingClientRect: rect,
-          intersectionRect:   rect,
-          rootBounds:         { top: 0, left: 0, bottom: viewportH, right: 1024, width: 1024, height: viewportH },
+          intersectionRect:   { top: iTop, left: iLeft, bottom: iBottom, right: iRight, width: iRight - iLeft, height: iBottom - iTop },
+          rootBounds:         { top: 0, left: 0, bottom: viewportH, right: viewportW, width: viewportW, height: viewportH },
           target: el,
           time: _perf.now(),
         });
@@ -3313,21 +3352,178 @@ export function createPageJS(
   (doc as any).pictureInPictureEnabled = false;
   (doc as any).pictureInPictureElement = null;
 
-  // ── EventSource (Server-Sent Events) ─────────────────────────────────────
+  // ── EventSource (Server-Sent Events) — real streaming SSE implementation ───
+
+  interface _SSEEntry {
+    sse:        EventSource_;
+    sock:       import('../../core/sdk.js').RawSocket | null;
+    buf:        number[];
+    headerDone: boolean;
+    headerBuf:  string;
+    lineBuf:    string;
+    dataBuf:    string;
+    eventType:  string;
+    lastId:     string;
+    retryMs:    number;
+    retryAt:    number;  // kernel uptime ms when to reconnect (0 = not pending)
+  }
+
+  var _sseSockets: _SSEEntry[] = [];
+
+  function _sseFireEvent(sse: EventSource_, type: string, extra?: Record<string, unknown>): void {
+    var ev = Object.assign({ type, target: sse }, extra || {});
+    var arr = (sse as any)._listeners as Map<string, Array<(e: unknown) => void>>;
+    if (arr) { var fns = arr.get(type); if (fns) for (var _fn of fns) _callGuardedCtx('sse:' + type, _fn, ev); }
+    var onFn = (sse as any)['on' + type];
+    if (typeof onFn === 'function') _callGuardedCtx('sse:' + type, onFn, ev);
+  }
+
+  function _sseConnect(entry: _SSEEntry): void {
+    var sse = entry.sse;
+    var rawUrl = sse.url.startsWith('http') ? sse.url : _resolveURL(sse.url, _baseHref);
+    var _sm = rawUrl.match(/^(https?):\/\/([^/:?#]+)(?::(\d+))?(\/[^]*)?$/i);
+    if (!_sm) { sse.readyState = 2; _sseFireEvent(sse, 'error', { message: 'Invalid SSE URL: ' + rawUrl }); return; }
+    var _stls  = _sm[1].toLowerCase() === 'https';
+    var _shost = _sm[2];
+    var _sport = _sm[3] ? parseInt(_sm[3]) : (_stls ? 443 : 80);
+    var _spath = _sm[4] || '/';
+    sse.readyState = 0; // CONNECTING
+    (os.net as any).connect(_shost, _sport, function(sock: import('../../core/sdk.js').RawSocket | null, err?: string) {
+      if (!sock) {
+        sse.readyState = 2;
+        entry.retryAt = (typeof kernel !== 'undefined' ? kernel.getUptime() : 0) + entry.retryMs;
+        _sseFireEvent(sse, 'error', { message: err || 'SSE connection failed' });
+        return;
+      }
+      entry.sock       = sock;
+      entry.buf        = [];
+      entry.headerDone = false;
+      entry.headerBuf  = '';
+      entry.lineBuf    = '';
+      entry.dataBuf    = '';
+      entry.eventType  = 'message';
+      entry.retryAt    = 0;
+      // Send HTTP/1.1 GET for SSE
+      var _hosthdr = _sport === (_stls ? 443 : 80) ? _shost : (_shost + ':' + _sport);
+      var _req = 'GET ' + _spath + ' HTTP/1.1\r\n' +
+        'Host: ' + _hosthdr + '\r\n' +
+        'Accept: text/event-stream\r\n' +
+        'Cache-Control: no-cache\r\n' +
+        'Connection: keep-alive\r\n' +
+        (entry.lastId ? 'Last-Event-ID: ' + entry.lastId + '\r\n' : '') +
+        '\r\n';
+      sock.write(_req);
+      if (!_sseSockets.includes(entry)) _sseSockets.push(entry);
+    }, { timeoutMs: 10000 });
+  }
+
+  function _tickSSE(): void {
+    var _now = typeof kernel !== 'undefined' ? kernel.getUptime() : 0;
+    for (var _si = _sseSockets.length - 1; _si >= 0; _si--) {
+      var _e = _sseSockets[_si];
+      var _sse = _e.sse;
+      // Handle reconnect timer for closed entries
+      if (_sse.readyState === 2) {
+        if (_e.retryAt > 0 && _now >= _e.retryAt) { _e.retryAt = 0; _sseConnect(_e); }
+        continue;
+      }
+      // Check socket health
+      if (!_e.sock || !_e.sock.connected) {
+        _sse.readyState = 2;
+        _e.retryAt = _now + _e.retryMs;
+        _sseFireEvent(_sse, 'error', { message: 'SSE connection lost' });
+        _sseSockets.splice(_si, 1);
+        continue;
+      }
+      var _avail = _e.sock.available();
+      if (_avail <= 0) continue;
+      var _newBytes = _e.sock.readBytes(_avail);
+      for (var _b of _newBytes) _e.buf.push(_b);
+      // Convert buf to string
+      var _raw = ''; for (var _bc of _e.buf) _raw += String.fromCharCode(_bc); _e.buf = [];
+      if (!_e.headerDone) {
+        _e.headerBuf += _raw;
+        var _dEnd = _e.headerBuf.indexOf('\r\n\r\n');
+        if (_dEnd >= 0) {
+          var _statusLine = _e.headerBuf.split('\r\n')[0];
+          if (_statusLine.indexOf(' 200') >= 0) {
+            _e.headerDone = true;
+            _sse.readyState = 1; // OPEN
+            _sseFireEvent(_sse, 'open');
+            // Bytes after headers go into line buffer
+            _e.lineBuf = _e.headerBuf.slice(_dEnd + 4);
+            _e.headerBuf = '';
+          } else {
+            _sse.readyState = 2;
+            _e.retryAt = _now + _e.retryMs;
+            _sseFireEvent(_sse, 'error', { message: 'SSE HTTP error: ' + _statusLine });
+            _e.sock.close();
+            _sseSockets.splice(_si, 1);
+          }
+        }
+        continue;
+      }
+      // Append to line buffer and parse SSE fields
+      _e.lineBuf += _raw;
+      var _lines = _e.lineBuf.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+      _e.lineBuf = _lines.pop() ?? '';
+      for (var _li = 0; _li < _lines.length; _li++) {
+        var _line = _lines[_li];
+        if (_line === '') {
+          // Blank line = dispatch event
+          if (_e.dataBuf !== '') {
+            var _data = _e.dataBuf.endsWith('\n') ? _e.dataBuf.slice(0, -1) : _e.dataBuf;
+            _sseFireEvent(_sse, _e.eventType, { data: _data, lastEventId: _e.lastId, origin: _sse.url, ports: [] });
+            _e.dataBuf = ''; _e.eventType = 'message';
+          }
+        } else if (_line.charAt(0) === ':') {
+          // Comment — skip
+        } else {
+          var _col = _line.indexOf(':');
+          var _field = _col >= 0 ? _line.slice(0, _col) : _line;
+          var _val   = _col >= 0 ? (_line.charAt(_col + 1) === ' ' ? _line.slice(_col + 2) : _line.slice(_col + 1)) : '';
+          if      (_field === 'data')  { _e.dataBuf   += _val + '\n'; }
+          else if (_field === 'event') { _e.eventType  = _val || 'message'; }
+          else if (_field === 'id')    { _e.lastId     = _val; }
+          else if (_field === 'retry') { var _ms = parseInt(_val); if (!isNaN(_ms)) _e.retryMs = _ms; }
+        }
+      }
+    }
+  }
 
   class EventSource_ {
     static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
     CONNECTING = 0; OPEN = 1; CLOSED = 2;
-    readyState = 2; // closed by default (no keep-alive networking)
+    readyState = 0;
     url: string; withCredentials: boolean;
-    onopen: ((e: unknown) => void) | null = null;
+    onopen:    ((e: unknown) => void) | null = null;
     onmessage: ((e: unknown) => void) | null = null;
-    onerror: ((e: unknown) => void) | null = null;
+    onerror:   ((e: unknown) => void) | null = null;
+    _listeners: Map<string, Array<(ev: unknown) => void>> = new Map();
+    _entry: _SSEEntry;
     constructor(url: string, init?: { withCredentials?: boolean }) {
       this.url = url; this.withCredentials = init?.withCredentials ?? false;
+      this._entry = {
+        sse: this, sock: null, buf: [], headerDone: false, headerBuf: '',
+        lineBuf: '', dataBuf: '', eventType: 'message', lastId: '', retryMs: 3000, retryAt: 0,
+      };
+      _sseConnect(this._entry);
     }
-    close(): void { this.readyState = 2; }
-    addEventListener() {} removeEventListener() {} dispatchEvent() { return true; }
+    addEventListener(type: string, fn: (ev: unknown) => void): void {
+      if (!this._listeners.has(type)) this._listeners.set(type, []);
+      this._listeners.get(type)!.push(fn);
+    }
+    removeEventListener(type: string, fn: (ev: unknown) => void): void {
+      var _arr = this._listeners.get(type);
+      if (_arr) { var _idx = _arr.indexOf(fn); if (_idx >= 0) _arr.splice(_idx, 1); }
+    }
+    dispatchEvent(_ev: unknown): boolean { return true; }
+    close(): void {
+      this.readyState = 2;
+      if (this._entry.sock) { try { this._entry.sock.close(); } catch (_) {} }
+      var _idx2 = _sseSockets.indexOf(this._entry);
+      if (_idx2 >= 0) _sseSockets.splice(_idx2, 1);
+    }
   }
 
   // ── OffscreenCanvas ───────────────────────────────────────────────────────
@@ -7876,12 +8072,15 @@ export function createPageJS(
         checkDirty();
         if (needsRerender) doRerender();
       }
-      // Pump Intersection and Resize Observers
-      var viewH = 768;
-      for (var io of _ioObservers) io._tick(viewH);
+      // Pump Intersection and Resize Observers (use real viewport height)
+      var viewH = ((win['innerHeight'] as number) || 768);
+      var viewW = ((win['innerWidth']  as number) || 1024);
+      for (var io of _ioObservers) io._tick(viewH, viewW);
       for (var ro of _roObservers) ro._tick();
       // Poll WebSocket connections for incoming data
       if (_wsSockets.length > 0) _tickWebSockets();
+      // Poll EventSource / SSE streams
+      if (_sseSockets.length > 0) _tickSSE();
       // Pump all Web Workers
       tickAllWorkers();
       // Record frame timing

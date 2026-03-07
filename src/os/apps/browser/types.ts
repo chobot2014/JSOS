@@ -137,6 +137,8 @@ export interface RenderNode {
   gridRowStart?:        string;
   gridRowEnd?:          string;
   gridArea?:            string;
+  // Grid subgrid — parent passes resolved column sizes to a child with gridTemplateColumns='subgrid'
+  _subgridColSizes?:    number[];
   // Cursor / interaction (items 415, 416)
   cursor?:        string;              // CSS cursor value: auto, pointer, text, crosshair, move,…
   pointerEvents?: 'auto' | 'none';    // CSS pointer-events: none disables mouse events on element
