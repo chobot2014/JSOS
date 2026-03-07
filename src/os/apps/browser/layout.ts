@@ -924,6 +924,8 @@ function _layoutNodesImpl(
   }
 
   // ── Out-of-flow (position:absolute/fixed) node rendering ─────────────────
+  // Sort by zIndex so higher z-index elements render on top (item 398)
+  oofNodes.sort(function(a, b) { return (a.zIndex ?? 0) - (b.zIndex ?? 0); });
   for (var oi = 0; oi < oofNodes.length; oi++) {
     var oof      = oofNodes[oi];
     var oofW     = oof.boxWidth ?? (maxX - xLeft);

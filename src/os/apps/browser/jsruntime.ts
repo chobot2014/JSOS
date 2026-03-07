@@ -2659,38 +2659,67 @@ export function createPageJS(
   // ── IndexedDB stub (item 502) ─────────────────────────────────────────────
 
   class IDBRequest_ { result: unknown = undefined; error: unknown = null; readyState = 'pending'; onsuccess: ((ev: unknown) => void) | null = null; onerror: ((ev: unknown) => void) | null = null;
-    _succeed(r: unknown): void { this.result = r; this.readyState = 'done'; if (this.onsuccess) setTimeout(() => { try { this.onsuccess!({ target: this }); } catch(_) {} }, 0); }
-    _fail(e: Error): void { this.error = e; this.readyState = 'done'; if (this.onerror) setTimeout(() => { try { this.onerror!({ target: this }); } catch(_) {} }, 0); }
+    _txn: IDBTransaction_ | null = null; // back-ref for oncomplete tracking
+    _succeed(r: unknown): void { this.result = r; this.readyState = 'done'; if (this.onsuccess) setTimeout(() => { try { this.onsuccess!({ target: this }); } catch(_) {} }, 0); this._txn?._requestDone(); }
+    _fail(e: Error): void { this.error = e; this.readyState = 'done'; if (this.onerror) setTimeout(() => { try { this.onerror!({ target: this }); } catch(_) {} }, 0); this._txn?._requestDone(); }
     addEventListener(type: string, fn: (ev: unknown) => void): void { if (type === 'success') this.onsuccess = fn; if (type === 'error') this.onerror = fn; }
     removeEventListener(): void {}
   }
 
   class IDBObjectStore_ {
-    _name: string; _db: IDBDatabase_; _data: Map<unknown, unknown>;
-    constructor(name: string, db: IDBDatabase_) { this._name = name; this._db = db; this._data = db._stores.get(name) ?? new Map(); db._stores.set(name, this._data); }
-    put(value: unknown, key?: unknown): IDBRequest_ { var r = new IDBRequest_(); var k = key ?? (typeof value === 'object' && value ? (value as any)[this._db._keyPaths.get(this._name) ?? 'id'] : undefined) ?? Date.now(); this._data.set(k, value); r._succeed(k); return r; }
+    _name: string; _db: IDBDatabase_; _data: Map<unknown, unknown>; _txn: IDBTransaction_ | null = null;
+    constructor(name: string, db: IDBDatabase_, txn?: IDBTransaction_) { this._name = name; this._db = db; this._data = db._stores.get(name) ?? new Map(); db._stores.set(name, this._data); this._txn = txn ?? null; }
+    _req(): IDBRequest_ { var r = new IDBRequest_(); r._txn = this._txn; if (this._txn) this._txn._pending++; return r; }
+    put(value: unknown, key?: unknown): IDBRequest_ { var r = this._req(); var k = key ?? (typeof value === 'object' && value ? (value as any)[this._db._keyPaths.get(this._name) ?? 'id'] : undefined) ?? Date.now(); this._data.set(k, value); r._succeed(k); return r; }
     add(value: unknown, key?: unknown): IDBRequest_ { return this.put(value, key); }
-    get(key: unknown): IDBRequest_ { var r = new IDBRequest_(); r._succeed(this._data.get(key)); return r; }
-    getAll(_range?: unknown, _count?: unknown): IDBRequest_ { var r = new IDBRequest_(); r._succeed([...this._data.values()]); return r; }
-    getAllKeys(_range?: unknown, _count?: unknown): IDBRequest_ { var r = new IDBRequest_(); r._succeed([...this._data.keys()]); return r; }
-    delete(key: unknown): IDBRequest_ { var r = new IDBRequest_(); this._data.delete(key); r._succeed(undefined); return r; }
-    clear(): IDBRequest_ { var r = new IDBRequest_(); this._data.clear(); r._succeed(undefined); return r; }
-    count(_range?: unknown): IDBRequest_ { var r = new IDBRequest_(); r._succeed(this._data.size); return r; }
-    index(_name: string): IDBObjectStore_ { return this; }
-    openCursor(_range?: unknown, _dir?: string): IDBRequest_ { var r = new IDBRequest_(); var vals = [...this._data.entries()]; var i = 0; var cursor = vals.length > 0 ? { key: vals[0][0], value: vals[0][1], continue() { i++; r.result = i < vals.length ? ({ key: vals[i][0], value: vals[i][1], continue: cursor!.continue } as unknown) : null; if (r.onsuccess) setTimeout(() => r.onsuccess!({ target: r }), 0); } } : null; r.result = cursor; setTimeout(() => { if (r.onsuccess) r.onsuccess({ target: r }); }, 0); return r; }
-    createIndex(_name: string, _keyPath: string, _opts?: unknown): IDBObjectStore_ { return this; }
+    get(key: unknown): IDBRequest_ { var r = this._req(); r._succeed(this._data.get(key)); return r; }
+    getAll(_range?: unknown, _count?: unknown): IDBRequest_ { var r = this._req(); r._succeed([...this._data.values()]); return r; }
+    getAllKeys(_range?: unknown, _count?: unknown): IDBRequest_ { var r = this._req(); r._succeed([...this._data.keys()]); return r; }
+    delete(key: unknown): IDBRequest_ { var r = this._req(); this._data.delete(key); r._succeed(undefined); return r; }
+    clear(): IDBRequest_ { var r = this._req(); this._data.clear(); r._succeed(undefined); return r; }
+    count(_range?: unknown): IDBRequest_ { var r = this._req(); r._succeed(this._data.size); return r; }
+    index(name: string): IDBIndex_ { return new IDBIndex_(name, this._db, this._txn); }
+    openCursor(_range?: unknown, _dir?: string): IDBRequest_ { var r = this._req(); var vals = [...this._data.entries()]; var i = 0; var cursor = vals.length > 0 ? { key: vals[0][0], value: vals[0][1], continue() { i++; r.result = i < vals.length ? ({ key: vals[i][0], value: vals[i][1], continue: cursor!.continue } as unknown) : null; if (r.onsuccess) setTimeout(() => r.onsuccess!({ target: r }), 0); } } : null; r.result = cursor; setTimeout(() => { if (r.onsuccess) r.onsuccess({ target: r }); }, 0); return r; }
+    createIndex(name: string, _keyPath: string, _opts?: unknown): IDBIndex_ { return new IDBIndex_(name, this._db, this._txn); }
+  }
+
+  class IDBIndex_ {
+    _name: string; _db: IDBDatabase_; _txn: IDBTransaction_ | null;
+    constructor(name: string, db: IDBDatabase_, txn?: IDBTransaction_ | null) { this._name = name; this._db = db; this._txn = txn ?? null; }
+    get(key: unknown): IDBRequest_ { var r = new IDBRequest_(); r._txn = this._txn; if (this._txn) this._txn._pending++;
+      // Search all stores for matching indexed key
+      var found: unknown = undefined;
+      this._db._stores.forEach(m => { m.forEach((v: unknown) => { if (typeof v === 'object' && v && (v as any)[this._name] === key && found === undefined) found = v; }); });
+      r._succeed(found); return r; }
+    getAll(_range?: unknown): IDBRequest_ { var r = new IDBRequest_(); r._txn = this._txn; if (this._txn) this._txn._pending++;
+      var all: unknown[] = [];
+      this._db._stores.forEach(m => { m.forEach((v: unknown) => { if (typeof v === 'object' && v && Object.prototype.hasOwnProperty.call(v, this._name)) all.push(v); }); });
+      r._succeed(all); return r; }
+    openCursor(_range?: unknown): IDBRequest_ { var r = new IDBRequest_(); r._txn = this._txn; if (this._txn) this._txn._pending++;
+      r.result = null; setTimeout(() => { if (r.onsuccess) r.onsuccess({ target: r }); }, 0); return r; }
+    count(): IDBRequest_ { var r = new IDBRequest_(); r._txn = this._txn; if (this._txn) this._txn._pending++; r._succeed(0); return r; }
   }
 
   class IDBTransaction_ {
-    _db: IDBDatabase_; _mode: string;
+    _db: IDBDatabase_; _mode: string; _pending = 0; _fireScheduled = false;
     constructor(db: IDBDatabase_, _storeNames: string[], mode: string) { this._db = db; this._mode = mode; }
-    objectStore(name: string): IDBObjectStore_ { return new IDBObjectStore_(name, this._db); }
+    objectStore(name: string): IDBObjectStore_ { return new IDBObjectStore_(name, this._db, this); }
     oncomplete: ((ev: unknown) => void) | null = null;
     onerror: ((ev: unknown) => void) | null = null;
     onabort: ((ev: unknown) => void) | null = null;
-    abort(): void {}
-    commit(): void {}
-    addEventListener(type: string, fn: (ev: unknown) => void): void { if (type === 'complete') this.oncomplete = fn; if (type === 'error') this.onerror = fn; }
+    _requestDone(): void {
+      this._pending = Math.max(0, this._pending - 1);
+      if (this._pending === 0 && !this._fireScheduled) {
+        this._fireScheduled = true;
+        // Use a 0-delay timeout so all same-tick onsuccess handlers run first
+        setTimeout(() => {
+          if (this.oncomplete) try { this.oncomplete({ target: this }); } catch(_) {}
+        }, 0);
+      }
+    }
+    abort(): void { if (this.onabort) try { this.onabort({ target: this }); } catch(_) {} }
+    commit(): void { if (this.oncomplete) try { this.oncomplete({ target: this }); } catch(_) {} }
+    addEventListener(type: string, fn: (ev: unknown) => void): void { if (type === 'complete') this.oncomplete = fn; if (type === 'error') this.onerror = fn; if (type === 'abort') this.onabort = fn; }
     removeEventListener(): void {}
   }
 
@@ -2997,10 +3026,84 @@ export function createPageJS(
             _documentFonts.add(ff3);
           }
         } else if (!lhdr.startsWith('@')) {
-          var sr2 = new CSSStyleRule_(hdr, body2.trim()); sr2.parentStyleSheet = this; this.cssRules.push(sr2); this._idxRule(sr2);
+          // CSS nesting: if body2 contains nested {} blocks, flatten them
+          if (body2.indexOf('{') >= 0) {
+            this._flattenNested(hdr, body2.trim());
+          } else {
+            var sr2 = new CSSStyleRule_(hdr, body2.trim()); sr2.parentStyleSheet = this; this.cssRules.push(sr2); this._idxRule(sr2);
+          }
         }
       }
       bumpStyleGeneration(); // item 944 — new rules indexed, invalidate computed style cache
+    }
+
+    /** Flatten CSS nesting: `parent { decls; & .child { decls2 } }` → flat rules.
+     *  Handles `&` combinator and implicit descendant combinator (item 948). */
+    _flattenNested(parentSel: string, body: string): void {
+      var declBuf = '';
+      var i = 0;
+      while (i < body.length) {
+        // Find next `{` at depth-0 (which starts a nested rule)
+        var nest = -1;
+        var tempDepth = 0;
+        for (var ti = i; ti < body.length; ti++) {
+          if (body[ti] === '{') { if (tempDepth === 0) { nest = ti; break; } tempDepth++; }
+          else if (body[ti] === '}') { if (tempDepth > 0) tempDepth--; }
+        }
+        if (nest < 0) {
+          // No more nested blocks — rest is declarations
+          declBuf += body.slice(i);
+          break;
+        }
+        // Everything from i up to the selector start is declarations
+        var prefix = body.slice(i, nest);
+        // Split: last `;` separates declarations from the nested selector
+        var lastSemi = prefix.lastIndexOf(';');
+        if (lastSemi >= 0) {
+          declBuf += prefix.slice(0, lastSemi + 1);
+          var nestedSel = prefix.slice(lastSemi + 1).trim();
+        } else {
+          var nestedSel = prefix.trim();
+        }
+        // Find matching `}` for this nested block
+        var depth3 = 1; var k3 = nest + 1;
+        while (k3 < body.length && depth3 > 0) {
+          if (body[k3] === '{') depth3++;
+          else if (body[k3] === '}') depth3--;
+          k3++;
+        }
+        var nestedBody = body.slice(nest + 1, k3 - 1);
+        i = k3;
+        if (!nestedSel) continue;
+        // Handle @media / @supports nested inside a rule (CSS nesting level 4)
+        var lns = nestedSel.toLowerCase();
+        if (lns.startsWith('@media') || lns.startsWith('@supports') || lns.startsWith('@container')) {
+          // Wrap the parent selector inside the at-rule: @media x { parent { nestedBody } }
+          var wrappedBody = parentSel + ' { ' + nestedBody + ' }';
+          var innerWrap = new CSSStyleSheet_(); innerWrap._parseText(nestedSel + ' { ' + wrappedBody + ' }');
+          for (var wi = 0; wi < innerWrap.cssRules.length; wi++) { this.cssRules.push(innerWrap.cssRules[wi]); }
+          continue;
+        }
+        // Resolve `&` combinator; if no `&`, use descendant combinator
+        var resolvedSel: string;
+        if (nestedSel.indexOf('&') >= 0) {
+          // Replace each `&` with the parent selector (handles `&:hover`, `&.active`, `html &`, etc.)
+          resolvedSel = nestedSel.replace(/&/g, parentSel);
+        } else {
+          resolvedSel = parentSel + ' ' + nestedSel;
+        }
+        // Recursively flatten nested rules
+        if (nestedBody.indexOf('{') >= 0) {
+          this._flattenNested(resolvedSel, nestedBody.trim());
+        } else {
+          var nr2 = new CSSStyleRule_(resolvedSel, nestedBody.trim()); nr2.parentStyleSheet = this; this.cssRules.push(nr2); this._idxRule(nr2);
+        }
+      }
+      // Emit accumulated declarations as a flat rule for parentSel
+      var cleanDecls = declBuf.trim();
+      if (cleanDecls) {
+        var flatRule = new CSSStyleRule_(parentSel, cleanDecls); flatRule.parentStyleSheet = this; this.cssRules.push(flatRule); this._idxRule(flatRule);
+      }
     }
   }
 
@@ -4547,6 +4650,307 @@ export function createPageJS(
     return res;
   }
 
+  // ── HMAC-SHA256 / HMAC-SHA512 for crypto.subtle.sign/verify ─────────────
+
+  function _hmacSHA256(key: Uint8Array, data: Uint8Array): ArrayBuffer {
+    var blockSz = 64;
+    var kp: Uint8Array = key.length > blockSz ? new Uint8Array(_sha256(key)) : key;
+    var k = new Uint8Array(blockSz); k.set(kp);
+    var ipad = new Uint8Array(blockSz), opad = new Uint8Array(blockSz);
+    for (var i = 0; i < blockSz; i++) { ipad[i] = k[i]! ^ 0x36; opad[i] = k[i]! ^ 0x5c; }
+    var inner = new Uint8Array(blockSz + data.length);
+    inner.set(ipad); inner.set(data, blockSz);
+    var innerHash = new Uint8Array(_sha256(inner));
+    var outer = new Uint8Array(blockSz + 32);
+    outer.set(opad); outer.set(innerHash, blockSz);
+    return _sha256(outer);
+  }
+
+  function _sha512(data: Uint8Array): ArrayBuffer {
+    // SHA-512 round constants (first 80)
+    var K512: number[][] = [
+      [0x428a2f98,0xd728ae22],[0x71374491,0x23ef65cd],[0xb5c0fbcf,0xec4d3b2f],[0xe9b5dba5,0x8189dbbc],
+      [0x3956c25b,0xf348b538],[0x59f111f1,0xb605d019],[0x923f82a4,0xaf194f9b],[0xab1c5ed5,0xda6d8118],
+      [0xd807aa98,0xa3030242],[0x12835b01,0x45706fbe],[0x243185be,0x4ee4b28c],[0x550c7dc3,0xd5ffb4e2],
+      [0x72be5d74,0xf27b896f],[0x80deb1fe,0x3b1696b1],[0x9bdc06a7,0x25c71235],[0xc19bf174,0xcf692694],
+      [0xe49b69c1,0xefbe4786],[0x0fc19dc6,0x8b8cd5b5],[0x240ca1cc,0x77ac9c65],[0x2de92c6f,0x592b0275],
+      [0x4a7484aa,0x6ea6e483],[0x5cb0a9dc,0xbd41fbd4],[0x76f988da,0x831153b5],[0x983e5152,0xee66dfab],
+      [0xa831c66d,0x2db43210],[0xb00327c8,0x98fb213f],[0xbf597fc7,0xbeef0ee4],[0xc6e00bf3,0x3da88fc2],
+      [0xd5a79147,0x930aa725],[0x06ca6351,0xe003826f],[0x14292967,0x0a0e6e70],[0x27b70a85,0x46d22ffc],
+      [0x2e1b2138,0x5c26c926],[0x4d2c6dfc,0x5ac42aed],[0x53380d13,0x9d95b3df],[0x650a7354,0x8baf63de],
+      [0x766a0abb,0x3c77b2a8],[0x81c2c92e,0x47edaee6],[0x92722c85,0x1482353b],[0xa2bfe8a1,0x4cf10364],
+      [0xa81a664b,0xbc423001],[0xc24b8b70,0xd0f89791],[0xc76c51a3,0x0654be30],[0xd192e819,0xd6ef5218],
+      [0xd6990624,0x5565a910],[0xf40e3585,0x5771202a],[0x106aa070,0x32bbd1b8],[0x19a4c116,0xb8d2d0c8],
+      [0x1e376c08,0x5141ab53],[0x2748774c,0xdf8eeb99],[0x34b0bcb5,0xe19b48a8],[0x391c0cb3,0xc5c95a63],
+      [0x4ed8aa4a,0xe3418acb],[0x5b9cca4f,0x7763e373],[0x682e6ff3,0xd6b2b8a3],[0x748f82ee,0x5defb2fc],
+      [0x78a5636f,0x43172f60],[0x84c87814,0xa1f0ab72],[0x8cc70208,0x1a6439ec],[0x90befffa,0x23631e28],
+      [0xa4506ceb,0xde82bde9],[0xbef9a3f7,0xb2c67915],[0xc67178f2,0xe372532b],[0xca273ece,0xea26619c],
+      [0xd186b8c7,0x21c0c207],[0xeada7dd6,0xcde0eb1e],[0xf57d4f7f,0xee6ed178],[0x06f067aa,0x72176fba],
+      [0x0a637dc5,0xa2c898a6],[0x113f9804,0xbef90dae],[0x1b710b35,0x131c471b],[0x28db77f5,0x23047d84],
+      [0x32caab7b,0x40c72493],[0x3c9ebe0a,0x15c9bebc],[0x431d67c4,0x9c100d4c],[0x4cc5d4be,0xcb3e42b6],
+      [0x597f299c,0xfc657e2a],[0x5fcb6fab,0x3ad6faec],[0x6c44198c,0x4a475817],[0x00000000,0x00000000],
+    ];
+    // Init hash values (high/low 32-bit pairs for h0-h7)
+    var H = [
+      [0x6a09e667,0xf3bcc908],[0xbb67ae85,0x84caa73b],[0x3c6ef372,0xfe94f82b],[0xa54ff53a,0x5f1d36f1],
+      [0x510e527f,0xade682d1],[0x9b05688c,0x2b3e6c1f],[0x1f83d9ab,0xfb41bd6b],[0x5be0cd19,0x137e2179],
+    ];
+    var ml = data.length;
+    // Padding: message length in bits is 128-bit — we only support < 2^53 bytes
+    var padLen = ((112 - (ml + 1) % 128 + 128) % 128);
+    var buf = new Uint8Array(ml + 1 + padLen + 16);
+    buf.set(data); buf[ml] = 0x80;
+    var blBits = ml * 8;
+    // Write 128-bit length big-endian — only 53 bits significant
+    var dv5 = new DataView(buf.buffer);
+    dv5.setUint32(buf.length - 4, blBits >>> 0, false);
+    dv5.setUint32(buf.length - 8, Math.floor(blBits / 0x100000000), false);
+    // Process each 128-byte block
+    var W5 = new Array<number[]>(80);
+    for (var b5 = 0; b5 < buf.length; b5 += 128) {
+      for (var t5 = 0; t5 < 16; t5++) {
+        var hi5 = dv5.getUint32(b5 + t5 * 8, false);
+        var lo5 = dv5.getUint32(b5 + t5 * 8 + 4, false);
+        W5[t5] = [hi5, lo5];
+      }
+      for (var t5 = 16; t5 < 80; t5++) {
+        var w15h=W5[t5-15]![0]!, w15l=W5[t5-15]![1]!;
+        var w2h=W5[t5-2]![0]!, w2l=W5[t5-2]![1]!;
+        var sig0h=(((w15h>>>1)|(w15l<<31))^((w15h>>>8)|(w15l<<24))^(w15h>>>7))|0;
+        var sig0l=(((w15l>>>1)|(w15h<<31))^((w15l>>>8)|(w15h<<24))^((w15l>>>7)|(w15h<<25)))|0;
+        var sig1h=(((w2h>>>19)|(w2l<<13))^((w2h<<3)|(w2l>>>29))^(w2h>>>6))|0;
+        var sig1l=(((w2l>>>19)|(w2h<<13))^((w2l<<3)|(w2h>>>29))^((w2l>>>6)|(w2h<<26)))|0;
+        var addl = (W5[t5-16]![1]! + sig0l + W5[t5-7]![1]! + sig1l)|0;
+        var addh = (W5[t5-16]![0]! + sig0h + W5[t5-7]![0]! + sig1h + (((W5[t5-16]![1]!>>>0)+(sig0l>>>0)+(W5[t5-7]![1]!>>>0)+(sig1l>>>0)) >= 0x100000000 ? 1 : 0))|0;
+        W5[t5] = [addh, addl];
+      }
+      var ah=H[0]![0]!,al=H[0]![1]!,bh=H[1]![0]!,bl2=H[1]![1]!;
+      var ch5=H[2]![0]!,cl5=H[2]![1]!,dh=H[3]![0]!,dl5=H[3]![1]!;
+      var eh=H[4]![0]!,el5=H[4]![1]!,fh=H[5]![0]!,fl5=H[5]![1]!;
+      var gh5=H[6]![0]!,gl5=H[6]![1]!,hh=H[7]![0]!,hl5=H[7]![1]!;
+      for (var t5 = 0; t5 < 80; t5++) {
+        var S1h=((eh>>>14)|(el5<<18))^((eh>>>18)|(el5<<14))^((eh<<23)|(el5>>>9));
+        var S1l=((el5>>>14)|(eh<<18))^((el5>>>18)|(eh<<14))^((el5<<23)|(eh>>>9));
+        var chh_=(eh&fh)^(~eh&gh5); var chl_=(el5&fl5)^(~el5&gl5);
+        var t1l_=( hl5+S1l+chl_+K512[t5]![1]!+W5[t5]![1]! )|0;
+        var carry1=(((hl5>>>0)+(S1l>>>0)+(chl_>>>0)+(K512[t5]![1]!>>>0)+(W5[t5]![1]!>>>0))>=0x100000000)?1:0;
+        var t1h_=( hh+S1h+chh_+K512[t5]![0]!+W5[t5]![0]!+carry1 )|0;
+        var S0h=((ah>>>28)|(al<<4))^((ah<<30)|(al>>>2))^((ah<<25)|(al>>>7));
+        var S0l=((al>>>28)|(ah<<4))^((al<<30)|(ah>>>2))^((al<<25)|(ah>>>7));
+        var majh_=(ah&bh)^(ah&ch5)^(bh&ch5); var majl_=(al&bl2)^(al&cl5)^(bl2&cl5);
+        var t2l_=(S0l+majl_)|0; var t2h_=(S0h+majh_+(((S0l>>>0)+(majl_>>>0))>=0x100000000?1:0))|0;
+        hh=gh5;hl5=gl5; gh5=fh;gl5=fl5; fh=eh;fl5=el5;
+        el5=(dl5+t1l_)|0; eh=(dh+t1h_+(((dl5>>>0)+(t1l_>>>0))>=0x100000000?1:0))|0;
+        dh=ch5;dl5=cl5; ch5=bh;cl5=bl2; bh=ah;bl2=al;
+        al=(t1l_+t2l_)|0; ah=(t1h_+t2h_+(((t1l_>>>0)+(t2l_>>>0))>=0x100000000?1:0))|0;
+      }
+      H[0]=[( H[0]![0]!+ah)|0,( H[0]![1]!+al)|0];
+      H[1]=[( H[1]![0]!+bh)|0,( H[1]![1]!+bl2)|0];
+      H[2]=[( H[2]![0]!+ch5)|0,( H[2]![1]!+cl5)|0];
+      H[3]=[( H[3]![0]!+dh)|0,( H[3]![1]!+dl5)|0];
+      H[4]=[( H[4]![0]!+eh)|0,( H[4]![1]!+el5)|0];
+      H[5]=[( H[5]![0]!+fh)|0,( H[5]![1]!+fl5)|0];
+      H[6]=[( H[6]![0]!+gh5)|0,( H[6]![1]!+gl5)|0];
+      H[7]=[( H[7]![0]!+hh)|0,( H[7]![1]!+hl5)|0];
+    }
+    var res512 = new ArrayBuffer(64);
+    var dv512 = new DataView(res512);
+    for (var pi = 0; pi < 8; pi++) { dv512.setUint32(pi*8, H[pi]![0]!, false); dv512.setUint32(pi*8+4, H[pi]![1]!, false); }
+    return res512;
+  }
+
+  function _hmacSHA512(key: Uint8Array, data: Uint8Array): ArrayBuffer {
+    var blockSz = 128;
+    var kp: Uint8Array = key.length > blockSz ? new Uint8Array(_sha512(key)) : key;
+    var k = new Uint8Array(blockSz); k.set(kp);
+    var ipad = new Uint8Array(blockSz), opad = new Uint8Array(blockSz);
+    for (var i = 0; i < blockSz; i++) { ipad[i] = k[i]! ^ 0x36; opad[i] = k[i]! ^ 0x5c; }
+    var inner = new Uint8Array(blockSz + data.length);
+    inner.set(ipad); inner.set(data, blockSz);
+    var innerHash = new Uint8Array(_sha512(inner));
+    var outer = new Uint8Array(blockSz + 64);
+    outer.set(opad); outer.set(innerHash, blockSz);
+    return _sha512(outer);
+  }
+
+  // ── AES-GCM pure-TS (256-bit key) ────────────────────────────────────────
+  // Based on AES specification (Rijndael) + GCM/GHASH
+
+  var _AES_SBOX = new Uint8Array([
+    99,124,119,123,242,107,111,197,48,1,103,43,254,215,171,118,
+    202,130,201,125,250,89,71,240,173,212,162,175,156,164,114,192,
+    183,253,147,38,54,63,247,204,52,165,229,241,113,216,49,21,
+    4,199,35,195,24,150,5,154,7,18,128,226,235,39,178,117,
+    9,131,44,26,27,110,90,160,82,59,214,179,41,227,47,132,
+    83,209,0,237,32,252,177,91,106,203,190,57,74,76,88,207,
+    208,239,170,251,67,77,51,133,69,249,2,127,80,60,159,168,
+    81,163,64,143,146,157,56,245,188,182,218,33,16,255,243,210,
+    205,12,19,236,95,151,68,23,196,167,126,61,100,93,25,115,
+    96,129,79,220,34,42,144,136,70,238,184,20,222,94,11,219,
+    224,50,58,10,73,6,36,92,194,211,172,98,145,149,228,121,
+    231,200,55,109,141,213,78,169,108,86,244,234,101,122,174,8,
+    186,120,37,46,28,166,180,198,232,221,116,31,75,189,139,138,
+    112,62,181,102,72,3,246,14,97,53,87,185,134,193,29,158,
+    225,248,152,17,105,217,142,148,155,30,135,233,206,85,40,223,
+    140,161,137,13,191,230,66,104,65,153,45,15,176,84,187,22,
+  ]);
+  var _AES_RCON = new Uint8Array([0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36]);
+
+  function _aesKeyExpand(key: Uint8Array): Uint32Array {
+    var W = new Uint32Array(60); // supports 256-bit (14 rounds = 60 words)
+    var nk = key.length / 4; // 4, 6, or 8
+    var nr = nk + 6;
+    for (var i2 = 0; i2 < nk; i2++) {
+      W[i2] = (key[i2*4]!<<24)|(key[i2*4+1]!<<16)|(key[i2*4+2]!<<8)|key[i2*4+3]!;
+    }
+    for (var i2 = nk; i2 < 4*(nr+1); i2++) {
+      var temp = W[i2-1]!;
+      if (i2 % nk === 0) {
+        temp = (((_AES_SBOX[(temp>>>16)&0xff]!<<24)|(_AES_SBOX[(temp>>>8)&0xff]!<<16)|
+                 (_AES_SBOX[temp&0xff]!<<8)|_AES_SBOX[(temp>>>24)&0xff]!) ^ (_AES_RCON[(i2/nk)-1]!<<24))|0;
+      } else if (nk > 6 && i2 % nk === 4) {
+        temp = (_AES_SBOX[(temp>>>24)&0xff]!<<24)|(_AES_SBOX[(temp>>>16)&0xff]!<<16)|
+               (_AES_SBOX[(temp>>>8)&0xff]!<<8)|_AES_SBOX[temp&0xff]!;
+      }
+      W[i2] = W[i2-nk]! ^ temp;
+    }
+    return W;
+  }
+
+  function _xtime(x: number): number { return x & 0x80 ? (((x << 1) ^ 0x1b) & 0xff) : (x << 1) & 0xff; }
+  function _gmul(a: number, b: number): number {
+    var p = 0;
+    for (var i2 = 0; i2 < 8; i2++) { if (b & 1) p ^= a; var hi = a & 0x80; a = (a << 1) & 0xff; if (hi) a ^= 0x1b; b >>= 1; }
+    return p;
+  }
+
+  function _aesEncryptBlock(state: Uint8Array, W: Uint32Array, nk: number): Uint8Array {
+    var nr = nk + 6;
+    var s = new Uint8Array(state);
+    // AddRoundKey (round 0)
+    for (var c3 = 0; c3 < 4; c3++) { var rk = W[c3]!; s[c3*4]^=(rk>>>24)&0xff; s[c3*4+1]^=(rk>>>16)&0xff; s[c3*4+2]^=(rk>>>8)&0xff; s[c3*4+3]^=rk&0xff; }
+    for (var rnd = 1; rnd <= nr; rnd++) {
+      // SubBytes
+      for (var si = 0; si < 16; si++) s[si] = _AES_SBOX[s[si]!]!;
+      // ShiftRows
+      var t0=s[1]! ;s[1]=s[5]! ;s[5]=s[9]! ;s[9]=s[13]!;s[13]=t0;
+      var t1=s[2]! ;var t2=s[6]! ;s[2]=s[10]!;s[6]=s[14]!;s[10]=t1 ;s[14]=t2;
+      var t3=s[15]!;s[15]=s[11]!;s[11]=s[7]! ;s[7]=s[3]! ;s[3]=t3;
+      // MixColumns (skip last round)
+      if (rnd < nr) {
+        for (var c3 = 0; c3 < 4; c3++) {
+          var s0=s[c3*4]!,s1=s[c3*4+1]!,s2=s[c3*4+2]!,s3=s[c3*4+3]!;
+          s[c3*4]  =_gmul(2,s0)^_gmul(3,s1)^s2^s3;
+          s[c3*4+1]=s0^_gmul(2,s1)^_gmul(3,s2)^s3;
+          s[c3*4+2]=s0^s1^_gmul(2,s2)^_gmul(3,s3);
+          s[c3*4+3]=_gmul(3,s0)^s1^s2^_gmul(2,s3);
+        }
+      }
+      // AddRoundKey
+      for (var c3 = 0; c3 < 4; c3++) {
+        var rk = W[rnd*4+c3]!;
+        s[c3*4]^=(rk>>>24)&0xff; s[c3*4+1]^=(rk>>>16)&0xff; s[c3*4+2]^=(rk>>>8)&0xff; s[c3*4+3]^=rk&0xff;
+      }
+    }
+    return s;
+  }
+
+  /** Increment 128-bit big-endian counter (last 32 bits as CTR per GCM spec) */
+  function _gcmIncr(ctr: Uint8Array): void {
+    for (var i2 = 15; i2 >= 12; i2--) { ctr[i2] = (ctr[i2]! + 1) & 0xff; if (ctr[i2] !== 0) break; }
+  }
+
+  /** GHASH for AES-GCM (finite-field multiplication in GF(2^128)) */
+  function _ghash(H: Uint8Array, data: Uint8Array): Uint8Array {
+    var X = new Uint8Array(16);
+    for (var i2 = 0; i2 < data.length; i2 += 16) {
+      var block = data.slice(i2, i2 + 16);
+      for (var j = 0; j < 16; j++) X[j] ^= block[j] ?? 0;
+      // GF(2^128) multiply X by H
+      var Z = new Uint8Array(16); var V = new Uint8Array(H);
+      for (var j = 0; j < 128; j++) {
+        if ((X[Math.floor(j/8)]! >> (7 - j%8)) & 1) for (var k2 = 0; k2 < 16; k2++) Z[k2] ^= V[k2]!;
+        var lsb = V[15]! & 1;
+        for (var k2 = 15; k2 > 0; k2--) V[k2] = ((V[k2]! >>> 1) | ((V[k2-1]! & 1) << 7)) & 0xff;
+        V[0] = (V[0]! >>> 1) & 0xff;
+        if (lsb) V[0]! ^= 0xe1;
+      }
+      X = Z;
+    }
+    return X;
+  }
+
+  /** AES-GCM encrypt: returns IV(12) + ciphertext + authTag(16) */
+  function _aesGcmEncrypt(keyBytes: Uint8Array, iv: Uint8Array, plaintext: Uint8Array, aad: Uint8Array): ArrayBuffer {
+    var nk = keyBytes.length / 4;
+    var W = _aesKeyExpand(keyBytes);
+    // H = AES(K, 0^128)
+    var Hblk = _aesEncryptBlock(new Uint8Array(16), W, nk);
+    // J0 = IV || 0^31 || 1 (for 96-bit IV)
+    var J0 = new Uint8Array(16); J0.set(iv); J0[15] = 1;
+    var ctr = new Uint8Array(J0);
+    // Encrypt plaintext with CTR mode (starting at J0+1)
+    _gcmIncr(ctr);
+    var ct = new Uint8Array(plaintext.length);
+    for (var i2 = 0; i2 < plaintext.length; i2 += 16) {
+      var ks = _aesEncryptBlock(new Uint8Array(ctr), W, nk);
+      for (var j = 0; j < 16 && i2+j < plaintext.length; j++) ct[i2+j] = plaintext[i2+j]! ^ ks[j]!;
+      _gcmIncr(ctr);
+    }
+    // GHASH auth tag
+    var padCt = ct.length % 16 ? new Uint8Array(Math.ceil(ct.length/16)*16) : ct;
+    if (padCt !== ct) padCt.set(ct);
+    var padAad = aad.length % 16 ? new Uint8Array(Math.ceil(aad.length/16)*16) : aad;
+    if (padAad !== aad) padAad.set(aad);
+    var lenBuf = new Uint8Array(16);
+    var dv2 = new DataView(lenBuf.buffer);
+    dv2.setUint32(4, aad.length * 8, false); dv2.setUint32(12, ct.length * 8, false);
+    var ghashInput = new Uint8Array(padAad.length + padCt.length + 16);
+    ghashInput.set(padAad); ghashInput.set(padCt, padAad.length); ghashInput.set(lenBuf, padAad.length + padCt.length);
+    var S = _ghash(Hblk, ghashInput);
+    // Tag = AES(K, J0) XOR S
+    var tag = _aesEncryptBlock(new Uint8Array(J0), W, nk);
+    for (var i2 = 0; i2 < 16; i2++) tag[i2] ^= S[i2]!;
+    var out = new Uint8Array(ct.length + 16);
+    out.set(ct); out.set(tag, ct.length);
+    return out.buffer;
+  }
+
+  /** AES-GCM decrypt: input is ciphertext+tag(16); returns plaintext or throws */
+  function _aesGcmDecrypt(keyBytes: Uint8Array, iv: Uint8Array, cipherWithTag: Uint8Array, aad: Uint8Array): ArrayBuffer {
+    if (cipherWithTag.length < 16) throw new DOMException('Invalid ciphertext', 'OperationError');
+    var ct = cipherWithTag.slice(0, cipherWithTag.length - 16);
+    var tagIn = cipherWithTag.slice(cipherWithTag.length - 16);
+    var nk = keyBytes.length / 4;
+    var W = _aesKeyExpand(keyBytes);
+    var Hblk = _aesEncryptBlock(new Uint8Array(16), W, nk);
+    var J0 = new Uint8Array(16); J0.set(iv); J0[15] = 1;
+    // Verify tag
+    var padCt = ct.length % 16 ? new Uint8Array(Math.ceil(ct.length/16)*16) : ct;
+    if (padCt !== ct) padCt.set(ct);
+    var padAad = aad.length % 16 ? new Uint8Array(Math.ceil(aad.length/16)*16) : aad;
+    if (padAad !== aad) padAad.set(aad);
+    var lenBuf = new Uint8Array(16);
+    var dv2 = new DataView(lenBuf.buffer);
+    dv2.setUint32(4, aad.length * 8, false); dv2.setUint32(12, ct.length * 8, false);
+    var ghashInput = new Uint8Array(padAad.length + padCt.length + 16);
+    ghashInput.set(padAad); ghashInput.set(padCt, padAad.length); ghashInput.set(lenBuf, padAad.length + padCt.length);
+    var S = _ghash(Hblk, ghashInput);
+    var tagExpected = _aesEncryptBlock(new Uint8Array(J0), W, nk);
+    for (var i2 = 0; i2 < 16; i2++) tagExpected[i2] ^= S[i2]!;
+    var tagOk = true; for (var i2 = 0; i2 < 16; i2++) if (tagIn[i2] !== tagExpected[i2]) { tagOk = false; break; }
+    if (!tagOk) throw new DOMException('The operation failed for an operation-specific reason', 'OperationError');
+    // Decrypt (same CTR)
+    var ctr = new Uint8Array(J0); _gcmIncr(ctr);
+    var pt = new Uint8Array(ct.length);
+    for (var i2 = 0; i2 < ct.length; i2 += 16) {
+      var ks = _aesEncryptBlock(new Uint8Array(ctr), W, nk);
+      for (var j = 0; j < 16 && i2+j < ct.length; j++) pt[i2+j] = ct[i2+j]! ^ ks[j]!;
+      _gcmIncr(ctr);
+    }
+    return pt.buffer;
+  }
+
   /** Convert digest input to Uint8Array */
   function _toBytes(data: unknown): Uint8Array {
     if (data instanceof Uint8Array) return data;
@@ -4577,29 +4981,109 @@ export function createPageJS(
         var r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
       });
     },
-    // crypto.subtle — real SHA-256, stubs for other algorithms
+    // crypto.subtle — real SHA-256, real HMAC-SHA256/SHA512, real AES-GCM (item 949)
     subtle: {
       digest(algo: unknown, data: unknown): Promise<ArrayBuffer> {
         var name = typeof algo === 'string' ? algo : (algo as any)?.name || '';
         name = name.toUpperCase().replace(/[^A-Z0-9]/g, '');
         var bytes = _toBytes(data);
         if (name === 'SHA256') return Promise.resolve(_sha256(bytes));
-        // For other hash algorithms, return appropriately sized buffer
-        // SHA-1: 20 bytes, SHA-384: 48 bytes, SHA-512: 64 bytes, MD5: 16 bytes
+        if (name === 'SHA512') return Promise.resolve(_sha512(bytes));
+        // SHA-1: 20 bytes, SHA-384: 48 bytes
         var sz = name.includes('512') ? 64 : name.includes('384') ? 48 : name.includes('1') ? 20 : 32;
         return Promise.resolve(new ArrayBuffer(sz));
       },
-      sign(_algo: unknown, _key: unknown, _data: unknown): Promise<ArrayBuffer> { return Promise.resolve(new ArrayBuffer(64)); },
-      verify(_algo: unknown, _key: unknown, _sig: unknown, _data: unknown): Promise<boolean> { return Promise.resolve(false); },
-      encrypt(_algo: unknown, _key: unknown, _data: unknown): Promise<ArrayBuffer> { return Promise.resolve(new ArrayBuffer(16)); },
-      decrypt(_algo: unknown, _key: unknown, _data: unknown): Promise<ArrayBuffer> { return Promise.resolve(new ArrayBuffer(16)); },
-      generateKey(_algo: unknown, _extr: boolean, _usages: string[]): Promise<unknown> { return Promise.resolve({ type: 'secret', algorithm: {}, extractable: _extr, usages: _usages }); },
-      importKey(_fmt: unknown, _kd: unknown, _algo: unknown, _extr: boolean, _usages: string[]): Promise<unknown> { return Promise.resolve({ type: 'secret', algorithm: {}, extractable: _extr, usages: _usages }); },
-      exportKey(_fmt: unknown, _key: unknown): Promise<unknown> { return Promise.resolve({}); },
-      deriveKey(_algo: unknown, _base: unknown, _der: unknown, _extr: boolean, _usages: string[]): Promise<unknown> { return Promise.resolve({ type: 'secret', algorithm: {}, extractable: _extr, usages: _usages }); },
+      sign(algo: unknown, key: unknown, data: unknown): Promise<ArrayBuffer> {
+        var algoName = typeof algo === 'string' ? algo : (algo as any)?.name || '';
+        algoName = algoName.toUpperCase().replace(/[^A-Z0-9]/g, '');
+        var keyBytes = (key as any)?._raw as Uint8Array | undefined;
+        var dataBytes = _toBytes(data);
+        if (algoName === 'HMAC' || algoName.startsWith('HMAC')) {
+          if (!keyBytes) keyBytes = new Uint8Array(32); // fallback zero key
+          var hashAlgo = ((algo as any)?.hash?.name || (algo as any)?.hash || 'SHA-256').toString().toUpperCase().replace(/[^A-Z0-9]/g, '');
+          if (hashAlgo === 'SHA512') return Promise.resolve(_hmacSHA512(keyBytes, dataBytes));
+          return Promise.resolve(_hmacSHA256(keyBytes, dataBytes));
+        }
+        return Promise.resolve(new ArrayBuffer(64));
+      },
+      verify(algo: unknown, key: unknown, sig: unknown, data: unknown): Promise<boolean> {
+        var algoName = typeof algo === 'string' ? algo : (algo as any)?.name || '';
+        algoName = algoName.toUpperCase().replace(/[^A-Z0-9]/g, '');
+        var keyBytes = (key as any)?._raw as Uint8Array | undefined;
+        var dataBytes = _toBytes(data);
+        var sigBytes = _toBytes(sig);
+        if (algoName === 'HMAC' || algoName.startsWith('HMAC')) {
+          if (!keyBytes) keyBytes = new Uint8Array(32);
+          var hashAlgo = ((algo as any)?.hash?.name || (algo as any)?.hash || 'SHA-256').toString().toUpperCase().replace(/[^A-Z0-9]/g, '');
+          var expected = new Uint8Array(hashAlgo === 'SHA512' ? _hmacSHA512(keyBytes, dataBytes) : _hmacSHA256(keyBytes, dataBytes));
+          if (expected.length !== sigBytes.length) return Promise.resolve(false);
+          var ok = true; for (var vi = 0; vi < expected.length; vi++) if (expected[vi] !== sigBytes[vi]) { ok = false; break; }
+          return Promise.resolve(ok);
+        }
+        return Promise.resolve(false);
+      },
+      encrypt(algo: unknown, key: unknown, data: unknown): Promise<ArrayBuffer> {
+        var algoName = typeof algo === 'string' ? algo : (algo as any)?.name || '';
+        if (/aes.?gcm/i.test(algoName)) {
+          var keyBytes = (key as any)?._raw as Uint8Array | undefined;
+          if (!keyBytes) return Promise.resolve(new ArrayBuffer(16));
+          var iv = _toBytes((algo as any)?.iv || new Uint8Array(12));
+          var aad = _toBytes((algo as any)?.additionalData || new Uint8Array(0));
+          try { return Promise.resolve(_aesGcmEncrypt(keyBytes, iv, _toBytes(data), aad)); }
+          catch(e) { return Promise.reject(e); }
+        }
+        return Promise.resolve(new ArrayBuffer(16));
+      },
+      decrypt(algo: unknown, key: unknown, data: unknown): Promise<ArrayBuffer> {
+        var algoName = typeof algo === 'string' ? algo : (algo as any)?.name || '';
+        if (/aes.?gcm/i.test(algoName)) {
+          var keyBytes = (key as any)?._raw as Uint8Array | undefined;
+          if (!keyBytes) return Promise.resolve(new ArrayBuffer(0));
+          var iv = _toBytes((algo as any)?.iv || new Uint8Array(12));
+          var aad = _toBytes((algo as any)?.additionalData || new Uint8Array(0));
+          try { return Promise.resolve(_aesGcmDecrypt(keyBytes, iv, _toBytes(data), aad)); }
+          catch(e) { return Promise.reject(e); }
+        }
+        return Promise.resolve(new ArrayBuffer(0));
+      },
+      generateKey(algo: unknown, extr: boolean, usages: string[]): Promise<unknown> {
+        var algoName = typeof algo === 'string' ? algo : (algo as any)?.name || '';
+        var keyLen = (algo as any)?.length || ((algo as any)?.modulusLength) || 256;
+        var rawKey = new Uint8Array(keyLen >> 3 || 32);
+        for (var gi = 0; gi < rawKey.length; gi++) rawKey[gi] = Math.floor(Math.random() * 256) | 0;
+        var ck = { type: 'secret', algorithm: algo, extractable: extr, usages, _raw: rawKey };
+        if (/ec|rsa/i.test(algoName)) {
+          return Promise.resolve({ privateKey: { type:'private', algorithm:algo, extractable:extr, usages, _raw:rawKey }, publicKey: { type:'public', algorithm:algo, extractable:extr, usages, _raw:rawKey } });
+        }
+        return Promise.resolve(ck);
+      },
+      importKey(fmt: unknown, kd: unknown, algo: unknown, extr: boolean, usages: string[]): Promise<unknown> {
+        var rawBytes: Uint8Array;
+        if (fmt === 'raw' && (kd instanceof ArrayBuffer || ArrayBuffer.isView(kd))) {
+          rawBytes = _toBytes(kd);
+        } else if (fmt === 'jwk' && typeof kd === 'object' && kd) {
+          // Extract key bytes from JWK k field (base64url)
+          var kStr = (kd as any).k || '';
+          var bin = atob(kStr.replace(/-/g,'+').replace(/_/g,'/') + '=='.slice(0,(4-kStr.length%4)%4));
+          rawBytes = new Uint8Array(bin.length); for (var ii = 0; ii < bin.length; ii++) rawBytes[ii] = bin.charCodeAt(ii);
+        } else {
+          rawBytes = new Uint8Array(32);
+        }
+        return Promise.resolve({ type: 'secret', algorithm: algo, extractable: extr, usages, _raw: rawBytes });
+      },
+      exportKey(fmt: unknown, key: unknown): Promise<unknown> {
+        var raw = (key as any)?._raw as Uint8Array | undefined;
+        if (fmt === 'raw') return Promise.resolve(raw ? raw.buffer : new ArrayBuffer(0));
+        if (fmt === 'jwk') {
+          var b64 = raw ? btoa(String.fromCharCode(...Array.from(raw))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'') : '';
+          return Promise.resolve({ kty:'oct', k:b64, alg:'HS256', key_ops:(key as any)?.usages||[] });
+        }
+        return Promise.resolve({});
+      },
+      deriveKey(_algo: unknown, _base: unknown, _der: unknown, _extr: boolean, _usages: string[]): Promise<unknown> { return Promise.resolve({ type: 'secret', algorithm: {}, extractable: _extr, usages: _usages, _raw: new Uint8Array(32) }); },
       deriveBits(_algo: unknown, _base: unknown, _len: number): Promise<ArrayBuffer> { return Promise.resolve(new ArrayBuffer(_len >> 3)); },
       wrapKey(_fmt: unknown, _key: unknown, _wk: unknown, _algo: unknown): Promise<ArrayBuffer> { return Promise.resolve(new ArrayBuffer(32)); },
-      unwrapKey(_fmt: unknown, _d: unknown, _uk: unknown, _a1: unknown, _a2: unknown, _extr: boolean, _usages: string[]): Promise<unknown> { return Promise.resolve({ type: 'secret', algorithm: {}, extractable: _extr, usages: _usages }); },
+      unwrapKey(_fmt: unknown, _d: unknown, _uk: unknown, _a1: unknown, _a2: unknown, _extr: boolean, _usages: string[]): Promise<unknown> { return Promise.resolve({ type: 'secret', algorithm: {}, extractable: _extr, usages: _usages, _raw: new Uint8Array(32) }); },
     },
   };
 
