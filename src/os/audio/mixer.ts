@@ -13,6 +13,10 @@
  */
 
 import type { AudioHardware } from './drivers.js';
+import { ArrayBufferPool } from '../process/gc.js';
+
+/** Module-level ArrayBufferPool for per-tick mix buffers (item 884). */
+const _mixPool = new ArrayBufferPool();
 
 // ── EQ filter ──────────────────────────────────────────────────────────────
 
@@ -191,15 +195,21 @@ export class AudioMixer {
    */
   tick(): void {
     const n = MIXER_FRAME_SIZE;
-    const mixL = new Float32Array(n);
-    const mixR = new Float32Array(n);
+    // Phase 2.6: use ArrayBufferPool for temporary mix buffers (item 884).
+    // mixL/mixR each need n*4 = 4096B; out needs n*2*2 = 4096B — all hit the 4 KB pool bucket.
+    const _u8L = _mixPool.acquire(n * 4);
+    const _u8R = _mixPool.acquire(n * 4);
+    const _u8O = _mixPool.acquire(n * 4);
+    const mixL = new Float32Array(_u8L.buffer, _u8L.byteOffset, n);
+    const mixR = new Float32Array(_u8R.buffer, _u8R.byteOffset, n);
+    const out  = new Int16Array(_u8O.buffer,  _u8O.byteOffset,  n * 2);
+    // Buffers returned from pool are zero-filled (ArrayBufferPool.release calls buf.fill(0))
 
     for (const src of this._sources.values()) {
       src.readFrames(mixL, mixR, n);
     }
 
     // Apply EQ and master volume, clamp, write output
-    const out = new Int16Array(n * 2);
     for (let i = 0; i < n; i++) {
       let l = mixL[i] * this.masterVolume;
       let r = mixR[i] * this.masterVolume;
@@ -209,5 +219,7 @@ export class AudioMixer {
       out[i * 2 + 1] = (Math.max(-1, Math.min(1, r)) * 32767) | 0;
     }
     this._hw.flush(out);
+    // Return buffers to pool after hardware flush
+    _mixPool.release(_u8L); _mixPool.release(_u8R); _mixPool.release(_u8O);
   }
 }

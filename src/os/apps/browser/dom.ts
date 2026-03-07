@@ -1912,6 +1912,47 @@ export class VRange {
   }
 }
 
+// ── VElement pool (item 883) ──────────────────────────────────────────────────
+// Reuse VElement instances across DOM parse + mutation cycles. Reduces nursery
+// pressure by recycling the most-allocated object type in the browser engine.
+const _velPool: VElement[] = [];
+const _VELEM_POOL_MAX = 256;
+
+/** Reset a pooled VElement to a clean state for `tag`. */
+function _resetVElement(el: VElement, tag: string): void {
+  const t = (tag || 'unknown').toUpperCase();
+  el.tagName = t; el.nodeName = t;
+  el.nodeType = 1;
+  el.parentNode = null;
+  el.childNodes.length = 0;
+  el.ownerDocument  = null;
+  el._nextSib = null; el._prevSib = null;
+  el._handlers.clear(); el._captureHandlers.clear();
+  el._attrs.clear();
+  el._style._map.clear();
+  el.classList._cache = null;
+  el._onHandlers = {};
+  el._dirtyLayout  = true;
+  el._indeterminate = false;
+  el._shadowRoot = null;
+  (el.adoptedStyleSheets as unknown[]).length = 0;
+}
+
+/** Acquire a VElement from the pool (or allocate fresh if pool is empty). */
+export function acquireVElement(tag: string): VElement {
+  if (_velPool.length > 0) {
+    const el = _velPool.pop()!;
+    _resetVElement(el, tag);
+    return el;
+  }
+  return new VElement(tag);
+}
+
+/** Return a fully detached VElement to the pool for reuse. */
+export function releaseVElement(el: VElement): void {
+  if (_velPool.length < _VELEM_POOL_MAX) _velPool.push(el);
+}
+
 // ── VDocument ─────────────────────────────────────────────────────────────────
 
 export class VDocument extends VNode {
@@ -1967,7 +2008,7 @@ export class VDocument extends VNode {
   }
   get body_(): VElement { return this.body; }
 
-  createElement(tag: string): VElement { var el = new VElement(tag); el.ownerDocument = this; return el; }
+  createElement(tag: string): VElement { var el = acquireVElement(tag); el.ownerDocument = this; return el; }
   createElementNS(_ns: string, tag: string): VElement { return this.createElement(tag); }
   createTextNode(text: string): VText { var t = new VText(text); t.ownerDocument = this; return t; }
   createDocumentFragment(): VElement { var f = new VElement('#document-fragment'); f.nodeType = 11; f.ownerDocument = this; return f; }
@@ -2840,7 +2881,7 @@ function _parseFragment(html: string, doc: VDocument | null): VNode[] {
         if (/^(table|ul|ol|dl|select|div|article|section|aside|main|nav|header|footer|body)$/.test(_bt)) break;
       }
     }
-    var el = new VElement(tag); el.ownerDocument = doc;
+    var el = acquireVElement(tag); el.ownerDocument = doc;
     attrs.forEach((v, k) => el._attrs.set(k, v));
     var p = cur(); if (p) { el.parentNode = p; p.childNodes.push(el); } else { nodes.push(el); }
     if (!self && !_VOID.has(tag)) stack.push(el);

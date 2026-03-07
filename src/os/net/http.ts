@@ -10,12 +10,16 @@ import { net, strToBytes, bytesToStr } from './net.js';
 import { TLSSocket } from './tls.js';
 import { httpDecompress } from './deflate.js';
 import { waterfallRecorder } from './net-perf.js';
+import { ArrayBufferPool } from '../process/gc.js';
 import {
   hkdfExtract, hkdfExpandLabel,
   gcmEncrypt, x25519PublicKey, generateKey32, getHardwareRandom,
 } from './crypto.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
+
+/** Module-level ArrayBufferPool for HTTP Uint8Array conversion buffers (item 884). */
+const _abPool = new ArrayBufferPool();
 
 /** Fast O(n) chunk flattener — avoid byte-by-byte loops that cause O(n²) on large responses. */
 function _flattenChunks(chunks: number[][]): number[] {
@@ -2797,11 +2801,23 @@ export class ReadableStream {
    */
   static fromBytes(data: number[] | Uint8Array): ReadableStream {
     var stream = new ReadableStream();
-    var bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    // Phase 2.6: use ArrayBufferPool for the temporary conversion buffer (item 884).
+    // If data is number[], pool a Uint8Array, copy bytes, slice into chunks, then release.
+    // bytes.slice() copies data into new owned buffers so it's safe to release the pooled buf.
+    var _ownBuf = !(data instanceof Uint8Array);
+    var bytes: Uint8Array;
+    if (_ownBuf) {
+      bytes = _abPool.acquire((data as number[]).length);
+      for (var _ci = 0; _ci < (data as number[]).length; _ci++)
+        bytes[_ci] = (data as number[])[_ci] & 0xff;
+    } else {
+      bytes = data as Uint8Array;
+    }
     var chunkSize = 8192;
     for (var offset = 0; offset < bytes.length; offset += chunkSize)
       stream._chunks.push(bytes.slice(offset, offset + chunkSize));
     stream._done = true;
+    if (_ownBuf) _abPool.release(bytes); // slices own their data; safe to recycle conversion buf
     return stream;
   }
 
