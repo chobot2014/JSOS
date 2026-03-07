@@ -722,8 +722,8 @@ function _layoutNodesImpl(
         blkLeft += _centerOff;
         blkMaxX  = blkLeft + _effectBoxW - blkRight;
       }
-      // Track lines start for position:relative offset (item 2.3) and position:sticky (item 2.4)
-      var _relStart  = (nd.position === 'relative' || nd.position === 'sticky') ? lines.length : -1;
+      // Track lines start for position:relative offset (item 2.3), position:sticky (item 2.4), and CSS transform (item 2.5)
+      var _relStart  = (nd.position === 'relative' || nd.position === 'sticky' || (nd.transform && nd.transform !== 'none')) ? lines.length : -1;
       var lh        = nodeLineH(nd);
       var ndSpans   = transformSpans(nd.spans, nd.textTransform);
 
@@ -868,6 +868,12 @@ function _layoutNodesImpl(
         } else {
           var _relDX = nd.posLeft ?? (nd.posRight !== undefined ? -(nd.posRight) : 0);
           var _relDY = nd.posTop  ?? (nd.posBottom !== undefined ? -(nd.posBottom) : 0);
+          // CSS transform translation — visual shift without affecting flow (item 2.5)
+          if (nd.transform && nd.transform !== 'none') {
+            var _tfv = _parseCSSTranslate(nd.transform);
+            _relDX += _tfv[0];
+            _relDY += _tfv[1];
+          }
           if (_relDX !== 0 || _relDY !== 0) {
             for (var _ri = _relStart; _ri < lines.length; _ri++) {
               lines[_ri].y += _relDY;

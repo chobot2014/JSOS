@@ -288,6 +288,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
   var underline = 0;
   var listDepth = 0;
   var skipDepth = 0;   // CSS display:none depth
+  var _ibDepth  = 0;   // nesting depth of display:inline-block elements
 
   // CSS inline style stack — pushed/popped on styled elements
   var cssStack: CSSProps[] = [];
@@ -1409,9 +1410,16 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
               break;
             }
 
-            flushInline();
-            if (openBlock) { nodes.push(openBlock); openBlock = null; }
-            nodes.push({ type: 'p-break', spans: [] });
+            if (_disp === 'inline-block' || _disp === 'inline-table') {
+              // inline-block stays in line flow — no p-break, content becomes float:left block
+              _ibDepth++;
+              flushInline();
+              if (openBlock) { nodes.push(openBlock); openBlock = null; }
+            } else {
+              flushInline();
+              if (openBlock) { nodes.push(openBlock); openBlock = null; }
+              nodes.push({ type: 'p-break', spans: [] });
+            }
           }
           break;
         }
@@ -1571,8 +1579,13 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
             // Check if closing a child within a container
             // (child boundary will be handled by the next startContainerChild or popContainer)
             flushInline();
-            if (openBlock) { nodes.push(openBlock); openBlock = null; }
-            if (!inContainer()) nodes.push({ type: 'p-break', spans: [] });
+            if (openBlock) {
+              // If closing inline-block, promote to float:left so it sits inline
+              if (_ibDepth > 0) openBlock.float = 'left';
+              nodes.push(openBlock); openBlock = null;
+            }
+            if (!inContainer() && _ibDepth === 0) nodes.push({ type: 'p-break', spans: [] });
+            if (_ibDepth > 0) _ibDepth--;
             popCSS();
           }
           break;
