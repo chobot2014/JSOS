@@ -918,6 +918,10 @@ export class BrowserApp implements App {
       var lineY = line.y - _sv;
       if (lineY > ch) break;
       var absY = y0 + lineY;
+      // position:sticky: clamp absY so element sticks to viewport threshold when approached
+      if (line.stickyTop !== undefined && lineY < line.stickyTop) {
+        absY = y0 + line.stickyTop;
+      }
       var lineBot = absY + (line.lineH || CHAR_H);
       // Phase 3.1: skip lines entirely outside the damage rect (saves draw calls).
       if (_dmg !== null) {
@@ -1087,6 +1091,56 @@ export class BrowserApp implements App {
 
     // Clean up any remaining overflow:hidden clip rects
     while (_clipStack.length > 0) { canvas.restoreClipRect(_clipStack.pop()!.saved); }
+
+    // ── Sticky second pass — paint "stuck" sticky elements on top of main content
+    // An element is "stuck" when it has scrolled past its natural flow position
+    // (line.y < scrollY) — it needs to render at y0 + stickyTop instead.
+    for (var _stpI = 0; _stpI < _lines.length; _stpI++) {
+      var _stpLine = _lines[_stpI];
+      if (_stpLine.stickyTop === undefined) continue;
+      var _stpLineY = _stpLine.y - _sv;
+      if (_stpLineY >= _stpLine.stickyTop) continue; // in natural position, already painted
+      var _stpAbsY = y0 + _stpLine.stickyTop;
+      if (_stpAbsY + (_stpLine.lineH || CHAR_H) < y0 || _stpAbsY >= y0 + ch) continue;
+      // Paint background to occlude content that scrolled beneath the sticky element
+      if (_stpLine.bgColor !== undefined) {
+        canvas.fillRect(0, _stpAbsY - 1, w, (_stpLine.lineH || LINE_H) + 1, _stpLine.bgColor);
+      } else {
+        canvas.fillRect(0, _stpAbsY - 1, w, (_stpLine.lineH || LINE_H) + 1, CLR_BG);
+      }
+      if (_stpLine.bgGradient) {
+        renderGradientCSS(canvas, 0, _stpAbsY - 1, w, (_stpLine.lineH || LINE_H) + 1, _stpLine.bgGradient);
+      }
+      // Paint text spans
+      for (var _stpJ = 0; _stpJ < _stpLine.nodes.length; _stpJ++) {
+        var _stpSp = _stpLine.nodes[_stpJ];
+        if (!_stpSp.text) continue;
+        var _stpClr = _stpSp.color;
+        if (_stpSp.href) {
+          _stpClr = this._visited.has(_stpSp.href) ? CLR_VISITED
+                  : _stpSp.href === this._hoverHref ? CLR_LINK_HOV : CLR_LINK;
+        }
+        var _stpSc = _stpSp.fontScale || 1;
+        var _stpCW = CHAR_W * _stpSc;
+        var _stpCH = CHAR_H * _stpSc;
+        if (_stpSc > 1) {
+          canvas.drawTextScaled(_stpSp.x, _stpAbsY, _stpSp.text, _stpClr, _stpSc);
+          if (_stpSp.bold) canvas.drawTextScaled(_stpSp.x + _stpSc, _stpAbsY, _stpSp.text, _stpClr, _stpSc);
+        } else {
+          if (_stpSp.italic) {
+            canvas.drawText(_stpSp.x + 1, _stpAbsY, _stpSp.text, _stpClr);
+            canvas.drawText(_stpSp.x, _stpAbsY + Math.floor(CHAR_H / 2), _stpSp.text, _stpClr);
+          } else {
+            canvas.drawText(_stpSp.x, _stpAbsY, _stpSp.text, _stpClr);
+          }
+          if (_stpSp.bold) canvas.drawText(_stpSp.x + 1, _stpAbsY, _stpSp.text, _stpClr);
+        }
+        if (_stpSp.underline || _stpSp.href) {
+          canvas.drawLine(_stpSp.x, _stpAbsY + _stpCH,
+                          _stpSp.x + _stpSp.text.length * _stpCW, _stpAbsY + _stpCH, _stpClr);
+        }
+      }
+    }
 
     this._drawWidgets(canvas, y0, ch);
 

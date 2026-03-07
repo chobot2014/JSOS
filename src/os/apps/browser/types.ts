@@ -179,6 +179,9 @@ export interface RenderedLine {
   bgImageUrl?:  string;   // CSS background-image url() resolved URL (item 386)
   // Box decorations (items 3.7, 4.2) — set on the FIRST line of a block element
   boxDeco?: BoxDecoration;
+  /** position:sticky threshold — minimum screen Y for this line during scroll.
+   *  Paint pass uses Math.max(line.y - scrollY, stickyTop) to clamp position. */
+  stickyTop?: number;
 }
 
 /**

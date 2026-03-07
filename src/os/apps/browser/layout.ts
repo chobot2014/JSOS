@@ -722,8 +722,8 @@ function _layoutNodesImpl(
         blkLeft += _centerOff;
         blkMaxX  = blkLeft + _effectBoxW - blkRight;
       }
-      // Track lines start for position:relative offset (item 2.3)
-      var _relStart  = nd.position === 'relative' ? lines.length : -1;
+      // Track lines start for position:relative offset (item 2.3) and position:sticky (item 2.4)
+      var _relStart  = (nd.position === 'relative' || nd.position === 'sticky') ? lines.length : -1;
       var lh        = nodeLineH(nd);
       var ndSpans   = transformSpans(nd.spans, nd.textTransform);
 
@@ -857,14 +857,23 @@ function _layoutNodesImpl(
         }
       }
       // position:relative — shift generated lines by posTop/posLeft (item 2.3)
+      // position:sticky — mark lines with stickyTop for viewport clamping in paint pass (item 2.4)
       if (_relStart >= 0 && _relStart < lines.length) {
-        var _relDX = nd.posLeft ?? (nd.posRight !== undefined ? -(nd.posRight) : 0);
-        var _relDY = nd.posTop  ?? (nd.posBottom !== undefined ? -(nd.posBottom) : 0);
-        if (_relDX !== 0 || _relDY !== 0) {
-          for (var _ri = _relStart; _ri < lines.length; _ri++) {
-            lines[_ri].y += _relDY;
-            if (_relDX !== 0) {
-              lines[_ri] = { ...lines[_ri], nodes: lines[_ri].nodes.map(function(n) { return { ...n, x: n.x + _relDX }; }) };
+        if (nd.position === 'sticky') {
+          // Sticky: stay in normal flow but mark lines for paint-time viewport clamping
+          var _stickyThresh = nd.posTop ?? 0;
+          for (var _sti = _relStart; _sti < lines.length; _sti++) {
+            lines[_sti].stickyTop = _stickyThresh;
+          }
+        } else {
+          var _relDX = nd.posLeft ?? (nd.posRight !== undefined ? -(nd.posRight) : 0);
+          var _relDY = nd.posTop  ?? (nd.posBottom !== undefined ? -(nd.posBottom) : 0);
+          if (_relDX !== 0 || _relDY !== 0) {
+            for (var _ri = _relStart; _ri < lines.length; _ri++) {
+              lines[_ri].y += _relDY;
+              if (_relDX !== 0) {
+                lines[_ri] = { ...lines[_ri], nodes: lines[_ri].nodes.map(function(n) { return { ...n, x: n.x + _relDX }; }) };
+              }
             }
           }
         }

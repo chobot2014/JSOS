@@ -18,6 +18,7 @@ import type { FetchResponse } from '../../core/sdk.js';
 import {
   VDocument, VElement, VEvent, VNode, VText, VRange, VEventTarget,
   buildDOM, serializeDOM, vdocToTokens, _serializeEl, _walk, _matchSel, _cePending,
+  setScrollYGetter,
 } from './dom.js';
 import type { HtmlToken } from './types.js';
 import { BrowserPerformance, BrowserPerformanceObserver } from './perf.js';
@@ -202,8 +203,8 @@ export function createPageJS(
   _sessionStorage = new VStorage();
   _blobStore = new Map<string, { content: string; type: string }>();
 
-  // ── Initialise per-origin localStorage (item 500) ─────────────────────────
-  // Derive a VFS-safe origin key from the base URL (e.g. "http_example.com_80")
+  // Wire scroll getter so getBoundingClientRect() returns viewport-relative coords
+  setScrollYGetter(() => cb.getScrollY());
   try {
     var _originURL  = new URL(cb.baseURL);
     var _originKey  = (_originURL.protocol.replace(':', '') + '_' +
@@ -1638,6 +1639,9 @@ export function createPageJS(
 
   // ── CSS object (item 553) ──────────────────────────────────────────────────
 
+  /** CSS Houdini Properties & Values API Level 1 — @property rule registry. */
+  var _cssPropertyRegistry = new Map<string, { syntax: string; inherits: boolean; initialValue: string }>();
+
   var CSS_ = {
     supports(_prop: string, _val?: string): boolean { return true; }, // optimistic stub
     escape(str: string): string {
@@ -1650,7 +1654,15 @@ export function createPageJS(
     percent(n: number): string { return n + '%'; },
     number(n: number): string { return String(n); },
     /** CSS.registerProperty() — CSS Houdini Properties & Values API Level 1 */
-    registerProperty(_descriptor: { name: string; syntax?: string; inherits: boolean; initialValue?: string }): void {},
+    registerProperty(descriptor: { name: string; syntax?: string; inherits: boolean; initialValue?: string }): void {
+      if (descriptor && descriptor.name && descriptor.name.startsWith('--')) {
+        _cssPropertyRegistry.set(descriptor.name, {
+          syntax: descriptor.syntax || '*',
+          inherits: descriptor.inherits !== false,
+          initialValue: descriptor.initialValue ?? '',
+        });
+      }
+    },
     /** CSS.paintWorklet — Houdini Paint API stub */
     paintWorklet: { addModule(_url: string): Promise<void> { return Promise.resolve(); } },
     /** CSS.layoutWorklet — Houdini Layout API stub */
@@ -3082,6 +3094,20 @@ export function createPageJS(
             var ff3 = new FontFace_(cleanFamily, ffSrc || '');
             _documentFonts.add(ff3);
           }
+        } else if (lhdr.startsWith('@property')) {
+          // CSS Houdini @property rule — register in _cssPropertyRegistry for var() fallbacks
+          var _propName = lhdr.replace('@property', '').trim();
+          if (_propName.startsWith('--')) {
+            var _propBody = body2.trim();
+            var _syntax   = (_propBody.match(/syntax\s*:\s*["']?([^;'"]+)["']?\s*;/) || [])[1] || '*';
+            var _inherits = /inherits\s*:\s*true/i.test(_propBody);
+            var _initVal  = (_propBody.match(/initial-value\s*:\s*([^;]+)\s*;/) || [])[1] || '';
+            _cssPropertyRegistry.set(_propName, {
+              syntax: _syntax.trim(),
+              inherits: _inherits,
+              initialValue: _initVal.trim(),
+            });
+          }
         } else if (!lhdr.startsWith('@')) {
           // CSS nesting: if body2 contains nested {} blocks, flatten them
           if (body2.indexOf('{') >= 0) {
@@ -4219,6 +4245,11 @@ export function createPageJS(
         var vm = (n._style as any)._map as Map<string, string> | undefined;
         if (vm) { var vv = vm.get(name); if (vv !== undefined) return vv; }
         n = n.parentNode instanceof VElement ? n.parentNode as VElement : null;
+      }
+      // Use CSS.registerProperty() / @property initialValue as last resort
+      if (fallback === '' || fallback === undefined) {
+        var _reg = _cssPropertyRegistry.get(name);
+        if (_reg && _reg.initialValue) return _reg.initialValue;
       }
       return fallback !== undefined ? fallback : '';
     }

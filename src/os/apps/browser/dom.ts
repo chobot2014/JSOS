@@ -11,6 +11,12 @@
 import { bumpStyleGeneration } from './cache.js';
 import type { HtmlToken } from './types.js';
 
+// ── Scroll offset getter — injected by jsruntime.ts so getBoundingClientRect() ──
+// returns viewport-relative coordinates per the W3C spec.
+var _scrollYGetter: (() => number) | null = null;
+/** Register the scroll offset provider. Called once by jsruntime.ts after cb is ready. */
+export function setScrollYGetter(fn: () => number): void { _scrollYGetter = fn; }
+
 // ── HTML Sanitizer (item 370) ─────────────────────────────────────────────────
 /**
  * Strip dangerous content from an HTML string before injecting via innerHTML.
@@ -1287,11 +1293,14 @@ export class VElement extends VNode {
    */
   _layoutRect: { x: number; y: number; w: number; h: number } | null = null;
 
-  /** Bounding rect — uses layout writeback when available, falls back to fallback. */
+  /** Bounding rect — uses layout writeback when available, falls back to fallback.
+   *  Returns VIEWPORT-RELATIVE coordinates per the W3C spec (top = y - scrollY). */
   getBoundingClientRect(): { x: number; y: number; width: number; height: number; top: number; left: number; right: number; bottom: number } {
     if (this._layoutRect) {
       var r = this._layoutRect;
-      return { x: r.x, y: r.y, width: r.w, height: r.h, top: r.y, left: r.x, right: r.x + r.w, bottom: r.y + r.h };
+      var sy = _scrollYGetter ? _scrollYGetter() : 0;
+      return { x: r.x, y: r.y - sy, width: r.w, height: r.h,
+               top: r.y - sy, left: r.x, right: r.x + r.w, bottom: r.y + r.h - sy };
     }
     // Fallback: return a plausible rect so visibility checks don't all return zero
     return { x: 0, y: 0, width: 200, height: 20, top: 0, left: 0, right: 200, bottom: 20 };
