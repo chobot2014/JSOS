@@ -46,6 +46,7 @@ import { users } from '../users/users.js';
 import { audio as _pcmAudio } from '../audio/index.js';
 import { wm, type App, type WMWindow, type KeyEvent, type MouseEvent, type MenuItem } from '../ui/wm.js';
 import { Canvas } from '../ui/canvas.js';
+import { Colors } from '../ui/canvas.js';
 import { Mutex, Condvar, Semaphore } from '../process/sync.js';
 import { globalGC, type HeapStats } from '../process/gc.js';
 import { layoutProfiler } from '../apps/browser/layout.js';
@@ -1423,6 +1424,181 @@ export function _registerJITStats(
   _jitOSStatsProvider  = osStats;
 }
 
+// ── MenuBar widget (Phase 5.8) ──────────────────────────────────────────────
+
+/**
+ * A top-level menu in a MenuBar: label + list of items.
+ * Keyboard: Alt+first-letter opens the menu.  Arrow keys navigate.
+ */
+export interface MenuBarItem {
+  label: string;
+  items: MenuItem[];
+}
+
+/**
+ * Horizontal menu bar widget.  Embed in your app's render()/onKey()/onMouse()
+ * calls and offset content by `menuBar.height` pixels.
+ *
+ * @example
+ *   var mb = os.wm.createMenuBar([
+ *     { label: 'File', items: [{ label: 'Open', action: openFile }, { label: 'Quit', action: quit }] },
+ *     { label: 'View', items: [{ label: 'Zoom In', action: zoomIn }] },
+ *   ]);
+ *   function render(canvas) {
+ *     mb.render(canvas, win.width);          // draw bar at y=0
+ *     canvas.setClipRect(0, mb.height, win.width, win.height - mb.height);
+ *     // ... draw content ...
+ *     canvas.clearClipRect();
+ *     return mb.dirty || contentDirty;
+ *   }
+ *   function onKey(ev) { if (mb.onKey(ev)) return; /* ... *\/ }
+ *   function onMouse(ev) { if (mb.onMouse(ev, win.width)) return; /* ... *\/ }
+ */
+export class MenuBar {
+  private _menus:   MenuBarItem[];
+  private _openIdx: number   = -1;   // -1 = closed
+  /** True when render() should be called (bar or dropdown changed). */
+  dirty: boolean = true;
+
+  static readonly HEIGHT:     number = 20;
+  static readonly ITEM_H:     number = 16;
+  static readonly DROPDOWN_W: number = 150;
+
+  private static readonly C_BAR     = 0xFF1E1E2E;
+  private static readonly C_BAR_HL  = 0xFF2A2A4A;
+  private static readonly C_BG      = 0xFF2A2A3A;
+  private static readonly C_BORDER  = 0xFF5599CC;
+  private static readonly C_TEXT    = 0xFFD0D0D0;
+  private static readonly C_DIM     = 0xFF667788;
+  private static readonly C_SEP     = 0xFF445566;
+
+  get height(): number { return MenuBar.HEIGHT; }
+  get isOpen(): boolean { return this._openIdx >= 0; }
+
+  constructor(menus: MenuBarItem[]) {
+    this._menus = menus;
+  }
+
+  /** Close the open dropdown without invoking any action. */
+  close(): void {
+    if (this._openIdx >= 0) { this._openIdx = -1; this.dirty = true; }
+  }
+
+  /** Handle a keyboard event. Returns true if the event was consumed. */
+  onKey(ev: KeyEvent): boolean {
+    if (ev.type !== 'down') return false;
+    // Alt + letter: open matching menu
+    if ((ev as any).alt && ev.ch && !(ev as any).ctrl) {
+      var ch = ev.ch.toLowerCase();
+      for (var i = 0; i < this._menus.length; i++) {
+        if (this._menus[i].label[0] && this._menus[i].label[0].toLowerCase() === ch) {
+          this._openIdx = (this._openIdx === i) ? -1 : i;
+          this.dirty = true;
+          return true;
+        }
+      }
+    }
+    if (this._openIdx < 0) return false;
+    var k = ev.key || '';
+    if (k === 'ArrowLeft'  || k === 'Left')  { this._openIdx = (this._openIdx - 1 + this._menus.length) % this._menus.length; this.dirty = true; return true; }
+    if (k === 'ArrowRight' || k === 'Right') { this._openIdx = (this._openIdx + 1) % this._menus.length;                        this.dirty = true; return true; }
+    if (k === 'Escape')                       { this.close(); return true; }
+    return false;
+  }
+
+  /** Handle a mouse event (coordinates relative to window top-left). Returns true if consumed. */
+  onMouse(ev: MouseEvent, winW: number): boolean {
+    if (ev.type !== 'down') return false;
+    var ex = ev.x, ey = ev.y;
+    // Click on bar?
+    if (ey >= 0 && ey < MenuBar.HEIGHT) {
+      var cx = 4;
+      for (var i = 0; i < this._menus.length; i++) {
+        var lw = this._menus[i].label.length * 8 + 12;
+        if (ex >= cx && ex < cx + lw) {
+          this._openIdx = (this._openIdx === i) ? -1 : i;
+          this.dirty = true;
+          return true;
+        }
+        cx += lw;
+      }
+      if (this._openIdx >= 0) { this.close(); }
+      return true;
+    }
+    // Click on open dropdown?
+    if (this._openIdx >= 0) {
+      var hit = this._hitItem(ex, ey);
+      this._openIdx = -1;
+      this.dirty = true;
+      if (hit && !hit.disabled && !hit.separator && hit.action) hit.action();
+      return true;
+    }
+    return false;
+  }
+
+  private _menuX(idx: number): number {
+    var cx = 4;
+    for (var i = 0; i < idx; i++) cx += this._menus[i].label.length * 8 + 12;
+    return cx;
+  }
+
+  private _hitItem(mx: number, my: number): MenuItem | null {
+    if (this._openIdx < 0) return null;
+    var menu = this._menus[this._openIdx];
+    var dx   = this._menuX(this._openIdx);
+    var dy   = MenuBar.HEIGHT;
+    var W    = MenuBar.DROPDOWN_W;
+    var iy   = dy + 4;
+    for (var i = 0; i < menu.items.length; i++) {
+      var item = menu.items[i];
+      var ih   = item.separator ? 5 : MenuBar.ITEM_H;
+      if (!item.separator && mx >= dx && mx < dx + W && my >= iy && my < iy + ih) return item;
+      iy += ih;
+    }
+    return null;
+  }
+
+  /**
+   * Draw the menu bar (and any open dropdown) onto `canvas`.
+   * Call this at y=0 before drawing your app content.
+   * @param winW  Window width (from `win.width`).
+   */
+  render(canvas: Canvas, winW: number): void {
+    var C = MenuBar;
+    // Bar background
+    canvas.fillRect(0, 0, winW, C.HEIGHT, C.C_BAR);
+    // Labels
+    var cx = 4;
+    for (var i = 0; i < this._menus.length; i++) {
+      var label = this._menus[i].label;
+      var lw    = label.length * 8 + 12;
+      if (i === this._openIdx) canvas.fillRect(cx - 2, 1, lw + 2, C.HEIGHT - 2, C.C_BAR_HL);
+      canvas.drawText(cx + 4, 5, label, i === this._openIdx ? Colors.WHITE : C.C_TEXT);
+      cx += lw;
+    }
+    // Bottom separator
+    canvas.fillRect(0, C.HEIGHT - 1, winW, 1, C.C_BORDER);
+    // Draw open dropdown
+    if (this._openIdx >= 0) {
+      var menu  = this._menus[this._openIdx];
+      var dx    = this._menuX(this._openIdx);
+      var totalH = 8;
+      for (var k = 0; k < menu.items.length; k++) totalH += menu.items[k].separator ? 5 : C.ITEM_H;
+      var W = C.DROPDOWN_W;
+      canvas.fillRect(dx, C.HEIGHT, W, totalH, C.C_BG);
+      canvas.drawRect(dx, C.HEIGHT, W, totalH, C.C_BORDER);
+      var iy = C.HEIGHT + 4;
+      for (var j = 0; j < menu.items.length; j++) {
+        var item = menu.items[j];
+        if (item.separator) { canvas.fillRect(dx + 4, iy + 2, W - 8, 1, C.C_SEP); iy += 5; continue; }
+        canvas.drawText(dx + 8, iy + 3, item.label, item.disabled ? C.C_DIM : Colors.WHITE);
+        iy += C.ITEM_H;
+      }
+    }
+    this.dirty = false;
+  }
+}
+
 const sdk = {
 
   // ── Filesystem ─────────────────────────────────────────────────────────────
@@ -2497,6 +2673,22 @@ const sdk = {
     showContextMenu(x: number, y: number, items: MenuItem[]): void { if (wm) wm.showContextMenu(x, y, items); },
     /** Close the active context menu without invoking any action. */
     dismissContextMenu(): void { if (wm) wm.dismissContextMenu(); },
+
+    /**
+     * Create a horizontal menu bar widget.
+     * Embed it in your app's render/onKey/onMouse handlers.
+     * Offset your content by `menuBar.height` (20 px).
+     *
+     * @example
+     *   var mb = os.wm.createMenuBar([
+     *     { label: 'File', items: [{ label: 'New', action: newFile }, { label: 'Quit', action: quit }] },
+     *     { label: 'Edit', items: [{ label: 'Copy', action: doCopy }] },
+     *   ]);
+     *   // In app.render():    mb.render(canvas, win.width);
+     *   // In app.onKey():     if (mb.onKey(ev)) return;
+     *   // In app.onMouse():   if (mb.onMouse(ev, win.width)) return;
+     */
+    createMenuBar(menus: MenuBarItem[]): MenuBar { return new MenuBar(menus); },
 
     /**
      * Launch a sandboxed child JS process in a new managed window.
