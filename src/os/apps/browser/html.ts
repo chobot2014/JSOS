@@ -333,6 +333,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (p.minHeight    !== undefined) curCSS.minHeight    = p.minHeight;
     if (p.maxWidth     !== undefined) curCSS.maxWidth     = p.maxWidth;
     if (p.maxHeight    !== undefined) curCSS.maxHeight    = p.maxHeight;
+    if (p.aspectRatio  !== undefined) curCSS.aspectRatio  = p.aspectRatio;
     if (p.paddingTop    !== undefined) curCSS.paddingTop    = p.paddingTop;
     if (p.paddingRight  !== undefined) curCSS.paddingRight  = p.paddingRight;
     if (p.paddingBottom !== undefined) curCSS.paddingBottom = p.paddingBottom;
@@ -578,6 +579,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (curCSS.height && curCSS.height > 0) blk.height   = curCSS.height;
     if (curCSS.minHeight !== undefined) blk.minHeight  = curCSS.minHeight;
     if (curCSS.maxHeight !== undefined) blk.maxHeight  = curCSS.maxHeight;
+    if (curCSS.aspectRatio !== undefined) blk.aspectRatio = curCSS.aspectRatio;
     if (curCSS.borderRadius !== undefined) blk.borderRadius = curCSS.borderRadius;
     if (curCSS.borderWidth  !== undefined) blk.borderWidth  = curCSS.borderWidth;
     if (curCSS.borderColor  !== undefined) blk.borderColor  = curCSS.borderColor;
@@ -1347,6 +1349,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
               if (curCSS.maxWidth !== undefined) _fp.maxWidth = curCSS.maxWidth;
               if (curCSS.minHeight !== undefined) _fp.minHeight = curCSS.minHeight;
               if (curCSS.maxHeight !== undefined) _fp.maxHeight = curCSS.maxHeight;
+              if (curCSS.aspectRatio !== undefined) _fp.aspectRatio = curCSS.aspectRatio;
               if (curCSS.bgColor !== undefined) _fp.bgColor = curCSS.bgColor;
               if (curCSS.bgGradient) _fp.bgGradient = curCSS.bgGradient;
               if (curCSS.paddingLeft) _fp.paddingLeft = curCSS.paddingLeft;

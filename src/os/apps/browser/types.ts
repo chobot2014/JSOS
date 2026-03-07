@@ -145,6 +145,8 @@ export interface RenderNode {
   // Cursor / interaction (items 415, 416)
   cursor?:        string;              // CSS cursor value: auto, pointer, text, crosshair, move,…
   pointerEvents?: 'auto' | 'none';    // CSS pointer-events: none disables mouse events on element
+  // Aspect ratio (CSS aspect-ratio property)
+  aspectRatio?:   string;             // e.g. '16/9', '1', 'auto 4/3'
 }
 
 // ── Rendered output ───────────────────────────────────────────────────────────

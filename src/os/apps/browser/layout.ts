@@ -813,6 +813,20 @@ function _layoutNodesImpl(
         if (nd.minHeight && nd.minHeight > 0 && (y - yBeforeBlock) < nd.minHeight) {
           blank(nd.minHeight - (y - yBeforeBlock));
         }
+        // Enforce aspect-ratio: derive height from block width when height is not explicit
+        if (nd.aspectRatio && !nd.height) {
+          var _arStr = nd.aspectRatio.replace('auto', '').trim();
+          var _arParts = _arStr.split('/');
+          var _arNumW = parseFloat(_arParts[0]) || 0;
+          var _arNumH = parseFloat(_arParts[1] || '1') || 1;
+          if (_arNumW > 0) {
+            var _arEffW = (nd.boxWidth && nd.boxWidth > 0) ? nd.boxWidth : (maxX - xLeft);
+            var _arTargH = Math.round(_arEffW * _arNumH / _arNumW);
+            if (_arTargH > 0 && (y - yBeforeBlock) < _arTargH) {
+              blank(_arTargH - (y - yBeforeBlock));
+            }
+          }
+        }
         // Enforce max-height: clip lines that overflow (remove lines past the limit)
         if (nd.maxHeight && nd.maxHeight > 0) {
           var yMaxEnd = yBeforeBlock + nd.maxHeight;
