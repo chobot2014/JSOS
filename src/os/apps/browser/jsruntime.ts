@@ -92,6 +92,8 @@ export interface PageJS {
   updateLayoutRects(rects: Map<string, { x: number; y: number; w: number; h: number }>): void;
   /** Get canvas element framebuffers for compositing into the browser viewport (item 3.3). */
   getCanvasBuffers(): Array<{ elId: string; width: number; height: number; rgba: Uint8Array }>;
+  /** Fire a general window/document event (e.g. 'scroll') from BrowserApp. */
+  fireEvent(type: string, detail?: number): void;
 }
 
 // ── Timer state ───────────────────────────────────────────────────────────────
@@ -8858,6 +8860,18 @@ export function createPageJS(
         }
       }
       return result;
+    },
+    fireEvent(type: string, _detail?: number): void {
+      // Dispatch generic window/document events (e.g. 'scroll') from host to page JS
+      var ev = new VEvent(type, { bubbles: type !== 'scroll' });
+      (win['dispatchEvent'] as (e: VEvent) => void)(ev);
+      if (type === 'scroll') {
+        doc.dispatchEvent(new VEvent('scroll', { bubbles: false }));
+        // Also update document.documentElement.scrollTop
+        try { (doc.documentElement as any)._scrollTop = _detail ?? 0; } catch(_) {}
+      }
+      checkDirty();
+      if (needsRerender) doRerender();
     },
   };
 }

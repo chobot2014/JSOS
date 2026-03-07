@@ -2041,7 +2041,11 @@ export class BrowserApp implements App {
         this._expandDamage(0, y0, w, -actual);
       }
     }
-    this._dirty   = true;
+    this._dirty = true;
+    // Fire scroll event to page JS so scroll listeners and IntersectionObserver update
+    if (actual !== 0 && this._pageJS) {
+      this._pageJS.fireEvent('scroll', this._scrollY);
+    }
   }
 
   private _hitTestLink(x: number, cy: number): string {
