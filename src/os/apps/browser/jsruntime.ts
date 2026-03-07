@@ -2271,6 +2271,13 @@ export function createPageJS(
       if (b instanceof Blob) {
         // Store blob content for browser navigation (item 639)
         _blobStore.set(url, { content: b._parts.join(''), type: b.type || 'text/html' });
+      } else if (b instanceof MediaSource_) {
+        // Store MediaSource reference; fire 'sourceopen' async so video.src=url works
+        _blobStore.set(url, { content: '', type: 'mediasource', _ms: b } as any);
+        Promise.resolve().then(() => {
+          b.readyState = 'open';
+          b.dispatchEvent(new VEvent('sourceopen'));
+        });
       }
       return url;
     }
@@ -4688,6 +4695,68 @@ export function createPageJS(
   // Minimal stubs — complete enough for feature-detection by frameworks.
 
   // â”€â”€ WebCodecs (Chrome 94+) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Media Source Extensions (MSE, Chrome 31+) ─────────────────────────────
+  // Used by YouTube, Netflix, Twitch etc. for adaptive bitrate streaming.
+  class TimeRanges_ {
+    _ranges: [number, number][];
+    constructor(ranges: [number, number][] = []) { this._ranges = ranges; }
+    get length(): number { return this._ranges.length; }
+    start(i: number): number { return this._ranges[i]?.[0] ?? 0; }
+    end(i:   number): number { return this._ranges[i]?.[1] ?? 0; }
+  }
+  class SourceBuffer_ extends VEventTarget {
+    mode: string = 'segments'; updating: boolean = false;
+    buffered: TimeRanges_ = new TimeRanges_();
+    timestampOffset = 0; appendWindowStart = 0; appendWindowEnd = Infinity;
+    audioTracks: unknown[] = []; videoTracks: unknown[] = []; textTracks: unknown[] = [];
+    onupdatestart: ((e: VEvent) => void) | null = null;
+    onupdate:      ((e: VEvent) => void) | null = null;
+    onupdateend:   ((e: VEvent) => void) | null = null;
+    onerror:       ((e: VEvent) => void) | null = null;
+    onabort:       ((e: VEvent) => void) | null = null;
+    appendBuffer(_data: unknown): void {
+      this.updating = true;
+      this.dispatchEvent(new VEvent('updatestart'));
+      Promise.resolve().then(() => {
+        this.updating = false;
+        this.dispatchEvent(new VEvent('update'));
+        this.dispatchEvent(new VEvent('updateend'));
+      });
+    }
+    remove(_start: number, _end: number): void {}
+    abort(): void { this.updating = false; this.dispatchEvent(new VEvent('abort')); }
+    changeType(_type: string): void {}
+  }
+  class MediaSource_ extends VEventTarget {
+    readyState: 'closed' | 'open' | 'ended' = 'closed';
+    duration: number = NaN;
+    sourceBuffers: SourceBuffer_[] = [];
+    activeSourceBuffers: SourceBuffer_[] = [];
+    onsourceopen:  ((e: VEvent) => void) | null = null;
+    onsourceended: ((e: VEvent) => void) | null = null;
+    onsourceclose: ((e: VEvent) => void) | null = null;
+    static isTypeSupported(mimeType: string): boolean {
+      var m = mimeType.toLowerCase();
+      return m.startsWith('video/mp4') || m.startsWith('video/webm') ||
+             m.startsWith('audio/mp4') || m.startsWith('audio/aac') ||
+             m.startsWith('audio/mpeg') || m.startsWith('audio/webm');
+    }
+    addSourceBuffer(_type: string): SourceBuffer_ {
+      var sb = new SourceBuffer_();
+      this.sourceBuffers.push(sb); this.activeSourceBuffers.push(sb);
+      return sb;
+    }
+    removeSourceBuffer(sb: SourceBuffer_): void {
+      this.sourceBuffers = this.sourceBuffers.filter(s => s !== sb);
+      this.activeSourceBuffers = this.activeSourceBuffers.filter(s => s !== sb);
+    }
+    endOfStream(_reason?: string): void {
+      this.readyState = 'ended'; this.dispatchEvent(new VEvent('sourceended'));
+    }
+    clearLiveSeekableRange(): void {}
+    setLiveSeekableRange(_start: number, _end: number): void {}
+  }
+
   class VideoColorSpace_ {
     fullRange = false; matrix = "rgb"; primaries = "bt709"; transfer = "iec61966-2-1";
     constructor(_init?: unknown) {}
@@ -4724,16 +4793,39 @@ export function createPageJS(
     clone(): AudioData_ { return new AudioData_({ timestamp: this.timestamp }); }
     close(): void {}
   }
+  // Helper: is a codec string a known video/audio type?
+  function _wcIsVideoSupported(cfg: any): boolean {
+    var c = (cfg?.codec ?? '').toLowerCase();
+    return c.startsWith('vp8') || c.startsWith('vp09') || c.startsWith('vp9') ||
+           c.startsWith('avc1') || c.startsWith('av01') || c.startsWith('hev1') ||
+           c.startsWith('hvc1') || c.startsWith('theora');
+  }
+  function _wcIsAudioSupported(cfg: any): boolean {
+    var c = (cfg?.codec ?? '').toLowerCase();
+    return c.startsWith('opus') || c.startsWith('vorbis') || c.startsWith('mp4a') ||
+           c.startsWith('aac') || c.startsWith('flac') || c.startsWith('pcm');
+  }
   class VideoDecoder_ extends VEventTarget {
     state: "unconfigured" | "configured" | "closed" = "unconfigured";
-    decodeQueueSize = 0; _init: any;
+    decodeQueueSize = 0; _init: any; _cfg: any = null;
     constructor(init: any) { super(); this._init = init; }
-    configure(_cfg: unknown): void { this.state = "configured"; }
-    decode(_chunk: unknown): void {}
+    configure(cfg: unknown): void { this.state = "configured"; this._cfg = cfg; }
+    decode(chunk: unknown): void {
+      if (this.state !== 'configured' || !this._init?.output) return;
+      var outCb = this._init.output;
+      Promise.resolve().then(() => {
+        var frame = new VideoFrame_(null, { timestamp: (chunk as any)?.timestamp ?? 0 });
+        frame.codedWidth = 1; frame.codedHeight = 1; frame.displayWidth = 1; frame.displayHeight = 1;
+        try { outCb(frame); } catch (_) {}
+      });
+    }
     flush(): Promise<void> { return Promise.resolve(); }
-    reset(): void { this.state = "unconfigured"; }
+    reset(): void { this.state = "unconfigured"; this._cfg = null; }
     close(): void { this.state = "closed"; }
-    static isConfigSupported(_c: unknown): Promise<unknown> { return Promise.resolve({ supported: false }); }
+    static isConfigSupported(cfg: unknown): Promise<unknown> {
+      var ok = _wcIsVideoSupported(cfg as any);
+      return Promise.resolve({ supported: ok, config: ok ? cfg : undefined });
+    }
   }
   class VideoEncoder_ extends VEventTarget {
     state: "unconfigured" | "configured" | "closed" = "unconfigured"; encodeQueueSize = 0;
@@ -4743,17 +4835,30 @@ export function createPageJS(
     flush(): Promise<void> { return Promise.resolve(); }
     reset(): void { this.state = "unconfigured"; }
     close(): void { this.state = "closed"; }
-    static isConfigSupported(_c: unknown): Promise<unknown> { return Promise.resolve({ supported: false }); }
+    static isConfigSupported(cfg: unknown): Promise<unknown> {
+      var ok = _wcIsVideoSupported(cfg as any);
+      return Promise.resolve({ supported: ok, config: ok ? cfg : undefined });
+    }
   }
   class AudioDecoder_ extends VEventTarget {
-    state: "unconfigured" | "configured" | "closed" = "unconfigured"; decodeQueueSize = 0;
-    constructor(_init: any) { super(); }
-    configure(_cfg: unknown): void { this.state = "configured"; }
-    decode(_chunk: unknown): void {}
+    state: "unconfigured" | "configured" | "closed" = "unconfigured"; decodeQueueSize = 0; _init: any; _cfg: any = null;
+    constructor(init: any) { super(); this._init = init; }
+    configure(cfg: unknown): void { this.state = "configured"; this._cfg = cfg; }
+    decode(chunk: unknown): void {
+      if (this.state !== 'configured' || !this._init?.output) return;
+      var outCb = this._init.output;
+      Promise.resolve().then(() => {
+        var data = new AudioData_({ timestamp: (chunk as any)?.timestamp ?? 0 });
+        try { outCb(data); } catch (_) {}
+      });
+    }
     flush(): Promise<void> { return Promise.resolve(); }
-    reset(): void { this.state = "unconfigured"; }
+    reset(): void { this.state = "unconfigured"; this._cfg = null; }
     close(): void { this.state = "closed"; }
-    static isConfigSupported(_c: unknown): Promise<unknown> { return Promise.resolve({ supported: false }); }
+    static isConfigSupported(cfg: unknown): Promise<unknown> {
+      var ok = _wcIsAudioSupported(cfg as any);
+      return Promise.resolve({ supported: ok, config: ok ? cfg : undefined });
+    }
   }
   class AudioEncoder_ extends VEventTarget {
     state: "unconfigured" | "configured" | "closed" = "unconfigured"; encodeQueueSize = 0;
@@ -4763,7 +4868,10 @@ export function createPageJS(
     flush(): Promise<void> { return Promise.resolve(); }
     reset(): void { this.state = "unconfigured"; }
     close(): void { this.state = "closed"; }
-    static isConfigSupported(_c: unknown): Promise<unknown> { return Promise.resolve({ supported: false }); }
+    static isConfigSupported(cfg: unknown): Promise<unknown> {
+      var ok = _wcIsAudioSupported(cfg as any);
+      return Promise.resolve({ supported: ok, config: ok ? cfg : undefined });
+    }
   }
   class ImageTrack_ {
     animated = false; frameCount = 1; repetitionCount = 0; selected = true;
@@ -4806,7 +4914,15 @@ export function createPageJS(
   class ScrollTimeline_ {
     axis: string; source: unknown | null;
     constructor(opts: any = {}) { this.axis = opts.axis ?? "block"; this.source = opts.source ?? null; }
-    get currentTime(): unknown { return null; }
+    get currentTime(): unknown {
+      // Return CSS percentage (0–100) representing how far the page has scrolled
+      var scrollY = cb.getScrollY();
+      var docEl = (win['document'] as any)?.documentElement;
+      var docH = docEl?.scrollHeight || 768;
+      var viewH = ((win['innerHeight'] as number) || 768);
+      var maxScroll = Math.max(1, docH - viewH);
+      return { value: Math.min(100, Math.max(0, (scrollY / maxScroll) * 100)), unit: 'percent' };
+    }
   }
   class ViewTimeline_ {
     axis: string; subject: unknown | null; startOffset: unknown; endOffset: unknown;
@@ -4814,7 +4930,12 @@ export function createPageJS(
       this.axis = opts.axis ?? "block"; this.subject = opts.subject ?? null;
       this.startOffset = null; this.endOffset = null;
     }
-    get currentTime(): unknown { return null; }
+    get currentTime(): unknown {
+      // Approximate scroll progress relative to viewport size
+      var scrollY = cb.getScrollY();
+      var viewH = ((win['innerHeight'] as number) || 768);
+      return { value: Math.min(100, Math.max(0, (scrollY / Math.max(1, viewH)) * 100)), unit: 'percent' };
+    }
   }
   // Reporting API (Chrome 69+)
   class ReportingObserver_ {
@@ -6539,6 +6660,11 @@ export function createPageJS(
     FileSystemFileHandle: Object,
     FileSystemDirectoryHandle: Object,
     FileSystemWritableFileStream: Object,
+
+    // -- MSE (Media Source Extensions, Chrome 31+) ----------------------------
+    MediaSource:  MediaSource_,
+    SourceBuffer: SourceBuffer_,
+    TimeRanges:   TimeRanges_,
 
     // -- WebCodecs (Chrome 94+) -----------------------------------------------
     VideoDecoder:       VideoDecoder_,

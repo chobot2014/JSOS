@@ -49,7 +49,11 @@ class MediaEventTarget {
     this._listeners.set(type, arr.filter(fn => fn !== cb));
   }
   dispatchEvent(type: string, detail: Record<string, unknown> = {}): void {
-    for (const cb of this._listeners.get(type) ?? []) cb({ type, target: this, ...detail });
+    const evt = { type, target: this, ...detail };
+    // Call IDL event handler (on${type} property) first
+    const idlFn = (this as any)['on' + type];
+    if (typeof idlFn === 'function') { try { idlFn(evt); } catch (_) {} }
+    for (const cb of this._listeners.get(type) ?? []) cb(evt);
   }
 }
 
@@ -62,10 +66,48 @@ export class JSAudioElement extends MediaEventTarget {
   autoplay: boolean = false;
   preload: string  = 'auto';
   controls: boolean = false;
+  crossOrigin: string | null = null;
+  defaultMuted: boolean = false;
+  defaultPlaybackRate: number = 1.0;
+  // Error state
+  error: null = null;
+  // Network state constants (matches HTMLMediaElement spec)
+  static readonly NETWORK_EMPTY      = 0;
+  static readonly NETWORK_IDLE       = 1;
+  static readonly NETWORK_LOADING    = 2;
+  static readonly NETWORK_NO_SOURCE  = 3;
+  // ReadyState constants
+  static readonly HAVE_NOTHING       = 0;
+  static readonly HAVE_METADATA      = 1;
+  static readonly HAVE_CURRENT_DATA  = 2;
+  static readonly HAVE_FUTURE_DATA   = 3;
+  static readonly HAVE_ENOUGH_DATA   = 4;
+  // IDL event handler properties
+  onplay:           ((e: unknown) => void) | null = null;
+  onpause:          ((e: unknown) => void) | null = null;
+  onended:          ((e: unknown) => void) | null = null;
+  ontimeupdate:     ((e: unknown) => void) | null = null;
+  onloadedmetadata: ((e: unknown) => void) | null = null;
+  onloadeddata:     ((e: unknown) => void) | null = null;
+  oncanplay:        ((e: unknown) => void) | null = null;
+  oncanplaythrough: ((e: unknown) => void) | null = null;
+  onerror:          ((e: unknown) => void) | null = null;
+  onwaiting:        ((e: unknown) => void) | null = null;
+  onstalled:        ((e: unknown) => void) | null = null;
+  onsuspend:        ((e: unknown) => void) | null = null;
+  onabort:          ((e: unknown) => void) | null = null;
+  onemptied:        ((e: unknown) => void) | null = null;
+  ondurationchange: ((e: unknown) => void) | null = null;
+  onprogress:       ((e: unknown) => void) | null = null;
+  onseeked:         ((e: unknown) => void) | null = null;
+  onseeking:        ((e: unknown) => void) | null = null;
+  onvolumechange:   ((e: unknown) => void) | null = null;
+  onratechange:     ((e: unknown) => void) | null = null;
 
   private _volume:      number = 1.0;
   private _playbackRate: number = 1.0;
   private _muted:       boolean = false;
+  private _networkState: number = 0;  // NETWORK_EMPTY initially
   private _source:      AudioSource | null = null;
   private _ready:       boolean = false;
   private _dataCache:   Uint8Array | null = null;
@@ -103,7 +145,17 @@ export class JSAudioElement extends MediaEventTarget {
 
   get paused():  boolean { return this._source?.state === 'paused'; }
   get ended():   boolean { return this._source?.state === 'stopped'; }
-  get readyState(): number { return this._ready ? 4 : 0; }  // HAVE_ENOUGH_DATA = 4
+  get readyState(): number { return this._ready ? 4 : 0; }
+  get networkState(): number { return this._networkState; }
+
+  get buffered(): any {
+    const dur = this._source ? (this._source.duration / (this._source.sampleRate || 44100)) : NaN;
+    return isFinite(dur) && dur > 0
+      ? { length: 1, start(_i: number) { return 0; }, end(_i: number) { return dur; } }
+      : { length: 0, start(_i: number) { return 0; }, end(_i: number) { return 0; } };
+  }
+  get seekable(): any { return this.buffered; }
+  get played(): any { return this.buffered; }  // HAVE_ENOUGH_DATA = 4
 
   // ── Loading ─────────────────────────────────────────────────────────────
 
@@ -123,10 +175,12 @@ export class JSAudioElement extends MediaEventTarget {
       // No network available — create a silent source so API calls don't throw
       this._source = audio.createSource(new Int16Array(0));
       this._ready  = true;
+      this._networkState = 1;  // NETWORK_IDLE
       this.dispatchEvent('canplaythrough');
       return;
     }
 
+    this._networkState = 2;  // NETWORK_LOADING
     this.dispatchEvent('loadstart');
     fetchFn(url).then(data => {
       this._dataCache = data;
@@ -134,11 +188,13 @@ export class JSAudioElement extends MediaEventTarget {
       if (this._source) { audio.destroySource(this._source); }
       this._source = audio.loadDecoded(fmt, data, { volume: this._volume, loop: this.loop });
       this._ready  = true;
+      this._networkState = 1;  // NETWORK_IDLE
       this.dispatchEvent('loadedmetadata');
       this.dispatchEvent('loadeddata');
       this.dispatchEvent('canplaythrough');
       if (this.autoplay) this.play().catch(() => {/**/});
     }).catch((err: unknown) => {
+      this._networkState = 3;  // NETWORK_NO_SOURCE
       this.dispatchEvent('error', { message: String(err) });
     });
   }

@@ -116,6 +116,9 @@ export class VEventTarget {
     return !ev.defaultPrevented;
   }
   _fireList(ev: VEvent): void {
+    // Also invoke IDL event handler (on${type} property) before listener list
+    var idlFn = (this as any)['on' + ev.type];
+    if (typeof idlFn === 'function') { try { idlFn.call(this, ev); } catch (e) { if (typeof (globalThis as any).os !== 'undefined') (globalThis as any).os.debug.log('[event error] on' + ev.type + ': ' + String(e)); } }
     var arr = this._handlers.get(ev.type);
     if (arr) { for (var fn of [...arr]) { try { fn(ev); } catch (e) { if (typeof (globalThis as any).os !== 'undefined') (globalThis as any).os.debug.log('[event error] ' + ev.type + ': ' + String(e)); } if (ev._stopImmediate) break; } }
   }
@@ -620,10 +623,31 @@ export class VElement extends VNode {
   get href():      string  { return this._attrs.get('href')  || ''; } set href(v: string)      { this.setAttribute('href', v); }
   get src():       string  { return this._attrs.get('src')   || ''; } set src(v: string)       { this.setAttribute('src', v); }
   get srcdoc():    string  { return this._attrs.get('srcdoc') || ''; } set srcdoc(v: string)   { this.setAttribute('srcdoc', v); }
-  /** HTMLIFrameElement.contentWindow — a null stub (JSOS has no nested browsing context). */
-  get contentWindow(): null { return null; }
-  /** HTMLIFrameElement.contentDocument — a null stub. */
-  get contentDocument(): null { return null; }
+  /** HTMLIFrameElement.contentWindow — minimal stub window so scripts don't crash. */
+  get contentWindow(): any {
+    var ifSrc = this._attrs.get('src') || 'about:blank';
+    var minDoc: any = { readyState: 'complete', body: null, head: null, title: '',
+      querySelector: () => null, querySelectorAll: () => [],
+      getElementById: () => null, getElementsByTagName: () => [],
+      write(): void {}, writeln(): void {}, close(): void {}, open(): void {},
+      addEventListener() {}, removeEventListener() {}, dispatchEvent() { return true; },
+      createElement: () => null, createTextNode: () => null,
+      cookie: '', domain: 'null', URL: ifSrc, location: { href: ifSrc } };
+    var minWin: any = { closed: false, length: 0, frames: [],
+      location: { href: ifSrc, origin: 'null', assign(_u: string): void {}, replace(_u: string): void {}, reload(): void {} },
+      document: minDoc,
+      postMessage(_msg: unknown, _target?: string): void {},
+      focus(): void {}, blur(): void {},
+      addEventListener(_t: string, _fn: unknown): void {},
+      removeEventListener(_t: string, _fn: unknown): void {},
+      dispatchEvent(_e: unknown): boolean { return true; },
+      getComputedStyle(_el: unknown): any { return {}; },
+      setTimeout: (globalThis as any).setTimeout, clearTimeout: (globalThis as any).clearTimeout };
+    minWin.self = minWin; minWin.window = minWin; minWin.top = minWin; minWin.parent = minWin;
+    return minWin;
+  }
+  /** HTMLIFrameElement.contentDocument — delegates to contentWindow.document. */
+  get contentDocument(): any { return this.contentWindow?.document ?? null; }
   get sandbox(): { add(_v: string): void; remove(_v: string): void; contains(_v: string): boolean; toString(): string; value: string } {
     return { add() {}, remove() {}, contains() { return false; }, toString() { return ''; }, value: '' };
   }
@@ -1608,8 +1632,9 @@ export class VElement extends VNode {
   _defaultPlaybackRate = 1;
   _duration = NaN;
   _ended = false;
-  _readyStateMedia = 0;   // HAVE_NOTHING
-  _networkState = 0;      // NETWORK_EMPTY
+  _readyStateMedia = 4;   // HAVE_ENOUGH_DATA — assume ready so players advance
+  _networkState = 1;      // NETWORK_IDLE
+  error: null = null;
 
   play(): Promise<void> {
     this._paused = false; this._ended = false;
@@ -1635,6 +1660,7 @@ export class VElement extends VNode {
   set playbackRate(v: number) { this._playbackRate = v; }
   get defaultPlaybackRate(): number { return this._defaultPlaybackRate; }
   set defaultPlaybackRate(v: number) { this._defaultPlaybackRate = v; }
+  get readyState(): number { return this._readyStateMedia; }  // HTMLMediaElement.readyState alias
   get readyStateMedia(): number { return this._readyStateMedia; }
   get networkState(): number { return this._networkState; }
   get loop(): boolean { return this.hasAttribute('loop'); }
@@ -1645,9 +1671,9 @@ export class VElement extends VNode {
   set controls(v: boolean) { if (v) this.setAttribute('controls', ''); else this.removeAttribute('controls'); }
   get preload(): string { return this.getAttribute('preload') || 'auto'; }
   set preload(v: string) { this.setAttribute('preload', v); }
-  get buffered(): any { return { length: 0, start(_i: number) { return 0; }, end(_i: number) { return 0; } }; }
-  get played(): any   { return { length: 0, start(_i: number) { return 0; }, end(_i: number) { return 0; } }; }
-  get seekable(): any { return { length: 0, start(_i: number) { return 0; }, end(_i: number) { return 0; } }; }
+  get buffered(): any  { var d = this._duration; return isFinite(d) && d > 0 ? { length: 1, start(_i: number) { return 0; }, end(_i: number) { return d; } } : { length: 0, start(_i: number) { return 0; }, end(_i: number) { return 0; } }; }
+  get played(): any    { var t = this._currentTime; return t > 0 ? { length: 1, start(_i: number) { return 0; }, end(_i: number) { return t; } } : { length: 0, start(_i: number) { return 0; }, end(_i: number) { return 0; } }; }
+  get seekable(): any  { var d = this._duration; return isFinite(d) && d > 0 ? { length: 1, start(_i: number) { return 0; }, end(_i: number) { return d; } } : { length: 0, start(_i: number) { return 0; }, end(_i: number) { return 0; } }; }
   get videoWidth():  number { return parseInt(this.getAttribute('width') || '0', 10); }
   get videoHeight(): number { return parseInt(this.getAttribute('height') || '0', 10); }
   get textTracks(): any { return { length: 0, addEventListener() {}, removeEventListener() {} }; }
