@@ -248,6 +248,23 @@ export function createPageJS(
   (doc as any).compatMode = 'CSS1Compat';
   // document.documentMode (item 867) — IE compat shim: return 11 (IE11 compat)
   (doc as any).documentMode = 11;
+  // document.scrollingElement — read-to-cb.scrollTo hook so JS setting
+  // document.documentElement.scrollTop / body.scrollTop scrolls the browser viewport
+  var _scrollElHook = {
+    get scrollTop(): number { return cb.getScrollY(); },
+    set scrollTop(v: number) { cb.scrollTo(0, v); },
+    get scrollLeft(): number { return 0; },
+    set scrollLeft(_v: number) {},
+  };
+  (doc as any).scrollingElement = _scrollElHook;
+  // Also override documentElement.scrollTop to proxy through cb
+  if (doc.documentElement) {
+    Object.defineProperty(doc.documentElement, 'scrollTop', {
+      get() { return cb.getScrollY(); },
+      set(v: number) { cb.scrollTo(0, v); },
+      configurable: true,
+    });
+  }
   (doc as any).characterSet = 'UTF-8';
   (doc as any).charset = 'UTF-8';
   // doc._styleSheets populated later after CSSStyleSheet_ class is defined
