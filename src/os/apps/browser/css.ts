@@ -38,11 +38,23 @@ export function registerCSSVarBlock(block: string): void {
 
 /**
  * Resolve `var(--name)` and `var(--name, fallback)` references in a CSS value.
+ * Also resolves `env(name)` CSS environment variables (safe-area-insets etc.).
  * Returns the substituted string (unchanged if no var() present).
  */
 export function resolveCSSVars(value: string): string {
-  if (value.indexOf('var(') < 0) return value;
-  return value.replace(/var\(\s*(--[^,)]+)\s*(?:,\s*([^)]+))?\s*\)/g,
+  if (value.indexOf('var(') < 0 && value.indexOf('env(') < 0) return value;
+  // Resolve env() — map to JSOS environment values (all safe-area-insets are 0)
+  var step1 = value.replace(/env\(\s*([\w-]+)\s*(?:,\s*([^)]*))?\s*\)/g,
+    (_: string, name: string, fallback: string | undefined) => {
+      // Safe-area-inset-* (iOS/notch) — always 0 on JSOS
+      if (name.startsWith('safe-area-inset')) return '0px';
+      // titlebar-area-* — assume full viewport
+      if (name === 'titlebar-area-x' || name === 'titlebar-area-width') return '0px';
+      if (name === 'titlebar-area-y' || name === 'titlebar-area-height') return '0px';
+      return fallback !== undefined ? fallback.trim() : '0';
+    });
+  if (step1.indexOf('var(') < 0) return step1;
+  return step1.replace(/var\(\s*(--[^,)]+)\s*(?:,\s*([^)]+))?\s*\)/g,
     (_: string, name: string, fallback: string | undefined) => {
       var resolved = _cssVars[name.trim()];
       if (resolved !== undefined) return resolveCSSVars(resolved.trim());  // recursive
