@@ -20,6 +20,14 @@ volatile int     _js_fault_vector  = 0;
  * JIT-compiled native code (which can generate faulty stores). */
 volatile int     _js_in_page_eval  = 0;
 
+/* ── Level-2 global fault recovery ──────────────────────────────────────── */
+/* Secondary recovery point set up in quickjs_run_os().  If a CPU fault fires
+ * with _js_fault_active == 0 (e.g. during QJS native dispatch after a
+ * callGuarded longjmp recovery), the ISR longjmps here instead of halting.
+ * This keeps the OS alive after double-faults in page script execution. */
+jmp_buf          _js_global_fault_buf;
+volatile int     _js_global_fault_active = 0;
+
 /* ── CPU exception dispatcher ───────────────────────────────────────────── */
 
 /* Minimal serial hex printer for use inside exception_dispatch.
@@ -139,6 +147,22 @@ void exception_dispatch(exception_frame_t *f) {
          * The recovery site (js_eval_guarded / js_call_guarded) issues sti
          * after longjmp returns so interrupts are re-enabled promptly. */
         longjmp(_js_fault_buf, (int)f->vector + 1);
+    }
+
+    /* Level-2 global recovery — catches secondary faults that occur with
+     * _js_fault_active == 0, e.g. when QJS's native dispatch accesses a
+     * corrupted object after js_call_guarded returned from fault recovery.
+     * Without this, the second #PF halts the OS. */
+    if (_js_global_fault_active &&
+        (f->vector == 0 || f->vector == 6 || f->vector == 13 || f->vector == 14)) {
+        _js_global_fault_active = 0;
+        _js_fault_active = 0;
+        _js_in_page_eval = 0;
+        _js_fault_vector = (int)f->vector;
+        platform_serial_puts("[kernel] secondary fault (vector=");
+        _exc_hex32(f->vector);
+        platform_serial_puts(") — global recovery\n");
+        longjmp(_js_global_fault_buf, (int)f->vector + 1);
     }
 
     platform_serial_puts("System halted.\n");

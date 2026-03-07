@@ -6236,27 +6236,46 @@ export function createPageJS(
   //
   // Bindings are removed in dispose() so they don't outlive the page.
   var _bridgedKeys: string[] = [];
-  var _lastBridgedWinKeyCount = 0;  // fast-path: skip scan if win hasn't grown
+  // Bridge only essential properties to globalThis.  Bridging ALL ~423 win keys
+  // causes QJS's global object shape tree to grow so large that the inline
+  // cache / shape lookup code dereferences stale pointers → #PF.
+  // We only bridge the subset that scripts commonly access as bare identifiers.
+  var _essentialBridgeKeys = [
+    'document', 'window', 'self', 'top', 'parent', 'frames',
+    'navigator', 'location', 'history', 'screen',
+    'console', 'performance', 'crypto',
+    'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
+    'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback',
+    'fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource',
+    'addEventListener', 'removeEventListener', 'dispatchEvent',
+    'getComputedStyle', 'matchMedia', 'getSelection',
+    'alert', 'confirm', 'prompt', 'close', 'focus', 'blur',
+    'scrollTo', 'scrollBy', 'scroll', 'scrollX', 'scrollY',
+    'innerWidth', 'innerHeight', 'outerWidth', 'outerHeight',
+    'pageXOffset', 'pageYOffset', 'devicePixelRatio',
+    'localStorage', 'sessionStorage',
+    'atob', 'btoa', 'structuredClone',
+    'CustomEvent', 'Event', 'MutationObserver', 'ResizeObserver',
+    'IntersectionObserver', 'URL', 'URLSearchParams',
+    'Headers', 'Request', 'Response', 'AbortController', 'AbortSignal',
+    'TextEncoder', 'TextDecoder', 'Blob', 'File', 'FileReader',
+    'FormData', 'URLPattern',
+    'FontFace', 'FontFaceSet',
+    'HTMLElement', 'Element', 'Node', 'Document', 'DocumentFragment',
+    'NodeList', 'DOMParser', 'Range', 'Selection', 'TreeWalker',
+    'CSSStyleSheet', 'CSSStyleDeclaration',
+    'Image', 'Audio', 'MediaQueryList',
+    'Worker', 'SharedWorker', 'MessageChannel', 'MessagePort',
+    'BroadcastChannel', 'Notification',
+    'queueMicrotask', 'reportError',
+  ];
   function _bridgeToGlobal() {
-    var winKeys = Object.keys(win);
-    // Short-circuit: if win hasn't gained any new keys since the last scan,
-    // there is nothing new to bridge (all existing keys will pass the
-    // `_bk in globalThis` check and continue immediately).
-    if (winKeys.length === _lastBridgedWinKeyCount) return;
-    _lastBridgedWinKeyCount = winKeys.length;
-    for (var _bi = 0; _bi < winKeys.length; _bi++) {
-      var _bk = winKeys[_bi];
-      // Skip keys already on QJS globalThis (builtins: Math, Array, Promise…)
+    for (var _bi = 0; _bi < _essentialBridgeKeys.length; _bi++) {
+      var _bk = _essentialBridgeKeys[_bi];
       if (_bk in (globalThis as any)) continue;
+      if (!(_bk in (win as any))) continue;  // skip if win doesn't have it
       try {
-        (function(key: string) {
-          Object.defineProperty(globalThis as any, key, {
-            get(): unknown  { return (win as any)[key]; },
-            set(v: unknown): void { (win as any)[key] = v; },
-            configurable: true,
-            enumerable:   false,
-          });
-        })(_bk);
+        (globalThis as any)[_bk] = (win as any)[_bk];
         _bridgedKeys.push(_bk);
       } catch(_) {}
     }
@@ -6359,13 +6378,23 @@ export function createPageJS(
     if (typeof (kernel as any).callGuarded === 'function') {
       try {
         var _r = (kernel as any).callGuarded(fn, ...args);
-        // callGuarded returns true on longjmp fault recovery.  The heap is
-        // now dirty — set _pageFaulted to stop ALL further page JS execution.
-        if (_r === true) {
+        // callGuarded returns -9999 sentinel on CPU fault recovery.
+        // No JS exception is thrown — the C recovery path avoids all
+        // heap allocation to prevent secondary faults from half-init'd
+        // QJS objects.  We detect the sentinel here instead.
+        if (_r === -9999 || _r === true) {
           _pageFaulted = true;
-          cb.log('[JS] page faulted — stopping all page script execution');
+          cb.log('[JS] page faulted (callGuarded sentinel) — stopping all page JS');
         }
-      } catch(e) { _fireScriptError(e); }
+      } catch(e) {
+        var _eMsg = String(e);
+        if (_eMsg.indexOf('CPU fault') >= 0 || _eMsg.indexOf('InternalError') >= 0) {
+          _pageFaulted = true;
+          cb.log('[JS] page faulted (exception) — stopping all page JS');
+        } else {
+          _fireScriptError(e);
+        }
+      }
     } else {
       try { (fn as any)(...args); } catch(e) { _fireScriptError(e); }
     }
@@ -6420,54 +6449,71 @@ export function createPageJS(
     // getter/setter descriptors on that same object confused QuickJS's property
     // table writer → #PF at 0x726F6D71 (a live JSString in the OS heap).
     //
-    // Fix: compile the page script inside a `with(_winScope)` wrapper (identical
-    // to the non-guarded stage-1 path), then call the resulting Function through
-    // kernel.callGuarded(fn, _winScope).  This routes all identifier reads/writes
-    // through the _winScope Proxy → win, which is a plain JS object with no
-    // getters/setters on ctx->global_obj.  Page vars stay in win, not the OS
-    // global object, and the OS heap is not written to during page script eval.
+    // Fix: for guarded execution, use kernel.evalGuarded() to run the script
+    // directly via JS_Eval in the global context.  This avoids the JS_Call path
+    // which has a QJS internal crash when combined with the _js_in_page_eval=1
+    // flag (suppressed JIT dispatch causes stale object pointer faults).
     //
-    // If the with() compilation throws a SyntaxError (class bodies, etc.) we fall
-    // back to stage-2: new Function(rawCode) called guarded with win as `this`.
+    // To make page globals (document, window, etc.) available without using
+    // getter/setter _bridgeToGlobal() descriptors (which corrupt the property
+    // table), we copy the necessary win properties as plain data properties
+    // on globalThis before eval and sync back after.
     if (_useGuarded) {
       cb.log('[JS exec] guarded ' + (code.length / 1024).toFixed(1) + 'KB ' + (scriptURL || '(inline)'));
+
+      // ── Graduated diagnostics: test evalGuarded piece by piece ──
+      var _t1 = (kernel as any).evalGuarded('1+1');
+      if (_t1 === -9999) { cb.log('[JS] FAULT on trivial eval (before bridge)'); _pageFaulted = true; return; }
+      cb.log('[JS] pre-bridge eval OK');
+
       _bridgeToGlobal();
-      var _guardedSrc = _prepareForWith(code);
-      var _guardedErr: any = null;
-      // Stage-1 guarded: with(_winScope) wrapper keeps page vars off ctx->global_obj
+      cb.log('[JS] bridge done (' + _bridgedKeys.length + ' keys)');
+
+      var _t2 = (kernel as any).evalGuarded('1+1');
+      if (_t2 === -9999) { cb.log('[JS] FAULT on trivial eval (after bridge)'); _pageFaulted = true; return; }
+
+      var _t3 = (kernel as any).evalGuarded('typeof document');
+      if (_t3 === -9999) { cb.log('[JS] FAULT on typeof document'); _pageFaulted = true; return; }
+
+      var _t4 = (kernel as any).evalGuarded('document.fonts');
+      if (_t4 === -9999) { cb.log('[JS] FAULT on document.fonts access'); _pageFaulted = true; return; }
+
+      var _t5 = (kernel as any).evalGuarded('document.fonts.load("hello")');
+      if (_t5 === -9999) { cb.log('[JS] FAULT on document.fonts.load()'); _pageFaulted = true; return; }
+
+      var _t6 = (kernel as any).evalGuarded('document.fonts.load("hello").catch(function(){})');
+      if (_t6 === -9999) { cb.log('[JS] FAULT on .catch()'); _pageFaulted = true; return; }
+
+      var _t7 = (kernel as any).evalGuarded('(function(){document.fonts.load("hello").catch(function(){})})()');
+      if (_t7 === -9999) { cb.log('[JS] FAULT on IIFE with fonts.load'); _pageFaulted = true; return; }
+
+      cb.log('[JS] ALL sanity checks passed');
+
+      // Step 3: run the actual script
+      var _guardedCode = code;
+      if (_guardedCode.charCodeAt(0) === 35 && _guardedCode.charCodeAt(1) === 33)
+        _guardedCode = _guardedCode.replace(/^#!.*/, '');
       try {
-        var _gfn = new Function('__s__',
-          'with(__s__){\n' + _guardedSrc + '\n}') as (s: any) => void;
-        _callGuardedCtx('guarded-s1:' + (scriptURL || '(inline)').slice(-40), _gfn, _winScope);
-      } catch (e) {
-        var _emsg = String(e);
-        if (_emsg.indexOf('SyntaxError') === -1) {
-          // Runtime error — report and stop (no stage-2 retry for runtime failures)
-          _fireScriptError(e);
-          _guardedErr = null; // suppress stage-2
+        var _evalResult = (kernel as any).evalGuarded(_guardedCode);
+        // evalGuarded returns -9999 sentinel on CPU fault recovery.
+        // The C recovery path avoids all heap allocation — no
+        // JS_ThrowInternalError, just a tagged int return.
+        if (_evalResult === -9999) {
+          _pageFaulted = true;
+          cb.log('[JS] page faulted (evalGuarded sentinel) — stopping all page JS');
+        }
+      } catch(e) {
+        var _eMsg = String(e);
+        if (_eMsg.indexOf('CPU fault') >= 0 || _eMsg.indexOf('InternalError') >= 0) {
+          _pageFaulted = true;
+          cb.log('[JS] page faulted (exception) — stopping all page JS');
         } else {
-          _guardedErr = e;  // compile error → try stage-2 below
+          _fireScriptError(e);
         }
       }
-      // Stage-2 guarded fallback for scripts that fail inside with() (class bodies etc.)
-      if (_guardedErr !== null) {
-        cb.log('[JS exec] guarded-s2-fallback ' + (code.length / 1024).toFixed(1) + 'KB '
-          + (scriptURL || '(inline)') + ' (s1: ' + String(_guardedErr) + ')');
-        var _raw2 = (code.charCodeAt(0) === 35 && code.charCodeAt(1) === 33)
-          ? code.replace(/^#!.*/, '') : code;
-        try {
-          var _gfn2 = new Function(_raw2) as () => void;
-          _callGuardedCtx('guarded-s2:' + (scriptURL || '(inline)').slice(-40), _gfn2.bind(win));
-        } catch (e2) {
-          _fireScriptError(e2);
-        }
-      }
-      // After a fault recovery, skip all post-eval cleanup — the heap is dirty.
-      // _bridgeToGlobal, _drainMicrotasks, and checkDirty all touch the QJS heap
-      // and can trigger a fatal second fault with _js_fault_active==0.
       if (!_pageFaulted) {
-        _bridgeToGlobal();
-        _drainMicrotasks();  // drain any Promise jobs queued by the script
+        _bridgeToGlobal(); // pick up any new globals the script created
+        _drainMicrotasks();
         checkDirty();
       }
       return;

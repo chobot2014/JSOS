@@ -329,8 +329,9 @@ static JSValue js_get_uptime(JSContext *c, JSValueConst this_val, int argc, JSVa
 }
 /* Forward-declared here so js_sleep() can call the scheduler hook on every
  * tick during its busy-wait.  The actual storage lives further down in the
- * Phase-5 section near js_register_scheduler_hook().                        */
-static JSValue _scheduler_hook;
+ * Phase-5 section near js_register_scheduler_hook().
+ * NOT static — referenced by quickjs_run_os() for global fault recovery. */
+JSValue _scheduler_hook;
 static JSValue js_sleep(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
     int32_t ms = 0; JS_ToInt32(c, &ms, argv[0]);
     uint32_t target    = timer_get_ms() + (uint32_t)ms;
@@ -596,20 +597,41 @@ static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JS
     _js_fault_vector = 0;
     /* Signal to quickjs.c that we are evaluating a page script so JIT
      * native dispatch and JIT compilation are suppressed for all functions
-     * encountered during this eval (prevents JIT-generated faulty stores). */
-    _js_in_page_eval = 1;
+     * encountered during this eval (prevents JIT-generated faulty stores).
+     * NOTE: temporarily disabled for diagnostics — testing if this flag
+     * is causing the bytecode interpreter to crash. */
+    /* _js_in_page_eval = 1; */
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
-        _js_fault_active = 0;
         _js_in_page_eval = 0;
         /* Restore interrupts: the ISR macro issued CLI and we longjmp'd out
          * before the normal 'sti; iret' epilogue ran.  We deliberately kept
          * interrupts disabled across the longjmp to prevent a timer IRQ from
          * overwriting _js_fault_buf mid-flight; now it is safe to re-enable. */
         __asm__ volatile("sti");
-        /* Do NOT call JS_FreeCString here (see comment in js_call_guarded). */
+        /* Do NOT call JS_FreeCString here — `code` was on the now-unwound stack
+         * frame, and the QJS string may reference freed evaluator memory. */
         JS_ResetAfterFault(c, _saved_frame);
-        return JS_UNDEFINED;
+        _js_fault_active = 0;
+        /* Return a sentinel integer that the TypeScript caller can detect.
+         * CRITICAL: do NOT allocate on the QJS heap here (no JS_ThrowInternalError,
+         * no JS_NewString, etc.).  The heap may have half-initialised objects
+         * from the faulting eval — any allocation could trigger GC which
+         * traverses corrupt pointers → secondary #PF → global recovery →
+         * total state loss.  JS_NewInt32 is an inline tagged-value (no alloc). */
+        platform_serial_puts("[kernel] evalGuarded fault recovered (vector=");
+        {
+            static const char _h2[] = "0123456789ABCDEF";
+            char _vb[5];
+            unsigned _v = (unsigned)_js_fault_vector;
+            _vb[0] = '0'; _vb[1] = 'x';
+            _vb[2] = _h2[(_v >> 4) & 0xF];
+            _vb[3] = _h2[_v & 0xF];
+            _vb[4] = '\0';
+            platform_serial_puts(_vb);
+        }
+        platform_serial_puts(") — returning sentinel\n");
+        return JS_NewInt32(c, -9999);
     }
     JSValue result = JS_Eval(c, code, len, filename, JS_EVAL_TYPE_GLOBAL);
     _js_fault_active = 0;
@@ -648,22 +670,22 @@ static JSValue js_call_guarded(JSContext *c, JSValueConst this_val, int argc, JS
      * timers, event handlers, Proxy traps in with(_winScope), etc.).  Without
      * this, hot functions like the Proxy has/get/set traps reach JIT_THRESHOLD
      * and get compiled to native code that embeds stale GC pointer constants,
-     * crashing on dispatch after heap mutation or longjmp recovery. */
-    _js_in_page_eval = 1;
+     * crashing on dispatch after heap mutation or longjmp recovery.
+     * NOTE: temporarily disabled for diagnostics. */
+    /* _js_in_page_eval = 1; */
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
-        _js_fault_active = 0;
         _js_in_page_eval = 0;
         /* Restore interrupts: ISR CLI was not paired with STI since we bypassed
          * the normal iret epilogue.  Kept disabled across longjmp to prevent a
          * timer IRQ from overwriting _js_fault_buf mid-flight. */
         __asm__ volatile("sti");
         JS_ResetAfterFault(c, _saved_frame);
-        /* Return JS_TRUE so the TypeScript caller can detect "fault recovery
-         * happened" and stop all further page-script execution (the heap is
-         * dirty after longjmp — any further JS on this heap risks a fatal
-         * second fault with _js_fault_active==0). */
-        return JS_TRUE;
+        _js_fault_active = 0;
+        /* Same sentinel return as evalGuarded — no heap allocation in the
+         * recovery path to avoid secondary faults from half-init'd objects. */
+        platform_serial_puts("[kernel] callGuarded fault recovered\n");
+        return JS_NewInt32(c, -9999);
     }
     JSValue result = JS_Call(c, argv[0], JS_UNDEFINED,
                              argc - 1,
@@ -3782,6 +3804,35 @@ int quickjs_initialize(void) {
 
 int quickjs_run_os(void) {
     if (!ctx) return -1;
+
+    /* ── Level-2 global fault recovery ──────────────────────────────────────
+     * This setjmp stays on the C stack for the entire OS lifetime (JS_Eval
+     * below runs the TypeScript event loop and never returns).  If a CPU
+     * fault occurs with _js_fault_active == 0 (e.g. QJS native dispatch
+     * after a callGuarded longjmp recovery), the ISR longjmps here instead
+     * of halting the OS.  We log the event and enter a safe idle loop.
+     *
+     * IMPORTANT: after a Level-2 recovery the ENTIRE TypeScript event loop
+     * is gone (its C stack frames were above the main JS_Eval, which was
+     * below our setjmp).  We cannot call ANY JavaScript — the scheduler hook,
+     * event listeners, rendering callbacks — all reference closures that
+     * captured alloca'd variables on the now-abandoned stack.  Calling them
+     * dereferences freed stack memory → guaranteed fault loop.
+     * The only safe action is to idle. */
+    extern jmp_buf       _js_global_fault_buf;
+    extern volatile int  _js_global_fault_active;
+    _js_global_fault_active = 1;
+    if (setjmp(_js_global_fault_buf) != 0) {
+        /* Secondary fault recovery — the JS world is completely gone.
+         * Do NOT try to call back into JavaScript.  Just idle forever. */
+        _js_fault_active = 0;
+        _js_in_page_eval = 0;
+        _js_global_fault_active = 0;
+        __asm__ volatile("sti");
+        platform_serial_puts("[kernel] GLOBAL fault recovery — JS state lost, entering idle\n");
+        for (;;) __asm__ volatile("hlt");
+    }
+
     JSValue result = JS_Eval(ctx, embedded_js_code, strlen(embedded_js_code),
                              "jsos.js", JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(result)) {
