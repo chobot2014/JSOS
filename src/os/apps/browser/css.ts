@@ -259,13 +259,22 @@ export function parseCSSColor(val: string): number | undefined {
  * Evaluate a simple CSS `calc()` expression.
  * Handles: px arithmetic, %, em (1em=16px), rem (1rem=16px).
  * Returns NaN if expression is too complex to evaluate.
+ * @param varResolver  Optional function to resolve CSS custom property values,
+ *                     receives the full var name (e.g. '--brand-color') and returns
+ *                     the resolved string value (or undefined).
  */
-export function evalCalc(expr: string, containerPx?: number): number {
+export function evalCalc(expr: string, containerPx?: number, varResolver?: (name: string) => string | undefined): number {
   var s = expr.replace(/calc\(/g, '(').replace(/\s+/g, ' ').trim();
   // Replace env(safe-area-inset-*) and other env() calls with 0 (no safe area in OS)
   s = s.replace(/env\([^)]*\)/g, '0');
-  // Replace var(--*) CSS custom properties with 0 (no runtime value available here)
-  s = s.replace(/var\(--[^)]*\)/g, '0');
+  // Replace var(--*) CSS custom properties using resolver if available, else 0
+  s = s.replace(/var\(\s*(--[\w-]+)(?:\s*,[^)]+)?\)/g, function(_m: string, name: string) {
+    if (varResolver) {
+      var resolved = varResolver(name);
+      if (resolved !== undefined && resolved !== '') return resolved;
+    }
+    return '0';
+  });
   // Replace unit suffixes with numeric px values
   s = s.replace(/([\d.]+)rem/g, (_m: string, n: string) => String(parseFloat(n) * 16));
   s = s.replace(/([\d.]+)em/g,  (_m: string, n: string) => String(parseFloat(n) * 16));

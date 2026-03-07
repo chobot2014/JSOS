@@ -10,6 +10,37 @@ import {
 import { getLayoutCache, setLayoutCache, layoutFingerprint, getBlockLayoutCache, setBlockLayoutCache, blockFingerprint, type BlockLayoutCache } from './cache.js';
 import { layoutGrid, layoutTable } from './layout-ext.js';
 
+// ── CSS transform translate parser ───────────────────────────────────────────
+/**
+ * Extract the net [tx, ty] pixel translation from a CSS transform string.
+ * Handles: translate(x,y), translateX(x), translateY(y), translate3d(x,y,z).
+ * Units: px, %, em (1em=16px). Ignores rotate/scale (visual only, not position-affecting here).
+ * Returns [0, 0] if no translate or unparseable.
+ */
+function _parseCSSTranslate(t: string): [number, number] {
+  var tx = 0, ty = 0;
+  var re = /(translateX|translateY|translate3d|translate)\(([^)]*)\)/g;
+  var m: RegExpExecArray | null;
+  var _parsePx = function(s: string): number {
+    s = s.trim();
+    if (s.endsWith('px')) return parseFloat(s);
+    if (s.endsWith('em')) return parseFloat(s) * 16;
+    if (s.endsWith('%'))  return 0; // cannot resolve % without element size — skip
+    return parseFloat(s) || 0;
+  };
+  while ((m = re.exec(t)) !== null) {
+    var fn   = m[1]!;
+    var args = m[2]!.split(',');
+    if (fn === 'translateX') { tx += _parsePx(args[0] ?? '0'); }
+    else if (fn === 'translateY') { ty += _parsePx(args[0] ?? '0'); }
+    else if (fn === 'translate' || fn === 'translate3d') {
+      tx += _parsePx(args[0] ?? '0');
+      ty += _parsePx(args[1] ?? '0');
+    }
+  }
+  return [tx, ty];
+}
+
 // ── Inline word-flow layout ───────────────────────────────────────────────────
 
 export function flowSpans(
@@ -937,6 +968,12 @@ function _layoutNodesImpl(
     var oofY     = oof.posTop    !== undefined ? oof.posTop
                  : oof.posBottom !== undefined ? Math.max(0, y - (oof.height ?? nodeLineH(oof)) - oof.posBottom)
                  : 0;
+    // Apply CSS transform translate offset (visual shift, does not affect layout flow)
+    if (oof.transform) {
+      var _tx = _parseCSSTranslate(oof.transform);
+      oofX += _tx[0];
+      oofY += _tx[1];
+    }
     var oofMaxX  = Math.min(oofX + oofW, maxX);
     var oofLh    = nodeLineH(oof);
     var oofSpans = transformSpans(oof.spans, oof.textTransform);

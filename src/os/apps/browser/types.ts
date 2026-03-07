@@ -88,6 +88,8 @@ export interface RenderNode {
   whiteSpace?:   'normal' | 'nowrap' | 'pre' | 'pre-wrap' | 'pre-line';
   textTransform?: 'none' | 'uppercase' | 'lowercase' | 'capitalize';
   textOverflow?:  'clip' | 'ellipsis';  // item 465
+  // CSS visual transform (translate/scale/rotate) — visual offset only, no layout shift
+  transform?:     string;
   lineHeight?:   number;
   letterSpacing?: number;  // px — extra space between characters
   wordSpacing?:   number;  // px — extra space between words

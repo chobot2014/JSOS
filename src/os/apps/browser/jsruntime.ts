@@ -2666,6 +2666,44 @@ export function createPageJS(
     removeEventListener(): void {}
   }
 
+  /** IDBKeyRange — wraps a lower/upper bound pair for IndexedDB cursor filtering */
+  class IDBKeyRange_ {
+    lower: unknown; upper: unknown; lowerOpen: boolean; upperOpen: boolean;
+    constructor(lower: unknown, upper: unknown, lowerOpen: boolean, upperOpen: boolean) {
+      this.lower = lower; this.upper = upper; this.lowerOpen = lowerOpen; this.upperOpen = upperOpen;
+    }
+    includes(key: unknown): boolean {
+      if (this.lower !== undefined) {
+        var cmpL = _idbCmp(key, this.lower);
+        if (cmpL < 0 || (cmpL === 0 && this.lowerOpen)) return false;
+      }
+      if (this.upper !== undefined) {
+        var cmpU = _idbCmp(key, this.upper);
+        if (cmpU > 0 || (cmpU === 0 && this.upperOpen)) return false;
+      }
+      return true;
+    }
+    static only(v: unknown): IDBKeyRange_ { return new IDBKeyRange_(v, v, false, false); }
+    static lowerBound(v: unknown, open = false): IDBKeyRange_ { return new IDBKeyRange_(v, undefined, open, false); }
+    static upperBound(v: unknown, open = false): IDBKeyRange_ { return new IDBKeyRange_(undefined, v, false, open); }
+    static bound(lower: unknown, upper: unknown, lowerOpen = false, upperOpen = false): IDBKeyRange_ {
+      return new IDBKeyRange_(lower, upper, lowerOpen, upperOpen);
+    }
+  }
+  /** IDB key comparison: numbers < dates < strings < binary */
+  function _idbCmp(a: unknown, b: unknown): number {
+    if (a === b) return 0;
+    if (typeof a === 'number' && typeof b === 'number') return a < b ? -1 : 1;
+    var sa = typeof a === 'string' ? a : String(a);
+    var sb = typeof b === 'string' ? b : String(b);
+    return sa < sb ? -1 : sa > sb ? 1 : 0;
+  }
+  /** Return true if key satisfies range (null range = all keys pass) */
+  function _idbInRange(key: unknown, range: unknown): boolean {
+    if (!range || !(range instanceof IDBKeyRange_)) return true;
+    return range.includes(key);
+  }
+
   class IDBObjectStore_ {
     _name: string; _db: IDBDatabase_; _data: Map<unknown, unknown>; _txn: IDBTransaction_ | null = null;
     constructor(name: string, db: IDBDatabase_, txn?: IDBTransaction_) { this._name = name; this._db = db; this._data = db._stores.get(name) ?? new Map(); db._stores.set(name, this._data); this._txn = txn ?? null; }
@@ -2673,13 +2711,32 @@ export function createPageJS(
     put(value: unknown, key?: unknown): IDBRequest_ { var r = this._req(); var k = key ?? (typeof value === 'object' && value ? (value as any)[this._db._keyPaths.get(this._name) ?? 'id'] : undefined) ?? Date.now(); this._data.set(k, value); r._succeed(k); return r; }
     add(value: unknown, key?: unknown): IDBRequest_ { return this.put(value, key); }
     get(key: unknown): IDBRequest_ { var r = this._req(); r._succeed(this._data.get(key)); return r; }
-    getAll(_range?: unknown, _count?: unknown): IDBRequest_ { var r = this._req(); r._succeed([...this._data.values()]); return r; }
-    getAllKeys(_range?: unknown, _count?: unknown): IDBRequest_ { var r = this._req(); r._succeed([...this._data.keys()]); return r; }
+    getAll(range?: unknown, count?: unknown): IDBRequest_ { var r = this._req(); var maxN = typeof count === 'number' ? count : Infinity; var vals: unknown[] = []; this._data.forEach((v, k) => { if (vals.length < maxN && _idbInRange(k, range)) vals.push(v); }); r._succeed(vals); return r; }
+    getAllKeys(range?: unknown, count?: unknown): IDBRequest_ { var r = this._req(); var maxN = typeof count === 'number' ? count : Infinity; var keys: unknown[] = []; this._data.forEach((_v, k) => { if (keys.length < maxN && _idbInRange(k, range)) keys.push(k); }); r._succeed(keys); return r; }
     delete(key: unknown): IDBRequest_ { var r = this._req(); this._data.delete(key); r._succeed(undefined); return r; }
     clear(): IDBRequest_ { var r = this._req(); this._data.clear(); r._succeed(undefined); return r; }
-    count(_range?: unknown): IDBRequest_ { var r = this._req(); r._succeed(this._data.size); return r; }
+    count(range?: unknown): IDBRequest_ { var r = this._req(); var n = 0; this._data.forEach((_v, k) => { if (_idbInRange(k, range)) n++; }); r._succeed(n); return r; }
     index(name: string): IDBIndex_ { return new IDBIndex_(name, this._db, this._txn); }
-    openCursor(_range?: unknown, _dir?: string): IDBRequest_ { var r = this._req(); var vals = [...this._data.entries()]; var i = 0; var cursor = vals.length > 0 ? { key: vals[0][0], value: vals[0][1], continue() { i++; r.result = i < vals.length ? ({ key: vals[i][0], value: vals[i][1], continue: cursor!.continue } as unknown) : null; if (r.onsuccess) setTimeout(() => r.onsuccess!({ target: r }), 0); } } : null; r.result = cursor; setTimeout(() => { if (r.onsuccess) r.onsuccess({ target: r }); }, 0); return r; }
+    openCursor(range?: unknown, dir?: string): IDBRequest_ {
+      var r = this._req();
+      var entries = [...this._data.entries()].filter(([k]) => _idbInRange(k, range));
+      if (dir === 'prev' || dir === 'prevunique') entries.reverse();
+      var i = 0;
+      function _makeCursor(): unknown {
+        if (i >= entries.length) return null;
+        var [k, v] = entries[i]!;
+        return { key: k, primaryKey: k, value: v,
+          continue() { i++; r.result = _makeCursor(); if (r.onsuccess) setTimeout(() => r.onsuccess!({ target: r }), 0); },
+          advance(n: number) { i += n; r.result = _makeCursor(); if (r.onsuccess) setTimeout(() => r.onsuccess!({ target: r }), 0); },
+          update(newVal: unknown): IDBRequest_ { entries[i]![1] = newVal; entries[i] && r['_storeRef']?.put(newVal, k); return new IDBRequest_(); },
+          delete(): IDBRequest_ { entries.splice(i, 1); return new IDBRequest_(); },
+        };
+      }
+      r.result = _makeCursor();
+      setTimeout(() => { if (r.onsuccess) r.onsuccess({ target: r }); }, 0);
+      return r;
+    }
+    openKeyCursor(range?: unknown, dir?: string): IDBRequest_ { return this.openCursor(range, dir); }
     createIndex(name: string, _keyPath: string, _opts?: unknown): IDBIndex_ { return new IDBIndex_(name, this._db, this._txn); }
   }
 
@@ -6809,7 +6866,7 @@ export function createPageJS(
     localStorage:  _localStorage,
     sessionStorage: _sessionStorage,
     indexedDB:     _indexedDB,
-    IDBKeyRange:   { only: (v: unknown) => v, lowerBound: (v: unknown) => v, upperBound: (v: unknown) => v, bound: (l: unknown) => l },
+    IDBKeyRange:   IDBKeyRange_,
 
     // Misc
     console: console_,

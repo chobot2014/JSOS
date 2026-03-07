@@ -596,6 +596,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (curCSS.textOverflow !== undefined) blk.textOverflow = curCSS.textOverflow; // item 465
     if (curCSS.whiteSpace !== undefined) blk.whiteSpace = curCSS.whiteSpace;
     if (curCSS.textTransform !== undefined) blk.textTransform = curCSS.textTransform;
+    if (curCSS.transform !== undefined && curCSS.transform !== 'none') blk.transform = curCSS.transform;
     if (curCSS.lineHeight !== undefined) blk.lineHeight = curCSS.lineHeight;
     if (curCSS.letterSpacing !== undefined) blk.letterSpacing = curCSS.letterSpacing;
     if (curCSS.wordSpacing !== undefined) blk.wordSpacing = curCSS.wordSpacing;
