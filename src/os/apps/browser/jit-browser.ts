@@ -658,7 +658,13 @@ function deduplicatedFetch(
   var entry: PendingFetch = { url, startedAt: Date.now(), callbacks: [callback] };
   _pendingFetches.set(url, entry);
 
-  (globalThis as any).os?.fetchAsync(url, (resp: any, err?: string) => {
+  var _osFetch = (globalThis as any).os?.fetchAsync;
+  if (!_osFetch) {
+    (kernel as any).serialPut('[dedup] os.fetchAsync not available!\n');
+    callback(null, 'os.fetchAsync unavailable');
+    return;
+  }
+  _osFetch(url, (resp: any, err?: string) => {
     var cbs = entry.callbacks;
     _pendingFetches.delete(url);
     for (var cb of cbs) {

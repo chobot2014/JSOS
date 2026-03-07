@@ -31,7 +31,7 @@ import { registerCommands } from '../ui/commands.js';
 import { QJSJITHook } from '../process/qjs-jit.js';
 import { JITOSKernels } from '../process/jit-os.js';
 import { JITBrowserEngine } from '../apps/browser/jit-browser.js';
-import { _registerJITStats } from './sdk.js';
+import { _registerJITStats, os } from './sdk.js';
 import { writebackTimer } from '../fs/buffer-cache.js';
 import { ntp } from '../net/ntp.js';
 import { detectHypervisor } from '../process/guest-addons.js';
@@ -124,6 +124,10 @@ function printBanner(): void {
 /** Main entry point - called by the bundled JS IIFE footer */
 function main(): void {
   setupConsole();
+
+  // Expose the SDK as globalThis.os for modules that access it dynamically
+  // (e.g. jit-browser.ts uses (globalThis as any).os?.fetchAsync).
+  (globalThis as any).os = os;
 
   // Mount virtual filesystems before any code reads them
   fs.mountVFS('/proc', procFS);
@@ -362,11 +366,26 @@ function main(): void {
       // kernel.yield() wakes any sleeping JS processes before input/render.
       // kernel.sleep() uses 'hlt' so the CPU is truly idle between frames
       // instead of burning 100% on a spin-wait.
-      for (;;) {
+      var _guardedRun = typeof (kernel as any).guardedRun === 'function'
+        ? (kernel as any).guardedRun.bind(kernel)
+        : null;
+      // Minimal event loop: ALL JS logic is inside guardedRun so that any
+      // #PF / #GP during a frame is caught.  No complex code between
+      // guardedRun calls — only kernel.sleep(8) which is a trivial C call.
+      // _tickChildProcs now auto-destroys faulting children, so the same
+      // corrupt child won't be re-ticked on the next frame.
+      var _tickFn = function() {
         kernel.yield();          // cooperative scheduler tick — unblock sleeping threads
-        wmInst.tick();           // poll input, render, composite, flip
-        init.tick(kernel.getUptime());          // respawn crashed services (item 718)
-        writebackTimer.tick(kernel.getTicks()); // flush dirty blocks every 30 s (item 189)
+        try { wmInst.tick(); } catch(e) { kernel.serialPut('[tick] wm error: ' + String(e).slice(0, 100) + '\n'); }
+        try { init.tick(kernel.getUptime()); } catch(e) { kernel.serialPut('[tick] init error: ' + String(e).slice(0, 100) + '\n'); }
+        try { writebackTimer.tick(kernel.getTicks()); } catch(e) { kernel.serialPut('[tick] wb error: ' + String(e).slice(0, 100) + '\n'); }
+      };
+      for (;;) {
+        if (_guardedRun) {
+          _guardedRun(_tickFn);
+        } else {
+          try { _tickFn(); } catch (_) {}
+        }
         kernel.sleep(8);         // halt CPU until next timer tick (~10 ms at 100 Hz)
       }
     }

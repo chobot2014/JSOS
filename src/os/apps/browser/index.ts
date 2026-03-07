@@ -2161,9 +2161,14 @@ export class BrowserApp implements App {
     this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
 
     // Build inline-sheet rules immediately (synchronous)
-    var sheets: CSSRule[] = r.styles.length > 0
-      ? parseStylesheet(r.styles.join('\n'))
-      : [];
+    var sheets: CSSRule[] = [];
+    try {
+      sheets = r.styles.length > 0
+        ? parseStylesheet(r.styles.join('\n'))
+        : [];
+    } catch (_cssErr) {
+      os.debug.log('[browser] parseStylesheet THREW:', String(_cssErr).slice(0, 200));
+    }
 
     // ── Pre-apply cached external CSS — avoids deferred re-layout on same-site nav
     var _uncachedCSSLinks: string[] = [];
@@ -2177,12 +2182,17 @@ export class BrowserApp implements App {
         _uncachedCSSLinks.push(_cssHref);
       }
     }
+    os.debug.log('[browser] css:', sheets.length, 'rules, uncached:', _uncachedCSSLinks.length);
 
     // ── Pass 2: re-parse with all available CSS (inline + any cached external) ─
     if (sheets.length > 0) {
-      r = parseHTML(html, sheets);
-      this._forms       = r.forms;
-      this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
+      try {
+        r = parseHTML(html, sheets);
+        this._forms       = r.forms;
+        this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
+      } catch (_p2Err) {
+        os.debug.log('[browser] pass2 parseHTML THREW:', String(_p2Err).slice(0, 200));
+      }
     }
 
     // Dispose any previous page JS before setting up the new page
@@ -2248,6 +2258,7 @@ export class BrowserApp implements App {
     }
 
     // Start JS engine for the new page (after layout so widgets have positions)
+    os.debug.log('[browser] about to createPageJS, scripts:', r.scripts.length);
     if (r.scripts.length > 0) {
       var self2 = this;
       this._jsStartMs = Date.now();

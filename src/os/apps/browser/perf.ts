@@ -4,7 +4,7 @@
  * Implements the W3C Performance Timeline, Navigation Timing, Resource Timing,
  * User Timing (marks + measures), and PerformanceObserver.
  *
- * Timing source: kernel.getTicks() × 10 gives milliseconds at 100 Hz PIT
+ * Timing source: kernel.getTicks() gives milliseconds at 1000 Hz PIT
  * resolution. For sub-tick interpolation we store a wall δ at creation time.
  */
 
@@ -146,7 +146,7 @@ export class BrowserPerformance {
 
   now(): number {
     if (typeof kernel !== 'undefined' && kernel.getTicks) {
-      return (kernel.getTicks() - this._originTick) * 10;
+      return (kernel.getTicks() - this._originTick);  // 1 tick = 1 ms at 1000 Hz
     }
     return Date.now();
   }

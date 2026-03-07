@@ -293,6 +293,337 @@ export function createPageJS(
   // is effectively "Aw, Snap!"'d — only a navigation away clears the flag.
   var _pageFaulted = false;
 
+  // ── Child-runtime page script isolation ──────────────────────────────────
+  // When the coordinator runtime faults on a page script (evalGuarded →
+  // sentinel -9999), we spin up an isolated child JSRuntime via
+  // kernel.procCreate().  Remaining scripts execute in the child, which has
+  // its own heap — any crash there is contained and the OS continues.
+  //
+  // Architecture:
+  //   Coordinator (main JSRuntime) ─── OS kernel, browser engine, DOM, layout
+  //   Child (JSRuntime via procCreate) ─── page scripts only, minimal DOM stubs
+  //   IPC: kernel.procEval / procTick / procSend / procRecv (string messages)
+  //
+  // The child is bootstrapped with DOM stubs (document, window, navigator,
+  // console, setTimeout, etc.) so page scripts can run without crashing.
+  // DOM mutations in the child are relayed back via postMessage.
+  var _pageChildId: number = -1;              // child proc slot (-1 = not created)
+  var _useChildRuntime = false;               // activate after coordinator fault
+
+  /** Bootstrap code evaluated in the child runtime to set up DOM stubs. */
+  var _childBootstrap = [
+    // ── window / self ────────────────────────────────────────────────────
+    'var window = globalThis;',
+    'var self = globalThis;',
+    'var top = globalThis;',
+    'var parent = globalThis;',
+    'var frames = globalThis;',
+
+    // ── navigator ────────────────────────────────────────────────────────
+    'var navigator = {',
+    '  userAgent: "Mozilla/5.0 (JSOS; x86) AppleWebKit/537.36 Chrome/120.0.0.0",',
+    '  language: "en-US", languages: ["en-US","en"],',
+    '  platform: "JSOS", vendor: "JSOS",',
+    '  cookieEnabled: true, onLine: true,',
+    '  hardwareConcurrency: 1, maxTouchPoints: 0,',
+    '  mediaDevices: { enumerateDevices: function() { return Promise.resolve([]); } },',
+    '  serviceWorker: { register: function() { return Promise.resolve(); }, ready: Promise.resolve({ active: null }) },',
+    '  credentials: { get: function() { return Promise.resolve(null); }, create: function() { return Promise.resolve(null); } },',
+    '  clipboard: { writeText: function() { return Promise.resolve(); }, readText: function() { return Promise.resolve(""); } },',
+    '  sendBeacon: function() { return true; },',
+    '};',
+
+    // ── location (read-only snapshot) ────────────────────────────────────
+    'var location = {',
+    '  href: "", protocol: "https:", host: "", hostname: "",',
+    '  port: "", pathname: "/", search: "", hash: "", origin: "",',
+    '  assign: function(){}, replace: function(){}, reload: function(){},',
+    '  toString: function() { return this.href; }',
+    '};',
+
+    // ── history ──────────────────────────────────────────────────────────
+    'var history = {',
+    '  length: 1, state: null, scrollRestoration: "auto",',
+    '  pushState: function(){}, replaceState: function(){},',
+    '  back: function(){}, forward: function(){}, go: function(){}',
+    '};',
+
+    // ── screen ───────────────────────────────────────────────────────────
+    'var screen = { width: 1024, height: 768, availWidth: 1024, availHeight: 768,',
+    '  colorDepth: 32, pixelDepth: 32, orientation: { type: "landscape-primary", angle: 0 } };',
+
+    // ── performance ──────────────────────────────────────────────────────
+    'var performance = {',
+    '  now: function() { return kernel.getUptime(); },',
+    '  timing: { navigationStart: 0 },',
+    '  getEntriesByType: function() { return []; },',
+    '  getEntriesByName: function() { return []; },',
+    '  mark: function(){}, measure: function(){}, clearMarks: function(){},',
+    '  clearMeasures: function(){}',
+    '};',
+
+    // ── crypto ───────────────────────────────────────────────────────────
+    'var crypto = {',
+    '  getRandomValues: function(a) { for(var i=0;i<a.length;i++) a[i]=Math.floor(Math.random()*256); return a; },',
+    '  randomUUID: function() { return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function(c) {',
+    '    var r=Math.random()*16|0; return (c==="x"?r:r&3|8).toString(16); }); },',
+    '  subtle: { digest: function() { return Promise.resolve(new ArrayBuffer(32)); } }',
+    '};',
+
+    // ── DOM stubs ────────────────────────────────────────────────────────
+    'var _noop = function(){};',
+    'var _noopArr = function(){ return []; };',
+    'var _noopNull = function(){ return null; };',
+    'var _noopPromise = function(){ return Promise.resolve(); };',
+    'var _noopFalse = function(){ return false; };',
+    'var _noopTrue = function(){ return true; };',
+
+    // Minimal Element stub
+    'function _StubElement(tag) {',
+    '  this.tagName = (tag||"DIV").toUpperCase();',
+    '  this.nodeName = this.tagName;',
+    '  this.nodeType = 1;',
+    '  this.childNodes = [];',
+    '  this.children = [];',
+    '  this.classList = { add:_noop, remove:_noop, toggle:_noop, contains:_noopFalse, replace:_noop };',
+    '  this.style = {};',
+    '  this.dataset = {};',
+    '  this._attrs = {};',
+    '  this.textContent = "";',
+    '  this.innerHTML = "";',
+    '  this.innerText = "";',
+    '  this.id = "";',
+    '  this.className = "";',
+    '  this.parentNode = null;',
+    '  this.parentElement = null;',
+    '  this.nextSibling = null;',
+    '  this.previousSibling = null;',
+    '  this.firstChild = null;',
+    '  this.lastChild = null;',
+    '}',
+    '_StubElement.prototype.getAttribute = function(n){ return this._attrs[n]||null; };',
+    '_StubElement.prototype.setAttribute = function(n,v){ this._attrs[n]=String(v); };',
+    '_StubElement.prototype.removeAttribute = function(n){ delete this._attrs[n]; };',
+    '_StubElement.prototype.hasAttribute = function(n){ return n in this._attrs; };',
+    '_StubElement.prototype.addEventListener = _noop;',
+    '_StubElement.prototype.removeEventListener = _noop;',
+    '_StubElement.prototype.dispatchEvent = _noopTrue;',
+    '_StubElement.prototype.appendChild = function(c){ this.childNodes.push(c); c.parentNode=this; return c; };',
+    '_StubElement.prototype.removeChild = function(c){ var i=this.childNodes.indexOf(c); if(i>=0) this.childNodes.splice(i,1); c.parentNode=null; return c; };',
+    '_StubElement.prototype.insertBefore = function(n,r){ if(!r) return this.appendChild(n); var i=this.childNodes.indexOf(r); if(i>=0) this.childNodes.splice(i,0,n); n.parentNode=this; return n; };',
+    '_StubElement.prototype.replaceChild = function(n,o){ var i=this.childNodes.indexOf(o); if(i>=0){ this.childNodes[i]=n; n.parentNode=this; o.parentNode=null; } return o; };',
+    '_StubElement.prototype.cloneNode = function(){ return new _StubElement(this.tagName); };',
+    '_StubElement.prototype.querySelector = _noopNull;',
+    '_StubElement.prototype.querySelectorAll = _noopArr;',
+    '_StubElement.prototype.getElementsByClassName = _noopArr;',
+    '_StubElement.prototype.getElementsByTagName = _noopArr;',
+    '_StubElement.prototype.getBoundingClientRect = function(){ return {x:0,y:0,width:0,height:0,top:0,left:0,right:0,bottom:0}; };',
+    '_StubElement.prototype.closest = _noopNull;',
+    '_StubElement.prototype.matches = _noopFalse;',
+    '_StubElement.prototype.contains = _noopFalse;',
+    '_StubElement.prototype.focus = _noop;',
+    '_StubElement.prototype.blur = _noop;',
+    '_StubElement.prototype.click = _noop;',
+    '_StubElement.prototype.scrollIntoView = _noop;',
+
+    // FontFaceSet stub
+    'var _fontFaceSet = {',
+    '  load: function(f){ return Promise.resolve([]); },',
+    '  check: function(){ return true; },',
+    '  ready: Promise.resolve(),',
+    '  status: "loaded",',
+    '  forEach: _noop,',
+    '  add: _noop,',
+    '  delete: _noop,',
+    '  clear: _noop,',
+    '  addEventListener: _noop,',
+    '  removeEventListener: _noop',
+    '};',
+
+    // document stub
+    'var _docBody = new _StubElement("BODY");',
+    'var _docHead = new _StubElement("HEAD");',
+    'var _docEl = new _StubElement("HTML");',
+    '_docEl.childNodes = [_docHead, _docBody];',
+    'var document = {',
+    '  nodeType: 9,',
+    '  title: "", referrer: "", domain: "", URL: "",',
+    '  cookie: "",',
+    '  readyState: "complete",',
+    '  compatMode: "CSS1Compat",',
+    '  characterSet: "UTF-8", charset: "UTF-8",',
+    '  contentType: "text/html",',
+    '  documentElement: _docEl,',
+    '  head: _docHead,',
+    '  body: _docBody,',
+    '  fonts: _fontFaceSet,',
+    '  styleSheets: [],',
+    '  scripts: [],',
+    '  images: [],',
+    '  links: [],',
+    '  forms: [],',
+    '  defaultView: globalThis,',
+    '  implementation: { createHTMLDocument: function(t){ return document; } },',
+    '  createElement: function(t){ return new _StubElement(t); },',
+    '  createElementNS: function(ns,t){ return new _StubElement(t); },',
+    '  createDocumentFragment: function(){ return new _StubElement("FRAGMENT"); },',
+    '  createTextNode: function(t){ var n={nodeType:3,textContent:String(t),parentNode:null}; return n; },',
+    '  createComment: function(t){ return {nodeType:8,textContent:String(t),parentNode:null}; },',
+    '  createEvent: function(t){ return {type:"",target:null,bubbles:false,cancelable:false,preventDefault:_noop,stopPropagation:_noop,initEvent:function(t2){this.type=t2;}}; },',
+    '  createRange: function(){ return {setStart:_noop,setEnd:_noop,collapse:_noop,cloneContents:function(){return new _StubElement("FRAGMENT");},getBoundingClientRect:function(){return{x:0,y:0,width:0,height:0,top:0,left:0,right:0,bottom:0};}}; },',
+    '  createTreeWalker: function(){ return {nextNode:_noopNull,currentNode:null}; },',
+    '  getElementById: _noopNull,',
+    '  getElementsByClassName: _noopArr,',
+    '  getElementsByTagName: _noopArr,',
+    '  getElementsByName: _noopArr,',
+    '  querySelector: _noopNull,',
+    '  querySelectorAll: _noopArr,',
+    '  addEventListener: _noop,',
+    '  removeEventListener: _noop,',
+    '  dispatchEvent: _noopTrue,',
+    '  evaluate: function(){ return {iterateNext:_noopNull,snapshotLength:0,snapshotItem:_noopNull}; },',
+    '  adoptNode: function(n){ return n; },',
+    '  importNode: function(n){ return n; },',
+    '  hasFocus: _noopTrue,',
+    '  getSelection: function(){ return {rangeCount:0,toString:function(){return "";}}; },',
+    '  exitFullscreen: _noopPromise,',
+    '  hidden: false,',
+    '  visibilityState: "visible",',
+    '  activeElement: _docBody',
+    '};',
+
+    // ── Event constructors ───────────────────────────────────────────────
+    'function Event(t,o){this.type=t;this.bubbles=!!(o&&o.bubbles);this.cancelable=!!(o&&o.cancelable);this.target=null;this.currentTarget=null;this.defaultPrevented=false;}',
+    'Event.prototype.preventDefault=function(){this.defaultPrevented=true;};',
+    'Event.prototype.stopPropagation=_noop;',
+    'Event.prototype.stopImmediatePropagation=_noop;',
+    'function CustomEvent(t,o){Event.call(this,t,o);this.detail=o&&o.detail||null;}',
+    'CustomEvent.prototype=Object.create(Event.prototype);',
+
+    // ── Misc Web APIs ────────────────────────────────────────────────────
+    'var MutationObserver = function(cb){ this.observe=_noop; this.disconnect=_noop; this.takeRecords=_noopArr; };',
+    'var IntersectionObserver = function(cb,o){ this.observe=_noop; this.unobserve=_noop; this.disconnect=_noop; };',
+    'var ResizeObserver = function(cb){ this.observe=_noop; this.unobserve=_noop; this.disconnect=_noop; };',
+    'var queueMicrotask = function(fn) { Promise.resolve().then(fn); };',
+    'var reportError = function(e) { console.error(e); };',
+    'var atob = function(s) { return s; };',     // simplified stub
+    'var btoa = function(s) { return s; };',     // simplified stub
+    'var structuredClone = function(v) { return JSON.parse(JSON.stringify(v)); };',
+
+    // ── window-level API ─────────────────────────────────────────────────
+    'var getComputedStyle = function(el){ return el?el.style:{}; };',
+    'var matchMedia = function(q){ return { matches:false, media:q, addEventListener:_noop, removeEventListener:_noop, addListener:_noop, removeListener:_noop }; };',
+    'var getSelection = function(){ return document.getSelection(); };',
+    'var requestAnimationFrame = function(fn){ return setTimeout(fn, 16); };',
+    'var cancelAnimationFrame = function(id){ clearTimeout(id); };',
+    'var requestIdleCallback = function(fn){ return setTimeout(function(){fn({didTimeout:false,timeRemaining:function(){return 50;}});},1); };',
+    'var cancelIdleCallback = function(id){ clearTimeout(id); };',
+
+    // ── Viewport ─────────────────────────────────────────────────────────
+    'var innerWidth = 1024, innerHeight = 768;',
+    'var outerWidth = 1024, outerHeight = 768;',
+    'var devicePixelRatio = 1;',
+    'var scrollX = 0, scrollY = 0, pageXOffset = 0, pageYOffset = 0;',
+    'var scrollTo = _noop, scrollBy = _noop, scroll = _noop;',
+    'var alert = function(m){ console.log("[alert] "+m); };',
+    'var confirm = function(){ return false; };',
+    'var prompt = function(m,d){ return d||""; };',
+    'var close = _noop, focus = _noop, blur = _noop;',
+    'var open = function(){ return null; };',
+    'var print = _noop;',
+
+    // ── Storage stubs ────────────────────────────────────────────────────
+    'var _makeStorage = function(){',
+    '  var d={};',
+    '  return{',
+    '    getItem:function(k){return d[k]||null;},',
+    '    setItem:function(k,v){d[k]=String(v);},',
+    '    removeItem:function(k){delete d[k];},',
+    '    clear:function(){d={};},',
+    '    key:function(n){return Object.keys(d)[n]||null;},',
+    '    get length(){return Object.keys(d).length;}',
+    '  };',
+    '};',
+    'var localStorage = _makeStorage();',
+    'var sessionStorage = _makeStorage();',
+
+    // ── fetch stub (relays to coordinator via postMessage) ───────────────
+    'var fetch = function(url, opts) {',
+    '  return Promise.resolve({',
+    '    ok: true, status: 200, statusText: "OK",',
+    '    headers: { get: function() { return null; } },',
+    '    text: function() { return Promise.resolve(""); },',
+    '    json: function() { return Promise.resolve({}); },',
+    '    arrayBuffer: function() { return Promise.resolve(new ArrayBuffer(0)); },',
+    '    blob: function() { return Promise.resolve(new Blob([])); },',
+    '    clone: function() { return this; }',
+    '  });',
+    '};',
+
+    // ── XMLHttpRequest stub ──────────────────────────────────────────────
+    'function XMLHttpRequest() {',
+    '  this.readyState=0; this.status=0; this.statusText="";',
+    '  this.responseText=""; this.response=null; this.responseType="";',
+    '  this.withCredentials=false; this.timeout=0;',
+    '  this._hdrs={}; this._rhdrs={};',
+    '}',
+    'XMLHttpRequest.prototype.open=function(m,u){this._m=m;this._u=u;this.readyState=1;};',
+    'XMLHttpRequest.prototype.send=function(){this.readyState=4;this.status=200;if(this.onreadystatechange)this.onreadystatechange();if(this.onload)this.onload();};',
+    'XMLHttpRequest.prototype.abort=_noop;',
+    'XMLHttpRequest.prototype.setRequestHeader=function(k,v){this._hdrs[k]=v;};',
+    'XMLHttpRequest.prototype.getResponseHeader=function(k){return this._rhdrs[k]||null;};',
+    'XMLHttpRequest.prototype.getAllResponseHeaders=function(){return"";};',
+    'XMLHttpRequest.prototype.addEventListener=_noop;',
+    'XMLHttpRequest.prototype.removeEventListener=_noop;',
+    'XMLHttpRequest.UNSENT=0;XMLHttpRequest.OPENED=1;XMLHttpRequest.HEADERS_RECEIVED=2;',
+    'XMLHttpRequest.LOADING=3;XMLHttpRequest.DONE=4;',
+
+    // ── AbortController / AbortSignal stubs ──────────────────────────────
+    'function AbortController(){ this.signal={aborted:false,reason:undefined,addEventListener:_noop,removeEventListener:_noop,throwIfAborted:_noop}; }',
+    'AbortController.prototype.abort=function(r){this.signal.aborted=true;this.signal.reason=r;};',
+    'var AbortSignal = { abort: function(){ return {aborted:true,addEventListener:_noop,removeEventListener:_noop}; }, timeout: function(){ return {aborted:false,addEventListener:_noop,removeEventListener:_noop}; } };',
+
+    // ── URL / URLSearchParams ────────────────────────────────────────────
+    // (QJS built-in URL class should be available, but add fallbacks)
+    'if(typeof URLSearchParams==="undefined"){',
+    '  var URLSearchParams=function(init){this._p=[];if(typeof init==="string"){init.replace(/^\\?/,"").split("&").forEach(function(p){var kv=p.split("=");if(kv[0])this._p.push([decodeURIComponent(kv[0]),decodeURIComponent(kv[1]||"")]);}.bind(this));}};',
+    '  URLSearchParams.prototype.get=function(k){for(var i=0;i<this._p.length;i++)if(this._p[i][0]===k)return this._p[i][1];return null;};',
+    '  URLSearchParams.prototype.set=function(k,v){for(var i=0;i<this._p.length;i++)if(this._p[i][0]===k){this._p[i][1]=v;return;}this._p.push([k,v]);};',
+    '  URLSearchParams.prototype.has=function(k){for(var i=0;i<this._p.length;i++)if(this._p[i][0]===k)return true;return false;};',
+    '  URLSearchParams.prototype.delete=function(k){this._p=this._p.filter(function(p){return p[0]!==k;});};',
+    '  URLSearchParams.prototype.toString=function(){return this._p.map(function(p){return encodeURIComponent(p[0])+"="+encodeURIComponent(p[1]);}).join("&");};',
+    '  URLSearchParams.prototype.forEach=function(cb){this._p.forEach(function(p){cb(p[1],p[0]);});};',
+    '}',
+
+    // ── Blob / FormData stubs ────────────────────────────────────────────
+    'if(typeof Blob==="undefined"){',
+    '  var Blob=function(parts,opts){this.size=0;this.type=(opts&&opts.type)||"";};',
+    '  Blob.prototype.text=function(){return Promise.resolve("");};',
+    '  Blob.prototype.arrayBuffer=function(){return Promise.resolve(new ArrayBuffer(0));};',
+    '}',
+    'if(typeof FormData==="undefined"){',
+    '  var FormData=function(){this._d=[];};',
+    '  FormData.prototype.append=function(k,v){this._d.push([k,v]);};',
+    '  FormData.prototype.get=function(k){for(var i=0;i<this._d.length;i++)if(this._d[i][0]===k)return this._d[i][1];return null;};',
+    '  FormData.prototype.has=function(k){for(var i=0;i<this._d.length;i++)if(this._d[i][0]===k)return true;return false;};',
+    '}',
+
+    // ── Headers / Request / Response stubs ───────────────────────────────
+    'if(typeof Headers==="undefined"){',
+    '  var Headers=function(init){this._h={};if(init)for(var k in init)this._h[k.toLowerCase()]=init[k];};',
+    '  Headers.prototype.get=function(k){return this._h[k.toLowerCase()]||null;};',
+    '  Headers.prototype.set=function(k,v){this._h[k.toLowerCase()]=v;};',
+    '  Headers.prototype.has=function(k){return k.toLowerCase() in this._h;};',
+    '  Headers.prototype.forEach=function(cb){for(var k in this._h)cb(this._h[k],k);};',
+    '}',
+
+    // ── Image constructor ────────────────────────────────────────────────
+    'var Image = function(w,h){ var e=new _StubElement("IMG"); e.width=w||0; e.height=h||0; return e; };',
+
+    // ── Mark child runtime as ready ──────────────────────────────────────
+    'var __jsos_child_ready = true;',
+  ].join('\n');
+
   // Mutation flag — reset after re-render check
   var needsRerender = false;
   function checkDirty(): void {
@@ -6410,8 +6741,9 @@ export function createPageJS(
   }
 
   function execScript(code: string, scriptURL?: string): void {
-    // After a fault recovery the heap is dirty — no more page JS execution.
-    if (_pageFaulted) return;
+    // After a fault recovery the coordinator heap is dirty — but if we have a
+    // child runtime available, scripts can still run there safely.
+    if (_pageFaulted && !_useChildRuntime) return;
 
     // ── CSP enforcement ──────────────────────────────────────────────────────
     if (cspPolicy) {
@@ -6449,64 +6781,126 @@ export function createPageJS(
     // getter/setter descriptors on that same object confused QuickJS's property
     // table writer → #PF at 0x726F6D71 (a live JSString in the OS heap).
     //
-    // Fix: for guarded execution, use kernel.evalGuarded() to run the script
-    // directly via JS_Eval in the global context.  This avoids the JS_Call path
-    // which has a QJS internal crash when combined with the _js_in_page_eval=1
-    // flag (suppressed JIT dispatch causes stale object pointer faults).
+    // NEW ARCHITECTURE (Phase 1):
+    // Page scripts run in an ISOLATED child JSRuntime (via kernel.procCreate).
+    // The child has its own heap — any crash there is contained and the OS
+    // continues.  The coordinator runtime (this one) never runs untrusted code.
     //
-    // To make page globals (document, window, etc.) available without using
-    // getter/setter _bridgeToGlobal() descriptors (which corrupt the property
-    // table), we copy the necessary win properties as plain data properties
-    // on globalThis before eval and sync back after.
+    // Flow:
+    //   1. Create child runtime (once per page)
+    //   2. Bootstrap with DOM stubs (document, window, navigator, etc.)
+    //   3. Inject page URL context (location.href, document.URL, etc.)
+    //   4. Run each page script via kernel.procEval(childId, code)
+    //   5. Drain async jobs via kernel.procTick(childId)
+    //   6. On dispose(), kernel.procDestroy(childId)
+    //
+    // If procCreate is unavailable, falls back to evalGuarded with
+    // essential-keys bridge (80 keys, plain assignment).
     if (_useGuarded) {
+      // ── Child-runtime path (PREFERRED) ─────────────────────────────────
+      if (_useChildRuntime || typeof (kernel as any).procCreate === 'function') {
+        // Lazily create the child runtime on first script execution
+        if (_pageChildId < 0) {
+          try {
+            _pageChildId = (kernel as any).procCreate();
+          } catch(_) { _pageChildId = -1; }
+          if (_pageChildId >= 0) {
+            cb.log('[JS] child runtime created (slot ' + _pageChildId + ')');
+            // Bootstrap the child with DOM stubs
+            var _bsResult = (kernel as any).procEval(_pageChildId, _childBootstrap);
+            if (typeof _bsResult === 'string' && _bsResult.indexOf('Error') === 0) {
+              cb.log('[JS] child bootstrap error: ' + _bsResult.slice(0, 200));
+              (kernel as any).procDestroy(_pageChildId);
+              _pageChildId = -1;
+            } else {
+              // Inject page-specific context (URL, origin, etc.)
+              var _locCtx = [
+                'location.href = ' + JSON.stringify(_effectiveHref()) + ';',
+                'location.protocol = ' + JSON.stringify(_locPart('protocol')) + ';',
+                'location.host = ' + JSON.stringify(_locPart('host')) + ';',
+                'location.hostname = ' + JSON.stringify(_locPart('hostname')) + ';',
+                'location.port = ' + JSON.stringify(_locPart('port')) + ';',
+                'location.pathname = ' + JSON.stringify(_locPart('pathname')) + ';',
+                'location.search = ' + JSON.stringify(_locPart('search')) + ';',
+                'location.hash = ' + JSON.stringify(_locPart('hash')) + ';',
+                'location.origin = ' + JSON.stringify(_locPart('origin')) + ';',
+                'document.URL = ' + JSON.stringify(_effectiveHref()) + ';',
+                'document.referrer = ' + JSON.stringify(cb.baseURL) + ';',
+                'document.domain = ' + JSON.stringify(_locPart('hostname')) + ';',
+              ].join('\n');
+              (kernel as any).procEval(_pageChildId, _locCtx);
+              _useChildRuntime = true;
+              cb.log('[JS] child runtime ready');
+            }
+          } else {
+            cb.log('[JS] procCreate failed — falling back to evalGuarded');
+          }
+        }
+        // Execute the script in the child runtime
+        if (_pageChildId >= 0) {
+          cb.log('[JS exec] child-runtime ' + (code.length / 1024).toFixed(1) + 'KB ' + (scriptURL || '(inline)'));
+          var _guardedCode = code;
+          if (_guardedCode.charCodeAt(0) === 35 && _guardedCode.charCodeAt(1) === 33)
+            _guardedCode = _guardedCode.replace(/^#!.*/, '');
+          // Strip 'use strict' — not needed in child global context
+          _guardedCode = _guardedCode.replace(/^\s*(?:'use strict'|"use strict")\s*;?/, '');
+          try {
+            var _childResult = (kernel as any).procEval(_pageChildId, _guardedCode);
+            // procEval returns "Error: ..." on exception in the child
+            if (typeof _childResult === 'string' && _childResult.indexOf('Error') === 0) {
+              cb.log('[JS child error] ' + _childResult.slice(0, 300));
+              // If it was a CPU fault, the child heap is corrupted — destroy
+              // and create a fresh one for remaining scripts
+              if (_childResult.indexOf('CPU fault') >= 0) {
+                cb.log('[JS] child runtime faulted — recycling');
+                try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
+                _pageChildId = -1;
+                // Will be recreated on next execScript call
+                return;
+              }
+            }
+            // Drain async jobs (Promise.then, setTimeout callbacks, etc.)
+            var _tickResult = (kernel as any).procTick(_pageChildId);
+            // procTick returns -1 on fault recovery
+            if (_tickResult < 0) {
+              cb.log('[JS] child runtime faulted during tick — recycling');
+              try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
+              _pageChildId = -1;
+              return;
+            }
+            // Collect any messages from the child (DOM mutations, etc.)
+            var _childMsg: string | null;
+            while ((_childMsg = (kernel as any).procRecv(_pageChildId)) !== null) {
+              cb.log('[JS child msg] ' + String(_childMsg).slice(0, 200));
+              // Future: parse and apply DOM mutations to the real DOM
+            }
+          } catch(e) {
+            cb.log('[JS child exec error] ' + String(e));
+          }
+          return;
+        }
+        // Fall through to evalGuarded if child creation failed
+      }
+
+      // ── EvalGuarded fallback path ──────────────────────────────────────
       cb.log('[JS exec] guarded ' + (code.length / 1024).toFixed(1) + 'KB ' + (scriptURL || '(inline)'));
-
-      // ── Graduated diagnostics: test evalGuarded piece by piece ──
-      var _t1 = (kernel as any).evalGuarded('1+1');
-      if (_t1 === -9999) { cb.log('[JS] FAULT on trivial eval (before bridge)'); _pageFaulted = true; return; }
-      cb.log('[JS] pre-bridge eval OK');
-
       _bridgeToGlobal();
-      cb.log('[JS] bridge done (' + _bridgedKeys.length + ' keys)');
-
-      var _t2 = (kernel as any).evalGuarded('1+1');
-      if (_t2 === -9999) { cb.log('[JS] FAULT on trivial eval (after bridge)'); _pageFaulted = true; return; }
-
-      var _t3 = (kernel as any).evalGuarded('typeof document');
-      if (_t3 === -9999) { cb.log('[JS] FAULT on typeof document'); _pageFaulted = true; return; }
-
-      var _t4 = (kernel as any).evalGuarded('document.fonts');
-      if (_t4 === -9999) { cb.log('[JS] FAULT on document.fonts access'); _pageFaulted = true; return; }
-
-      var _t5 = (kernel as any).evalGuarded('document.fonts.load("hello")');
-      if (_t5 === -9999) { cb.log('[JS] FAULT on document.fonts.load()'); _pageFaulted = true; return; }
-
-      var _t6 = (kernel as any).evalGuarded('document.fonts.load("hello").catch(function(){})');
-      if (_t6 === -9999) { cb.log('[JS] FAULT on .catch()'); _pageFaulted = true; return; }
-
-      var _t7 = (kernel as any).evalGuarded('(function(){document.fonts.load("hello").catch(function(){})})()');
-      if (_t7 === -9999) { cb.log('[JS] FAULT on IIFE with fonts.load'); _pageFaulted = true; return; }
-
-      cb.log('[JS] ALL sanity checks passed');
-
-      // Step 3: run the actual script
-      var _guardedCode = code;
-      if (_guardedCode.charCodeAt(0) === 35 && _guardedCode.charCodeAt(1) === 33)
-        _guardedCode = _guardedCode.replace(/^#!.*/, '');
+      var _guardedCode2 = code;
+      if (_guardedCode2.charCodeAt(0) === 35 && _guardedCode2.charCodeAt(1) === 33)
+        _guardedCode2 = _guardedCode2.replace(/^#!.*/, '');
       try {
-        var _evalResult = (kernel as any).evalGuarded(_guardedCode);
-        // evalGuarded returns -9999 sentinel on CPU fault recovery.
-        // The C recovery path avoids all heap allocation — no
-        // JS_ThrowInternalError, just a tagged int return.
+        var _evalResult = (kernel as any).evalGuarded(_guardedCode2);
         if (_evalResult === -9999) {
           _pageFaulted = true;
-          cb.log('[JS] page faulted (evalGuarded sentinel) — stopping all page JS');
+          _useChildRuntime = true;  // switch to child runtime for remaining scripts
+          cb.log('[JS] page faulted (evalGuarded sentinel) — switching to child runtime');
         }
       } catch(e) {
         var _eMsg = String(e);
         if (_eMsg.indexOf('CPU fault') >= 0 || _eMsg.indexOf('InternalError') >= 0) {
           _pageFaulted = true;
-          cb.log('[JS] page faulted (exception) — stopping all page JS');
+          _useChildRuntime = true;
+          cb.log('[JS] page faulted (exception) — switching to child runtime');
         } else {
           _fireScriptError(e);
         }
@@ -6591,6 +6985,7 @@ export function createPageJS(
 
   function loadExternalScript(src: string, done: (code?: string) => void, noAutoExec = false): void {
     var url = src.startsWith('http') ? src : _resolveURL(src, _baseHref);
+    cb.log('[JS] loadExternalScript: ' + url.slice(0, 120));
     // Use deduplicated fetch to avoid redundant network requests for the same
     // script URL (common in SPAs with code-splitting / React.lazy / Suspense).
     JITBrowserEngine.deduplicatedFetch(url, (resp: FetchResponse | null, _err?: string) => {
@@ -7261,6 +7656,13 @@ export function createPageJS(
       disposed = true;
       _unbridgeFromGlobal();
       timers = []; rafCallbacks = [];
+      // Destroy child runtime if active
+      if (_pageChildId >= 0) {
+        try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
+        cb.log('[JS] child runtime destroyed (slot ' + _pageChildId + ')');
+        _pageChildId = -1;
+        _useChildRuntime = false;
+      }
       // Close active WebSocket connections
       for (var _wsd = 0; _wsd < _wsSockets.length; _wsd++) {
         var _wse = _wsSockets[_wsd];

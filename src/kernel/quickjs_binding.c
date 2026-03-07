@@ -343,6 +343,10 @@ static JSValue js_sleep(JSContext *c, JSValueConst this_val, int argc, JSValueCo
             /* Cooperatively yield to the TypeScript scheduler on each tick. */
             if (!JS_IsUndefined(_scheduler_hook)) {
                 JSValue r = JS_Call(c, _scheduler_hook, JS_UNDEFINED, 0, NULL);
+                if (JS_IsException(r)) {
+                    JSValue exc = JS_GetException(c);
+                    JS_FreeValue(c, exc);
+                }
                 JS_FreeValue(c, r);
             }
         }
@@ -585,40 +589,23 @@ static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JS
     const char *code = JS_ToCStringLen(c, &len, argv[0]);
     if (!code) return JS_EXCEPTION;
     const char *filename = "<eval-guarded>";
-    /* Save the outer JS frame chain BEFORE arming the setjmp.  After longjmp()
-     * unwinds the C stack back to this frame, the eval's JSStackFrame nodes
-     * (which lived on the now-gone portion of the stack) are dangling, but
-     * every frame ABOVE this setjmp site is still valid.  Restoring to
-     * _saved_frame brings current_stack_frame back to a consistent state so
-     * JS execution in the calling context can continue normally. */
     void *_saved_frame = JS_GetCurrentStackFrame(c);
+    /* Save previous fault state so nested guardedRun works */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
     /* Arm the recovery checkpoint */
     _js_fault_active = 1;
     _js_fault_vector = 0;
-    /* Signal to quickjs.c that we are evaluating a page script so JIT
-     * native dispatch and JIT compilation are suppressed for all functions
-     * encountered during this eval (prevents JIT-generated faulty stores).
-     * NOTE: temporarily disabled for diagnostics — testing if this flag
-     * is causing the bytecode interpreter to crash. */
-    /* _js_in_page_eval = 1; */
+    _js_in_page_eval = 1;
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
-        _js_in_page_eval = 0;
-        /* Restore interrupts: the ISR macro issued CLI and we longjmp'd out
-         * before the normal 'sti; iret' epilogue ran.  We deliberately kept
-         * interrupts disabled across the longjmp to prevent a timer IRQ from
-         * overwriting _js_fault_buf mid-flight; now it is safe to re-enable. */
+        _js_in_page_eval = _saved_in_page_eval;
         __asm__ volatile("sti");
-        /* Do NOT call JS_FreeCString here — `code` was on the now-unwound stack
-         * frame, and the QJS string may reference freed evaluator memory. */
         JS_ResetAfterFault(c, _saved_frame);
-        _js_fault_active = 0;
-        /* Return a sentinel integer that the TypeScript caller can detect.
-         * CRITICAL: do NOT allocate on the QJS heap here (no JS_ThrowInternalError,
-         * no JS_NewString, etc.).  The heap may have half-initialised objects
-         * from the faulting eval — any allocation could trigger GC which
-         * traverses corrupt pointers → secondary #PF → global recovery →
-         * total state loss.  JS_NewInt32 is an inline tagged-value (no alloc). */
+        _js_fault_active = _saved_fault_active;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
         platform_serial_puts("[kernel] evalGuarded fault recovered (vector=");
         {
             static const char _h2[] = "0123456789ABCDEF";
@@ -634,8 +621,9 @@ static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JS
         return JS_NewInt32(c, -9999);
     }
     JSValue result = JS_Eval(c, code, len, filename, JS_EVAL_TYPE_GLOBAL);
-    _js_fault_active = 0;
-    _js_in_page_eval = 0;
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
     JS_FreeCString(c, code);
     if (JS_IsException(result)) {
         return JS_EXCEPTION;  /* propagate normal JS exceptions as-is */
@@ -661,37 +649,31 @@ static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JS
 static JSValue js_call_guarded(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
     if (argc < 1) return JS_UNDEFINED;
-    /* Same save/restore pattern as js_eval_guarded — see comment there. */
     void *_saved_frame = JS_GetCurrentStackFrame(c);
+    /* Save previous fault state for proper nesting */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
     _js_fault_active = 1;
     _js_fault_vector = 0;
-    /* Suppress JIT dispatch and compilation for ALL functions called during
-     * this guarded call.  callGuarded is used for page-script callbacks (RAF,
-     * timers, event handlers, Proxy traps in with(_winScope), etc.).  Without
-     * this, hot functions like the Proxy has/get/set traps reach JIT_THRESHOLD
-     * and get compiled to native code that embeds stale GC pointer constants,
-     * crashing on dispatch after heap mutation or longjmp recovery.
-     * NOTE: temporarily disabled for diagnostics. */
-    /* _js_in_page_eval = 1; */
+    _js_in_page_eval = 1;
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
-        _js_in_page_eval = 0;
-        /* Restore interrupts: ISR CLI was not paired with STI since we bypassed
-         * the normal iret epilogue.  Kept disabled across longjmp to prevent a
-         * timer IRQ from overwriting _js_fault_buf mid-flight. */
+        _js_in_page_eval = _saved_in_page_eval;
         __asm__ volatile("sti");
         JS_ResetAfterFault(c, _saved_frame);
-        _js_fault_active = 0;
-        /* Same sentinel return as evalGuarded — no heap allocation in the
-         * recovery path to avoid secondary faults from half-init'd objects. */
+        _js_fault_active = _saved_fault_active;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
         platform_serial_puts("[kernel] callGuarded fault recovered\n");
         return JS_NewInt32(c, -9999);
     }
     JSValue result = JS_Call(c, argv[0], JS_UNDEFINED,
                              argc - 1,
                              argc > 1 ? argv + 1 : (JSValueConst *)NULL);
-    _js_fault_active = 0;
-    _js_in_page_eval = 0;
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
     if (JS_IsException(result)) {
         return JS_EXCEPTION;
     }
@@ -700,6 +682,70 @@ static JSValue js_call_guarded(JSContext *c, JSValueConst this_val, int argc, JS
 }
 
 /*  Function table  */
+
+/*
+ * kernel.guardedRun(fn)
+ *
+ * Execute a JavaScript function with full CPU-fault recovery.  Designed for
+ * the main event loop so that any #PF / #GP / #UD during TypeScript
+ * execution (e.g. corrupted QJS heap pointer dereference) recovers here
+ * instead of triggering global idle recovery.
+ *
+ * All inner setjmp-using functions (evalGuarded, callGuarded, procEval,
+ * procTick, drainJobs, serviceTimers) save and restore the fault state,
+ * so this outer guard persists through nested protected calls.
+ *
+ * Returns:  0 = success, -1 = CPU fault recovered, -3 = JS exception consumed
+ */
+static JSValue js_guarded_run(JSContext *c, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1 || !JS_IsFunction(c, argv[0]))
+        return JS_NewInt32(c, -2);
+    void *_saved_frame = JS_GetCurrentStackFrame(c);
+    /* Save previous fault state */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
+    _js_fault_active = 1;
+    _js_in_page_eval = 0;
+    _js_fault_vector = 0;
+    int recovered = setjmp(_js_fault_buf);
+    if (recovered != 0) {
+        _js_fault_active = _saved_fault_active;
+        _js_in_page_eval = _saved_in_page_eval;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+        __asm__ volatile("sti");
+        JS_ResetAfterFault(c, _saved_frame);
+        platform_serial_puts("[guardedRun] recovered from fault (vector=");
+        {
+            static const char _h2[] = "0123456789ABCDEF";
+            char _vb[5];
+            unsigned _v = (unsigned)_js_fault_vector;
+            _vb[0] = '0'; _vb[1] = 'x';
+            _vb[2] = _h2[(_v >> 4) & 0xF];
+            _vb[3] = _h2[_v & 0xF];
+            _vb[4] = '\0';
+            platform_serial_puts(_vb);
+        }
+        platform_serial_puts(")\n");
+        return JS_NewInt32(c, -1);
+    }
+    JSValue r = JS_Call(c, argv[0], JS_UNDEFINED, 0, NULL);
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+    if (JS_IsException(r)) {
+        JSValue exc = JS_GetException(c);
+        JS_FreeValue(c, exc);
+        JS_FreeValue(c, r);
+        return JS_NewInt32(c, -3);
+    }
+    JS_FreeValue(c, r);
+    return JS_NewInt32(c, 0);
+}
+
 /* ── Framebuffer bindings ──────────────────────────────────────────── */
 
 /*
@@ -1275,6 +1321,12 @@ static JSValue js_yield(JSContext *c, JSValueConst this_val,
     (void)this_val; (void)argc; (void)argv;
     if (!JS_IsUndefined(_scheduler_hook)) {
         JSValue r = JS_Call(c, _scheduler_hook, JS_UNDEFINED, 0, NULL);
+        if (JS_IsException(r)) {
+            /* Consume the pending exception so it doesn't leak into the
+             * caller's context and cause a stale 'throw null' later. */
+            JSValue exc = JS_GetException(c);
+            JS_FreeValue(c, exc);
+        }
         JS_FreeValue(c, r);
     }
     return JS_UNDEFINED;
@@ -1305,13 +1357,19 @@ static JSValue js_drain_jobs(JSContext *c, JSValueConst this_val,
     (void)this_val; (void)argc; (void)argv;
     if (!rt) return JS_NewInt32(c, 0);
     void *_saved_frame = JS_GetCurrentStackFrame(c);
+    /* Save/restore fault state for nesting */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
     _js_fault_active = 1;
     _js_fault_vector = 0;
     _js_in_page_eval = 1;
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
-        _js_fault_active = 0;
-        _js_in_page_eval = 0;
+        _js_fault_active = _saved_fault_active;
+        _js_in_page_eval = _saved_in_page_eval;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
         __asm__ volatile("sti");
         JS_ResetAfterFault(c, _saved_frame);
         return JS_NewInt32(c, -1);  /* negative = fault during drain */
@@ -1319,8 +1377,9 @@ static JSValue js_drain_jobs(JSContext *c, JSValueConst this_val,
     int count = 0;
     JSContext *job_ctx = NULL;
     while (JS_ExecutePendingJob(rt, &job_ctx) > 0 && count < 10000) count++;
-    _js_fault_active = 0;
-    _js_in_page_eval = 0;
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
     return JS_NewInt32(c, count);
 }
 
@@ -1628,9 +1687,37 @@ static JSValue js_proc_eval(JSContext *c, JSValueConst this_val,
         return JS_NewString(c, "Error: invalid process id");
     const char *code = JS_ToCString(c, argv[1]);
     if (!code) return JS_NewString(c, "undefined");
+
+    /* Arm fault recovery — save/restore previous state for nesting. */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
+    _js_fault_active = 1;
+    _js_fault_vector = 0;
+    _js_in_page_eval = 1;
+    int _pf_recovered = setjmp(_js_fault_buf);
+    if (_pf_recovered != 0) {
+        _js_in_page_eval = _saved_in_page_eval;
+        __asm__ volatile("sti");
+        _js_fault_active = _saved_fault_active;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+        _cur_proc = -1;
+        /* Do NOT FreeCString — `code` was extracted from the coordinator's
+         * context but the longjmp may have invalidated the stack frame
+         * that held the length metadata.  Leak is acceptable here. */
+        platform_serial_puts("[kernel] procEval fault recovered (child ");
+        { char _idb[4]; _idb[0]='0'+(char)id; _idb[1]=0; platform_serial_puts(_idb); }
+        platform_serial_puts(")\n");
+        return JS_NewString(c, "Error: CPU fault in child runtime");
+    }
+
     _cur_proc = id;
     JSValue result = JS_Eval(_procs[id].ctx, code, strlen(code),
                              "<process>", JS_EVAL_TYPE_GLOBAL);
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
     _cur_proc = -1;
     JS_FreeCString(c, code);
     if (JS_IsException(result)) {
@@ -1660,10 +1747,33 @@ static JSValue js_proc_tick(JSContext *c, JSValueConst this_val,
     int32_t id = 0;
     JS_ToInt32(c, &id, argv[0]);
     if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_NewInt32(c, 0);
+    /* Arm fault recovery — save/restore for nesting */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
+    _js_fault_active = 1;
+    _js_fault_vector = 0;
+    _js_in_page_eval = 1;
+    int _pt_recovered = setjmp(_js_fault_buf);
+    if (_pt_recovered != 0) {
+        _js_in_page_eval = _saved_in_page_eval;
+        __asm__ volatile("sti");
+        _js_fault_active = _saved_fault_active;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+        _cur_proc = -1;
+        platform_serial_puts("[kernel] procTick fault recovered (child ");
+        { char _idb[4]; _idb[0]='0'+(char)id; _idb[1]=0; platform_serial_puts(_idb); }
+        platform_serial_puts(")\n");
+        return JS_NewInt32(c, -1);   /* negative = fault indicator */
+    }
     _cur_proc = id;
     int count = 0;
     JSContext *job_ctx = NULL;
     while (JS_ExecutePendingJob(_procs[id].rt, &job_ctx) > 0 && count < 256) count++;
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
     _cur_proc = -1;
     return JS_NewInt32(c, count);
 }
@@ -1795,6 +1905,25 @@ static JSValue js_proc_eval_slice(JSContext *c, JSValueConst this_val,
         return JS_NewString(c, "error:invalid process id");
     const char *code = JS_ToCString(c, argv[1]);
     if (!code) return JS_NewString(c, "error:null code");
+    /* Arm fault recovery — save/restore for nesting */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
+    _js_fault_active = 1;
+    _js_fault_vector = 0;
+    _js_in_page_eval = 1;
+    int _ps_recovered = setjmp(_js_fault_buf);
+    if (_ps_recovered != 0) {
+        _js_in_page_eval = _saved_in_page_eval;
+        __asm__ volatile("sti");
+        _js_fault_active = _saved_fault_active;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+        _proc_slice_deadline = 0;
+        _cur_proc = -1;
+        platform_serial_puts("[kernel] procEvalSlice fault recovered\n");
+        return JS_NewString(c, "error:CPU fault in child runtime");
+    }
     /* Arm deadline: timer_get_ticks() runs at TIMER_HZ (1000 Hz = 1 ms/tick) */
     if (max_ms > 0)
         _proc_slice_deadline = timer_get_ticks() + MS_TO_TICKS((uint32_t)max_ms);
@@ -1803,6 +1932,9 @@ static JSValue js_proc_eval_slice(JSContext *c, JSValueConst this_val,
     _cur_proc = id;
     JSValue result = JS_Eval(_procs[id].ctx, code, strlen(code),
                              "<slice>", JS_EVAL_TYPE_GLOBAL);
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
     _proc_slice_deadline = 0;   /* always clear immediately after eval */
     _cur_proc = -1;
     JS_FreeCString(c, code);
@@ -2365,6 +2497,10 @@ static int _jit_hook_impl(JSRuntime *rt, JSContext *hook_ctx,
 static int _jit_hook_child(JSRuntime *rt, JSContext *hook_ctx,
                             void *bc_ptr, void *sp, int argc) {
     (void)hook_ctx; (void)sp; (void)argc;
+    /* Suppress JIT for page-script children — they run briefly and are
+     * disposed.  Attempting to JIT-compile their bytecode risks reading
+     * from unmapped child heap addresses → CPU fault with no recovery. */
+    if (_js_in_page_eval) return 0;
     /* Identify which child slot owns this runtime */
     for (int i = 0; i < JSPROC_MAX; i++) {
         if (_procs[i].used && _procs[i].rt == rt) {
@@ -2565,6 +2701,26 @@ static JSValue js_service_timers(JSContext *c, JSValueConst this_val,
     if (argc < 1) return JS_UNDEFINED;
     int32_t id = 0; JS_ToInt32(c, &id, argv[0]);
     if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_UNDEFINED;
+    /* Arm fault recovery — save/restore for nesting */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
+    _js_fault_active = 1;
+    _js_fault_vector = 0;
+    _js_in_page_eval = 1;
+    int _st_recovered = setjmp(_js_fault_buf);
+    if (_st_recovered != 0) {
+        _js_in_page_eval = _saved_in_page_eval;
+        __asm__ volatile("sti");
+        _js_fault_active = _saved_fault_active;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+        _cur_proc = -1;
+        platform_serial_puts("[kernel] serviceTimers fault recovered (child ");
+        { char _idb[4]; _idb[0]='0'+(char)id; _idb[1]=0; platform_serial_puts(_idb); }
+        platform_serial_puts(")\n");
+        return JS_NewInt32(c, -1);
+    }
     uint32_t now = timer_get_ticks();
     JSContext *cc = _procs[id].ctx;
     _cur_proc = id;
@@ -2595,6 +2751,9 @@ static JSValue js_service_timers(JSContext *c, JSValueConst this_val,
             t->active = 0;
         }
     }
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
     _cur_proc = -1;
     return JS_UNDEFINED;
 }
@@ -3513,6 +3672,7 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("eval",         1, js_eval),
     JS_CFUNC_DEF("evalGuarded",  1, js_eval_guarded),
     JS_CFUNC_DEF("callGuarded",  1, js_call_guarded),
+    JS_CFUNC_DEF("guardedRun",   1, js_guarded_run),
     /* ATA block device */
     JS_CFUNC_DEF("ataPresent",     0, js_ata_present),
     JS_CFUNC_DEF("ataSectorCount", 0, js_ata_sector_count),

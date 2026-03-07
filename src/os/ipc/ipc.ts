@@ -467,7 +467,7 @@ export class Channel<T> {
    * Returns false if closed before space became available (max 1s wait).
    */
   send(item: T): boolean {
-    var deadline = kernel.getTicks() + 100; // 1 s @ 100 Hz
+    var deadline = kernel.getTicks() + 1000; // 1 s @ 1000 Hz
     while (this.buf.length >= this.capacity && !this._closed) {
       if (kernel.getTicks() >= deadline) return false;
       kernel.sleep(1);

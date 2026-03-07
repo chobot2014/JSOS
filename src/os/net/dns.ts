@@ -202,7 +202,7 @@ function cacheKey(type: 'A' | 'AAAA', hostname: string): string {
 }
 
 function cachePut(type: 'A' | 'AAAA', hostname: string, ip: string, ttlSec: number): void {
-  var ticksPerSec = 100; // PIT ~10 ms per tick → 100 ticks/sec
+  var ticksPerSec = 1000; // PIT at 1000 Hz
   dnsCache.set(cacheKey(type, hostname), {
     ip,
     type,
@@ -222,7 +222,7 @@ function cacheGet(type: 'A' | 'AAAA', hostname: string): string | null {
 function negCachePut(type: 'A' | 'AAAA', hostname: string): void {
   var k = cacheKey(type, hostname);
   dnsCache.delete(k);
-  dnsNegCache.set(k, { expiresAt: kernel.getTicks() + 60 * 100 }); // 60 s
+  dnsNegCache.set(k, { expiresAt: kernel.getTicks() + 60 * 1000 }); // 60 s
 }
 
 function negCacheGet(type: 'A' | 'AAAA', hostname: string): boolean {

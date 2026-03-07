@@ -193,18 +193,34 @@ interface ParsedURL {
 }
 
 function _parseURL(raw: string): ParsedURL | null {
-  // Accept URLs where the path may be absent before a query string:
-  //   http://host/path?q=v    → host='host', path='/path?q=v'  (standard)
-  //   http://host?q=v         → host='host', path='/?q=v'      (no leading /)
-  //   http://host             → host='host', path='/'
-  var m = raw.match(/^(https?):\/\/([^/:?#]+)(?::(\d+))?(\/[^]*|[?#][^]*)?$/);
-  if (!m) return null;
-  var protocol = m[1] as 'http' | 'https';
-  var port     = m[3] ? parseInt(m[3], 10) : (protocol === 'https' ? 443 : 80);
+  // Strip any whitespace/newlines that may be in HTML attribute values
+  var url = raw.replace(/[\s]+/g, '');
+  var m = url.match(/^(https?):\/\/([^/:?#]+)(?::(\d+))?(\/[^]*|[?#][^]*)?$/);
+  if (!m) {
+    // Fallback: simple string splitting for very long URLs where regex may fail
+    var protoEnd = url.indexOf('://');
+    if (protoEnd < 0) return null;
+    var protocol = url.substring(0, protoEnd) as 'http' | 'https';
+    if (protocol !== 'http' && protocol !== 'https') return null;
+    var rest = url.substring(protoEnd + 3);
+    var slashIdx = rest.indexOf('/');
+    var qIdx     = rest.indexOf('?');
+    var hashIdx  = rest.indexOf('#');
+    var hostEnd  = slashIdx >= 0 ? slashIdx : (qIdx >= 0 ? qIdx : (hashIdx >= 0 ? hashIdx : rest.length));
+    var hostPort = rest.substring(0, hostEnd);
+    var colonIdx = hostPort.indexOf(':');
+    var host = colonIdx >= 0 ? hostPort.substring(0, colonIdx) : hostPort;
+    var port = colonIdx >= 0 ? parseInt(hostPort.substring(colonIdx + 1), 10) : (protocol === 'https' ? 443 : 80);
+    var path = hostEnd < rest.length ? rest.substring(hostEnd) : '/';
+    if (path.charCodeAt(0) === 63 || path.charCodeAt(0) === 35) path = '/' + path;
+    if (!host) return null;
+    return { protocol, host, port, path };
+  }
+  var protocol2 = m[1] as 'http' | 'https';
+  var port2     = m[3] ? parseInt(m[3], 10) : (protocol2 === 'https' ? 443 : 80);
   var rawPath  = m[4] || '/';
-  // If path starts with '?' or '#' (no leading slash), prepend '/'
-  var path = (rawPath.charCodeAt(0) === 63 || rawPath.charCodeAt(0) === 35) ? '/' + rawPath : rawPath;
-  return { protocol, host: m[2], port, path };
+  var path2 = (rawPath.charCodeAt(0) === 63 || rawPath.charCodeAt(0) === 35) ? '/' + rawPath : rawPath;
+  return { protocol: protocol2, host: m[2], port: port2, path: path2 };
 }
 
 function _resolveHref(href: string, baseURL: string): string {
@@ -261,7 +277,7 @@ interface _PoolEntry {
 }
 var _connPool: _PoolEntry[] = [];
 var _POOL_MAX = 6;
-var _POOL_TTL = 3000;  // 30 s at 100 Hz
+var _POOL_TTL = 60000;  // 60 s at 1000 Hz PIT
 
 // ── HTTP/2 connection pool (one multiplexed connection per host) ──────────────
 interface _H2PoolEntry {
@@ -271,13 +287,20 @@ interface _H2PoolEntry {
   expiry: number;
 }
 var _h2Pool: _H2PoolEntry[] = [];
-var _H2_POOL_TTL = 6000;  // 60 s at 100 Hz
+var _H2_POOL_TTL = 120000;  // 120 s at 1000 Hz PIT
 
 function _h2PoolGet(host: string, port: number): HTTP2Connection | null {
   var now = kernel.getTicks();
   for (var i = _h2Pool.length - 1; i >= 0; i--) {
     var p = _h2Pool[i];
-    if (now >= p.expiry || !p.conn.isAlive()) {
+    if (now >= p.expiry) {
+      (kernel as any).serialPut('[h2pool] evict expired ' + p.host + '\n');
+      try { p.conn.close(); } catch(_) {}
+      _h2Pool.splice(i, 1);
+      continue;
+    }
+    if (!p.conn.isAlive()) {
+      (kernel as any).serialPut('[h2pool] evict dead ' + p.host + '\n');
       try { p.conn.close(); } catch(_) {}
       _h2Pool.splice(i, 1);
       continue;
@@ -392,7 +415,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
           return 'pending';
         }
         f.stage    = 'connecting';
-        f.deadline = kernel.getTicks() + 500;
+        f.deadline = kernel.getTicks() + 5000;
         f.sock     = net.createSocket('tcp');
         net.connectAsync(f.sock, ip, f.parsed.port);
         return 'pending';
@@ -495,7 +518,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       f.headersDone = false;
       f.bodyOffset = 0;
       f.chunked    = false;
-      f.deadline   = kernel.getTicks() + 3000;  // 30 s hard timeout
+      f.deadline   = kernel.getTicks() + 30000;  // 30 s hard timeout
       f.stage      = 'receiving';
       return 'pending';
     }
@@ -512,7 +535,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
         if (!chunk || chunk.length === 0) break;  // nothing available right now
         f.chunks.push(chunk);
         f.totalRecv += chunk.length;
-        f.deadline = kernel.getTicks() + 500;  // 5 s silence timeout resets on each chunk
+        f.deadline = kernel.getTicks() + 5000;  // 5 s silence timeout resets on each chunk
 
         // Parse headers on-the-fly to extract Content-Length / Transfer-Encoding
         if (!f.headersDone) {
@@ -647,12 +670,12 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
           if (rIP) {
             f.fetchIP  = rIP;
             f.stage    = 'connecting';
-            f.deadline = kernel.getTicks() + 500;
+            f.deadline = kernel.getTicks() + 5000;
             f.sock     = net.createSocket('tcp');
             net.connectAsync(f.sock, rIP, rParsed.port);
           } else {
             f.stage    = 'dns';
-            f.deadline = kernel.getTicks() + 500;
+            f.deadline = kernel.getTicks() + 5000;
             var rq     = dnsSendQueryAsync(rParsed.host);
             f.dnsPort  = rq.port;
             f.dnsId    = rq.id;
@@ -713,7 +736,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
         }
         h2.sendData(h2sid, h2body, true);
       }
-      f.deadline = kernel.getTicks() + 3000;  // 30 s timeout
+      f.deadline = kernel.getTicks() + 30000;  // 30 s timeout
       f.stage = 'h2-receiving';
       return 'pending';
     }
@@ -794,12 +817,12 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
             if (h2rIP) {
               f.fetchIP  = h2rIP;
               f.stage    = 'connecting';
-              f.deadline = kernel.getTicks() + 500;
+              f.deadline = kernel.getTicks() + 5000;
               f.sock     = net.createSocket('tcp');
               net.connectAsync(f.sock, h2rIP, h2rParsed.port);
             } else {
               f.stage    = 'dns';
-              f.deadline = kernel.getTicks() + 500;
+              f.deadline = kernel.getTicks() + 5000;
               var h2rq   = dnsSendQueryAsync(h2rParsed.host);
               f.dnsPort  = h2rq.port;
               f.dnsId    = h2rq.id;
@@ -1195,6 +1218,8 @@ function _doFetch(
       f.fetchIP = dnsResolveCached(parsed.host) || '';
       f.pooled  = true;
       f.stage   = 'h2-sending';
+    } else {
+      (kernel as any).serialPut('[fetch] h2pool miss for ' + parsed.host + ':' + parsed.port + ' pool=' + _h2Pool.length + '\n');
     }
   }
 
@@ -1212,12 +1237,12 @@ function _doFetch(
       if (cachedIP) {
         f.fetchIP  = cachedIP;
         f.stage    = 'connecting';
-        f.deadline = kernel.getTicks() + 500;
+        f.deadline = kernel.getTicks() + 5000;
         f.sock     = net.createSocket('tcp');
         net.connectAsync(f.sock, cachedIP, parsed.port);
       } else {
         f.stage    = 'dns';
-        f.deadline = kernel.getTicks() + 500;
+        f.deadline = kernel.getTicks() + 5000;
         var q      = dnsSendQueryAsync(parsed.host);
         f.dnsPort  = q.port;
         f.dnsId    = q.id;
@@ -1228,6 +1253,7 @@ function _doFetch(
   var step = _buildFetchCoroutine(f);
   var id   = threadManager.runCoroutine('fetch:' + parsed.host, step);
   f.coroId = id;
+  (kernel as any).serialPut('[fetch] new coro id=' + id + ' stage=' + f.stage + ' host=' + parsed.host + ' path=' + parsed.path.slice(0, 80) + '\n');
   return id;
 }
 
@@ -1687,7 +1713,7 @@ const sdk = {
       callback: (sock: RawSocket | null, error?: string) => void,
       opts?: { timeoutMs?: number },
     ): number {
-      var timeoutTicks = ((opts && opts.timeoutMs) ? opts.timeoutMs : 5000) / 10;
+      var timeoutTicks = (opts && opts.timeoutMs) ? opts.timeoutMs : 5000;  // 1 tick = 1 ms at 1000 Hz PIT
       var netSock: import('../net/net.js').Socket | null = null;
       var done   = false;
       var deadline = kernel.getTicks() + timeoutTicks;

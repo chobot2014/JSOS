@@ -628,10 +628,6 @@ export class WindowManager {
     this._pollInput();
 
     // ── Cursor fast blit — runs BEFORE any app render ──────────────────────
-    // Gives the cursor immediate visual feedback even while browser.render()
-    // is working through a page-load paint that may take 10-50 ms.
-    // _cursorSaveValid becomes true at the end of the first full composite;
-    // until then we fall through to the normal full composite below.
     if (this._cursorDirty && this._cursorSaveValid) {
       this._restoreCursorSaveUnder();
       this._saveCursorUnder();
@@ -641,9 +637,9 @@ export class WindowManager {
     }
 
     this._tickChildProcs();
-    scheduler.tick();                 // process-level accounting, signals, time-slice
+    scheduler.tick();
     threadManager.tickCoroutines();   // cooperative fetch / async coroutines
-    systemProfiler.tick();            // always-on optimizer & profiler
+    systemProfiler.tick();
     this._composite();
   }
   /** Mark the WM as needing a repaint (call from app code or external events). */
@@ -660,12 +656,32 @@ export class WindowManager {
     if (list.length === 0) return;
     for (var i = 0; i < list.length; i++) {
       var id = list[i].id;
-      kernel.procTick(id);
-      kernel.serviceTimers(id);
-      /* Step 11: service any pending child JIT compilation requests */
-      var pendingBC = kernel.procPendingJIT(id);
-      if (pendingBC !== 0) { _serviceChildJIT(id, pendingBC); }
-      this._processWindowCommands(id);
+      try {
+        var _tickResult = kernel.procTick(id);
+        // procTick returns -1 on hardware fault; only then destroy
+        if (_tickResult < 0) {
+          kernel.serialPut('[wm] child proc ' + id + ' HW fault in procTick — destroying\n');
+          try { kernel.procDestroy(id); } catch(_) {}
+          try { clearChildJITForProc(id); } catch(_) {}
+          continue;
+        }
+      } catch(e1) {
+        kernel.serialPut('[wm] procTick(' + id + ') threw: ' + String(e1).slice(0, 120) + '\n');
+        continue;
+      }
+      try { kernel.serviceTimers(id); } catch(e2) {
+        kernel.serialPut('[wm] serviceTimers(' + id + ') threw: ' + String(e2).slice(0, 120) + '\n');
+      }
+      try {
+        /* Step 11: service any pending child JIT compilation requests */
+        var pendingBC = kernel.procPendingJIT(id);
+        if (pendingBC !== 0) { _serviceChildJIT(id, pendingBC); }
+      } catch(e3) {
+        kernel.serialPut('[wm] JIT(' + id + ') threw: ' + String(e3).slice(0, 120) + '\n');
+      }
+      try { this._processWindowCommands(id); } catch(e4) {
+        kernel.serialPut('[wm] processCmd(' + id + ') threw: ' + String(e4).slice(0, 120) + '\n');
+      }
     }
   }
   // ── Input dispatch ─────────────────────────────────────────────────────
@@ -1172,7 +1188,7 @@ export class WindowManager {
 
     // Clock (ticks-based): crude HH:MM
     var ticks = kernel.getTicks();
-    var totalSecs = Math.floor(ticks / 100);
+    var totalSecs = Math.floor(ticks / 1000);
     var mins = Math.floor(totalSecs / 60) % 60;
     var hours = Math.floor(totalSecs / 3600) % 24;
     var hh = (hours < 10 ? '0' : '') + hours;

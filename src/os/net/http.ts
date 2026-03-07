@@ -66,14 +66,14 @@ function _cacheSet(url: string, resp: HttpResponse): void {
   var ct = resp.headers.get('content-type') || '';
   var cc = resp.headers.get('cache-control') || '';
   if (cc.includes('no-store')) return;
-  // Default TTL: 60 seconds (6000 ticks at 100 Hz)
-  var maxAge = 6000;
+  // Default TTL: 60 seconds (60000 ticks at 1000 Hz)
+  var maxAge = 60000;
   var m = cc.match(/max-age=([\d]+)/);
-  if (m) maxAge = Math.min(parseInt(m[1]) * 100, 36000);  // cap at 1 hr
+  if (m) maxAge = Math.min(parseInt(m[1]) * 1000, 3600000);  // cap at 1 hr
   // stale-while-revalidate window
   var swr = 0;
   var sm = cc.match(/stale-while-revalidate=([\d]+)/);
-  if (sm) swr = Math.min(parseInt(sm[1]) * 100, 36000);
+  if (sm) swr = Math.min(parseInt(sm[1]) * 1000, 3600000);
   // Only cache JS, CSS, fonts, images, JSON — not HTML (dynamic)
   var cacheable = ct.includes('javascript') || ct.includes('css') ||
                   ct.includes('font') || ct.includes('image') ||
@@ -2144,7 +2144,7 @@ export class QUICConnection {
       net.sendUDPRaw(srcPort, ip as any, port, pkt);
 
       // Wait for Initial response from server (QUIC Long Header, top bit = 1)
-      var deadline = kernel.getTicks() + 300;  // ~3 s at 100 Hz
+      var deadline = kernel.getTicks() + 3000;  // ~3 s at 1000 Hz
       while (kernel.getTicks() < deadline) {
         if (net.nicReady) net.pollNIC();
         var resp = net.recvUDPRawNB(srcPort);

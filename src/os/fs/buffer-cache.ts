@@ -197,19 +197,19 @@ export class BufferCache {
 
 /**
  * Calls BufferCache.flush() on a periodic timer tick.
- * Hook into the OS timer at ~100 Hz: writebackTimer.tick(kernel.getTicks()).
+ * Hook into the OS timer at ~1000 Hz: writebackTimer.tick(kernel.getTicks()).
  */
 export class WritebackTimer {
   private lastFlush = 0;
 
   /**
    * @param cache           The shared buffer cache to flush.
-   * @param intervalTicks   Flush interval in timer ticks.  Default 3 000 ticks
-   *                        = 30 s at 100 Hz.
+   * @param intervalTicks   Flush interval in timer ticks.  Default 30 000 ticks
+   *                        = 30 s at 1000 Hz.
    */
   constructor(
     private cache: BufferCache,
-    public  intervalTicks = 3000
+    public  intervalTicks = 30000
   ) {}
 
   /**
