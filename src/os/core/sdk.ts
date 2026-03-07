@@ -48,6 +48,7 @@ import { wm, type App, type WMWindow, type KeyEvent, type MouseEvent, type MenuI
 import { Canvas } from '../ui/canvas.js';
 import { Mutex, Condvar, Semaphore } from '../process/sync.js';
 import { globalGC, type HeapStats } from '../process/gc.js';
+import { layoutProfiler } from '../apps/browser/layout.js';
 import {
   sha256 as _sha256Raw,
   hmacSha256 as _hmacSha256Raw,
@@ -1910,6 +1911,92 @@ const sdk = {
      */
     gcStats(): HeapStats {
       return globalGC.stats();
+    },
+  },
+
+  // ── Browser profiler API (item 4.4) ──────────────────────────────────────────
+
+  browser: {
+    /** Enable per-subtree layout timing. */
+    enableLayout():  string { layoutProfiler.enabled = true;  return 'Layout profiler ON'; },
+    /** Disable per-subtree layout timing. */
+    disableLayout(): string { layoutProfiler.enabled = false; return 'Layout profiler OFF'; },
+    /** Clear accumulated layout timing data. */
+    resetLayout():   string { layoutProfiler.reset(); return 'Layout stats cleared'; },
+    /**
+     * Return hot layout subtrees sorted by total time (ms).
+     *
+     * @example
+     *   os.browser.enableLayout();
+     *   // ... browse a page ...
+     *   os.browser.layoutStats();
+     *   // → [{ id: 'p', totalMs: 42, count: 380, avgMs: 0.11 }, ...]
+     */
+    layoutStats(): Array<{ id: string; totalMs: number; count: number; avgMs: number }> {
+      return layoutProfiler.report();
+    },
+  },
+
+  // ── Perf tools: ASCII flame graph (item 4.5) ─────────────────────────────────
+
+  perf: {
+    /**
+     * Render an ASCII flame graph (horizontal bar chart) from current layout profiler
+     * data, combined with a JIT stats summary footer.
+     *
+     * @example
+     *   os.browser.enableLayout();    // start collecting
+     *   // ... navigate a page ...
+     *   print(os.perf.flame());       // render to terminal
+     *
+     * @param opts.width    Column width (default 80)
+     * @param opts.maxRows  Max bars to show (default 20)
+     */
+    flame(opts?: { width?: number; maxRows?: number }): string {
+      var cols    = (opts && opts.width)   || 80;
+      var maxRows = (opts && opts.maxRows) || 20;
+      var rows    = layoutProfiler.report();
+      var FILL    = '\u2588';
+      var EMPTY   = '\u2591';
+      var SEP     = '\u2500'.repeat(cols);
+      var out: string[] = [];
+
+      out.push('Layout Flame Graph');
+      out.push(SEP);
+
+      if (rows.length === 0) {
+        out.push('(no data \u2014 call os.browser.enableLayout() first, then navigate a page)');
+      } else {
+        var maxMs  = rows[0].totalMs || 1;
+        var labelW = 10;
+        var statsW = 14;   // '  999.9ms x999'
+        var barW   = Math.max(10, cols - labelW - statsW - 3); // ' |' + '|' = 3
+        var limit  = Math.min(rows.length, maxRows);
+        for (var i = 0; i < limit; i++) {
+          var r    = rows[i];
+          var fill = Math.round((r.totalMs / maxMs) * barW);
+          var bar  = FILL.repeat(fill) + EMPTY.repeat(barW - fill);
+          var lbl  = (r.id.length > labelW ? r.id.slice(0, labelW - 1) + '\u2026' : r.id).padEnd(labelW);
+          var ms   = r.totalMs.toFixed(1);
+          var cnt  = 'x' + r.count;
+          var stat = (ms + 'ms').padStart(8) + (' ' + cnt).padStart(6);
+          out.push(lbl + stat + ' |' + bar + '|');
+        }
+      }
+
+      out.push(SEP);
+
+      // Footer: live JIT stats summary
+      try {
+        var jitS = (globalThis as any).os?.system?.jitStats?.();
+        if (jitS) {
+          out.push('JIT: ' + jitS.compiled + ' compiled | pool ' + jitS.poolUsedKB +
+                   '/' + jitS.poolCapKB + ' KB | ' + jitS.deopts + ' deopts | ' +
+                   jitS.bailed + ' bailed');
+        }
+      } catch (_) {}
+
+      return out.join('\n');
     },
   },
 

@@ -48,6 +48,7 @@ import { physAlloc } from '../process/physalloc.js';
 import { JSProcess, listProcesses } from '../process/jsprocess.js';
 import { os } from '../core/sdk.js';
 import { systemProfiler } from '../process/optimizer.js';
+import { layoutProfiler } from '../apps/browser/layout.js';
 import { JITChecksum, JITMem, JITCRC32, JITOSKernels } from '../process/jit-os.js';
 import { dnsResolve } from '../net/dns.js';
 import { pkgmgr } from '../core/pkgmgr.js';
@@ -278,6 +279,38 @@ export function registerCommands(g: any): void {
       stats() {
         var m = kernel.getMemoryInfo();
         return { heapUsed: m.used, heapTotal: m.total, heapFree: m.free, ts: kernel.getUptime() };
+      },
+    },
+    // ── [Item 4.4] Layout profiler ───────────────────────────────────────────
+    browser: {
+      /** Enable per-subtree layout timing. Call layoutStats() to read results. */
+      enableLayout()  { layoutProfiler.enabled = true;  return 'Layout profiler ON'; },
+      /** Disable per-subtree layout timing. */
+      disableLayout() { layoutProfiler.enabled = false; return 'Layout profiler OFF'; },
+      /** Reset accumulated layout timing data. */
+      resetLayout()   { layoutProfiler.reset(); return 'Layout stats cleared'; },
+      /** Return hot layout subtrees sorted by total time spent. */
+      layoutStats() {
+        var rows = layoutProfiler.report();
+        return rows.length > 0 ? rows : '(no data — call sys.browser.enableLayout() first)';
+      },
+    },
+    // ── [Item 4.5] ASCII flame graph ─────────────────────────────────────────
+    perf: {
+      /**
+       * Render an ASCII flame graph from layout profiler data + JIT stats.
+       * Example:
+       *   sys.browser.enableLayout(); // navigate a page; then:
+       *   terminal.println(sys.perf.flame());
+       */
+      flame(cols?: number): string {
+        return os.perf.flame({ width: cols });
+      },
+      /** Reset layout stats and enable profiler for a fresh sample. */
+      startSample(): string {
+        layoutProfiler.reset();
+        layoutProfiler.enabled = true;
+        return 'Layout profiler reset — navigate a page then call sys.perf.flame()';
       },
     },
   };

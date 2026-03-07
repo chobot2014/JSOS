@@ -184,6 +184,13 @@ function _layoutNodesImpl(
   var xLeft = CONTENT_PAD;
   var maxX  = contentW - CONTENT_PAD;
 
+  // Phase 4.4 — Per-subtree layout profiling (no-op when layoutProfiler.enabled = false)
+  var _lpId = '';
+  if (layoutProfiler.enabled && nodes.length > 0) {
+    _lpId = nodes[0].type || 'span';
+    layoutProfiler.startLayout(_lpId);
+  }
+
   // Absolutely/fixed-positioned elements collected separately (out-of-flow)
   var oofNodes: RenderNode[] = [];
 
@@ -940,6 +947,7 @@ function _layoutNodesImpl(
     }
   }
 
+  if (_lpId) layoutProfiler.endLayout(_lpId);
   return { lines, widgets };
 }
 
