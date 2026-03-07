@@ -999,6 +999,23 @@ export function parseInlineStyle(style: string): CSSProps {
       case 'right':  { if (vl !== 'auto') { var rv = parseLengthPx(vl); if (!isNaN(rv)) p.right  = rv; } break; }
       case 'bottom': { if (vl !== 'auto') { var bv = parseLengthPx(vl); if (!isNaN(bv)) p.bottom = bv; } break; }
       case 'left':   { if (vl !== 'auto') { var lv = parseLengthPx(vl); if (!isNaN(lv)) p.left   = lv; } break; }
+      case 'inset': {
+        // inset: <top> [<right> [<bottom> [<left>]]] — shorthand for top/right/bottom/left
+        if (vl !== 'auto') {
+          var _inParts = vl.split(/\s+/);
+          var _inT = parseLengthPx(_inParts[0]); if (!isNaN(_inT)) p.top = _inT;
+          var _inR = parseLengthPx(_inParts[1] || _inParts[0]); if (!isNaN(_inR)) p.right = _inR;
+          var _inB = parseLengthPx(_inParts[2] || _inParts[0]); if (!isNaN(_inB)) p.bottom = _inB;
+          var _inL = parseLengthPx(_inParts[3] || _inParts[1] || _inParts[0]); if (!isNaN(_inL)) p.left = _inL;
+        }
+        break;
+      }
+      case 'inset-block':        { var _inbParts = vl.split(/\s+/); var _inbT = parseLengthPx(_inbParts[0]); var _inbB = parseLengthPx(_inbParts[1] || _inbParts[0]); if (!isNaN(_inbT)) p.top = _inbT; if (!isNaN(_inbB)) p.bottom = _inbB; break; }
+      case 'inset-inline':       { var _iniParts = vl.split(/\s+/); var _iniL = parseLengthPx(_iniParts[0]); var _iniR = parseLengthPx(_iniParts[1] || _iniParts[0]); if (!isNaN(_iniL)) p.left = _iniL; if (!isNaN(_iniR)) p.right = _iniR; break; }
+      case 'inset-block-start':  { if (vl !== 'auto') { var _ibsV = parseLengthPx(vl); if (!isNaN(_ibsV)) p.top    = _ibsV; } break; }
+      case 'inset-block-end':    { if (vl !== 'auto') { var _ibeV = parseLengthPx(vl); if (!isNaN(_ibeV)) p.bottom = _ibeV; } break; }
+      case 'inset-inline-start': { if (vl !== 'auto') { var _iisV = parseLengthPx(vl); if (!isNaN(_iisV)) p.left   = _iisV; } break; }
+      case 'inset-inline-end':   { if (vl !== 'auto') { var _iieV = parseLengthPx(vl); if (!isNaN(_iieV)) p.right  = _iieV; } break; }
       case 'z-index': {
         if (vl !== 'auto') { var zv = parseInt(vl); if (!isNaN(zv)) p.zIndex = zv; } break;
       }
