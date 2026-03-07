@@ -19,6 +19,7 @@ import {
   VDocument, VElement, VEvent, VNode, VText, VRange, VEventTarget,
   buildDOM, serializeDOM, vdocToTokens, _serializeEl, _walk, _matchSel, _cePending,
   setScrollYGetter,
+  setScrollToCallback,
 } from './dom.js';
 import type { HtmlToken } from './types.js';
 import { BrowserPerformance, BrowserPerformanceObserver } from './perf.js';
@@ -207,6 +208,7 @@ export function createPageJS(
 
   // Wire scroll getter so getBoundingClientRect() returns viewport-relative coords
   setScrollYGetter(() => cb.getScrollY());
+  setScrollToCallback((x, y) => cb.scrollTo(x, y));
   try {
     var _originURL  = new URL(cb.baseURL);
     var _originKey  = (_originURL.protocol.replace(':', '') + '_' +
@@ -892,14 +894,17 @@ export function createPageJS(
   // ── window.navigator ───────────────────────────────────────────────────────
 
   var navigator = {
-    userAgent:  'JSOS/1.0',
+    userAgent:  'Mozilla/5.0 (JSOS; x86) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     platform:   'Linux x86_64',
     language:   'en-US',
     languages:  ['en-US', 'en'],
-    vendor:     'JSOS',
+    vendor:     'Google Inc.',
     appName:    'Netscape',
-    appVersion: '5.0 (X11)',
+    appVersion: '5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     product:    'Gecko',
+    productSub: '20030107',
+    oscpu:      'Linux i686',
+    buildID:    '20181001000000',
     cookieEnabled: true,
     onLine:     true,
     hardwareConcurrency: 1,
@@ -993,16 +998,20 @@ export function createPageJS(
     // User-Agent Client Hints API (navigator.userAgentData) — used by React DevTools, Angular, Vite
     userAgentData: {
       brands: [
-        { brand: 'JSOS', version: '1' },
+        { brand: 'Chromium', version: '120' },
+        { brand: 'Google Chrome', version: '120' },
+        { brand: 'Not_A Brand', version: '24' },
       ],
       mobile: false,
       platform: 'Linux',
       getHighEntropyValues(hints: string[]): Promise<Record<string, unknown>> {
         var vals: Record<string, unknown> = {
           architecture: 'x86', bitness: '32', model: '', platform: 'Linux',
-          platformVersion: '1.0', uaFullVersion: '1.0',
+          platformVersion: '5.15.0', uaFullVersion: '120.0.6099.71',
           fullVersionList: [
-            { brand: 'JSOS', version: '1.0.0' },
+            { brand: 'Chromium', version: '120.0.6099.71' },
+            { brand: 'Google Chrome', version: '120.0.6099.71' },
+            { brand: 'Not_A Brand', version: '24.0.0.0' },
           ],
           wow64: false,
         };

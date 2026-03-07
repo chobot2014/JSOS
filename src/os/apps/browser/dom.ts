@@ -17,6 +17,11 @@ var _scrollYGetter: (() => number) | null = null;
 /** Register the scroll offset provider. Called once by jsruntime.ts after cb is ready. */
 export function setScrollYGetter(fn: () => number): void { _scrollYGetter = fn; }
 
+// ── Scroll-to callback — injected by jsruntime.ts to wire scrollIntoView() ───
+var _scrollToCallback: ((x: number, y: number) => void) | null = null;
+/** Register the scroll-to provider. Called once by jsruntime.ts after cb is ready. */
+export function setScrollToCallback(fn: (x: number, y: number) => void): void { _scrollToCallback = fn; }
+
 // ── HTML Sanitizer (item 370) ─────────────────────────────────────────────────
 /**
  * Strip dangerous content from an HTML string before injecting via innerHTML.
@@ -1254,7 +1259,27 @@ export class VElement extends VNode {
   set defaultChecked(v: boolean) { if (v) this.setAttribute('checked', ''); else this.removeAttribute('checked'); }
 
   // HTMLInputElement-like — scrollIntoView etc.
-  scrollIntoView(_opts?: boolean | { behavior?: string; block?: string; inline?: string }): void {}
+  scrollIntoView(opts?: boolean | { behavior?: string; block?: string; inline?: string }): void {
+    if (!_scrollToCallback) return;
+    // Compute the element's document-relative top.
+    // _scrollYGetter() gives current scrollY, getBoundingClientRect().top is viewport-relative,
+    // so docTop = viewportTop + scrollY.
+    var scrollY = _scrollYGetter ? _scrollYGetter() : 0;
+    var rect = this.getBoundingClientRect();
+    var docTop = rect.top + scrollY;
+    var block = (opts && typeof opts === 'object' && opts.block) ? opts.block : 'start';
+    var targetY: number;
+    if (block === 'end' || block === 'nearest') {
+      // Scroll so element bottom is at viewport bottom (approximated as element top + 4 lines)
+      targetY = Math.max(0, docTop - 200);
+    } else if (block === 'center') {
+      targetY = Math.max(0, docTop - 100);
+    } else {
+      // 'start' — element top at viewport top with a small margin
+      targetY = Math.max(0, docTop - 16);
+    }
+    _scrollToCallback(0, targetY);
+  }
 
   /** HTMLInputElement.showPicker() — opens the browser-native picker for date/time/color inputs (Chrome 99+).
    *  In text-mode we have no native pickers, so this is a no-op that doesn't throw. */

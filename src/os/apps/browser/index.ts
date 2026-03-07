@@ -1142,6 +1142,53 @@ export class BrowserApp implements App {
       }
     }
 
+    // ── Fixed-element pass — paint position:fixed elements at viewport-anchored positions
+    // These elements ignore scroll and always appear at their posTop/posLeft viewport coordinates.
+    for (var _fxI = 0; _fxI < _lines.length; _fxI++) {
+      var _fxLine = _lines[_fxI];
+      if (_fxLine.fixedViewportY === undefined) continue;
+      var _fxAbsY = y0 + _fxLine.fixedViewportY;
+      if (_fxAbsY + (_fxLine.lineH || CHAR_H) < y0 || _fxAbsY >= y0 + ch) continue;
+      // Paint background to cover scrolled content beneath
+      if (_fxLine.bgColor !== undefined) {
+        canvas.fillRect(0, _fxAbsY - 1, w, (_fxLine.lineH || LINE_H) + 1, _fxLine.bgColor);
+      } else {
+        canvas.fillRect(0, _fxAbsY - 1, w, (_fxLine.lineH || LINE_H) + 1, CLR_BG);
+      }
+      if (_fxLine.bgGradient) {
+        renderGradientCSS(canvas, 0, _fxAbsY - 1, w, (_fxLine.lineH || LINE_H) + 1, _fxLine.bgGradient);
+      }
+      // Paint text spans
+      for (var _fxJ = 0; _fxJ < _fxLine.nodes.length; _fxJ++) {
+        var _fxSp = _fxLine.nodes[_fxJ];
+        if (!_fxSp.text) continue;
+        var _fxClr = _fxSp.color;
+        if (_fxSp.href) {
+          _fxClr = this._visited.has(_fxSp.href) ? CLR_VISITED
+                 : _fxSp.href === this._hoverHref ? CLR_LINK_HOV : CLR_LINK;
+        }
+        var _fxSc = _fxSp.fontScale || 1;
+        var _fxCW = CHAR_W * _fxSc;
+        var _fxCH = CHAR_H * _fxSc;
+        if (_fxSc > 1) {
+          canvas.drawTextScaled(_fxSp.x, _fxAbsY, _fxSp.text, _fxClr, _fxSc);
+          if (_fxSp.bold) canvas.drawTextScaled(_fxSp.x + _fxSc, _fxAbsY, _fxSp.text, _fxClr, _fxSc);
+        } else {
+          if (_fxSp.italic) {
+            canvas.drawText(_fxSp.x + 1, _fxAbsY, _fxSp.text, _fxClr);
+            canvas.drawText(_fxSp.x, _fxAbsY + Math.floor(CHAR_H / 2), _fxSp.text, _fxClr);
+          } else {
+            canvas.drawText(_fxSp.x, _fxAbsY, _fxSp.text, _fxClr);
+          }
+          if (_fxSp.bold) canvas.drawText(_fxSp.x + 1, _fxAbsY, _fxSp.text, _fxClr);
+        }
+        if (_fxSp.underline || _fxSp.href) {
+          canvas.drawLine(_fxSp.x, _fxAbsY + _fxCH,
+                          _fxSp.x + _fxSp.text.length * _fxCW, _fxAbsY + _fxCH, _fxClr);
+        }
+      }
+    }
+
     this._drawWidgets(canvas, y0, ch);
 
     // Phase 3.1: lift damage clip before drawing scrollbar and canvas elements —
@@ -2051,8 +2098,9 @@ export class BrowserApp implements App {
   private _hitTestLink(x: number, cy: number): string {
     for (var i = 0; i < this._pageLines.length; i++) {
       var line = this._pageLines[i];
-      if (line.y > cy) break;
-      if (line.y + line.lineH <= cy) continue;
+      var lineTop = line.fixedViewportY !== undefined ? line.fixedViewportY + this._scrollY : line.y;
+      if (lineTop > cy) { if (line.fixedViewportY === undefined) break; else continue; }
+      if (lineTop + line.lineH <= cy) continue;
       for (var j = 0; j < line.nodes.length; j++) {
         var span = line.nodes[j];
         if (span.href && x >= span.x && x <= span.x + span.text.length * CHAR_W) {
@@ -2067,10 +2115,13 @@ export class BrowserApp implements App {
   private _hitTestLinkFull(x: number, cy: number): RenderedSpan | null {
     for (var i = 0; i < this._pageLines.length; i++) {
       var line = this._pageLines[i];
-      if (line.y > cy) break;
-      if (line.y + line.lineH <= cy) continue;
+      // Fixed elements: viewport-relative, so doc coord = fixedViewportY + scrollY
+      var lineTop = line.fixedViewportY !== undefined ? line.fixedViewportY + this._scrollY : line.y;
+      if (lineTop > cy) { if (line.fixedViewportY === undefined) break; else continue; }
+      if (lineTop + line.lineH <= cy) continue;
       for (var j = 0; j < line.nodes.length; j++) {
         var span = line.nodes[j];
+        if (span.noClick) continue;
         if (span.href && x >= span.x && x <= span.x + span.text.length * CHAR_W) {
           return span;
         }
@@ -2083,10 +2134,12 @@ export class BrowserApp implements App {
   private _hitTestAnySpan(x: number, cy: number): RenderedSpan | null {
     for (var i = 0; i < this._pageLines.length; i++) {
       var line = this._pageLines[i];
-      if (line.y > cy) break;
-      if (line.y + line.lineH <= cy) continue;
+      var lineTop = line.fixedViewportY !== undefined ? line.fixedViewportY + this._scrollY : line.y;
+      if (lineTop > cy) { if (line.fixedViewportY === undefined) break; else continue; }
+      if (lineTop + line.lineH <= cy) continue;
       for (var j = 0; j < line.nodes.length; j++) {
         var span = line.nodes[j];
+        if (span.noClick) continue;
         if (x >= span.x && x <= span.x + span.text.length * CHAR_W) {
           return span;
         }

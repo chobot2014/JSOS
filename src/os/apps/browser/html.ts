@@ -663,6 +663,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       if (mark > 0)                          tsp.mark      = true;
       if (underline > 0 || curCSS.underline) tsp.underline = true;
       if (curCSS.color !== undefined && !linkHref) tsp.color = curCSS.color;
+      if (curCSS.pointerEvents === 'none') tsp.noClick = true;
       tableCellSpans.push(tsp);
       return;
     }
@@ -678,6 +679,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (underline > 0 || curCSS.underline) sp.underline = true;
     if (curCSS.color !== undefined && !linkHref) sp.color = curCSS.color;
     if (curCSS._onclickElId && !linkHref) sp.elId = curCSS._onclickElId;
+    if (curCSS.pointerEvents === 'none') sp.noClick = true;
     if (openBlock) { openBlock.spans.push(sp); }
     else           { inlineSpans.push(sp); }
   }

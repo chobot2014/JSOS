@@ -18,8 +18,9 @@ export interface InlineSpan {
   text:       string;
   href?:      string;
   download?:  string;  // <a download="filename"> hint (item 636)
-  elId?:      string;  // Element ID for JS click dispatch (id attr or data-jsos-el attr)
-  bold?:      boolean;
+  elId?:        string;  // Element ID for JS click dispatch (id attr or data-jsos-el attr)
+  noClick?:     boolean;  // pointer-events:none — span is not interactive
+  bold?:        boolean;
   italic?:    boolean;
   code?:      boolean;
   del?:       boolean;
@@ -155,6 +156,7 @@ export interface RenderedSpan {
   href?:      string;
   download?:  string;  // <a download="filename"> hint (item 636)
   elId?:      string;  // Element ID for JS click dispatch
+  noClick?:   boolean;  // pointer-events:none — skip during hit-testing
   bold?:      boolean;
   italic?:    boolean;   // CSS font-style: italic/oblique (item 433)
   del?:       boolean;
@@ -182,6 +184,10 @@ export interface RenderedLine {
   /** position:sticky threshold — minimum screen Y for this line during scroll.
    *  Paint pass uses Math.max(line.y - scrollY, stickyTop) to clamp position. */
   stickyTop?: number;
+  /** position:fixed — viewport-relative Y; painted in a separate fixed pass at y0 + fixedViewportY. */
+  fixedViewportY?: number;
+  /** position:fixed — viewport-relative X offset from content area left edge. */
+  fixedViewportX?: number;
 }
 
 /**

@@ -116,6 +116,7 @@ export function flowSpans(
       if (sp.href)      rsp.href      = sp.href;
       if (sp.download)  rsp.download  = sp.download;  // item 636
       if (sp.elId)      rsp.elId      = sp.elId;  // JS click-dispatch hit-test ID
+      if (sp.noClick)   rsp.noClick   = true;     // pointer-events:none
       if (sp.bold)      rsp.bold      = true;
       if (sp.italic)    rsp.italic    = true;
       if (sp.del)       rsp.del       = true;
@@ -996,7 +997,14 @@ function _layoutNodesImpl(
                              oof.bgColor !== undefined ? { bgColor: oof.bgColor } : undefined);
     for (var ol = 0; ol < oofLines.length; ol++) {
       var oofLine = oofLines[ol];
-      lines.push({ y: oofY, nodes: oofLine.nodes, lineH: oofLine.lineH });
+      var rendLine: { y: number; nodes: typeof oofLine.nodes; lineH: number; fixedViewportY?: number; fixedViewportX?: number } =
+        { y: oofY, nodes: oofLine.nodes, lineH: oofLine.lineH };
+      // position:fixed — mark lines so paint pass keeps them viewport-anchored regardless of scroll
+      if (oof.position === 'fixed') {
+        rendLine.fixedViewportY = oof.posTop  ?? 0;
+        rendLine.fixedViewportX = oof.posLeft ?? 0;
+      }
+      lines.push(rendLine);
       oofY += oofLine.lineH;
     }
   }
