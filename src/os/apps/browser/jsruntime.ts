@@ -270,6 +270,11 @@ export function createPageJS(
   // Toggle at runtime: window.__jsDebug = false  (or true to re-enable)
   var _jsDebug = true;
 
+  // ── Service Worker runtime state (Phase 6.7) ──────────────────────────────────
+  var _swActiveScope: any   = null;  // active ServiceWorkerGlobalScope_ instance
+  var _swRegistration: any  = null;  // current ServiceWorkerRegistration-like object
+  var _swContainer: any     = null;  // ServiceWorkerContainer_ (set after class def)
+
   function setTimeout_(fn: () => void, delay: number): number {
     var id = timerSeq++;
     var fireAt = Date.now() - startTime + Math.max(0, delay);
@@ -884,13 +889,15 @@ export function createPageJS(
       addEventListener(_t: string, _fn: unknown): void {},
       removeEventListener(_t: string, _fn: unknown): void {},
     },
-    serviceWorker: {
-      register(_url: string): Promise<unknown> { return Promise.resolve({ installing: null, waiting: null, active: null, scope: '/', unregister() { return Promise.resolve(true); }, update() { return Promise.resolve(this); }, addEventListener() {}, removeEventListener() {} }); },
-      ready: new Promise<unknown>(() => {}),  // never resolves (no SW support, but doesn't reject)
-      controller: null,
-      getRegistrations(): Promise<unknown[]> { return Promise.resolve([]); },
-      getRegistration(): Promise<unknown> { return Promise.resolve(undefined); },
-      addEventListener() {}, removeEventListener() {},
+    get serviceWorker(): any {
+      // Lazily returns the ServiceWorkerContainer_ instance (defined later in the closure)
+      return _swContainer || {
+        ready: new Promise(() => {}), controller: null,
+        register() { return Promise.reject(new DOMException('SW not ready', 'InvalidStateError')); },
+        getRegistration() { return Promise.resolve(undefined); },
+        getRegistrations() { return Promise.resolve([]); },
+        addEventListener() {}, removeEventListener() {}, startMessages() {},
+      };
     },
     sendBeacon(url: string, data?: unknown): boolean {
       try {
@@ -1767,6 +1774,19 @@ export function createPageJS(
           get body() { return _makeBodyStream(text2); },
         });
         return;
+      }
+
+      // ── Service Worker fetch intercept (Phase 6.7) ────────────────────────────
+      if (_swActiveScope) {
+        try {
+          var _swReq = new Request_(urlStr, opts as any);
+          var _swRespP = (_swActiveScope as ServiceWorkerGlobalScope_)._interceptFetch(_swReq);
+          if (_swRespP !== null) {
+            // SW called respondWith() — use its promise as the fetch result
+            _swRespP.then(resolve as (v: unknown) => void, reject);
+            return;
+          }
+        } catch (_swErr) { /* SW handler threw — fall through to network */ }
       }
 
       var method = (opts?.method || 'GET').toUpperCase();
@@ -4852,20 +4872,152 @@ export function createPageJS(
     delete(cacheName: string): Promise<boolean> { return Promise.resolve(this._caches.delete(cacheName)); }
     keys(): Promise<string[]> { return Promise.resolve([...this._caches.keys()]); }
   }
-  // ServiceWorkerContainer stub (Chrome 40+)
-  class ServiceWorkerContainer_ extends VEventTarget {
-    controller: unknown | null = null;
-    ready: Promise<unknown> = new Promise(() => {}); // never resolves (no SW)
-    oncontrollerchange: ((ev: VEvent) => void) | null = null;
-    onmessage: ((ev: VEvent) => void) | null = null;
-    onmessageerror: ((ev: VEvent) => void) | null = null;
-    register(_scriptURL: string, _options?: unknown): Promise<unknown> {
-      return Promise.reject(new DOMException("Service workers are not supported in JSOS", "NotSupportedError"));
+  // ── Service Worker Fetch intercept (Phase 6.7) ──────────────────────────────
+
+  /** FetchEvent delivered to SW fetch handlers via respondWith(). */
+  class FetchEvent_ extends VEvent {
+    request: Request_;
+    _respondWithPromise: Promise<unknown> | null = null;
+    _responded = false;
+    constructor(request: Request_) {
+      super('fetch');
+      this.request = request;
     }
-    getRegistration(_scope?: string): Promise<unknown> { return Promise.resolve(undefined); }
-    getRegistrations(): Promise<unknown[]> { return Promise.resolve([]); }
+    respondWith(responsePromise: Promise<unknown>): void {
+      this._responded = true;
+      this._respondWithPromise = Promise.resolve(responsePromise);
+    }
+    waitUntil(_promise: Promise<unknown>): void { /* SW lifecycle bookkeeping, noop */ }
+    get clientId(): string { return ''; }
+    get resultingClientId(): string { return ''; }
+    get handled(): Promise<undefined> { return Promise.resolve(undefined); }
+  }
+
+  /** ExtendableEvent for SW install / activate lifecycle. */
+  class ExtendableEvent_ extends VEvent {
+    waitUntil(_promise: Promise<unknown>): void { /* noop */ }
+  }
+
+  /**
+   * Simulated ServiceWorkerGlobalScope — the `self` context in which SW scripts
+   * are eval'd.  addEventListener('fetch', handler) is stored here;
+   * _interceptFetch() is called by fetchAPI to dispatch FetchEvent_.
+   */
+  class ServiceWorkerGlobalScope_ extends VEventTarget {
+    _swScriptURL: string;
+    _swScope: string;
+    caches = new CacheStorage_();
+    clients = {
+      claim():                           Promise<void>      { return Promise.resolve(); },
+      get(_id: string):                  Promise<unknown>   { return Promise.resolve(null); },
+      matchAll(_opts?: unknown):         Promise<unknown[]> { return Promise.resolve([]); },
+      openWindow(_url: string):          Promise<unknown>   { return Promise.resolve(null); },
+    };
+    registration: unknown = null;
+    constructor(scriptURL: string, scope: string) {
+      super();
+      this._swScriptURL = scriptURL;
+      this._swScope = scope;
+    }
+    skipWaiting():                       Promise<void>      { return Promise.resolve(); }
+    importScripts(..._urls: string[]):   void               { /* intentional no-op: dynamic imports not supported */ }
+    /** SW's own network requests bypass the SW intercept to avoid infinite recursion. */
+    fetch(url: string, opts?: any):      Promise<unknown>   { return fetchAPI(url, opts); }
+    /** Dispatch a FetchEvent; return respondWith() promise when set, else null. */
+    _interceptFetch(request: Request_): Promise<unknown> | null {
+      var _handlers = this._handlers.get('fetch');
+      if (!_handlers || _handlers.length === 0) return null;
+      var _ev = new FetchEvent_(request);
+      this._fireList(_ev as VEvent);
+      return _ev._responded ? _ev._respondWithPromise : null;
+    }
+  }
+
+  // ── ServiceWorkerContainer — full implementation ──────────────────────────────
+  class ServiceWorkerContainer_ extends VEventTarget {
+    controller:        unknown | null = null;
+    ready:             Promise<unknown>;
+    _readyResolve!:    (val: unknown) => void;
+    oncontrollerchange: ((ev: VEvent) => void) | null = null;
+    onmessage:          ((ev: VEvent) => void) | null = null;
+    onmessageerror:     ((ev: VEvent) => void) | null = null;
+    constructor() {
+      super();
+      this.ready = new Promise<unknown>(resolve => { this._readyResolve = resolve; });
+    }
+    register(scriptURL: string, options?: { scope?: string }): Promise<unknown> {
+      return new Promise<unknown>((resolve, reject) => {
+        try {
+          var scope = (options && options.scope) ? options.scope : '/';
+          var fullUrl = _resolveURL(scriptURL, _baseHref);
+          // Fetch the SW script via the real network (bypasses SW intercept)
+          os.fetchAsync(fullUrl, (resp: any, err: any) => {
+            if (err || !resp) {
+              reject(new DOMException('Failed to fetch SW script: ' + (err || 'no response'), 'AbortError'));
+              return;
+            }
+            try {
+              var swText: string = resp.bodyText || resp.body || '';
+              var swScope = new ServiceWorkerGlobalScope_(fullUrl, scope);
+              // Build SW registration object
+              var reg: any = {
+                scope, installing: null, waiting: null,
+                active: { scriptURL: fullUrl, state: 'activated', addEventListener() {}, postMessage() {} },
+                navigationPreload: new NavigationPreloadManager_(),
+                unregister(): Promise<boolean> {
+                  _swActiveScope = null; _swRegistration = null;
+                  if (_swContainer) _swContainer.controller = null;
+                  return Promise.resolve(true);
+                },
+                update(): Promise<unknown> { return Promise.resolve(reg); },
+                addEventListener(t: string, fn: any) { swScope.addEventListener(t, fn); },
+                removeEventListener(t: string, fn: any) { swScope.removeEventListener(t, fn); },
+              };
+              swScope.registration = reg;
+              _swActiveScope = swScope;
+              _swRegistration = reg;
+              this.controller = reg.active;
+              // Eval the SW script with `self` bound to the ServiceWorkerGlobalScope_
+              // New Function is safe here: already inside QuickJS sandbox
+              var _swFn = new Function(
+                'self', 'caches', 'skipWaiting', 'clients', 'importScripts',
+                'fetch', 'FetchEvent', 'ExtendableEvent',
+                '"use strict";\n' + swText
+              );
+              _swFn(
+                swScope,
+                swScope.caches,
+                swScope.skipWaiting.bind(swScope),
+                swScope.clients,
+                swScope.importScripts.bind(swScope),
+                fetchAPI,
+                FetchEvent_,
+                ExtendableEvent_,
+              );
+              // Fire install then activate lifecycle events
+              swScope.dispatchEvent(new ExtendableEvent_('install') as VEvent);
+              swScope.dispatchEvent(new ExtendableEvent_('activate') as VEvent);
+              // Notify the page of controller change
+              this._readyResolve(reg);
+              this.dispatchEvent(new VEvent('controllerchange'));
+              if (this.oncontrollerchange) this.oncontrollerchange(new VEvent('controllerchange'));
+              resolve(reg);
+            } catch (evalErr) {
+              _swActiveScope = null; _swRegistration = null;
+              reject(new Error('ServiceWorker script error: ' + String(evalErr)));
+            }
+          }, { method: 'GET' });
+        } catch (ex) {
+          reject(ex);
+        }
+      });
+    }
+    getRegistration(_scope?: string): Promise<unknown> { return Promise.resolve(_swRegistration); }
+    getRegistrations(): Promise<unknown[]>             { return Promise.resolve(_swRegistration ? [_swRegistration] : []); }
     startMessages(): void {}
   }
+  // Instantiate after class definition so the navigator getter can find it
+  _swContainer = new ServiceWorkerContainer_();
   // PaymentRequest (Chrome 60+) â€” stub so feature detection works
   class PaymentRequest_ extends VEventTarget {
     id = ""; shippingAddress: unknown | null = null; shippingOption: string | null = null; shippingType: string | null = null;
