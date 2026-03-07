@@ -46,6 +46,7 @@ import { createPageJS, getBlobURLContent, type PageJS } from './jsruntime.js';
 import { flushAllCaches } from './cache.js';
 import { renderGradientCSS } from './gradient.js';
 import { parseCSP, type CSPPolicy } from './csp.js';
+import { TileRenderer, AnimationCompositor, textAtlas, borderShadowCache, BorderShadowCache } from './render.js';
 
 // ── Box-shadow parser ─────────────────────────────────────────────────────────
 interface _BoxShadowLayer {
@@ -171,6 +172,10 @@ export class BrowserApp implements App {
   private _status      = '';
   private _dirty       = true;
   private _damage: { x: number; y: number; w: number; h: number } | null = null;  // item 2.4
+  // Phase 3 rendering pipeline
+  private _tileRenderer:   TileRenderer | null        = null;   // 3.1 dirty tiles / 3.5 back buffer
+  private _animCompositor: AnimationCompositor | null  = null;  // 3.3 transform/opacity bypass
+  private _lastBlitTick:   number                      = -1;    // 3.5 vsync PIT tick tracker
   private _hoverHref   = '';
   private _hoverElId   = '';  // JS-element currently under the mouse pointer
   private _focusedWidgetName = '';  // name of currently JS-focused widget for blur tracking;
@@ -653,6 +658,18 @@ export class BrowserApp implements App {
       this._cursorBlink++;
       if (((this._cursorBlink >> 4) & 1) !== prevPhase) this._dirty = true;
     }
+    // 3.3: Compositor-only tick — CSS transform / opacity animations bypass layout + paint.
+    // Gate: animations are active AND no pending damage (DOM was not mutated this frame).
+    if (this._animCompositor && this._animCompositor.activeCount > 0 && !this._damage) {
+      this._animCompositor.tick();
+      if (this._tileRenderer && this._win) {
+        var _acBuf = this._tileRenderer.compositor.composite();
+        var _acVpW = this._win.canvas.width;
+        var _acVpH = this._contentH();
+        this._win.canvas.blitPixelsDirect(_acBuf, _acVpW, _acVpH, 0, TAB_BAR_H + TOOLBAR_H);
+      }
+      return true;
+    }
     if (!this._dirty) return false;
     this._dirty = false;
     // Clear damage rect after each full render (item 2.4)
@@ -832,7 +849,35 @@ export class BrowserApp implements App {
     var ch = this._contentH();
     var y0 = TAB_BAR_H + TOOLBAR_H;
 
-    canvas.fillRect(0, y0, w, ch, CLR_BG);
+    // 3.1 / 3.5: TileRenderer back buffer — render text + simple-bg content into an
+    // off-screen Uint32Array, then vsync-gate the blit to prevent partial-frame tearing.
+    if (this._tileRenderer) {
+      // 3.1: Invalidate only the damaged region (dirty-tile tracking).
+      // When no damage rect is set, invalidate the full content area for a fresh repaint.
+      if (this._damage) {
+        this._tileRenderer.invalidate(
+          this._damage.x,
+          Math.max(0, this._damage.y - y0),
+          this._damage.w,
+          this._damage.h,
+        );
+      } else {
+        this._tileRenderer.invalidate(0, 0, w, ch);
+      }
+      // Paint text + simple backgrounds into the off-screen back buffer.
+      var _trBuf = this._tileRenderer.paint(this._pageLines, this._scrollY, w, ch, CLR_BG);
+      // 3.5: Vsync-gated flip — blit the back buffer only when the PIT tick has
+      // advanced, so no partial render is ever visible mid-frame.
+      var _kernelG = (typeof globalThis !== 'undefined' ? (globalThis as any).kernel : undefined);
+      var _pitTick: number = (_kernelG && _kernelG.getTicks) ? (_kernelG.getTicks() as number) : -1;
+      if (_pitTick < 0 || _pitTick !== this._lastBlitTick) {
+        this._lastBlitTick = _pitTick;
+        canvas.blitPixelsDirect(_trBuf, w, ch, 0, y0);
+      }
+    } else {
+      // Fallback: full synchronous clear (tileRenderer not yet initialised).
+      canvas.fillRect(0, y0, w, ch, CLR_BG);
+    }
 
     if (this._loading) {
       canvas.drawText(CONTENT_PAD, y0 + 20, 'Loading  ' + this._pageURL + ' ...', CLR_STATUS_TXT);
@@ -920,14 +965,28 @@ export class BrowserApp implements App {
         // 3. Border outline
         if (deco.borderWidth && deco.borderWidth > 0 && deco.borderColor !== undefined) {
           var _brd = deco.borderWidth;
-          canvas.drawRoundRect(decoX, decoY, decoW, decoH, decoR, deco.borderColor);
-          for (var _bi = 1; _bi < _brd; _bi++) {
-            canvas.drawRoundRect(
-              decoX + _bi, decoY + _bi,
-              decoW - _bi * 2, decoH - _bi * 2,
-              Math.max(0, decoR - _bi),
-              deco.borderColor,
-            );
+          if (decoR === 0) {
+            // 3.4: Border/shadow cache \u2014 pre-rasterised straight-edge borders avoid
+            // repeated canvas.drawRoundRect calls for identical-geometry elements.
+            var _brdKey = BorderShadowCache.key(decoW, decoH, _brd, deco.borderColor, 0, 0, 0);
+            var _brdEntry = borderShadowCache.get(_brdKey);
+            if (!_brdEntry) {
+              var _brdPx = borderShadowCache.renderBorder(decoW, decoH, _brd, deco.borderColor);
+              _brdEntry = { w: decoW, h: decoH, data: _brdPx, key: _brdKey };
+              borderShadowCache.set(_brdKey, _brdEntry);
+            }
+            canvas.blitPixelsDirect(_brdEntry!.data, _brdEntry!.w, _brdEntry!.h, decoX, decoY);
+          } else {
+            // Rounded border \u2014 canvas path (radius varies per element, not worth caching).
+            canvas.drawRoundRect(decoX, decoY, decoW, decoH, decoR, deco.borderColor);
+            for (var _bi = 1; _bi < _brd; _bi++) {
+              canvas.drawRoundRect(
+                decoX + _bi, decoY + _bi,
+                decoW - _bi * 2, decoH - _bi * 2,
+                Math.max(0, decoR - _bi),
+                deco.borderColor,
+              );
+            }
           }
         }
         // overflow:hidden: push canvas clip rect so children are clipped to this box (item 3.10)
@@ -939,10 +998,18 @@ export class BrowserApp implements App {
       }
 
       if (line.bgColor) {
-        // Skip full-width fill when boxDeco already painted a rounded background
-        if (!(line.boxDeco && (line.boxDeco.borderRadius || 0) > 0)) {
-          canvas.fillRect(0, absY - 1, w, line.lineH + 1, line.bgColor);
+        var _bdR = line.boxDeco ? (line.boxDeco.borderRadius || 0) : 0;
+        if (_bdR === 0) {
+          // 3.6: Solid-fill fast path — skip canvas.fillRect when the TileRenderer back
+          // buffer already painted this solid background, avoiding a redundant
+          // full-compositing pass on solid-colour elements with no overlapping children.
+          var _trCoversBg = this._tileRenderer !== null
+            && !line.bgGradient && !line.bgImageUrl && !line.quoteBg && !line.boxDeco;
+          if (!_trCoversBg) {
+            canvas.fillRect(0, absY - 1, w, line.lineH + 1, line.bgColor);
+          }
         }
+        // When _bdR > 0 the rounded fill is painted by the boxDeco section above.
       }
       if (line.bgGradient) {
         var _gx  = line.boxDeco ? line.boxDeco.x : 0;
@@ -2335,6 +2402,19 @@ export class BrowserApp implements App {
     this._scrollY   = 0;
 
     var w  = this._win ? this._win.canvas.width : 800;
+    // 3.2: Pre-warm text atlas on page load so the TileRenderer has glyphs ready
+    // immediately, avoiding per-glyph initialisation on the first paint.
+    if (!textAtlas.ready) textAtlas.prewarm(CHAR_W, CHAR_H);
+    // 3.1 / 3.3: Initialise or reset the tile renderer and animation compositor.
+    // On first call a new TileRenderer is created; on subsequent page loads it is
+    // reset so dirty-tile state starts clean for the new page.
+    var _trVpH = this._contentH();
+    if (!this._tileRenderer) {
+      this._tileRenderer   = new TileRenderer(w, _trVpH);
+      this._animCompositor = new AnimationCompositor(this._tileRenderer.compositor);
+    } else {
+      this._tileRenderer.reset();
+    }
     var lr = layoutNodes(nodes, bps, w);
     this._pageLines = lr.lines;
     this._widgets   = lr.widgets;

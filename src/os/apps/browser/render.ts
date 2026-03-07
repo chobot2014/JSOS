@@ -211,6 +211,15 @@ export class TextAtlas {
   get ready(): boolean { return this._ready; }
 
   /**
+   * Pre-warm: initialise the atlas now if not already done.
+   * Call once per page load so glyphs are available before the first paint.
+   * Safe to call multiple times — no-op when atlas is already built.
+   */
+  prewarm(charW = CHAR_W, charH = CHAR_H): void {
+    if (!this._ready) this.init(charW, charH);
+  }
+
+  /**
    * Blit character `ch` into `dest` at (dx, dy) with the given RGBA color.
    * `destW` is the stride (width) of the destination buffer.
    */
@@ -652,7 +661,10 @@ export class TileRenderer {
     var lineH = line.lineH || CHAR_H;
 
     // ── Background fill (bgColor / preBg / hrLine) ─────────────────────────
-    if (line.bgColor !== undefined) {
+    // Skip solid fill for rounded-border box elements — the canvas path in
+    // _drawContent() paints those with fillRoundRect (correct shape).
+    var _isRoundedBox = !!(line.boxDeco && (line.boxDeco.borderRadius || 0) > 0);
+    if (line.bgColor !== undefined && !_isRoundedBox) {
       var bgFill = line.bgColor | 0xFF000000;  // ensure opaque
       for (var bgy = lineY; bgy < Math.min(lineY + lineH, pixels.length / vpW); bgy++) {
         for (var bgx = tileX; bgx < tileX + tileW; bgx++) {
