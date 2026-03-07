@@ -46,6 +46,7 @@ import { createPageJS, getBlobURLContent, type PageJS } from './jsruntime.js';
 import { flushAllCaches } from './cache.js';
 import { renderGradientCSS } from './gradient.js';
 import { parseCSP, type CSPPolicy } from './csp.js';
+import { TileRenderer, textAtlas } from './render.js';
 
 // ── Box-shadow parser ─────────────────────────────────────────────────────────
 interface _BoxShadowLayer {
@@ -171,6 +172,19 @@ export class BrowserApp implements App {
   private _status      = '';
   private _dirty       = true;
   private _damage: { x: number; y: number; w: number; h: number } | null = null;  // item 2.4
+
+  // ── Tile-dirty render cache (Phase 3) ──────────────────────────────────────
+  /** TileRenderer for background content layer (64×64 tile grid). */
+  private _tileRenderer: TileRenderer | null = null;
+  private _tileVpW = 0;
+  private _tileVpH = 0;
+  /** Monotonic counter bumped whenever _pageLines is replaced. */
+  private _contentVersion  = 0;
+  /** _contentVersion at the time _tileRenderer last painted. */
+  private _tileContentVer  = -1;
+  /** _scrollY at the time _tileRenderer last painted. */
+  private _tileScrollY     = -9999;
+
   private _hoverHref   = '';
   private _hoverElId   = '';  // JS-element currently under the mouse pointer
   private _focusedWidgetName = '';  // name of currently JS-focused widget for blur tracking;
@@ -254,6 +268,7 @@ export class BrowserApp implements App {
     this._pageURL = t.url; this._pageTitle = t.title;
     this._history = t.history; this._histIdx = t.histIdx;
     this._pageLines = t.pageLines; this._widgets = t.widgets;
+    this._contentVersion++;          // Phase 3: invalidate tile cache on tab switch
     this._scrollY = t.scrollY; this._maxScrollY = t.maxScrollY;
     this._loading = t.loading; this._status = t.status;
     this._hoverHref = t.hoverHref; this._forms = t.forms;
@@ -296,6 +311,8 @@ export class BrowserApp implements App {
   onMount(win: WMWindow): void {
     os.debug.log('[browser] onMount start');
     this._win = win;
+    // Phase 3.2: pre-warm glyph atlas so TileRenderer has fast char lookup on first paint.
+    if (!textAtlas.ready) textAtlas.init(CHAR_W, CHAR_H);
     // Start with a blank page; user can navigate to any URL via the address bar
     var _startURL = 'about:blank';
     this._tabs = [this._makeBlankTab(_startURL)];
@@ -655,12 +672,11 @@ export class BrowserApp implements App {
     }
     if (!this._dirty) return false;
     this._dirty = false;
-    // Clear damage rect after each full render (item 2.4)
-    this._damage = null;
 
     this._drawTabBar(canvas);
     this._drawToolbar(canvas);
-    this._drawContent(canvas);
+    this._drawContent(canvas);           // reads this._damage before clearing
+    this._damage = null;                 // clear damage rect after content used it (item 2.4)
     this._drawStatusBar(canvas);
     if (this._findMode) this._drawFindBar(canvas);
     return true;
@@ -832,12 +848,59 @@ export class BrowserApp implements App {
     var ch = this._contentH();
     var y0 = TAB_BAR_H + TOOLBAR_H;
 
-    canvas.fillRect(0, y0, w, ch, CLR_BG);
+    // ── Phase 3.1: Tile-dirty partial repaint ────────────────────────────────
+    // Initialise (or resize) the TileRenderer when the viewport dimensions change.
+    if (!this._tileRenderer || this._tileVpW !== w || this._tileVpH !== ch) {
+      this._tileRenderer = new TileRenderer(w, ch);
+      this._tileVpW = w; this._tileVpH = ch;
+      // Force full repaint after resize.
+      this._tileContentVer = -1;
+    }
+    var _tr  = this._tileRenderer;
+    var _dmg = this._damage;
+
+    // Check whether the content layer is truly clean (no layout change, no scroll, no damage).
+    var _contentSame = (
+      this._contentVersion === this._tileContentVer &&
+      this._scrollY        === this._tileScrollY    &&
+      _dmg === null
+    );
+    if (_contentSame) {
+      // Only chrome (toolbar/URL bar) or focused-widget cursor changed — text lines are
+      // untouched. Redraw widgets only (they clear their own background) and return.
+      this._drawWidgets(canvas, y0, ch);
+      return;
+    }
+
+    // Mark the right set of tiles dirty before painting.
+    if (_dmg !== null) {
+      // Partial update: only tiles overlapping the damage rect need repainting.
+      _tr.compositor.tileDirty.markRectDirty(_dmg.x, _dmg.y - y0, _dmg.w, _dmg.h);
+    } else {
+      // Full repaint (new page, scroll, resize).
+      _tr.compositor.tileDirty.markAllDirty();
+    }
+
+    // ── Set canvas clip to damage area (when present) to avoid over-drawing ─
+    var _savedClip = canvas.saveClipRect();
+    if (_dmg !== null) {
+      canvas.setClipRect(_dmg.x, _dmg.y, _dmg.w, _dmg.h);
+      canvas.fillRect(_dmg.x, _dmg.y, _dmg.w, _dmg.h, CLR_BG);
+    } else {
+      canvas.fillRect(0, y0, w, ch, CLR_BG);
+    }
 
     if (this._loading) {
       canvas.drawText(CONTENT_PAD, y0 + 20, 'Loading  ' + this._pageURL + ' ...', CLR_STATUS_TXT);
+      canvas.restoreClipRect(_savedClip);
+      this._tileContentVer = this._contentVersion;
+      this._tileScrollY    = this._scrollY;
       return;
     }
+
+    // Damage rect bounds in absolute canvas coordinates — used to skip off-damage lines.
+    var _dmgY1 = _dmg !== null ? _dmg.y         : y0;
+    var _dmgY2 = _dmg !== null ? _dmg.y + _dmg.h : y0 + ch;
 
     // Binary-search to the first visible line
     var _lines = this._pageLines;
@@ -855,6 +918,12 @@ export class BrowserApp implements App {
       var lineY = line.y - _sv;
       if (lineY > ch) break;
       var absY = y0 + lineY;
+      var lineBot = absY + (line.lineH || CHAR_H);
+      // Phase 3.1: skip lines entirely outside the damage rect (saves draw calls).
+      if (_dmg !== null) {
+        if (lineBot < _dmgY1) continue;  // line is above the damage strip
+        if (absY   > _dmgY2) break;      // line is below the damage strip — done
+      }
       // Pop expired overflow:hidden clips
       while (_clipStack.length > 0 && absY > _clipStack[_clipStack.length - 1].endY) {
         canvas.restoreClipRect(_clipStack.pop()!.saved);
@@ -1021,6 +1090,10 @@ export class BrowserApp implements App {
 
     this._drawWidgets(canvas, y0, ch);
 
+    // Phase 3.1: lift damage clip before drawing scrollbar and canvas elements —
+    // scrollbar thumb position changes on every scroll, canvas elements are always current.
+    canvas.clearClipRect();
+
     // Scrollbar
     if (this._maxScrollY > 0 && ch > 0) {
       var sbW    = 10;
@@ -1062,6 +1135,11 @@ export class BrowserApp implements App {
         canvas.blitPixelsDirect(_cPixels, _cb.width, _cb.height, _cRect.x, _cdy);
       }
     }
+
+    // Phase 3.1: restore clip rect and record what was rendered.
+    canvas.restoreClipRect(_savedClip);
+    this._tileContentVer = this._contentVersion;
+    this._tileScrollY    = this._scrollY;
   }
 
   private _drawWidgets(canvas: Canvas, y0: number, ch: number): void {
@@ -2337,6 +2415,7 @@ export class BrowserApp implements App {
     var w  = this._win ? this._win.canvas.width : 800;
     var lr = layoutNodes(nodes, bps, w);
     this._pageLines = lr.lines;
+    this._contentVersion++;          // Phase 3: invalidate tile cache on new layout
     this._widgets   = lr.widgets;
 
     var contentH = this._contentH();
