@@ -38,6 +38,11 @@ Thumbs.db
 # Docker
 .dockerignore
 
+# Test output (can be very large)
+test-output/latest.txt
+test-output/test8.txt
+test-output/memlimit-test.txt
+
 # Temporary files
 tmp/
 temp/
