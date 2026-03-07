@@ -113,7 +113,9 @@ function _makeEntry(
 }
 
 export class BrowserPerformance {
-  /** Kernel tick at which this Performance object was created (page start). */
+  /** Microseconds since boot at page-start (Phase 4.1: sub-ms precision via TSC). */
+  private _originUs: number;
+  /** Fallback: tick-count origin when uptimeUs is unavailable. */
   private _originTick: number;
   /** Buffer of all entries recorded since page start. */
   _buffer: PerformanceEntry[] = [];
@@ -139,14 +141,23 @@ export class BrowserPerformance {
   loadEventEnd          = 0;
 
   constructor() {
-    this._originTick = typeof kernel !== 'undefined' ? (kernel.getTicks ? kernel.getTicks() : 0) : 0;
+    this._originTick = typeof kernel !== 'undefined' && kernel.getTicks ? kernel.getTicks() : 0;
+    // Phase 4.1: prefer micro-second resolution from calibrated TSC.
+    this._originUs   = typeof kernel !== 'undefined' && kernel.uptimeUs ? kernel.uptimeUs() : this._originTick * 1000;
   }
 
   // ── Core timing ────────────────────────────────────────────────────────────
 
+  /**
+   * Returns milliseconds since page start — sub-millisecond resolution when
+   * the kernel's TSC calibration is available (Phase 4.1).
+   */
   now(): number {
+    if (typeof kernel !== 'undefined' && kernel.uptimeUs) {
+      return (kernel.uptimeUs() - this._originUs) / 1000;  // μs → ms (fractional)
+    }
     if (typeof kernel !== 'undefined' && kernel.getTicks) {
-      return (kernel.getTicks() - this._originTick);  // 1 tick = 1 ms at 1000 Hz
+      return (kernel.getTicks() - this._originTick);        // 1 tick = 1 ms fallback
     }
     return Date.now();
   }

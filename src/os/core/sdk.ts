@@ -47,6 +47,7 @@ import { audio as _pcmAudio } from '../audio/index.js';
 import { wm, type App, type WMWindow, type KeyEvent, type MouseEvent, type MenuItem } from '../ui/wm.js';
 import { Canvas } from '../ui/canvas.js';
 import { Mutex, Condvar, Semaphore } from '../process/sync.js';
+import { globalGC, type HeapStats } from '../process/gc.js';
 import {
   sha256 as _sha256Raw,
   hmacSha256 as _hmacSha256Raw,
@@ -1264,6 +1265,8 @@ function _doFetch(
 /** Cached CMOS RTC read at first call: Unix epoch ms at that moment. */
 var _rtcBootEpoch: number | null = null;
 var _rtcBootUptime = 0;
+/** Boot-time uptime in microseconds for sub-ms elapsed tracking (Phase 4.1). */
+var _rtcBootUptimeUs = 0;
 
 /** Animation registry: id → { cb, duration, startUptime } */
 var _animRegistry = new Map<number, { cb: (progress: number) => void; duration: number; startUptime: number; coroId: number }>();
@@ -1329,13 +1332,19 @@ function _rtcGetUnixMs(): number {
 function _sdkTimeNow(): number {
   if (_rtcBootEpoch === null) {
     try {
-      _rtcBootEpoch  = _rtcGetUnixMs();
-      _rtcBootUptime = kernel.getUptime();
+      _rtcBootEpoch     = _rtcGetUnixMs();
+      _rtcBootUptime    = kernel.getUptime();
+      _rtcBootUptimeUs  = (kernel.uptimeUs ? kernel.uptimeUs() : _rtcBootUptime * 1000);
     } catch (_e) {
       // Fallback: treat boot as 2026-01-01T00:00:00Z
-      _rtcBootEpoch  = 1735689600000;
-      _rtcBootUptime = kernel.getUptime();
+      _rtcBootEpoch     = 1735689600000;
+      _rtcBootUptime    = kernel.getUptime();
+      _rtcBootUptimeUs  = _rtcBootUptime * 1000;
     }
+  }
+  // Phase 4.1: use sub-ms TSC resolution when kernel.uptimeUs() is available.
+  if (kernel.uptimeUs) {
+    return _rtcBootEpoch + (kernel.uptimeUs() - _rtcBootUptimeUs) / 1000;
   }
   return _rtcBootEpoch + (kernel.getUptime() - _rtcBootUptime);
 }
@@ -1890,6 +1899,17 @@ const sdk = {
         osNative:     os?.checksumNative  ?? false,
         stringNative: os?.stringNative    ?? false,
       };
+    },
+
+    /**
+     * Live GC heap statistics.
+     *
+     * @example
+     *   var g = os.system.gcStats();
+     *   print('Heap: ' + (g.totalBytes/1024|0) + ' KB, minorGC=' + g.minorGCCount + ' majorGC=' + g.majorGCCount);
+     */
+    gcStats(): HeapStats {
+      return globalGC.stats();
     },
   },
 
@@ -3153,8 +3173,10 @@ const sdk = {
   time: {
     /** Current time as Unix epoch milliseconds. */
     now(): number { return _sdkTimeNow(); },
-    /** OS uptime in milliseconds since boot. */
-    uptime(): number { return kernel.getUptime ? kernel.getUptime() * 1000 : 0; },
+    /** OS uptime in milliseconds since boot (sub-ms resolution when TSC available). */
+    uptime(): number {
+      return kernel.uptimeUs ? kernel.uptimeUs() / 1000 : kernel.getUptime();
+    },
     /** Current date/time as a structured object. */
     date(epochMs?: number): { year: number; month: number; day: number; hour: number; minute: number; second: number; dow: number } {
       var d = (epochMs !== undefined ? epochMs : _sdkTimeNow()) / 1000;

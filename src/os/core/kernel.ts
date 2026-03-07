@@ -86,6 +86,12 @@ export interface KernelAPI {
   getTicks(): number;
   getUptime(): number;   /* milliseconds since boot */
   sleep(ms: number): void;
+  /** TSC ticks per second (calibrated against PIT at boot). 0 before calibration. (item 46) */
+  tscHz?(): number;
+  /** Microseconds since boot via calibrated TSC; falls back to PIT ms if TSC unavailable. (item 48) */
+  uptimeUs?(): number;
+  /** Nanoseconds since boot as a JS number (BigInt on kernel side, unwrapped here). (item 48) */
+  getTimeNs?(): number;
 
   //  Memory 
   getMemoryInfo(): MemoryInfo;

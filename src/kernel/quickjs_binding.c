@@ -3953,9 +3953,11 @@ int quickjs_initialize(void) {
 
     JS_SetPropertyStr(ctx, global, "kernel", kobj);
 
+    /* Phase 4.1: inject Date.now() using sub-ms uptimeUs (TSC) when available,
+     * falling back to 1 ms PIT resolution on older builds. */
     const char *stub =
         "var console={log:function(){},error:function(){},warn:function(){},clear:function(){}};"
-        "Date.now=function(){return kernel.getUptime();};";
+        "Date.now=function(){return kernel.uptimeUs?kernel.uptimeUs()/1000:kernel.getUptime();};";
     JSValue init = JS_Eval(ctx, stub, strlen(stub), "<init>", JS_EVAL_TYPE_GLOBAL);
     JS_FreeValue(ctx, init);
     JS_FreeValue(ctx, global);
