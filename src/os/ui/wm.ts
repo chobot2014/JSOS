@@ -18,7 +18,11 @@ import { threadManager } from '../process/threads.js';
 import { scheduler } from '../process/scheduler.js';
 import { _serviceChildJIT, clearChildJITForProc } from '../process/qjs-jit.js';
 import { systemProfiler } from '../process/optimizer.js';
+import { globalGC } from '../process/gc.js';
 import { SyscallPolicy, registerPolicy, unregisterPolicy } from '../core/syscall-policy.js';
+
+// GC tick counter — incremented each WM frame, passed to globalGC.tick()
+let _wmGCTick = 0;
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -640,6 +644,8 @@ export class WindowManager {
     scheduler.tick();
     threadManager.tickCoroutines();   // cooperative fetch / async coroutines
     systemProfiler.tick();
+    // GC incremental slice — runs every frame, max 1ms budget (item 877/878)
+    try { globalGC.tick(_wmGCTick++); } catch (_) {}
     this._composite();
   }
   /** Mark the WM as needing a repaint (call from app code or external events). */

@@ -483,6 +483,21 @@ export class QJSJITCompiler {
     // Constant folding: pre-compute foldable push+push+arith triples (item 869)
     const _constFolds = ConstantFolder.fold(bc);
 
+    // LICM: compute loop-invariant PCs (item 867) — invariant locals/consts need
+    // not be re-evaluated on every loop iteration.
+    const _licmSet = LICMPass.analyze(bc, _preAnalysis.loopHeaders);
+
+    // Range analysis: induction-variable bounds for bounds-check elimination (item 868)
+    // _rangeMap[i] = [min, max] inclusive for local i when it is a loop counter.
+    const _rangeMap = RangeAnalysis.analyze(bc, _preAnalysis.loopHeaders);
+
+    // Track the local-variable index most recently pushed onto the eval stack.
+    // Used by OP_get_array_el to elide redundant bounds-check work when the
+    // index is a proven-non-negative induction variable (item 868 use site).
+    let _lastPushLocal = -1;
+
+    void _licmSet; // consumed by future hoisting optimisation; suppress lint
+
     while (pc < bc.bcLen) {
       // DCE: skip dead code ranges — avoids bail-outs on unreachable unsupported opcodes.
       if (_deadCutoff[pc] >= 0) { pc = _deadCutoff[pc]; continue; }
@@ -520,7 +535,7 @@ export class QJSJITCompiler {
         case OP_get_loc: {
           const i = bc.u16(pc + 1);
           if (this._isRegLocal(i)) { e.movEaxEbx(); } else { e.load(this._locDisp(i)); }
-          e.pushEax(); pc += 3; break;
+          e.pushEax(); _lastPushLocal = i; pc += 3; break;
         }
         case OP_put_loc: {
           const i = bc.u16(pc + 1);
@@ -852,22 +867,47 @@ export class QJSJITCompiler {
           if (icEntry && icEntry.dataOff > 0 && icEntry.elemSize === 4) {
             // Fast path: dense Int32Array / Uint32Array — elemSize === 4 guarantees raw int32 backing.
             // Stack on entry: [..., arr_ptr, idx]  (idx = TOS, arr_ptr = TOS-1)
+            //
+            // Range analysis (item 868): if the index was produced by OP_get_loc(i) and
+            // RangeAnalysis proves i ∈ [0, N] (non-negative range), emit an unsigned
+            // comparison (JB) instead of signed (JLE) — works for non-negative indices
+            // because a negative signed int as uint32 is always > array.length.
+            // Range analysis (item 868): if the pushed index local was tracked by
+            // OP_get_loc and RangeAnalysis proves its range starts at ≥ 0, we can
+            // skip the negative-index guard and use an unsigned bounds check (JBE).
+            const _idxRange  = (_lastPushLocal >= 0) ? _rangeMap.get(_lastPushLocal) : undefined;
+            const _idxNonNeg = _idxRange !== undefined && _idxRange[0] >= 0;
+            _lastPushLocal = -1; // consumed
+
             e.popEcx();          // ECX = idx
             e.popEax();          // EAX = arr_ptr
-            e.xchgEaxEcx();      // ECX = arr_ptr, EAX = idx  (no temp register needed)
+            e.xchgEaxEcx();      // ECX = arr_ptr, EAX = idx
+
             e.pushEax();         // [ESP] = idx  (save for in-bounds path)
-            // Bounds check: load arr->length into EAX, compare against saved idx
-            e.movEaxEcxDisp(icEntry.lengthOff); // EAX = arr->length (field at known offset)
-            e.cmpEaxEspInd();    // CMP EAX, [ESP]  →  flags = (length - idx)
-            const oobJmp = e.jle(); // JLE: jump if length ≤ idx  (out-of-bounds)
+
+            // Negative-index guard — only emitted when range analysis cannot prove idx ≥ 0.
+            // TEST EAX, EAX sets SF when EAX is negative; JS branches out on negative index.
+            let oobNeg = 0;
+            if (!_idxNonNeg) {
+              e.testAA();           // TEST EAX, EAX
+              oobNeg = e.js();      // JS → out-of-bounds if idx < 0
+            }
+
+            // Bounds check: load arr->length, compare against saved idx.
+            e.movEaxEcxDisp(icEntry.lengthOff); // EAX = arr->length
+            e.cmpEaxEspInd();    // CMP EAX, [ESP]  →  length - idx
+            // _idxNonNeg: unsigned JBE is exact (negative idx already excluded above or proven absent).
+            // !_idxNonNeg: JLE handles the remaining positive out-of-bounds case after the JS guard.
+            const oobJmp = _idxNonNeg ? e.jbe() : e.jle();
+
             // In-bounds path:
             e.popEax();          // EAX = idx (restore)
-            // Load the backing data pointer: arr_ptr->data at icEntry.dataOff
             e.movEcxEcxDisp(icEntry.dataOff); // ECX = arr->data (raw C int32_t* pointer)
-            // Read element: EAX = *(int32*)(&arr->data[idx * 4])
             e.movEaxEcxEaxScale4();           // EAX = [ECX + EAX*4]  ← actual element value
             const doneJmp = e.jmp();
-            // Out-of-bounds path: discard saved idx, return 0
+
+            // Out-of-bounds path: discard saved idx, return 0.
+            if (!_idxNonNeg) e.patch(oobNeg, e.here());
             e.patch(oobJmp, e.here());
             e.addEsp(4);         // remove the saved idx
             e.xorEaxEax();       // EAX = 0 (safe fallback)
@@ -3045,11 +3085,115 @@ export class LICMPass {
 }
 
 /** Item 868: Range analysis — propagates integer range bounds through the IR
- *  to eliminate redundant bounds checks on array accesses. */
+ *  to eliminate redundant bounds checks on array accesses.
+ *
+ * Detection algorithm:
+ *   1. Pre-pass: collect `push_i32(start); put_loc(i)` → initValues[i] = start
+ *   2. For each loop body [header, tail]: collect locals incremented by
+ *      inc_loc / inc_loc8 / add_loc (induction variables).
+ *   3. At the loop header scan the first ≤24 bytes for the comparison pattern:
+ *      get_loc(i);  push_i32(N);  lt → range[i] = [initVal, N-1]
+ *      get_loc(i);  push_i32(N);  lte → range[i] = [initVal, N]
+ *   Returns Map<localIdx, [min, max]> of guaranteed inclusive ranges.
+ */
 export class RangeAnalysis {
-  /** Map from local index → [min, max] inclusive known integer range. */
-  static analyze(_bc: QJSBytecodeReader): Map<number, [number, number]> {
-    return new Map();
+  static analyze(bc: QJSBytecodeReader, loopHeaders: Set<number>): Map<number, [number, number]> {
+    const ranges = new Map<number, [number, number]>();
+    if (loopHeaders.size === 0) return ranges;
+
+    // Pass 1: collect initialization patterns push_i32(v); put_loc/set_loc(i)
+    const initValues = new Map<number, number>(); // localIdx → init value
+    {
+      let p = 0;
+      while (p < bc.bcLen) {
+        const op = bc.u8(p);
+        if (op === OP_push_i32) {
+          const v = bc.i32(p + 1);
+          const nop = bc.u8(p + 5);
+          if (nop === OP_put_loc || nop === OP_set_loc) {
+            initValues.set(bc.u16(p + 6), v);
+          } else if (nop === OP_put_loc0 || nop === OP_set_loc0) {
+            initValues.set(0, v);
+          } else if (nop === OP_put_loc1 || nop === OP_set_loc1) {
+            initValues.set(1, v);
+          } else if (nop === OP_put_loc2 || nop === OP_set_loc2) {
+            initValues.set(2, v);
+          } else if (nop === OP_put_loc3 || nop === OP_set_loc3) {
+            initValues.set(3, v);
+          }
+        }
+        p += OPCODE_SIZE[op] ?? 1;
+      }
+    }
+
+    // For each known loop header, find its tail (furthest back-edge source)
+    for (const hdr of loopHeaders) {
+      let tail = -1;
+      {
+        let p = 0;
+        while (p < bc.bcLen) {
+          const op = bc.u8(p);
+          let target = -1;
+          let end = p + (OPCODE_SIZE[op] ?? 1);
+          if (op === OP_goto8)  { end = p + 2; target = p + 2 + bc.i8(p + 1); }
+          else if (op === OP_goto16) { end = p + 3; target = p + 3 + bc.i16(p + 1); }
+          else if (op === OP_goto)   { end = p + 5; target = p + 5 + bc.i32(p + 1); }
+          else if (op === OP_if_true8 || op === OP_if_false8) { end = p + 2; target = p + 2 + bc.i8(p + 1); }
+          else if (op === OP_if_true  || op === OP_if_false)  { end = p + 5; target = p + 5 + bc.i32(p + 1); }
+          if (target === hdr && p > hdr) tail = Math.max(tail, end);
+          p = end;
+        }
+      }
+      if (tail < 0) continue; // no back edge — not a real loop
+
+      // Pass 2: collect induction variables (locals incremented inside loop body)
+      const indVars = new Set<number>();
+      {
+        let p = hdr;
+        while (p < tail && p < bc.bcLen) {
+          const op = bc.u8(p);
+          if (op === OP_inc_loc || op === OP_dec_loc || op === OP_add_loc) {
+            indVars.add(bc.u16(p + 1));
+          } else if (op === OP_inc_loc8 || op === OP_dec_loc8 || op === OP_add_loc8) {
+            indVars.add(bc.u8(p + 1));
+          } else if (op === OP_put_loc0 || op === OP_set_loc0) { /* may write local 0 */ }
+          p += OPCODE_SIZE[op] ?? 1;
+        }
+      }
+      if (indVars.size === 0) continue;
+
+      // Pass 3: find comparison at loop header — scan up to 32 bytes
+      const scanEnd = Math.min(hdr + 32, tail, bc.bcLen);
+      let p3 = hdr;
+      while (p3 < scanEnd) {
+        const op = bc.u8(p3);
+        // Look for get_loc(i) where i is an induction variable
+        let localIdx = -1;
+        let afterGet = p3;
+        if (op === OP_get_loc0) { localIdx = 0; afterGet = p3 + 1; }
+        else if (op === OP_get_loc1) { localIdx = 1; afterGet = p3 + 1; }
+        else if (op === OP_get_loc2) { localIdx = 2; afterGet = p3 + 1; }
+        else if (op === OP_get_loc3) { localIdx = 3; afterGet = p3 + 1; }
+        else if (op === OP_get_loc) { localIdx = bc.u16(p3 + 1); afterGet = p3 + 3; }
+
+        if (localIdx >= 0 && indVars.has(localIdx) && afterGet + 5 < scanEnd) {
+          // Try: push_i32(N) + lt/lte
+          const boundOp = bc.u8(afterGet);
+          if (boundOp === OP_push_i32) {
+            const N = bc.i32(afterGet + 1);
+            const cmpOp = bc.u8(afterGet + 5);
+            const init = initValues.get(localIdx) ?? 0;
+            if (cmpOp === OP_lt) {
+              ranges.set(localIdx, [init, N - 1]);
+            } else if (cmpOp === OP_lte) {
+              ranges.set(localIdx, [init, N]);
+            }
+          }
+        }
+        p3 += OPCODE_SIZE[op] ?? 1;
+      }
+    }
+    return ranges;
   }
 }
 

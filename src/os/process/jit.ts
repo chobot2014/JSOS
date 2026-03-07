@@ -837,6 +837,10 @@ export class _Emit {
   jle(): number { this._w(0x0F); this._w(0x8E); var o = this.here(); this._u32(0); return o; }
   jg():  number { this._w(0x0F); this._w(0x8F); var o = this.here(); this._u32(0); return o; }
   jge(): number { this._w(0x0F); this._w(0x8D); var o = this.here(); this._u32(0); return o; }
+  /** JBE (unsigned ≤, CF=1 or ZF=1) — jump if below or equal (unsigned comparison). */
+  jbe(): number { this._w(0x0F); this._w(0x86); var o = this.here(); this._u32(0); return o; }
+  /** JS — jump if sign flag set (i.e. result / value in EAX is negative). */
+  js():  number { this._w(0x0F); this._w(0x88); var o = this.here(); this._u32(0); return o; }
   // Short (8-bit offset) jumps — returns fixup offset
   jmp8(): number { this._w(0xEB); var o = this.here(); this._w(0); return o; }
   je8():  number { this._w(0x74); var o = this.here(); this._w(0); return o; }
