@@ -57,6 +57,9 @@ import {
   OP_get_var_ref, OP_put_var_ref, OP_set_var_ref,
   // Exception opcodes — handled via deopt
   OP_throw, OP_throw_error,
+  // Special-object / async opcodes (items 870, 872, 873)
+  OP_special_object,
+  OP_initial_yield, OP_await, OP_return_async,
 } from './qjs-opcodes.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
@@ -218,6 +221,27 @@ export class QJSBytecodeReader {
   cpoolFloat64(idx: number): number {
     if (!this._cpoolView || idx < 0 || idx >= this.cpoolCount) return 0;
     return this._cpoolView.getFloat64(idx * 8, true);
+  }
+
+  /**
+   * Create a synthetic reader from pre-patched bytecode bytes (for AsyncDesugar).
+   * Shares metadata (argCount, varCount, cpool, etc.) with the source reader so
+   * only the bytecode buffer is replaced.
+   */
+  static fromBytes(src: QJSBytecodeReader, patchedBytes: ArrayBuffer): QJSBytecodeReader {
+    const inst = Object.create(QJSBytecodeReader.prototype) as QJSBytecodeReader;
+    (inst as any).bcBuf           = src.bcBuf;
+    (inst as any).bcLen           = patchedBytes.byteLength;
+    (inst as any).argCount        = src.argCount;
+    (inst as any).varCount        = src.varCount;
+    (inst as any).stackSize       = src.stackSize;
+    (inst as any).cpoolPtr        = src.cpoolPtr;
+    (inst as any).cpoolCount      = src.cpoolCount;
+    (inst as any).closureVarCount = src.closureVarCount;
+    (inst as any)._bytes          = patchedBytes;
+    (inst as any)._view           = new DataView(patchedBytes);
+    (inst as any)._cpoolView      = (src as any)._cpoolView;
+    return inst;
   }
 }
 
@@ -415,7 +439,14 @@ export class QJSJITCompiler {
     const entry_bcAddr = bcAddr;
     const entry_argTypes = argTypes;
     const e = this._e;
-    const bc = this._bc;
+    // Async desugaring (item 873): detect linear tail-await async functions and rewrite
+    // bytecode to remove OP_initial_yield / OP_await / OP_return_async so the JIT
+    // compiles them as regular synchronous functions — no generator state machine.
+    let bc = this._bc;
+    if (PromiseFastPath.isApplicable(bc)) {
+      const _db = AsyncDesugar.desugar(bc);
+      if (_db !== null) bc = _db;
+    }
 
     // Determine if this function accesses closure variables
     const usesClosure = bc.closureVarCount > 0 && this._closureGlobalAddr > 0
@@ -431,10 +462,14 @@ export class QJSJITCompiler {
 
     // IC-backed / slow-path opcodes accepted in addition to JIT_SUPPORTED_OPCODES
     // (items 848/849/852/858 + OP_call/OP_call0/OP_call_method via C helper slow path)
+    // OP_special_object added for item 870 (arguments elim): functions that create an
+    // arguments object slow-path through the interpreter for that one opcode instead of
+    // bailing the JIT entirely, preserving JIT execution of all other instructions.
     const IC_OPCODES = new Set([OP_get_field, OP_put_field, OP_get_array_el, OP_put_array_el, OP_typeof,
                                  OP_call, OP_call0, OP_call_method,
                                  OP_get_var_ref, OP_put_var_ref, OP_set_var_ref,
-                                 OP_throw, OP_throw_error]);
+                                 OP_throw, OP_throw_error,
+                                 OP_special_object]);
 
     // Prologue — save EBX for reg-alloc path (item 855)
     if (this._regAlloc) {
@@ -3251,11 +3286,29 @@ export class ConstantFolder {
 /** Item 870: Arguments object elimination — when `arguments` is never used,
  *  skip allocating the arguments array object. */
 export class ArgumentsElimPass {
+  /**
+   * Returns true when the function never creates an `arguments` object, meaning
+   * no OP_special_object(kind=0 mapped | kind=1 unmapped) is emitted.
+   * In that case the JIT skips allocating a heavyweight arguments array entirely.
+   *
+   * When false, OP_special_object is in IC_OPCODES so the JIT slow-paths through
+   * the interpreter for that single opcode rather than bailing the whole function.
+   */
   static canEliminate(bc: QJSBytecodeReader): boolean {
-    // Check if OP_arguments (fetch arguments object) appears anywhere
-    const OP_ARGUMENTS = 0x37;  // typical QJS opcode value
-    for (let pc = 0; pc < bc.bcLen; pc++) {
-      if (bc.u8(pc) === OP_ARGUMENTS) return false;
+    // OP_special_object = 0x0C (2 bytes: opcode + kind byte)
+    // kind 0 = JS_SPECIAL_OBJECT_ARGUMENTS_MAPPED
+    // kind 1 = JS_SPECIAL_OBJECT_ARGUMENTS_UNMAPPED
+    const OP_SPECIAL_OBJ = 0x0C;
+    let pc = 0;
+    while (pc + 1 < bc.bcLen) {
+      const op = bc.u8(pc);
+      if (op === OP_SPECIAL_OBJ) {
+        const kind = bc.u8(pc + 1);
+        if (kind === 0 || kind === 1) return false; // arguments object creation
+        pc += 2; // skip opcode + kind
+        continue;
+      }
+      pc += OPCODE_SIZE[op] ?? 1;
     }
     return true;
   }
@@ -3273,18 +3326,107 @@ export class ClosureVarPromotion {
 /** Item 872: Promise fast-path — when a function starts with async/await but
  *  the awaited value is already resolved, skip the micro-task queue. */
 export class PromiseFastPath {
-  static isApplicable(_bc: QJSBytecodeReader): boolean {
-    // Requires recognizing the async..await bytecode pattern; stub.
-    return false;
+  /**
+   * Returns true when a function is a linear async function with a single
+   * tail await: `async function f() { ... return await expr; }`
+   *
+   * Pattern in QJS bytecode:
+   *   OP_initial_yield (0xAE)  — marks async entry
+   *   ... (setup)
+   *   <expr bytecode>          — expression to await
+   *   OP_await (0xB2)          — exactly one await
+   *   (optional OP_nop/OP_label padding)
+   *   OP_return_async (0x49)   — async return
+   *
+   * When true, AsyncDesugar.desugar() can rewrite the function so the JIT
+   * compiles it without the generator state machine.
+   */
+  static isApplicable(bc: QJSBytecodeReader): boolean {
+    const _OP_INITIAL_YIELD = 0xAE;
+    const _OP_AWAIT         = 0xB2;
+    const _OP_RETURN_ASYNC  = 0x49;
+    const _OP_NOP           = 0x9C;
+    const _OP_LABEL         = 0x9D;
+
+    // Must start with OP_initial_yield (marks async function)
+    if (bc.bcLen < 3 || bc.u8(0) !== _OP_INITIAL_YIELD) return false;
+
+    // Count OP_await occurrences; must be exactly one
+    let awaitCount = 0;
+    let lastAwaitPc = -1;
+    let pc = 0;
+    while (pc < bc.bcLen) {
+      const op = bc.u8(pc);
+      if (op === _OP_AWAIT) { awaitCount++; lastAwaitPc = pc; if (awaitCount > 1) return false; }
+      pc += OPCODE_SIZE[op] ?? 1;
+    }
+    if (awaitCount !== 1 || lastAwaitPc < 0) return false;
+
+    // Verify: after the OP_await, the only ops before end are OP_nop/OP_label/OP_return_async
+    pc = lastAwaitPc + 1;
+    while (pc < bc.bcLen) {
+      const op = bc.u8(pc);
+      if (op === _OP_RETURN_ASYNC) return true;   // found the tail return — done
+      if (op === _OP_NOP)                { pc++; continue; }
+      if (op === _OP_LABEL)              { pc += 5; continue; }
+      return false;  // any other op between await and return_async → not linear
+    }
+    return false; // OP_return_async not found
   }
 }
 
 /** Item 873: Async/await desugaring — compile state-machine directly to native
  *  without creating Promise/generator objects for simple linear async functions. */
 export class AsyncDesugar {
-  static desugar(_bc: QJSBytecodeReader): QJSBytecodeReader | null {
-    // Full desugaring requires rewriting the BCReader; not yet implemented.
-    return null;
+  /**
+   * Desugar a linear async function (single tail-await) to a plain synchronous
+   * function whose return value is the awaited expression result.
+   *
+   * Bytecode transform:
+   *   OP_initial_yield (0xAE)              → OP_nop (0x9C)    — remove async entry
+   *   OP_await (0xB2)                      → OP_nop (0x9C)    — pass result through
+   *   OP_return_async (0x49)               → OP_return_val (0x3C) — return the value
+   *
+   * Returns a QJSBytecodeReader backed by the patched buffer, or null if the
+   * function does not match the expected pattern (should only be called after
+   * PromiseFastPath.isApplicable() returns true).
+   */
+  static desugar(bc: QJSBytecodeReader): QJSBytecodeReader | null {
+    const _OP_INITIAL_YIELD = 0xAE;
+    const _OP_AWAIT         = 0xB2;
+    const _OP_RETURN_ASYNC  = 0x49;
+    const _OP_NOP           = 0x9C;
+    const _OP_RETURN_VAL    = 0x3C;
+
+    // Copy bytecode bytes into a mutable Uint8Array
+    const patched = new Uint8Array(bc.bcLen);
+    for (let i = 0; i < bc.bcLen; i++) patched[i] = bc.u8(i);
+
+    let foundAwait = false;
+    let foundReturn = false;
+    let pc = 0;
+    while (pc < bc.bcLen) {
+      const op = patched[pc];
+      if (op === _OP_INITIAL_YIELD) {
+        patched[pc] = _OP_NOP;          // nop out the generator init
+        pc++; continue;
+      }
+      if (op === _OP_AWAIT) {
+        patched[pc] = _OP_NOP;          // await → pass value through unchanged
+        foundAwait = true;
+        pc++; continue;
+      }
+      if (op === _OP_RETURN_ASYNC) {
+        patched[pc] = _OP_RETURN_VAL;   // return the awaited value as plain return
+        foundReturn = true;
+        pc++; continue;
+      }
+      pc += OPCODE_SIZE[op] ?? 1;
+    }
+
+    if (!foundAwait || !foundReturn) return null; // safety check
+
+    return QJSBytecodeReader.fromBytes(bc, patched.buffer);
   }
 }
 
