@@ -1178,6 +1178,36 @@ export function createPageJS(
 
     // ── Mark child runtime as ready ──────────────────────────────────────
     'var __jsos_child_ready = true;',
+
+    // ── v8/Node.js compatibility shims ────────────────────────────────────
+    'if(!Error.captureStackTrace) Error.captureStackTrace=function(o){o.stack=new Error().stack||"";};',
+    'if(!Error.prototype.captureStackTrace) Error.prototype.captureStackTrace=function(){this.stack=new Error().stack||"";};',
+    'Error.stackTraceLimit=50;',
+    // process stub (Node.js compat — many bundled libs check typeof process)
+    'var process={env:{NODE_ENV:"production",NODE_DEBUG:""},browser:true,version:"v18.0.0",versions:{node:"18.0.0"},platform:"linux",arch:"x86",argv:[],argv0:"node",execArgv:[],pid:1,ppid:0,exitCode:0,hrtime:function(prev){var n=Date.now();return prev?[0,Math.max(0,(n-prev[0]*1000-prev[1]/1e6)*1e6|0)]:[(n/1000)|0,(n%1000)*1e6|0];},nextTick:function(fn){Promise.resolve().then(fn);},on:function(){return process;},off:function(){return process;},emit:function(){},exit:function(){},abort:function(){},cwd:function(){return "/";},chdir:function(){},umask:function(){return 0o022;},binding:function(){throw new Error("binding not available");},stdout:{write:function(s){console.log(s);return true;},end:_noop,on:function(){return this;},removeListener:function(){},writableEnded:false},stderr:{write:function(s){console.error(s);return true;},end:_noop,on:function(){return this;},removeListener:function(){},writableEnded:false},stdin:{on:function(){return this;},removeListener:function(){},read:function(){return null;}}};',
+    // global stub (some code does `var x = global || globalThis || window`)
+    'var global = globalThis;',
+    // Symbol shims for ES6 iterators if needed
+    'if(!Symbol.observable) try{Object.defineProperty(Symbol,"observable",{value:Symbol("observable")});}catch(_){}',
+    'if(!Symbol.asyncIterator) try{Object.defineProperty(Symbol,"asyncIterator",{value:Symbol.for("Symbol.asyncIterator")});}catch(_){}',
+    // Array.prototype.at polyfill (ES2022)
+    'if(!Array.prototype.at) Array.prototype.at=function(i){return i>=0?this[i]:this[this.length+i];};',
+    'if(!String.prototype.at) String.prototype.at=function(i){return i>=0?this[i]:this[this.length+i];};',
+    'if(!TypedArray) {} ; try{ if(!Int8Array.prototype.at) Int8Array.prototype.at=Array.prototype.at; }catch(_){}',
+    // Object.hasOwn (ES2022)
+    'if(!Object.hasOwn) Object.hasOwn=function(o,k){return Object.prototype.hasOwnProperty.call(o,k);};',
+    // Array grouping (ES2024)
+    'if(!Array.prototype.group && !Object.groupBy) { try{ Object.groupBy=function(arr,fn){var r={};for(var i=0;i<arr.length;i++){var k=fn(arr[i],i);if(!r[k])r[k]=[];r[k].push(arr[i]);}return r;}; Map.groupBy=function(arr,fn){var r=new Map();for(var i=0;i<arr.length;i++){var k=fn(arr[i],i);if(!r.has(k))r.set(k,[]);r.get(k).push(arr[i]);}return r;}; }catch(_){} }',
+    // Promise.withResolvers (ES2024)
+    'if(!Promise.withResolvers) Promise.withResolvers=function(){var res,rej;var p=new Promise(function(rv,rj){res=rv;rej=rj;});return{promise:p,resolve:res,reject:rej};};',
+    // Iterator helpers (TC39 stage 3+, used by some frameworks)
+    'if(typeof Iterator!=="undefined"&&!Iterator.prototype.toArray){try{Iterator.prototype.toArray=function(){var r=[];for(var v of this)r.push(v);return r;};Iterator.prototype.map=function(f){var self=this;return{[Symbol.iterator]:function(){return self;},next:function(){var n=self.next();return n.done?n:{done:false,value:f(n.value)};},toArray:Iterator.prototype.toArray};}{}}catch(_){}}',
+    // WeakRef shim if missing
+    'if(typeof WeakRef==="undefined"){ var WeakRef=function(o){this._r=o;}; WeakRef.prototype.deref=function(){return this._r;}; }',
+    // FinalizationRegistry shim  
+    'if(typeof FinalizationRegistry==="undefined"){ var FinalizationRegistry=function(){}; FinalizationRegistry.prototype.register=function(){}; FinalizationRegistry.prototype.unregister=function(){}; }',
+    // queueMicrotask double-define guard
+    'if(typeof queueMicrotask==="undefined") var queueMicrotask=function(fn){Promise.resolve().then(fn);};',
   ].join('\n');
 
   // Mutation flag — reset after re-render check
