@@ -19,6 +19,15 @@
 import type { RenderNode, InlineSpan, RenderedLine, RenderedSpan, WidgetBlueprint, LayoutResult } from './types.js';
 import { CHAR_W, CHAR_H, LINE_H, CONTENT_PAD } from './constants.js';
 
+// [Item 906] Grid track size cache — keyed by nodeId:template:availPx
+const _gridTrackCache = new Map<string, number[]>();
+function _invalidateGridTrackCache(nodeId: string): void {
+  for (var _k of Array.from(_gridTrackCache.keys())) {
+    if (_k.startsWith(nodeId + ':')) _gridTrackCache.delete(_k);
+  }
+}
+export { _invalidateGridTrackCache as invalidateGridTrackCache };
+
 // ── White-space handling (item 394) ──────────────────────────────────────────
 
 /**
@@ -671,8 +680,16 @@ export function layoutGrid(
 
   // Resolve column tracks
   var colTmpl = gridNode.gridTemplateColumns || '';
-  var colSizes = parseGridTrack(colTmpl, contentW - padLeft - padRight);
-  if (colSizes.length === 0) colSizes = [contentW - padLeft - padRight];
+  var _gAvail  = contentW - padLeft - padRight;
+  var _gKey    = gridNode.elId ? gridNode.elId + ':' + colTmpl + ':' + (_gAvail | 0) : '';
+  var colSizes: number[];
+  if (_gKey && _gridTrackCache.has(_gKey)) {
+    colSizes = (_gridTrackCache.get(_gKey) as number[]).slice();
+  } else {
+    colSizes = parseGridTrack(colTmpl, _gAvail);
+    if (colSizes.length === 0) colSizes = [_gAvail];
+    if (_gKey) _gridTrackCache.set(_gKey, colSizes.slice());
+  }
 
   var colCount = colSizes.length;
 

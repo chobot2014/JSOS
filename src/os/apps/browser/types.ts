@@ -75,6 +75,7 @@ export interface RenderNode {
   borderStyle?:  string;
   opacity?:      number;
   boxShadow?:    string;
+  contain?:      string;   // CSS contain (layout / paint / strict / content)
   // Positioning
   position?:     'static' | 'relative' | 'absolute' | 'fixed' | 'sticky';
   posTop?:       number;

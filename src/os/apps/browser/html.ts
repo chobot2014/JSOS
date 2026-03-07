@@ -5,6 +5,7 @@ import type {
 import { parseInlineStyle, parseCSSColor } from './css.js';
 import { isGradient } from './gradient.js';
 import { type CSSRule, type AncestorEl, computeElementStyle, getPseudoContent } from './stylesheet.js';
+import { markContainLayout } from './cache.js';
 import { renderSVG } from './svg.js';
 
 // ── HTML5 Named Entity Table (items 350–351) ──────────────────────────────────
@@ -376,6 +377,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (p.backgroundSize     !== undefined) curCSS.backgroundSize     = p.backgroundSize;
     if (p.backgroundPosition !== undefined) curCSS.backgroundPosition = p.backgroundPosition;
     if (p.backgroundRepeat   !== undefined) curCSS.backgroundRepeat   = p.backgroundRepeat;
+    // ── CSS contain (item 893) ─────────────────────────────────────────────
+    if (p.contain !== undefined) curCSS.contain = p.contain;
   }
   function popCSS(): void {
     if (cssStack.length > 0) {
@@ -580,6 +583,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (curCSS.borderStyle  !== undefined) blk.borderStyle  = curCSS.borderStyle;
     if (curCSS.opacity  !== undefined) blk.opacity  = curCSS.opacity;
     if (curCSS.boxShadow)              blk.boxShadow  = curCSS.boxShadow;
+    if (curCSS.contain)                { blk.contain   = curCSS.contain; if (blk.elId) markContainLayout(blk.elId); }
     if (curCSS.position && curCSS.position !== 'static') {
       blk.position = curCSS.position;
       if (curCSS.top    !== undefined) blk.posTop    = curCSS.top;
