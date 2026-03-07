@@ -361,11 +361,24 @@ export function createPageJS(
     // ── performance ──────────────────────────────────────────────────────
     'var performance = {',
     '  now: function() { return kernel.getUptime(); },',
-    '  timing: { navigationStart: 0 },',
+    '  timing: (function() {',
+    '    var t = kernel.getUptime();',
+    '    return { navigationStart: t, unloadEventStart: 0, unloadEventEnd: 0,',
+    '      redirectStart: 0, redirectEnd: 0, fetchStart: t,',
+    '      domainLookupStart: t, domainLookupEnd: t,',
+    '      connectStart: t, connectEnd: t, secureConnectionStart: t,',
+    '      requestStart: t, responseStart: t + 10, responseEnd: t + 20,',
+    '      domLoading: t + 20, domInteractive: t + 50,',
+    '      domContentLoadedEventStart: t + 50, domContentLoadedEventEnd: t + 55,',
+    '      domComplete: t + 60, loadEventStart: t + 60, loadEventEnd: t + 65,',
+    '      toJSON: function() { return this; }',
+    '    };',
+    '  })(),',
+    '  navigation: { type: 0, redirectCount: 0 },',
     '  getEntriesByType: function() { return []; },',
     '  getEntriesByName: function() { return []; },',
     '  mark: function(){}, measure: function(){}, clearMarks: function(){},',
-    '  clearMeasures: function(){}',
+    '  clearMeasures: function(){}, clearResourceTimings: function(){}',
     '};',
 
     // ── crypto ───────────────────────────────────────────────────────────
@@ -2534,6 +2547,7 @@ export function createPageJS(
     _fn:       (entries: unknown[], obs: IntersectionObserverImpl) => void;
     _elements: VElement[] = [];
     _threshold: number;
+    _prevState = new WeakMap<VElement, { intersecting: boolean; ratio: number }>();
     constructor(fn: (entries: unknown[], obs: IntersectionObserverImpl) => void, opts?: { threshold?: number }) {
       this._fn = fn; this._threshold = opts?.threshold ?? 0;
     }
@@ -2541,44 +2555,54 @@ export function createPageJS(
       if (el instanceof VElement) {
         if (!this._elements.includes(el)) this._elements.push(el);
         if (!_ioObservers.includes(this)) _ioObservers.push(this);
-        // Fire initial entries on next tick (browsers always deliver initial state)
+        // Fire initial entry on next tick (browsers always deliver initial state)
         var self = this;
-        setTimeout_(function() { self._tick(768); }, 0);
+        setTimeout_(function() {
+          var vH = ((win['innerHeight'] as number) || 768);
+          var vW = ((win['innerWidth']  as number) || 1024);
+          self._tickOne(el as VElement, vH, vW, true /* force initial fire */);
+        }, 0);
       }
     }
-    unobserve(el: unknown): void { this._elements = this._elements.filter(e => e !== el); }
+    unobserve(el: unknown): void {
+      this._elements = this._elements.filter(e => e !== el);
+      if (el instanceof VElement) this._prevState.delete(el);
+    }
     disconnect(): void {
       this._elements = [];
       var _ii = _ioObservers.indexOf(this);
       if (_ii >= 0) _ioObservers.splice(_ii, 1);
     }
-    /** Called by tick to fire entries for elements that have entered the viewport. */
+    _tickOne(el: VElement, viewportH: number, viewportW: number, forceInitial = false): void {
+      var rect = el.getBoundingClientRect?.() ?? { top: 0, bottom: 0, height: 0, width: 0, left: 0, right: 0 };
+      var intersecting = rect.bottom > 0 && rect.top < viewportH &&
+                         rect.right  > 0 && rect.left < viewportW;
+      var iTop    = Math.max(rect.top,    0);
+      var iBottom = Math.min(rect.bottom, viewportH);
+      var iLeft   = Math.max(rect.left,   0);
+      var iRight  = Math.min(rect.right,  viewportW);
+      var iArea   = (iBottom > iTop && iRight > iLeft) ? (iBottom - iTop) * (iRight - iLeft) : 0;
+      var elArea  = (rect.height * rect.width) || 1;
+      var ratio   = Math.min(1, iArea / elArea);
+      var threshold = this._threshold || 0;
+      var isAbove   = ratio >= threshold;
+      var prev      = this._prevState.get(el);
+      // Only fire if state changed, or if this is the initial observation
+      if (!forceInitial && prev && prev.intersecting === isAbove) return;
+      this._prevState.set(el, { intersecting: isAbove, ratio });
+      _callGuardedCtx('intersection', this._fn, [{
+        isIntersecting: isAbove,
+        intersectionRatio: ratio,
+        boundingClientRect: rect,
+        intersectionRect:   { top: iTop, left: iLeft, bottom: iBottom, right: iRight, width: iRight - iLeft, height: iBottom - iTop },
+        rootBounds:         { top: 0, left: 0, bottom: viewportH, right: viewportW, width: viewportW, height: viewportH },
+        target: el,
+        time: _perf.now(),
+      }], this);
+    }
+    /** Called by tick to fire entries for elements whose intersection state has changed. */
     _tick(viewportH: number, viewportW = 1024): void {
-      if (this._elements.length === 0) return;
-      var entries: unknown[] = [];
-      for (var el of this._elements) {
-        var rect = el.getBoundingClientRect?.() ?? { top: 0, bottom: 0, height: 0, width: 0, left: 0, right: 0 };
-        var intersecting = rect.bottom > 0 && rect.top < viewportH &&
-                           rect.right  > 0 && rect.left < viewportW;
-        // Compute ratio: fraction of boundingClientRect visible in viewport
-        var iTop    = Math.max(rect.top,    0);
-        var iBottom = Math.min(rect.bottom, viewportH);
-        var iLeft   = Math.max(rect.left,   0);
-        var iRight  = Math.min(rect.right,  viewportW);
-        var iArea   = (iBottom > iTop && iRight > iLeft) ? (iBottom - iTop) * (iRight - iLeft) : 0;
-        var elArea  = (rect.height * rect.width) || 1;
-        var ratio   = Math.min(1, iArea / elArea);
-        entries.push({
-          isIntersecting: ratio >= (this._threshold || 0),
-          intersectionRatio: ratio,
-          boundingClientRect: rect,
-          intersectionRect:   { top: iTop, left: iLeft, bottom: iBottom, right: iRight, width: iRight - iLeft, height: iBottom - iTop },
-          rootBounds:         { top: 0, left: 0, bottom: viewportH, right: viewportW, width: viewportW, height: viewportH },
-          target: el,
-          time: _perf.now(),
-        });
-      }
-      if (entries.length > 0) _callGuardedCtx('intersection(' + entries.length + ')', this._fn, entries, this);
+      for (var el of this._elements) this._tickOne(el, viewportH, viewportW);
     }
   }
 
@@ -2877,6 +2901,36 @@ export function createPageJS(
       constructor(_loc?: unknown, _opts?: unknown) {}
       format(list: string[]): string { return list.join(', '); }
       formatToParts(list: string[]): Array<{type: string; value: string}> { return list.map(v => ({ type: 'element', value: v })); }
+      resolvedOptions(): object { return {}; }
+      static supportedLocalesOf(): string[] { return []; }
+    },
+    Segmenter: class {
+      constructor(_loc?: unknown, _opts?: unknown) {}
+      segment(str: string): Iterable<{ segment: string; index: number; input: string }> {
+        // Grapheme cluster approximation: split into individual characters
+        var chars = [...str];
+        var idx = 0;
+        var segs = chars.map(ch => {
+          var s = { segment: ch, index: idx, input: str };
+          idx += ch.length;
+          return s;
+        });
+        return { [Symbol.iterator]() { var i = 0; return { next() { return i < segs.length ? { value: segs[i++], done: false } : { value: undefined, done: true }; } }; } } as any;
+      }
+      resolvedOptions(): object { return { locale: 'en', granularity: 'grapheme' }; }
+      static supportedLocalesOf(): string[] { return ['en']; }
+    },
+    DisplayNames: class {
+      _opts: any;
+      constructor(_loc?: unknown, opts?: any) { this._opts = opts || {}; }
+      of(code: string): string | undefined { return code; }
+      resolvedOptions(): object { return { locale: 'en', style: 'long', type: this._opts?.type || 'region', fallback: 'code' }; }
+      static supportedLocalesOf(): string[] { return ['en']; }
+    },
+    DurationFormat: class {
+      constructor(_loc?: unknown, _opts?: unknown) {}
+      format(d: Record<string, number>): string { return JSON.stringify(d); }
+      formatToParts(_d: unknown): Array<{type: string; value: string}> { return []; }
       resolvedOptions(): object { return {}; }
       static supportedLocalesOf(): string[] { return []; }
     },
