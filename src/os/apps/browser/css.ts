@@ -884,6 +884,10 @@ export function parseInlineStyle(style: string): CSSProps {
       case 'contain-intrinsic-width':    break;
       case 'contain-intrinsic-height':   break;
       // Note: 'contain', 'mix-blend-mode', 'backdrop-filter' handled below with real logic
+      case 'container':                  break; // container query shorthand
+      case 'container-type':             break; // inline-size | size | normal
+      case 'container-name':             break; // named containers
+      case '@container':                 break;
       case 'text-wrap':                  break; // text-wrap: balance/pretty
       case 'text-wrap-mode':             break;
       case 'text-wrap-style':            break;
