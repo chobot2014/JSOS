@@ -622,7 +622,8 @@ export function createPageJS(
     // HTML parser for innerHTML setter
     'function _parseHTML(html,parent){while(parent.childNodes.length)parent.removeChild(parent.childNodes[0]);var i=0,len=html.length;var VOID=/^(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i;var stack=[parent];while(i<len){if(html[i]==="<"){if(html[i+1]==="!"&&html[i+2]==="-"&&html[i+3]==="-"){var ce=html.indexOf("-->",i+4);if(ce<0)ce=len-3;stack[stack.length-1].appendChild({nodeType:8,textContent:html.slice(i+4,ce),nodeValue:html.slice(i+4,ce),parentNode:null,nextSibling:null,previousSibling:null});i=ce+3;continue;}if(html[i+1]==="/"){var ce2=html.indexOf(">",i+2);if(ce2<0){i++;continue;}var ct=html.slice(i+2,ce2).trim().toLowerCase();for(var j=stack.length-1;j>0;j--){if(stack[j].tagName&&stack[j].tagName.toLowerCase()===ct){stack.length=j;break;}}i=ce2+1;continue;}var ce3=html.indexOf(">",i+1);if(ce3<0){i++;continue;}var ts=html.slice(i+1,ce3);var sc=ts[ts.length-1]==="/";if(sc)ts=ts.slice(0,-1);var mo=ts.match(/^([a-zA-Z][a-zA-Z0-9:-]*)(.*)/s);if(!mo){i=ce3+1;continue;}var tn=mo[1],as=mo[2]||"";var el=document.createElement(tn);var arx=/([a-zA-Z_:][a-zA-Z0-9_.:-]*)(?:\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|(\\S+)))?/g,am;while((am=arx.exec(as))!==null){el.setAttribute(am[1],am[2]!==undefined?am[2]:am[3]!==undefined?am[3]:am[4]!==undefined?am[4]:"");}stack[stack.length-1].appendChild(el);if(!sc&&!VOID.test(tn))stack.push(el);i=ce3+1;}else{var te=html.indexOf("<",i);if(te<0)te=len;var tx=html.slice(i,te);if(tx){var tn2=document.createTextNode(tx.replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&amp;/g,"&").replace(/&nbsp;/g,"\\u00a0").replace(/&quot;/g,"\""));stack[stack.length-1].appendChild(tn2);}i=te;}}}',
     // querySelector/querySelectorAll helpers
-    'function _stubMatch(el,tok){if(!el||el.nodeType!==1)return false;tok=tok.trim();var tag="",id="",cls=[],attrs=[];tok=tok.replace(/#([-\\w]+)/g,function(_,v){id=v;return "";}).replace(/\\.([-\\w]+)/g,function(_,v){cls.push(v);return "";}).replace(/\\[([^=\\]~|^$*]+)([~|^$*]?=)?["\']?([^"\'\\]]*)["\']?\\]/g,function(_,an,op,av){attrs.push([an,op||"",av]);return "";});tag=tok.trim();if(tag&&el.tagName.toUpperCase()!==tag.toUpperCase())return false;if(id&&el.id!==id&&!(el._attrs&&el._attrs.id===id))return false;for(var _ci=0;_ci<cls.length;_ci++){if(!el.classList||!el.classList.contains(cls[_ci]))return false;}for(var _ai=0;_ai<attrs.length;_ai++){var _at=attrs[_ai],_av=el.getAttribute?el.getAttribute(_at[0]):null;if(_at[1]==="")return _av!==null;if(_at[1]==="=")return _av===_at[2];if(_at[1]==="~=")return _av&&_av.split(/\\s+/).indexOf(_at[2])>=0;if(_at[1]==="|=")return _av&&(_av===_at[2]||_av.indexOf(_at[2]+"-")===0);if(_at[1]==="^=")return _av&&_av.indexOf(_at[2])===0;if(_at[1]==="$=")return _av&&_av.slice(-_at[2].length)===_at[2];if(_at[1]==="*=")return _av&&_av.indexOf(_at[2])>=0;}return true;}',
+    'function _nthMatch(e,i){e=(e||"").trim();if(e==="odd")return i%2===1;if(e==="even")return i%2===0;var m=e.match(/^([+-]?\\d*)n([+-]\\d+)?$|^([+-]?\\d+)$/);if(!m)return false;if(m[3]!==undefined)return i===parseInt(m[3],10);var a=(m[1]===""||m[1]===undefined||m[1]==="+")&&m[1]!=="-"?1:parseInt(m[1],10)||0;var b=m[2]?parseInt(m[2],10):0;if(a===0)return i===b;var r=(i-b)/a;return r>=1&&r===Math.floor(r);}',
+    'function _stubMatch(el,tok){if(!el||el.nodeType!==1)return false;tok=tok.trim();if(tok.indexOf("::")>=0)return false;var _ps=[];tok=tok.replace(/:([a-z][a-z-]*)(?:\\(([^)]*?)\\))?/g,function(_,pn,pa){_ps.push([pn,pa||""]);return "";});var tag="",id="",cls=[],attrs=[];tok=tok.replace(/#([-\\w]+)/g,function(_,v){id=v;return "";}).replace(/\\.([-\\w]+)/g,function(_,v){cls.push(v);return "";}).replace(/\\[([^=\\]~|^$*]+)([~|^$*]?=)?["\']?([^"\'\\]]*)["\']?\\]/g,function(_,an,op,av){attrs.push([an,op||"",av]);return "";});tag=tok.trim();if(tag&&el.tagName.toUpperCase()!==tag.toUpperCase())return false;if(id&&el.id!==id&&!(el._attrs&&el._attrs.id===id))return false;for(var _ci=0;_ci<cls.length;_ci++){if(!el.classList||!el.classList.contains(cls[_ci]))return false;}for(var _ai=0;_ai<attrs.length;_ai++){var _at=attrs[_ai],_av=el.getAttribute?el.getAttribute(_at[0]):null;if(_at[1]===""){if(_av===null)return false;}else if(_at[1]==="="){if(_av!==_at[2])return false;}else if(_at[1]==="~="){if(!_av||_av.split(/\\s+/).indexOf(_at[2])<0)return false;}else if(_at[1]==="|="){if(!_av||(_av!==_at[2]&&_av.indexOf(_at[2]+"-")!==0))return false;}else if(_at[1]==="^="){if(!_av||_av.indexOf(_at[2])!==0)return false;}else if(_at[1]==="$="){if(!_av||_av.slice(-_at[2].length)!==_at[2])return false;}else if(_at[1]==="*="){if(!_av||_av.indexOf(_at[2])<0)return false;}}for(var _pi2=0;_pi2<_ps.length;_pi2++){var _pn=_ps[_pi2][0],_pa=_ps[_pi2][1],_sib,_si,_cnt;if(_pn==="not"){if(_pa&&_stubMatch(el,_pa))return false;}else if(_pn==="is"||_pn==="where"||_pn==="matches"||_pn==="any"){var _ok=false,_isl=_pa.split(",");for(var _ii=0;_ii<_isl.length;_ii++){if(_stubMatch(el,_isl[_ii].trim())){_ok=true;break;}}if(!_ok)return false;}else if(_pn==="has"){if(!_pa||!_stubQSA(el,_pa,true).length)return false;}else if(_pn==="first-child"){_sib=el.parentNode&&el.parentNode.childNodes;if(!_sib)return false;var _fc=null;for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1){_fc=_sib[_si];break;}}if(_fc!==el)return false;}else if(_pn==="last-child"){_sib=el.parentNode&&el.parentNode.childNodes;if(!_sib)return false;var _lc=null;for(_si=_sib.length-1;_si>=0;_si--){if(_sib[_si].nodeType===1){_lc=_sib[_si];break;}}if(_lc!==el)return false;}else if(_pn==="only-child"){_sib=el.parentNode&&el.parentNode.childNodes;if(!_sib)return false;_cnt=0;for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1)_cnt++;}if(_cnt!==1)return false;}else if(_pn==="nth-child"){_sib=el.parentNode&&el.parentNode.childNodes;if(!_sib)return false;var _nx=0,_np=0;for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1){_np++;if(_sib[_si]===el)_nx=_np;}}if(!_nthMatch(_pa,_nx))return false;}else if(_pn==="nth-last-child"){_sib=el.parentNode&&el.parentNode.childNodes;if(!_sib)return false;var _nt=0,_npos=0,_nlx=0;for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1)_nt++;}for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1){_npos++;if(_sib[_si]===el)_nlx=_nt-_npos+1;}}if(!_nthMatch(_pa,_nlx))return false;}else if(_pn==="first-of-type"){_sib=el.parentNode&&el.parentNode.childNodes;var _tn=el.tagName;if(!_sib)return false;for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1&&_sib[_si].tagName===_tn){if(_sib[_si]!==el)return false;break;}}}else if(_pn==="last-of-type"){_sib=el.parentNode&&el.parentNode.childNodes;var _tn2=el.tagName;if(!_sib)return false;for(_si=_sib.length-1;_si>=0;_si--){if(_sib[_si].nodeType===1&&_sib[_si].tagName===_tn2){if(_sib[_si]!==el)return false;break;}}}else if(_pn==="only-of-type"){_sib=el.parentNode&&el.parentNode.childNodes;var _tn3=el.tagName;if(!_sib)return false;_cnt=0;for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1&&_sib[_si].tagName===_tn3)_cnt++;}if(_cnt!==1)return false;}else if(_pn==="nth-of-type"){_sib=el.parentNode&&el.parentNode.childNodes;var _tn4=el.tagName;if(!_sib)return false;var _tpos=0,_tidx=0;for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1&&_sib[_si].tagName===_tn4){_tpos++;if(_sib[_si]===el)_tidx=_tpos;}}if(!_nthMatch(_pa,_tidx))return false;}else if(_pn==="empty"){var _cn=el.childNodes;for(var _cni=0;_cni<_cn.length;_cni++){if(_cn[_cni].nodeType===1||(_cn[_cni].nodeType===3&&_cn[_cni].nodeValue&&_cn[_cni].nodeValue.trim()))return false;}}else if(_pn==="root"){if(!el.tagName||el.tagName.toUpperCase()!=="HTML")return false;}else if(_pn==="disabled"){if(!el._attrs||!el._attrs.disabled)return false;}else if(_pn==="enabled"){if(el._attrs&&el._attrs.disabled)return false;}else if(_pn==="checked"){if(!el._attrs||!el._attrs.checked)return false;}else if(_pn==="required"){if(!el._attrs||!el._attrs.required)return false;}}return true;}',
     'function _stubQSA(root,sel,first){var res=[];var parts=sel.trim().split(/\\s*,\\s*/);for(var _pi=0;_pi<parts.length;_pi++){var segs=parts[_pi].trim().split(/\\s+/);var last=segs[segs.length-1];var stk=[root];while(stk.length){var _nd=stk.pop();var _chn=_nd.childNodes||[];for(var _ni=_chn.length-1;_ni>=0;_ni--){if(_chn[_ni].nodeType===1)stk.push(_chn[_ni]);}if(_nd!==root&&(last==="*"||_stubMatch(_nd,last))){var _ok=true;if(segs.length>1){var _anc=_nd.parentNode;for(var _si=segs.length-2;_si>=0;_si--){var _fd=false;var _a2=_anc;while(_a2&&_a2!==root){if(_stubMatch(_a2,segs[_si])){_fd=true;_anc=_a2.parentNode;break;}_a2=_a2.parentNode;}if(!_fd){_ok=false;break;}}}if(_ok){if(first)return [_nd];res.push(_nd);}}}return first&&res.length?[res[0]]:res;}',
     '_StubElement.prototype.appendChild = function(c){ if(c.parentNode&&c.parentNode!==this) c.parentNode.removeChild(c); this.childNodes.push(c); c.parentNode=this; c.parentElement=this; _linkAll(this); _dispatchMO("childList",this,[c],[]); return c; };',
     '_StubElement.prototype.removeChild = function(c){ var i=this.childNodes.indexOf(c); if(i>=0) this.childNodes.splice(i,1); c.parentNode=null; c.parentElement=null; c.nextSibling=null; c.previousSibling=null; _linkAll(this); _dispatchMO("childList",this,[],[c]); return c; };',
@@ -9752,9 +9753,22 @@ export function createPageJS(
   function loadExternalScript(src: string, done: (code?: string) => void, noAutoExec = false): void {
     var url = src.startsWith('http') ? src : _resolveURL(src, _baseHref);
     cb.log('[JS] loadExternalScript: ' + url.slice(0, 120));
+    var _lsFinished = false;
+    // 15-second wall-clock timeout: if the fetch hangs, continue to next script
+    // rather than blocking the entire page load indefinitely.
+    var _lsTimer = setTimeout_(() => {
+      if (!_lsFinished) {
+        _lsFinished = true;
+        cb.log('[JS] loadExternalScript timeout (15s): ' + url.slice(0, 80));
+        done(undefined);
+      }
+    }, 15000);
     // Use deduplicated fetch to avoid redundant network requests for the same
     // script URL (common in SPAs with code-splitting / React.lazy / Suspense).
     JITBrowserEngine.deduplicatedFetch(url, (resp: FetchResponse | null, _err?: string) => {
+      if (_lsFinished) return;  // already timed out
+      _lsFinished = true;
+      clearTimeout_(_lsTimer);
       if (resp && resp.status === 200) {
         if (!noAutoExec) execScript(resp.bodyText, url);
         done(resp.bodyText);
@@ -10332,13 +10346,19 @@ export function createPageJS(
   }
 
   // ── Child process periodic DOM bridge ────────────────────────────────────
-  // Called every frame from tick() to keep child async JS alive: drives
-  // Promise chains, setTimeout callbacks, React re-renders, etc.
+  // Called every frame from tick() to drive child async JS: C-backed timers,
+  // Promise microjobs, React re-renders, fetch continuations.
+  // Uses a single batched procEval to collect all pending state (dirty flag,
+  // body HTML, title, all queues) in ONE IPC round-trip instead of 6.
+  // Backs off to every 4th frame when the child has been idle for >4 frames.
+  var _childIdleFrames = 0;  // consecutive frames with no child activity
   function _childTick(): void {
     if (_childTickBusy || _pageChildId < 0) return;
     _childTickBusy = true;
     try {
-      // 1. Pump QuickJS job queue (Promise.then, setTimeout(fn,0), etc.)
+      // 1. Fire expired C-backed timers (setTimeout / setInterval / RAF via setTimeout(fn,16))
+      try { (kernel as any).serviceTimers(_pageChildId); } catch(_) {}
+      // 2. Drain QuickJS Promise microjob queue (async/await, Promise.then chains)
       var _ct = (kernel as any).procTick(_pageChildId);
       if (_ct < 0) {
         cb.log('[JS] child runtime faulted during periodic tick — recycling');
@@ -10346,137 +10366,115 @@ export function createPageJS(
         _pageChildId = -1;
         return;
       }
-      // 2. Sync DOM: check _domDirty flag and apply body HTML to main runtime
-      var _ctDf: any = (kernel as any).procEval(_pageChildId,
-        '(function(){var d=_domDirty;_domDirty=false;return d?"y":"n";})()');
-      if (_ctDf === 'y' || _ctDf === '"y"') {
-        var _ctBH: any = (kernel as any).procEval(_pageChildId,
-          'try{document.body?document.body.innerHTML:""}catch(_e){""}');
-        if (typeof _ctBH === 'string') {
-          if (_ctBH.length >= 2 && _ctBH[0] === '"') _ctBH = JSON.parse(_ctBH);
-          var _ctPrev = (doc as any)._childBodyHTML || '';
-          if (_ctBH !== _ctPrev && _ctBH.length > 20) {
-            (doc as any)._childBodyHTML = _ctBH;
-            try { doc.body.innerHTML = _ctBH; doc._dirty = true; } catch(_) {}
-          }
+      // 3. Adaptive idle: when no jobs ran for >4 consecutive frames, poll every 4th frame
+      _childIdleFrames = (_ct === 0) ? _childIdleFrames + 1 : 0;
+      if (_childIdleFrames > 4 && (_childIdleFrames & 3) !== 0) return;
+      // 4. Batched DOM bridge — ONE procEval returns all pending state as JSON
+      var _bRaw: any;
+      try {
+        _bRaw = (kernel as any).procEval(_pageChildId,
+          '(function(){var d=_domDirty;_domDirty=false;' +
+          'var H=d&&document.body?document.body.innerHTML:null;' +
+          'var fq=_fetchQueue.splice(0);var hq=_historyQueue.splice(0);var lq=_lsQueue.splice(0);' +
+          'return JSON.stringify({d:d,H:H,t:document.title,fq:fq,hq:hq,lq:lq});})()');
+      } catch(_) { return; }
+      var _b: any = null;
+      try {
+        var _br = typeof _bRaw === 'string' ? _bRaw : String(_bRaw);
+        if (_br.length >= 2 && _br[0] === '"') _br = JSON.parse(_br);
+        _b = JSON.parse(_br);
+      } catch(_) {}
+      if (!_b) return;
+      // DOM dirty — apply updated body HTML to main runtime
+      if (_b.d && _b.H != null) {
+        var _ctPrev = (doc as any)._childBodyHTML || '';
+        if (_b.H !== _ctPrev && _b.H.length > 20) {
+          (doc as any)._childBodyHTML = _b.H;
+          try { doc.body.innerHTML = _b.H; doc._dirty = true; } catch(_) {}
         }
       }
-      // 3. Sync document.title
-      try {
-        var _ctTitle: any = (kernel as any).procEval(_pageChildId,
-          'try{document.title}catch(_e){""}');
-        if (typeof _ctTitle === 'string') {
-          if (_ctTitle.length >= 2 && _ctTitle[0] === '"') _ctTitle = JSON.parse(_ctTitle);
-          if (_ctTitle && _ctTitle !== (doc as any)._childTitle) {
-            (doc as any)._childTitle = _ctTitle; doc.title = _ctTitle; doc._dirty = true;
-          }
-        }
-      } catch(_) {}
-      // 4. Drain _fetchQueue — satisfy pending child fetch() calls via os.fetchAsync
-      try {
-        var _ctFqRaw: any = (kernel as any).procEval(_pageChildId,
-          '(function(){var q=_fetchQueue.slice();_fetchQueue.length=0;return JSON.stringify(q);})()');
-        if (typeof _ctFqRaw === 'string') {
-          if (_ctFqRaw.length >= 2 && _ctFqRaw[0] === '"') _ctFqRaw = JSON.parse(_ctFqRaw);
-          var _ctFq: any[] = [];
-          try { _ctFq = JSON.parse(_ctFqRaw); } catch(_) {}
-          for (var _ctFi = 0; _ctFi < _ctFq.length; _ctFi++) {
-            (function(_ctFreq: any) {
-              var _ctFreqId: number = _ctFreq.id;
-              var _ctCid: number = _pageChildId;
-              var _ctFOpts: any = { method: _ctFreq.method || 'GET' };
-              if (_ctFreq.body) _ctFOpts.body = _ctFreq.body;
-              if (_ctFreq.headers && Object.keys(_ctFreq.headers).length)
-                _ctFOpts.headers = _ctFreq.headers;
-              try {
-                os.fetchAsync(_ctFreq.url, (resp: any) => {
-                  if (_ctCid < 0) return;
-                  try {
-                    if (resp && resp.status) {
-                      var _ctFBody = resp.bodyText || '';
-                      var _ctFB64 = btoa(unescape(encodeURIComponent(_ctFBody)));
-                      var _ctFHdrs: Record<string, string> = {};
-                      if (resp.headers && typeof resp.headers.forEach === 'function')
-                        resp.headers.forEach((v: string, k: string) => { _ctFHdrs[k.toLowerCase()] = v; });
-                      var _ctFMime = _ctFHdrs['content-type'] || 'text/plain';
-                      (kernel as any).procEval(_ctCid,
-                        '_resolveRequest(' + _ctFreqId + ',' + resp.status + ',' +
-                        JSON.stringify(resp.statusText || 'OK') + ',' +
-                        JSON.stringify(_ctFHdrs) + ',' +
-                        JSON.stringify(_ctFB64) + ',' +
-                        JSON.stringify(_ctFMime) + ')');
-                    } else {
-                      (kernel as any).procEval(_ctCid,
-                        '_rejectRequest(' + _ctFreqId + ',' + JSON.stringify('Network error') + ')');
-                    }
-                    (kernel as any).procTick(_ctCid);
-                    // Mini DOM sync after fetch resolve
-                    try {
-                      var _ctDf2: any = (kernel as any).procEval(_ctCid,
-                        '(function(){var d=_domDirty;_domDirty=false;return d?"y":"n";})()');
-                      if (_ctDf2 === 'y' || _ctDf2 === '"y"') {
-                        var _ctBH2: any = (kernel as any).procEval(_ctCid,
-                          'try{document.body?document.body.innerHTML:""}catch(_e){""}');
-                        if (typeof _ctBH2 === 'string') {
-                          if (_ctBH2.length >= 2 && _ctBH2[0] === '"') _ctBH2 = JSON.parse(_ctBH2);
-                          if (_ctBH2 !== (doc as any)._childBodyHTML && _ctBH2.length > 20) {
-                            (doc as any)._childBodyHTML = _ctBH2;
-                            doc.body.innerHTML = _ctBH2; doc._dirty = true; needsRerender = true;
-                          }
-                        }
-                      }
-                    } catch(_ctDb2) {}
-                    // Process any new fetches chained from response handler (re-entrant guard inside)
-                    _childTick();
-                  } catch(_ctInjE) {}
-                }, _ctFOpts);
-              } catch(_ctFe) {
-                try { (kernel as any).procEval(_ctCid,
-                  '_rejectRequest(' + _ctFreqId + ',' + JSON.stringify(String(_ctFe)) + ')'); } catch(_) {}
-              }
-            })(_ctFq[_ctFi]);
-          }
-        }
-      } catch(_ctFqErr) {}
-      // 5. Drain _historyQueue
-      try {
-        var _ctHqRaw: any = (kernel as any).procEval(_pageChildId,
-          '(function(){var q=_historyQueue.slice();_historyQueue.length=0;return JSON.stringify(q);})()');
-        if (typeof _ctHqRaw === 'string') {
-          if (_ctHqRaw.length >= 2 && _ctHqRaw[0] === '"') _ctHqRaw = JSON.parse(_ctHqRaw);
-          var _ctHq: any[] = [];
-          try { _ctHq = JSON.parse(_ctHqRaw); } catch(_) {}
-          for (var _ctHi = 0; _ctHi < _ctHq.length; _ctHi++) {
-            var _ctHe = _ctHq[_ctHi];
-            if (_ctHe && _ctHe.url) {
-              try {
-                if (_ctHe.type === 'push') (window as any).history.pushState(_ctHe.state, '', _ctHe.url);
-                else (window as any).history.replaceState(_ctHe.state, '', _ctHe.url);
-              } catch(_) {}
-            }
-          }
-        }
-      } catch(_ctHqErr) {}
-      // 6. Drain _lsQueue: persist child localStorage mutations to main runtime
-      try {
-        var _ctLqRaw: any = (kernel as any).procEval(_pageChildId,
-          '(function(){var q=_lsQueue.slice();_lsQueue.length=0;return JSON.stringify(q);})()');
-        if (typeof _ctLqRaw === 'string') {
-          if (_ctLqRaw.length >= 2 && _ctLqRaw[0] === '"') _ctLqRaw = JSON.parse(_ctLqRaw);
-          var _ctLq: any[] = [];
-          try { _ctLq = JSON.parse(_ctLqRaw); } catch(_) {}
-          for (var _ctLi = 0; _ctLi < _ctLq.length; _ctLi++) {
-            var _ctLe = _ctLq[_ctLi];
-            if (!_ctLe) continue;
+      // document.title sync
+      if (_b.t && _b.t !== (doc as any)._childTitle) {
+        (doc as any)._childTitle = _b.t; doc.title = _b.t; doc._dirty = true;
+      }
+      // Drain _fetchQueue — satisfy pending child fetch() calls via os.fetchAsync
+      if (_b.fq && _b.fq.length) {
+        _childIdleFrames = 0;
+        for (var _ctFi = 0; _ctFi < _b.fq.length; _ctFi++) {
+          (function(_ctFreq: any) {
+            var _ctFreqId: number = _ctFreq.id;
+            var _ctCid: number = _pageChildId;
+            var _ctFOpts: any = { method: _ctFreq.method || 'GET' };
+            if (_ctFreq.body) _ctFOpts.body = _ctFreq.body;
+            if (_ctFreq.headers && Object.keys(_ctFreq.headers).length)
+              _ctFOpts.headers = _ctFreq.headers;
             try {
-              if (_ctLe.op === 'set') _localStorage.setItem(_ctLe.k, _ctLe.v);
-              else if (_ctLe.op === 'del') _localStorage.removeItem(_ctLe.k);
-              else if (_ctLe.op === 'clear') _localStorage.clear();
-            } catch(_) {}
-          }
+              os.fetchAsync(_ctFreq.url, (resp: any) => {
+                if (_ctCid < 0) return;
+                try {
+                  if (resp && resp.status) {
+                    var _ctFBody = resp.bodyText || '';
+                    var _ctFB64 = btoa(unescape(encodeURIComponent(_ctFBody)));
+                    var _ctFHdrs: Record<string, string> = {};
+                    if (resp.headers && typeof resp.headers.forEach === 'function')
+                      resp.headers.forEach((v: string, k: string) => { _ctFHdrs[k.toLowerCase()] = v; });
+                    (kernel as any).procEval(_ctCid,
+                      '_resolveRequest(' + _ctFreqId + ',' + resp.status + ',' +
+                      JSON.stringify(resp.statusText || 'OK') + ',' +
+                      JSON.stringify(_ctFHdrs) + ',' +
+                      JSON.stringify(_ctFB64) + ',' +
+                      JSON.stringify(_ctFHdrs['content-type'] || 'text/plain') + ')');
+                  } else {
+                    (kernel as any).procEval(_ctCid,
+                      '_rejectRequest(' + _ctFreqId + ',' + JSON.stringify('Network error') + ')');
+                  }
+                  // Fire timers + drain microjobs after response injection
+                  try { (kernel as any).serviceTimers(_ctCid); } catch(_) {}
+                  (kernel as any).procTick(_ctCid);
+                  // Mini batched DOM sync after fetch resolve
+                  try {
+                    var _mRaw: any = (kernel as any).procEval(_ctCid,
+                      '(function(){var d=_domDirty;_domDirty=false;var H=d&&document.body?document.body.innerHTML:null;return JSON.stringify({d:d,H:H});})()');
+                    var _mBr = typeof _mRaw === 'string' ? _mRaw : '';
+                    if (_mBr.length >= 2 && _mBr[0] === '"') _mBr = JSON.parse(_mBr);
+                    var _mB: any = null; try { _mB = JSON.parse(_mBr); } catch(_) {}
+                    if (_mB && _mB.d && _mB.H && _mB.H.length > 20) {
+                      (doc as any)._childBodyHTML = _mB.H;
+                      doc.body.innerHTML = _mB.H; doc._dirty = true; needsRerender = true;
+                    }
+                  } catch(_) {}
+                  _childIdleFrames = 0;
+                  _childTick(); // chain: handle any new fetches spawned by response handler
+                } catch(_ctInjE) {}
+              }, _ctFOpts);
+            } catch(_ctFe) {
+              try { (kernel as any).procEval(_ctCid,
+                '_rejectRequest(' + _ctFreqId + ',' + JSON.stringify(String(_ctFe)) + ')'); } catch(_) {}
+            }
+          })(_b.fq[_ctFi]);
         }
-      } catch(_ctLqErr) {}
-      // Apply accumulated DOM changes
+      }
+      // Drain _historyQueue
+      if (_b.hq && _b.hq.length) {
+        for (var _ctHi = 0; _ctHi < _b.hq.length; _ctHi++) {
+          var _ctHe = _b.hq[_ctHi];
+          if (_ctHe && _ctHe.url) try {
+            if (_ctHe.type === 'push') (window as any).history.pushState(_ctHe.state, '', _ctHe.url);
+            else (window as any).history.replaceState(_ctHe.state, '', _ctHe.url);
+          } catch(_) {}
+        }
+      }
+      // Drain _lsQueue — persist child localStorage mutations to main runtime
+      if (_b.lq && _b.lq.length) {
+        for (var _ctLi = 0; _ctLi < _b.lq.length; _ctLi++) {
+          var _ctLe = _b.lq[_ctLi]; if (!_ctLe) continue;
+          try {
+            if (_ctLe.op === 'set') _localStorage.setItem(_ctLe.k, _ctLe.v);
+            else if (_ctLe.op === 'del') _localStorage.removeItem(_ctLe.k);
+            else if (_ctLe.op === 'clear') _localStorage.clear();
+          } catch(_) {}
+        }
+      }
       if (doc._dirty) checkDirty();
     } catch(_ctErr) {
       cb.log('[JS childTick err] ' + String(_ctErr));
