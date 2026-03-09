@@ -658,7 +658,7 @@ export function createPageJS(
     '_StubElement.prototype.replaceChildren = function(){ while(this.firstChild)this.removeChild(this.firstChild); this.append.apply(this,arguments); };',
     '_StubElement.prototype.insertAdjacentHTML = function(pos,html){ var tmp=document.createElement("DIV"); tmp.innerHTML=html; var ns=tmp.childNodes.slice(); pos=pos.toLowerCase(); if(pos==="beforebegin"){ for(var i=0;i<ns.length;i++) if(this.parentNode) this.parentNode.insertBefore(ns[i],this); } else if(pos==="afterbegin"){ for(var i=ns.length-1;i>=0;i--) this.insertBefore(ns[i],this.firstChild); } else if(pos==="beforeend"){ for(var i=0;i<ns.length;i++) this.appendChild(ns[i]); } else if(pos==="afterend"){ for(var i=ns.length-1;i>=0;i--) if(this.parentNode) this.parentNode.insertBefore(ns[i],this.nextSibling); } };',
     '_StubElement.prototype.insertAdjacentText = function(pos,text){ this.insertAdjacentHTML(pos, text.replace(/[<>&"]/g,function(c){return {"<":"&lt;",">":"&gt;","&":"&amp;",\'"\':"&quot;"}[c];})); };',
-    '_StubElement.prototype.insertAdjacentElement = function(pos,el){ this.insertAdjacentHTML(pos,""); return el; };',
+    '_StubElement.prototype.insertAdjacentElement = function(pos,el){ if(!el) return null; pos=pos.toLowerCase(); if(pos==="beforebegin"){ if(this.parentNode) this.parentNode.insertBefore(el,this); } else if(pos==="afterbegin"){ this.insertBefore(el,this.firstChild); } else if(pos==="beforeend"){ this.appendChild(el); } else if(pos==="afterend"){ if(this.parentNode) this.parentNode.insertBefore(el,this.nextSibling); } return el; };',
     '_StubElement.prototype.setAttributeNS = function(_ns,n,v){ this.setAttribute(n.replace(/^[^:]+:/,""),v); };',
     '_StubElement.prototype.getAttributeNS = function(_ns,n){ return this.getAttribute(n.replace(/^[^:]+:/,"")); };',
     '_StubElement.prototype.hasAttributeNS = function(_ns,n){ return this.hasAttribute(n.replace(/^[^:]+:/,"")); };',
@@ -1383,33 +1383,85 @@ export function createPageJS(
     'var sessionStorage = _makeStorage();',
 
     // ── fetch stub (relays to coordinator via postMessage) ───────────────
+    'var _fetchId = 0, _fetchQueue = [], _fetchResolvers = {};',
     'var fetch = function(url, opts) {',
-    '  return Promise.resolve({',
-    '    ok: true, status: 200, statusText: "OK",',
-    '    headers: { get: function() { return null; } },',
-    '    text: function() { return Promise.resolve(""); },',
-    '    json: function() { return Promise.resolve({}); },',
-    '    arrayBuffer: function() { return Promise.resolve(new ArrayBuffer(0)); },',
-    '    blob: function() { return Promise.resolve(new Blob([])); },',
-    '    clone: function() { return this; }',
-    '  });',
+    '  url = String(url && typeof url === "object" ? (url.url||url.href||String(url)) : url);',
+    '  opts = opts || {};',
+    '  var id = ++_fetchId;',
+    '  var method = (opts.method || "GET").toUpperCase();',
+    '  var body = opts.body !== undefined ? String(opts.body) : null;',
+    '  var hdrs = {};',
+    '  if (opts.headers) {',
+    '    if (typeof opts.headers.forEach === "function") { opts.headers.forEach(function(v,k){hdrs[k]=v;}); }',
+    '    else if (opts.headers && typeof opts.headers === "object") { for(var k in opts.headers) hdrs[k]=opts.headers[k]; }',
+    '  }',
+    '  _fetchQueue.push({id:id,url:url,method:method,body:body,headers:hdrs});',
+    '  return new Promise(function(res,rej){ _fetchResolvers[id]={resolve:res,reject:rej,url:url}; });',
     '};',
+    'function _resolveRequest(id,status,statusText,headers,bodyB64,mime){',
+    '  var r=_fetchResolvers[id]; if(!r)return; delete _fetchResolvers[id];',
+    '  var bodyText; try{bodyText=decodeURIComponent(escape(atob(bodyB64)));}catch(_){try{bodyText=atob(bodyB64);}catch(__){bodyText=bodyB64;}}',
+    '  var ok=status>=200&&status<300;',
+    '  var hdrsObj={get:function(k){return headers[k.toLowerCase()]||null;},has:function(k){return k.toLowerCase() in headers;},forEach:function(fn){for(var k in headers)fn(headers[k],k);},entries:function(){var e=[];for(var k in headers)e.push([k,headers[k]]);return e[Symbol.iterator]();},keys:function(){return Object.keys(headers)[Symbol.iterator]();},values:function(){return Object.values(headers)[Symbol.iterator]();}};',
+    '  var _bd=bodyText;',
+    '  r.resolve({ok:ok,status:status,statusText:statusText,headers:hdrsObj,url:r.url,redirected:false,type:"cors",bodyUsed:false,',
+    '    text:function(){return Promise.resolve(_bd);},',
+    '    json:function(){return new Promise(function(res,rej){try{res(JSON.parse(_bd));}catch(e){rej(e);}});},',
+    '    arrayBuffer:function(){var b=new Uint8Array(_bd.length);for(var i=0;i<_bd.length;i++)b[i]=_bd.charCodeAt(i);return Promise.resolve(b.buffer);},',
+    '    blob:function(){return Promise.resolve(new Blob([_bd],{type:mime||"application/octet-stream"}));},',
+    '    clone:function(){return this;},body:null',
+    '  });',
+    '}',
+    'function _rejectRequest(id,msg){ var r=_fetchResolvers[id]; if(!r)return; delete _fetchResolvers[id]; r.reject(new TypeError(String(msg))); }',
 
-    // ── XMLHttpRequest stub ──────────────────────────────────────────────
+    // ── XMLHttpRequest (backed by fetch queue) ───────────────────────────
     'function XMLHttpRequest() {',
     '  this.readyState=0; this.status=0; this.statusText="";',
-    '  this.responseText=""; this.response=null; this.responseType="";',
+    '  this.responseText=""; this.response=null; this.responseType=""; this.responseURL="";',
     '  this.withCredentials=false; this.timeout=0;',
-    '  this._hdrs={}; this._rhdrs={};',
+    '  this._hdrs={}; this._rhdrs={}; this._m="GET"; this._u=""; this._async=true;',
+    '  this._listeners={};',
+    '  this.onreadystatechange=null; this.onload=null; this.onerror=null;',
+    '  this.onabort=null; this.ontimeout=null; this.onprogress=null; this.onloadstart=null; this.onloadend=null;',
     '}',
-    'XMLHttpRequest.prototype.open=function(m,u){this._m=m;this._u=u;this.readyState=1;};',
-    'XMLHttpRequest.prototype.send=function(){this.readyState=4;this.status=200;if(this.onreadystatechange)this.onreadystatechange();if(this.onload)this.onload();};',
-    'XMLHttpRequest.prototype.abort=_noop;',
+    'XMLHttpRequest.prototype.open=function(m,u,async){this._m=m;this._u=u;this._async=(async!==false);this.readyState=1;};',
+    'XMLHttpRequest.prototype.send=function(body){',
+    '  var self=this; self.readyState=1;',
+    '  var opts={method:self._m};',
+    '  if(body)opts.body=body;',
+    '  if(Object.keys(self._hdrs).length)opts.headers=self._hdrs;',
+    '  fetch(self._u,opts).then(function(r){',
+    '    self.status=r.status; self.statusText=r.statusText; self.responseURL=self._u;',
+    '    r.headers.forEach(function(v,k){self._rhdrs[k]=v;});',
+    '    self.readyState=2;',
+    '    return r.text();',
+    '  }).then(function(text){',
+    '    self.responseText=text;',
+    '    self.response=self.responseType==="json"?JSON.parse(text):text;',
+    '    self.readyState=4;',
+    '    var _ev={type:"readystatechange",target:self,currentTarget:self};',
+    '    if(self.onreadystatechange)try{self.onreadystatechange();}catch(_){}',
+    '    var _lev={type:"load",target:self,currentTarget:self,loaded:text.length,total:text.length}; ',
+    '    if(self.onload)try{self.onload(_lev);}catch(_){}',
+    '    if(self.onloadend)try{self.onloadend(_lev);}catch(_){}',
+    '    var ls=self._listeners["load"]||[]; for(var i=0;i<ls.length;i++)try{ls[i](_lev);}catch(_){}',
+    '    var rls=self._listeners["readystatechange"]||[]; for(var j=0;j<rls.length;j++)try{rls[j](_ev);}catch(_){}',
+    '  }).catch(function(e){',
+    '    self.status=0; self.readyState=4;',
+    '    var _ee={type:"error",target:self,message:String(e)};',
+    '    if(self.onerror)try{self.onerror(_ee);}catch(_){}',
+    '    if(self.onloadend)try{self.onloadend(_ee);}catch(_){}',
+    '    var els=self._listeners["error"]||[]; for(var i=0;i<els.length;i++)try{els[i](_ee);}catch(_){}',
+    '  });',
+    '};',
+    'XMLHttpRequest.prototype.abort=function(){this.readyState=0;if(this.onabort)this.onabort({type:"abort",target:this});};',
     'XMLHttpRequest.prototype.setRequestHeader=function(k,v){this._hdrs[k]=v;};',
-    'XMLHttpRequest.prototype.getResponseHeader=function(k){return this._rhdrs[k]||null;};',
-    'XMLHttpRequest.prototype.getAllResponseHeaders=function(){return"";};',
-    'XMLHttpRequest.prototype.addEventListener=_noop;',
-    'XMLHttpRequest.prototype.removeEventListener=_noop;',
+    'XMLHttpRequest.prototype.getResponseHeader=function(k){return this._rhdrs[k.toLowerCase()]||null;};',
+    'XMLHttpRequest.prototype.getAllResponseHeaders=function(){var s="";for(var k in this._rhdrs)s+=k+": "+this._rhdrs[k]+"\r\n";return s;};',
+    'XMLHttpRequest.prototype.overrideMimeType=_noop;',
+    'XMLHttpRequest.prototype.addEventListener=function(t,fn){if(!this._listeners[t])this._listeners[t]=[];this._listeners[t].push(fn);};',
+    'XMLHttpRequest.prototype.removeEventListener=function(t,fn){if(this._listeners[t])this._listeners[t]=this._listeners[t].filter(function(f){return f!==fn;});};',
+    'XMLHttpRequest.prototype.dispatchEvent=function(ev){var t=ev.type;var ls=this._listeners[t]||[];for(var i=0;i<ls.length;i++)try{ls[i](ev);}catch(_){}return true;};',
     'XMLHttpRequest.UNSENT=0;XMLHttpRequest.OPENED=1;XMLHttpRequest.HEADERS_RECEIVED=2;',
     'XMLHttpRequest.LOADING=3;XMLHttpRequest.DONE=4;',
 
@@ -9440,7 +9492,70 @@ export function createPageJS(
                   }
                 }
               } catch (_titleErr) { /* non-critical */ }
-              // ── Drain _historyQueue ──────────────────────────────────────
+              // ── Drain _fetchQueue: satisfy pending child fetch requests ─
+              try {
+                var _fqRaw: any = (kernel as any).procEval(_pageChildId,
+                  '(function(){var q=_fetchQueue.slice();_fetchQueue.length=0;return JSON.stringify(q);})()');
+                if (typeof _fqRaw === 'string') {
+                  if (_fqRaw.length >= 2 && _fqRaw[0] === '"') _fqRaw = JSON.parse(_fqRaw);
+                  var _fq: any[] = [];
+                  try { _fq = JSON.parse(_fqRaw); } catch(_) {}
+                  for (var _fi = 0; _fi < _fq.length; _fi++) {
+                    (function(_freq: any) {
+                      var _freqID: number = _freq.id;
+                      var _cid: number = _pageChildId;
+                      var _freqOpts: any = { method: _freq.method || 'GET' };
+                      if (_freq.body) _freqOpts.body = _freq.body;
+                      if (_freq.headers && Object.keys(_freq.headers).length)
+                        _freqOpts.headers = _freq.headers;
+                      try {
+                        os.fetchAsync(_freq.url, (resp: any) => {
+                          if (_cid < 0) return;
+                          try {
+                            if (resp && resp.status) {
+                              var _body2 = resp.bodyText || '';
+                              var _b64 = btoa(unescape(encodeURIComponent(_body2)));
+                              var _fhdrs: Record<string, string> = {};
+                              if (resp.headers && typeof resp.headers.forEach === 'function')
+                                resp.headers.forEach((v: string, k: string) => { _fhdrs[k.toLowerCase()] = v; });
+                              var _mime = _fhdrs['content-type'] || 'text/plain';
+                              (kernel as any).procEval(_cid,
+                                '_resolveRequest(' + _freqID + ',' + resp.status + ',' +
+                                JSON.stringify(resp.statusText || 'OK') + ',' +
+                                JSON.stringify(_fhdrs) + ',' +
+                                JSON.stringify(_b64) + ',' +
+                                JSON.stringify(_mime) + ')');
+                            } else {
+                              (kernel as any).procEval(_cid,
+                                '_rejectRequest(' + _freqID + ',' + JSON.stringify('Network error') + ')');
+                            }
+                            (kernel as any).procTick(_cid);
+                            // Sync DOM changes after fetch response was processed
+                            try {
+                              var _df2 = (kernel as any).procEval(_cid,
+                                '(function(){var d=_domDirty;_domDirty=false;return d?"y":"n";})()');
+                              if (_df2 === 'y' || _df2 === '"y"') {
+                                var _cbh2: any = (kernel as any).procEval(_cid,
+                                  'try{document.body?document.body.innerHTML:""}catch(_e){""}');
+                                if (typeof _cbh2 === 'string') {
+                                  if (_cbh2.length >= 2 && _cbh2[0] === '"') _cbh2 = JSON.parse(_cbh2);
+                                  if (_cbh2 !== (doc as any)._childBodyHTML && _cbh2.length > 20) {
+                                    (doc as any)._childBodyHTML = _cbh2;
+                                    doc.body.innerHTML = _cbh2; doc._dirty = true;
+                                  }
+                                }
+                              }
+                            } catch(_db2) {}
+                          } catch(_injE) {}
+                        }, _freqOpts);
+                      } catch(_fe) {
+                        try { (kernel as any).procEval(_cid,
+                          '_rejectRequest(' + _freqID + ',' + JSON.stringify(String(_fe)) + ')'); } catch(_) {}
+                      }
+                    })(_fq[_fi]);
+                  }
+                }
+              } catch (_fqErr) { /* non-critical */ }
               try {
                 var _hqRaw: any = (kernel as any).procEval(_pageChildId,
                   '(function(){var q=_historyQueue.slice();_historyQueue.length=0;return JSON.stringify(q);})()');
