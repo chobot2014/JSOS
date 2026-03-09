@@ -602,13 +602,15 @@ export function createPageJS(
     '  configurable:true',
     '});',
     '_StubElement.prototype.getAttribute = function(n){ return this._attrs[n]||null; };',
-    '_StubElement.prototype.setAttribute = function(n,v){ this._attrs[n]=String(v); };',
-    '_StubElement.prototype.removeAttribute = function(n){ delete this._attrs[n]; };',
+    '_StubElement.prototype.setAttribute = function(n,v){ this._attrs[n]=String(v); _domDirty=true; };',
+    '_StubElement.prototype.removeAttribute = function(n){ delete this._attrs[n]; _domDirty=true; };',
     '_StubElement.prototype.hasAttribute = function(n){ return n in this._attrs; };',
     '_StubElement.prototype.addEventListener = _noop;',
     '_StubElement.prototype.removeEventListener = _noop;',
     '_StubElement.prototype.dispatchEvent = _noopTrue;',
-    'function _linkAll(el){var ch=el.childNodes;el.firstChild=ch[0]||null;el.lastChild=ch[ch.length-1]||null;var _ech=[];for(var _i=0;_i<ch.length;_i++){ch[_i].previousSibling=_i>0?ch[_i-1]:null;ch[_i].nextSibling=_i<ch.length-1?ch[_i+1]:null;if(ch[_i].nodeType===1)_ech.push(ch[_i]);}for(var _j=0;_j<_ech.length;_j++){_ech[_j].previousElementSibling=_j>0?_ech[_j-1]:null;_ech[_j].nextElementSibling=_j<_ech.length-1?_ech[_j+1]:null;}el.firstElementChild=_ech[0]||null;el.lastElementChild=_ech[_ech.length-1]||null;el.childElementCount=_ech.length;el.children=_ech;}',
+    // DOM change flag — checked after each script+tick to know if body HTML needs syncing
+    'var _domDirty = false;',
+    'function _linkAll(el){_domDirty=true;var ch=el.childNodes;el.firstChild=ch[0]||null;el.lastChild=ch[ch.length-1]||null;var _ech=[];for(var _i=0;_i<ch.length;_i++){ch[_i].previousSibling=_i>0?ch[_i-1]:null;ch[_i].nextSibling=_i<ch.length-1?ch[_i+1]:null;if(ch[_i].nodeType===1)_ech.push(ch[_i]);}for(var _j=0;_j<_ech.length;_j++){_ech[_j].previousElementSibling=_j>0?_ech[_j-1]:null;_ech[_j].nextElementSibling=_j<_ech.length-1?_ech[_j+1]:null;}el.firstElementChild=_ech[0]||null;el.lastElementChild=_ech[_ech.length-1]||null;el.childElementCount=_ech.length;el.children=_ech;}',
     // HTML serializer for innerHTML getter
     'function _serHTML(n){var t=n.nodeType;if(t===3)return (n.textContent||n.nodeValue||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");if(t===8)return "<!--"+(n.textContent||n.nodeValue||"")+"-->";if(t!==1)return "";var tag=n.tagName.toLowerCase();var a="";var _a=n._attrs||{};for(var k in _a){if(k!=="class"&&k!=="style")a+=" "+k+"=\""+String(_a[k]).replace(/&/g,"&amp;").replace(/"/g,"&quot;")+"\"";}var _cls=n.classList&&n.classList._arr&&n.classList._arr.length?n.classList._arr.join(" "):"";if(_cls)a+=" class=\""+_cls+"\"";var _st=n.style;if(_st){var _sc="";for(var _sk in _st){if(typeof _st[_sk]==="string"&&_sk!=="cssText")_sc+=_sk+":"+_st[_sk]+";";}if(_sc)a+=" style=\""+_sc.replace(/"/g,"&quot;")+"\"";} var VOID=/^(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/;if(VOID.test(tag))return "<"+tag+a+">";var inner="";var ch=n.childNodes||[];for(var i=0;i<ch.length;i++)inner+=_serHTML(ch[i]);return "<"+tag+a+">"+inner+"</"+tag+">";}',
     // HTML parser for innerHTML setter
@@ -9359,11 +9361,40 @@ export function createPageJS(
               _pageChildId = -1;
               return;
             }
+            // ── DOM bridge: sync child body HTML → main runtime ───────────
+            // Check if any DOM mutations happened in the child during script+tick
+            try {
+              var _dirtyFlag = (kernel as any).procEval(_pageChildId,
+                '(function(){var d=_domDirty;_domDirty=false;return d?"y":"n";})()');
+              if (_dirtyFlag === 'y' || _dirtyFlag === '"y"') {
+                var _childBodyHTML: any = (kernel as any).procEval(_pageChildId,
+                  'try{document.body?document.body.innerHTML:""}catch(_e){""}');
+                // procEval of a string expr returns the value as a string (possibly with quotes)
+                if (typeof _childBodyHTML === 'string') {
+                  // Strip surrounding quotes if returned as JSON string
+                  if (_childBodyHTML.length >= 2 && _childBodyHTML[0] === '"')
+                    _childBodyHTML = JSON.parse(_childBodyHTML);
+                  var _prevCBH: string = (doc as any)._childBodyHTML || '';
+                  if (_childBodyHTML !== _prevCBH && _childBodyHTML.length > 20) {
+                    (doc as any)._childBodyHTML = _childBodyHTML;
+                    cb.log('[DOM bridge] applying child body HTML (' +
+                      (_childBodyHTML.length / 1024).toFixed(1) + 'KB)');
+                    try {
+                      doc.body.innerHTML = _childBodyHTML;
+                      doc._dirty = true;
+                    } catch (_applyErr) {
+                      cb.log('[DOM bridge] apply error: ' + String(_applyErr));
+                    }
+                  }
+                }
+              }
+            } catch (_bridgeErr) {
+              // Ignore bridge errors — not critical
+            }
             // Collect any messages from the child (DOM mutations, etc.)
             var _childMsg: string | null;
             while ((_childMsg = (kernel as any).procRecv(_pageChildId)) !== null) {
-              cb.log('[JS child msg] ' + String(_childMsg).slice(0, 200));
-              // Future: parse and apply DOM mutations to the real DOM
+              // Future: process structured mutation messages
             }
           } catch(e) {
             cb.log('[JS child exec error] ' + String(e));
