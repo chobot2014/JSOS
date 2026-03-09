@@ -3524,7 +3524,14 @@ export function createPageJS(
     text(): Promise<string> { return Promise.resolve(this._parts.join('')); }
     arrayBuffer(): Promise<ArrayBuffer> { var s = this._parts.join(''); var b = new ArrayBuffer(s.length); var v = new Uint8Array(b); for (var i = 0; i < s.length; i++) v[i] = s.charCodeAt(i) & 0xff; return Promise.resolve(b); }
     slice(start = 0, end?: number, contentType = ''): Blob { var s = this._parts.join('').slice(start, end); return new Blob([s], { type: contentType || this.type }); }
-    stream(): unknown { return null; }
+    stream(): ReadableStream_ {
+      var content = this._parts.join('');
+      // Return a ReadableStream that yields the blob content as a Uint8Array chunk
+      var _done = false;
+      var bytes = new Uint8Array(content.length);
+      for (var _bi = 0; _bi < content.length; _bi++) bytes[_bi] = content.charCodeAt(_bi) & 0xff;
+      return new ReadableStream_({ start(ctrl: any) { ctrl.enqueue(bytes); ctrl.close(); } });
+    }
   }
 
   class File extends Blob {
@@ -6511,7 +6518,32 @@ export function createPageJS(
         arr.push(resolve);
       });
     },
-    upgrade(_root: unknown): void {},
+    upgrade(root: unknown): void {
+      function _walk(el: any): void {
+        if (!el || !el.tagName) return;
+        var tag = el.tagName.toLowerCase();
+        var cctor = _ceRegistry.get(tag);
+        if (cctor && !el._ceUpgraded) {
+          el._ceUpgraded = true;
+          var proto = (cctor as any).prototype;
+          if (proto) {
+            // Copy CE prototype methods onto the element if not already set
+            for (var _k in proto) {
+              if (!(el[_k] !== undefined && el.hasOwnProperty(_k))) {
+                try { el[_k] = proto[_k]; } catch(_) {}
+              }
+            }
+            if (typeof el.connectedCallback === 'function') {
+              try { el.connectedCallback(); } catch (err) {}
+            }
+          }
+        }
+        var ch: any[] = el.childNodes || [];
+        for (var _i = 0; _i < ch.length; _i++) _walk(ch[_i]);
+        if (el.shadowRoot) _walk(el.shadowRoot);
+      }
+      _walk((root as VElement) || doc.documentElement);
+    },
     getName(_ctor: unknown): string | null {
       for (var [k, v] of _ceRegistry) { if (v === _ctor) return k; }
       return null;

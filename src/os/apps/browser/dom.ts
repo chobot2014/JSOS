@@ -248,6 +248,9 @@ export class VNode extends VEventTarget {
         if (this.ownerDocument._idIndex) this.ownerDocument._idIndex = null;
         this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: [], removedNodes: [child], previousSibling: prev, nextSibling: next });
       }
+      // Fire disconnectedCallback for custom elements
+      var _dccb = (child as any).disconnectedCallback;
+      if (typeof _dccb === 'function') { try { _dccb.call(child); } catch (_) {} }
     }
     return child;
   }
@@ -800,6 +803,14 @@ export class VElement extends VNode {
       this.ownerDocument._dirty = true;
       this.ownerDocument._queueMutation({ type: 'attributes', target: this, attributeName: lname, attributeNamespace: null, oldValue });
     }
+    // Fire attributeChangedCallback if this is a custom element observing this attribute
+    var _accb = (this as any).attributeChangedCallback;
+    if (typeof _accb === 'function') {
+      var _obs: string[] | undefined = (this.constructor as any).observedAttributes;
+      if (_obs && _obs.indexOf(lname) >= 0) {
+        try { _accb.call(this, lname, oldValue, String(value)); } catch (_) {}
+      }
+    }
   }
   removeAttribute(name: string): void {
     var lname = name.toLowerCase();
@@ -814,6 +825,14 @@ export class VElement extends VNode {
     if (this.ownerDocument) {
       this.ownerDocument._dirty = true;
       this.ownerDocument._queueMutation({ type: 'attributes', target: this, attributeName: lname, attributeNamespace: null, oldValue });
+    }
+    // Fire attributeChangedCallback if this is a custom element observing this attribute
+    var _accb2 = (this as any).attributeChangedCallback;
+    if (typeof _accb2 === 'function') {
+      var _obs2: string[] | undefined = (this.constructor as any).observedAttributes;
+      if (_obs2 && _obs2.indexOf(lname) >= 0) {
+        try { _accb2.call(this, lname, oldValue, null); } catch (_) {}
+      }
     }
   }
   hasAttribute(name: string): boolean { return this._attrs.has(name.toLowerCase()); }
@@ -1679,7 +1698,17 @@ export class VElement extends VNode {
     if (!this._paused) { this._paused = true; this.dispatchEvent(new VEvent('pause', { bubbles: false })); }
   }
   load(): void { this._paused = true; this._currentTime = 0; this.dispatchEvent(new VEvent('emptied', { bubbles: false })); }
-  canPlayType(_type: string): '' | 'maybe' | 'probably' { return ''; }
+  canPlayType(type: string): '' | 'maybe' | 'probably' {
+    var t = (type || '').toLowerCase().split(';')[0].trim();
+    if (!t) return '';
+    // Common widely-supported media types
+    if (t === 'video/mp4' || t === 'video/webm' || t === 'video/ogg' ||
+        t === 'audio/mp4' || t === 'audio/mpeg' || t === 'audio/ogg' ||
+        t === 'audio/wav' || t === 'audio/webm' || t === 'audio/flac' ||
+        t === 'audio/aac' || t === 'application/ogg') return 'probably';
+    if (t.startsWith('video/') || t.startsWith('audio/')) return 'maybe';
+    return '';
+  }
   get paused(): boolean { return this._paused; }
   get ended(): boolean  { return this._ended; }
   get seeking(): boolean { return false; }

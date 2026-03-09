@@ -907,9 +907,31 @@ export function parseInlineStyle(style: string): CSSProps {
       case 'counter-set':                break; // CSS counter-set
       case 'user-modify':                break; // legacy editable
       case '-webkit-user-modify':        break;
-      case 'rotate':                     break; // individual transform props (stored in transform)
-      case 'scale':                      break;
-      case 'translate':                  break;
+      case 'rotate': {
+        // Fold into transform for rendering: 'rotate: 45deg' → rotate(45deg), 3D form: 'rotate: 0 0 1 45deg'
+        if (val && val !== 'none') {
+          var _rotParts = val.trim().split(/\s+/);
+          var _rotFn = _rotParts.length === 4 ? 'rotate3d(' + _rotParts[0] + ',' + _rotParts[1] + ',' + _rotParts[2] + ',' + _rotParts[3] + ')' : 'rotate(' + val.trim() + ')';
+          p.transform = (p.transform && p.transform !== 'none') ? p.transform + ' ' + _rotFn : _rotFn;
+        }
+        p.rotate = val; break;
+      }
+      case 'scale': {
+        if (val && val !== 'none') {
+          var _scParts = val.trim().split(/\s+/);
+          var _scFn = _scParts.length === 3 ? 'scale3d(' + _scParts.join(',') + ')' : _scParts.length === 2 ? 'scale(' + _scParts[0] + ',' + _scParts[1] + ')' : 'scale(' + val.trim() + ')';
+          p.transform = (p.transform && p.transform !== 'none') ? p.transform + ' ' + _scFn : _scFn;
+        }
+        p.scale = val; break;
+      }
+      case 'translate': {
+        if (val && val !== 'none') {
+          var _trParts = val.trim().split(/\s+/);
+          var _trFn = _trParts.length === 3 ? 'translate3d(' + _trParts.join(',') + ')' : _trParts.length === 2 ? 'translate(' + _trParts[0] + ',' + _trParts[1] + ')' : 'translateX(' + val.trim() + ')';
+          p.transform = (p.transform && p.transform !== 'none') ? p.transform + ' ' + _trFn : _trFn;
+        }
+        p.translate = val; break;
+      }
       case 'offset':                     break; // motion path
       case 'offset-path':                break;
       case 'offset-distance':            break;
