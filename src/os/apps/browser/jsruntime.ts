@@ -624,7 +624,7 @@ export function createPageJS(
     // querySelector/querySelectorAll helpers
     'function _nthMatch(e,i){e=(e||"").trim();if(e==="odd")return i%2===1;if(e==="even")return i%2===0;var m=e.match(/^([+-]?\\d*)n([+-]\\d+)?$|^([+-]?\\d+)$/);if(!m)return false;if(m[3]!==undefined)return i===parseInt(m[3],10);var a=(m[1]===""||m[1]===undefined||m[1]==="+")&&m[1]!=="-"?1:parseInt(m[1],10)||0;var b=m[2]?parseInt(m[2],10):0;if(a===0)return i===b;var r=(i-b)/a;return r>=1&&r===Math.floor(r);}',
     'function _stubMatch(el,tok){if(!el||el.nodeType!==1)return false;tok=tok.trim();if(tok.indexOf("::")>=0)return false;var _ps=[];tok=tok.replace(/:([a-z][a-z-]*)(?:\\(([^)]*?)\\))?/g,function(_,pn,pa){_ps.push([pn,pa||""]);return "";});var tag="",id="",cls=[],attrs=[];tok=tok.replace(/#([-\\w]+)/g,function(_,v){id=v;return "";}).replace(/\\.([-\\w]+)/g,function(_,v){cls.push(v);return "";}).replace(/\\[([^=\\]~|^$*]+)([~|^$*]?=)?["\']?([^"\'\\]]*)["\']?\\]/g,function(_,an,op,av){attrs.push([an,op||"",av]);return "";});tag=tok.trim();if(tag&&el.tagName.toUpperCase()!==tag.toUpperCase())return false;if(id&&el.id!==id&&!(el._attrs&&el._attrs.id===id))return false;for(var _ci=0;_ci<cls.length;_ci++){if(!el.classList||!el.classList.contains(cls[_ci]))return false;}for(var _ai=0;_ai<attrs.length;_ai++){var _at=attrs[_ai],_av=el.getAttribute?el.getAttribute(_at[0]):null;if(_at[1]===""){if(_av===null)return false;}else if(_at[1]==="="){if(_av!==_at[2])return false;}else if(_at[1]==="~="){if(!_av||_av.split(/\\s+/).indexOf(_at[2])<0)return false;}else if(_at[1]==="|="){if(!_av||(_av!==_at[2]&&_av.indexOf(_at[2]+"-")!==0))return false;}else if(_at[1]==="^="){if(!_av||_av.indexOf(_at[2])!==0)return false;}else if(_at[1]==="$="){if(!_av||_av.slice(-_at[2].length)!==_at[2])return false;}else if(_at[1]==="*="){if(!_av||_av.indexOf(_at[2])<0)return false;}}for(var _pi2=0;_pi2<_ps.length;_pi2++){var _pn=_ps[_pi2][0],_pa=_ps[_pi2][1],_sib,_si,_cnt;if(_pn==="not"){if(_pa&&_stubMatch(el,_pa))return false;}else if(_pn==="is"||_pn==="where"||_pn==="matches"||_pn==="any"){var _ok=false,_isl=_pa.split(",");for(var _ii=0;_ii<_isl.length;_ii++){if(_stubMatch(el,_isl[_ii].trim())){_ok=true;break;}}if(!_ok)return false;}else if(_pn==="has"){if(!_pa||!_stubQSA(el,_pa,true).length)return false;}else if(_pn==="first-child"){_sib=el.parentNode&&el.parentNode.childNodes;if(!_sib)return false;var _fc=null;for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1){_fc=_sib[_si];break;}}if(_fc!==el)return false;}else if(_pn==="last-child"){_sib=el.parentNode&&el.parentNode.childNodes;if(!_sib)return false;var _lc=null;for(_si=_sib.length-1;_si>=0;_si--){if(_sib[_si].nodeType===1){_lc=_sib[_si];break;}}if(_lc!==el)return false;}else if(_pn==="only-child"){_sib=el.parentNode&&el.parentNode.childNodes;if(!_sib)return false;_cnt=0;for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1)_cnt++;}if(_cnt!==1)return false;}else if(_pn==="nth-child"){_sib=el.parentNode&&el.parentNode.childNodes;if(!_sib)return false;var _nx=0,_np=0;for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1){_np++;if(_sib[_si]===el)_nx=_np;}}if(!_nthMatch(_pa,_nx))return false;}else if(_pn==="nth-last-child"){_sib=el.parentNode&&el.parentNode.childNodes;if(!_sib)return false;var _nt=0,_npos=0,_nlx=0;for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1)_nt++;}for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1){_npos++;if(_sib[_si]===el)_nlx=_nt-_npos+1;}}if(!_nthMatch(_pa,_nlx))return false;}else if(_pn==="first-of-type"){_sib=el.parentNode&&el.parentNode.childNodes;var _tn=el.tagName;if(!_sib)return false;for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1&&_sib[_si].tagName===_tn){if(_sib[_si]!==el)return false;break;}}}else if(_pn==="last-of-type"){_sib=el.parentNode&&el.parentNode.childNodes;var _tn2=el.tagName;if(!_sib)return false;for(_si=_sib.length-1;_si>=0;_si--){if(_sib[_si].nodeType===1&&_sib[_si].tagName===_tn2){if(_sib[_si]!==el)return false;break;}}}else if(_pn==="only-of-type"){_sib=el.parentNode&&el.parentNode.childNodes;var _tn3=el.tagName;if(!_sib)return false;_cnt=0;for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1&&_sib[_si].tagName===_tn3)_cnt++;}if(_cnt!==1)return false;}else if(_pn==="nth-of-type"){_sib=el.parentNode&&el.parentNode.childNodes;var _tn4=el.tagName;if(!_sib)return false;var _tpos=0,_tidx=0;for(_si=0;_si<_sib.length;_si++){if(_sib[_si].nodeType===1&&_sib[_si].tagName===_tn4){_tpos++;if(_sib[_si]===el)_tidx=_tpos;}}if(!_nthMatch(_pa,_tidx))return false;}else if(_pn==="empty"){var _cn=el.childNodes;for(var _cni=0;_cni<_cn.length;_cni++){if(_cn[_cni].nodeType===1||(_cn[_cni].nodeType===3&&_cn[_cni].nodeValue&&_cn[_cni].nodeValue.trim()))return false;}}else if(_pn==="root"){if(!el.tagName||el.tagName.toUpperCase()!=="HTML")return false;}else if(_pn==="disabled"){if(!el._attrs||!el._attrs.disabled)return false;}else if(_pn==="enabled"){if(el._attrs&&el._attrs.disabled)return false;}else if(_pn==="checked"){if(!el._attrs||!el._attrs.checked)return false;}else if(_pn==="required"){if(!el._attrs||!el._attrs.required)return false;}}return true;}',
-    'function _stubQSA(root,sel,first){var res=[];var parts=sel.trim().split(/\\s*,\\s*/);for(var _pi=0;_pi<parts.length;_pi++){var segs=parts[_pi].trim().split(/\\s+/);var last=segs[segs.length-1];var stk=[root];while(stk.length){var _nd=stk.pop();var _chn=_nd.childNodes||[];for(var _ni=_chn.length-1;_ni>=0;_ni--){if(_chn[_ni].nodeType===1)stk.push(_chn[_ni]);}if(_nd!==root&&(last==="*"||_stubMatch(_nd,last))){var _ok=true;if(segs.length>1){var _anc=_nd.parentNode;for(var _si=segs.length-2;_si>=0;_si--){var _fd=false;var _a2=_anc;while(_a2&&_a2!==root){if(_stubMatch(_a2,segs[_si])){_fd=true;_anc=_a2.parentNode;break;}_a2=_a2.parentNode;}if(!_fd){_ok=false;break;}}}if(_ok){if(first)return [_nd];res.push(_nd);}}}return first&&res.length?[res[0]]:res;}',
+    'function _stubQSA(root,sel,first){var res=[];function _tk(pt){var sg=[],re=/([>+~]|\\s+)/g,pr=0,cmb="";pt=pt.trim();var m;while((m=re.exec(pt))!==null){var t=pt.slice(pr,m.index).trim();if(t)sg.push({s:t,c:cmb||" "});var c=m[0].trim();cmb=c||" ";pr=m.index+m[0].length;}var lt=pt.slice(pr).trim();if(lt)sg.push({s:lt,c:sg.length===0?"":cmb||" "});return sg;}function _mc(el,sg){if(!sg.length)return false;var la=sg[sg.length-1];if(la.s!=="*"&&!_stubMatch(el,la.s))return false;if(sg.length===1)return true;var pv=sg.slice(0,sg.length-1),cb3=la.c;if(cb3===">"){return !!(el.parentNode&&el.parentNode!==root&&_mc(el.parentNode,pv));}if(cb3==="+"){var s=el.previousSibling;while(s&&s.nodeType!==1)s=s.previousSibling;return !!(s&&s!==root&&_mc(s,pv));}if(cb3==="~"){var s2=el.previousSibling;while(s2){if(s2.nodeType===1&&s2!==root&&_mc(s2,pv))return true;s2=s2.previousSibling;}return false;}var a=el.parentNode;while(a&&a!==root){if(_mc(a,pv))return true;a=a.parentNode;}return false;}var pts=sel.trim().split(/\\s*,\\s*/);for(var _pi=0;_pi<pts.length;_pi++){var sg2=_tk(pts[_pi]);if(!sg2.length)continue;var stk=[root];while(stk.length){var _nd=stk.pop();var _chn=_nd.childNodes||[];for(var _ni=_chn.length-1;_ni>=0;_ni--){if(_chn[_ni].nodeType===1)stk.push(_chn[_ni]);}if(_nd!==root&&_mc(_nd,sg2)){if(first)return [_nd];res.push(_nd);}}}return first&&res.length?[res[0]]:res;}',
     '_StubElement.prototype.appendChild = function(c){ if(c.parentNode&&c.parentNode!==this) c.parentNode.removeChild(c); this.childNodes.push(c); c.parentNode=this; c.parentElement=this; _linkAll(this); _dispatchMO("childList",this,[c],[]); return c; };',
     '_StubElement.prototype.removeChild = function(c){ var i=this.childNodes.indexOf(c); if(i>=0) this.childNodes.splice(i,1); c.parentNode=null; c.parentElement=null; c.nextSibling=null; c.previousSibling=null; _linkAll(this); _dispatchMO("childList",this,[],[c]); return c; };',
     '_StubElement.prototype.insertBefore = function(n,r){ if(!r) return this.appendChild(n); if(n.parentNode&&n.parentNode!==this) n.parentNode.removeChild(n); var i=this.childNodes.indexOf(r); if(i>=0) this.childNodes.splice(i,0,n); else this.childNodes.push(n); n.parentNode=this; n.parentElement=this; _linkAll(this); _dispatchMO("childList",this,[n],[]); return n; };',
@@ -9482,7 +9482,9 @@ export function createPageJS(
                 return;
               }
             }
-            // Drain async jobs (Promise.then, setTimeout callbacks, etc.)
+            // Fire C-backed timers (setTimeout/setInterval/RAF) THEN drain Promise microjobs
+            try { (kernel as any).serviceTimers(_pageChildId); } catch(_) {}
+            var _t0Exec = Date.now();
             var _tickResult = (kernel as any).procTick(_pageChildId);
             // procTick returns -1 on fault recovery
             if (_tickResult < 0) {
@@ -9491,156 +9493,106 @@ export function createPageJS(
               _pageChildId = -1;
               return;
             }
-            // ── DOM bridge: sync child body HTML → main runtime ───────────
-            // Check if any DOM mutations happened in the child during script+tick
+            if (Date.now() - _t0Exec > 500)
+              cb.log('[JS exec tick] ' + (Date.now()-_t0Exec) + 'ms for ' + (scriptURL||'(inline)').slice(0,60));
+            // ── DOM bridge: single batched procEval (matches _childTick approach) ────
             try {
-              var _dirtyFlag = (kernel as any).procEval(_pageChildId,
-                '(function(){var d=_domDirty;_domDirty=false;return d?"y":"n";})()');
-              if (_dirtyFlag === 'y' || _dirtyFlag === '"y"') {
-                var _childBodyHTML: any = (kernel as any).procEval(_pageChildId,
-                  'try{document.body?document.body.innerHTML:""}catch(_e){""}');
-                // procEval of a string expr returns the value as a string (possibly with quotes)
-                if (typeof _childBodyHTML === 'string') {
-                  // Strip surrounding quotes if returned as JSON string
-                  if (_childBodyHTML.length >= 2 && _childBodyHTML[0] === '"')
-                    _childBodyHTML = JSON.parse(_childBodyHTML);
-                  var _prevCBH: string = (doc as any)._childBodyHTML || '';
-                  if (_childBodyHTML !== _prevCBH && _childBodyHTML.length > 20) {
-                    (doc as any)._childBodyHTML = _childBodyHTML;
-                    cb.log('[DOM bridge] applying child body HTML (' +
-                      (_childBodyHTML.length / 1024).toFixed(1) + 'KB)');
-                    try {
-                      doc.body.innerHTML = _childBodyHTML;
-                      doc._dirty = true;
-                    } catch (_applyErr) {
-                      cb.log('[DOM bridge] apply error: ' + String(_applyErr));
-                    }
+              var _exBRaw: any = (kernel as any).procEval(_pageChildId,
+                '(function(){var d=_domDirty;_domDirty=false;' +
+                'var H=d&&document.body?document.body.innerHTML:null;' +
+                'var fq=_fetchQueue.splice(0);var hq=_historyQueue.splice(0);var lq=_lsQueue.splice(0);' +
+                'return JSON.stringify({d:d,H:H,t:document.title,fq:fq,hq:hq,lq:lq});})()');
+              var _exB: any = null;
+              try {
+                var _exBr = typeof _exBRaw === 'string' ? _exBRaw : String(_exBRaw);
+                if (_exBr.length >= 2 && _exBr[0] === '"') _exBr = JSON.parse(_exBr);
+                _exB = JSON.parse(_exBr);
+              } catch(_) {}
+              if (_exB) {
+                if (_exB.d && _exB.H != null) {
+                  var _exPrev = (doc as any)._childBodyHTML || '';
+                  if (_exB.H !== _exPrev && _exB.H.length > 20) {
+                    (doc as any)._childBodyHTML = _exB.H;
+                    cb.log('[DOM bridge] child body ' + (_exB.H.length / 1024).toFixed(1) + 'KB');
+                    try { doc.body.innerHTML = _exB.H; doc._dirty = true; } catch(_ae) {}
                   }
                 }
-              }
-              // ── Sync document.title ──────────────────────────────────────
-              try {
-                var _childTitle: any = (kernel as any).procEval(_pageChildId,
-                  'try{document.title}catch(_e){""}');
-                if (typeof _childTitle === 'string') {
-                  if (_childTitle.length >= 2 && _childTitle[0] === '"')
-                    _childTitle = JSON.parse(_childTitle);
-                  if (_childTitle && _childTitle !== (doc as any)._childTitle) {
-                    (doc as any)._childTitle = _childTitle;
-                    doc.title = _childTitle;
-                    doc._dirty = true;
-                  }
+                if (_exB.t && _exB.t !== (doc as any)._childTitle) {
+                  (doc as any)._childTitle = _exB.t; doc.title = _exB.t; doc._dirty = true;
                 }
-              } catch (_titleErr) { /* non-critical */ }
-              // ── Drain _fetchQueue: satisfy pending child fetch requests ─
-              try {
-                var _fqRaw: any = (kernel as any).procEval(_pageChildId,
-                  '(function(){var q=_fetchQueue.slice();_fetchQueue.length=0;return JSON.stringify(q);})()');
-                if (typeof _fqRaw === 'string') {
-                  if (_fqRaw.length >= 2 && _fqRaw[0] === '"') _fqRaw = JSON.parse(_fqRaw);
-                  var _fq: any[] = [];
-                  try { _fq = JSON.parse(_fqRaw); } catch(_) {}
-                  for (var _fi = 0; _fi < _fq.length; _fi++) {
-                    (function(_freq: any) {
-                      var _freqID: number = _freq.id;
-                      var _cid: number = _pageChildId;
-                      var _freqOpts: any = { method: _freq.method || 'GET' };
-                      if (_freq.body) _freqOpts.body = _freq.body;
-                      if (_freq.headers && Object.keys(_freq.headers).length)
-                        _freqOpts.headers = _freq.headers;
+                if (_exB.fq && _exB.fq.length) {
+                  for (var _exFi = 0; _exFi < _exB.fq.length; _exFi++) {
+                    (function(_exFreq: any) {
+                      var _exFReqId: number = _exFreq.id;
+                      var _exFCid: number = _pageChildId;
+                      var _exFOpts: any = { method: _exFreq.method || 'GET' };
+                      if (_exFreq.body) _exFOpts.body = _exFreq.body;
+                      if (_exFreq.headers && Object.keys(_exFreq.headers).length)
+                        _exFOpts.headers = _exFreq.headers;
                       try {
-                        os.fetchAsync(_freq.url, (resp: any) => {
-                          if (_cid < 0) return;
+                        os.fetchAsync(_exFreq.url, (resp: any) => {
+                          if (_exFCid < 0) return;
                           try {
                             if (resp && resp.status) {
-                              var _body2 = resp.bodyText || '';
-                              var _b64 = btoa(unescape(encodeURIComponent(_body2)));
-                              var _fhdrs: Record<string, string> = {};
+                              var _exFBody = resp.bodyText || '';
+                              var _exFB64 = btoa(unescape(encodeURIComponent(_exFBody)));
+                              var _exFHdrs: Record<string, string> = {};
                               if (resp.headers && typeof resp.headers.forEach === 'function')
-                                resp.headers.forEach((v: string, k: string) => { _fhdrs[k.toLowerCase()] = v; });
-                              var _mime = _fhdrs['content-type'] || 'text/plain';
-                              (kernel as any).procEval(_cid,
-                                '_resolveRequest(' + _freqID + ',' + resp.status + ',' +
+                                resp.headers.forEach((v: string, k: string) => { _exFHdrs[k.toLowerCase()] = v; });
+                              (kernel as any).procEval(_exFCid,
+                                '_resolveRequest(' + _exFReqId + ',' + resp.status + ',' +
                                 JSON.stringify(resp.statusText || 'OK') + ',' +
-                                JSON.stringify(_fhdrs) + ',' +
-                                JSON.stringify(_b64) + ',' +
-                                JSON.stringify(_mime) + ')');
+                                JSON.stringify(_exFHdrs) + ',' +
+                                JSON.stringify(_exFB64) + ',' +
+                                JSON.stringify(_exFHdrs['content-type'] || 'text/plain') + ')');
                             } else {
-                              (kernel as any).procEval(_cid,
-                                '_rejectRequest(' + _freqID + ',' + JSON.stringify('Network error') + ')');
+                              (kernel as any).procEval(_exFCid,
+                                '_rejectRequest(' + _exFReqId + ',' + JSON.stringify('Network error') + ')');
                             }
-                            (kernel as any).procTick(_cid);
-                            // Sync DOM changes after fetch response was processed
+                            try { (kernel as any).serviceTimers(_exFCid); } catch(_) {}
+                            (kernel as any).procTick(_exFCid);
                             try {
-                              var _df2 = (kernel as any).procEval(_cid,
-                                '(function(){var d=_domDirty;_domDirty=false;return d?"y":"n";})()');
-                              if (_df2 === 'y' || _df2 === '"y"') {
-                                var _cbh2: any = (kernel as any).procEval(_cid,
-                                  'try{document.body?document.body.innerHTML:""}catch(_e){""}');
-                                if (typeof _cbh2 === 'string') {
-                                  if (_cbh2.length >= 2 && _cbh2[0] === '"') _cbh2 = JSON.parse(_cbh2);
-                                  if (_cbh2 !== (doc as any)._childBodyHTML && _cbh2.length > 20) {
-                                    (doc as any)._childBodyHTML = _cbh2;
-                                    doc.body.innerHTML = _cbh2; doc._dirty = true;
-                                  }
-                                }
+                              var _exMRaw: any = (kernel as any).procEval(_exFCid,
+                                '(function(){var d=_domDirty;_domDirty=false;var H=d&&document.body?document.body.innerHTML:null;return JSON.stringify({d:d,H:H});})()');
+                              var _exMBr = typeof _exMRaw === 'string' ? _exMRaw : '';
+                              if (_exMBr.length >= 2 && _exMBr[0] === '"') _exMBr = JSON.parse(_exMBr);
+                              var _exMB: any = null; try { _exMB = JSON.parse(_exMBr); } catch(_) {}
+                              if (_exMB && _exMB.d && _exMB.H && _exMB.H.length > 20) {
+                                (doc as any)._childBodyHTML = _exMB.H;
+                                doc.body.innerHTML = _exMB.H; doc._dirty = true; needsRerender = true;
                               }
-                            } catch(_db2) {}
-                          } catch(_injE) {}
-                        }, _freqOpts);
-                      } catch(_fe) {
-                        try { (kernel as any).procEval(_cid,
-                          '_rejectRequest(' + _freqID + ',' + JSON.stringify(String(_fe)) + ')'); } catch(_) {}
+                            } catch(_) {}
+                          } catch(_exInjE) {}
+                        }, _exFOpts);
+                      } catch(_exFe) {
+                        try { (kernel as any).procEval(_exFCid,
+                          '_rejectRequest(' + _exFReqId + ',' + JSON.stringify(String(_exFe)) + ')'); } catch(_) {}
                       }
-                    })(_fq[_fi]);
+                    })(_exB.fq[_exFi]);
                   }
                 }
-              } catch (_fqErr) { /* non-critical */ }
-              try {
-                var _hqRaw: any = (kernel as any).procEval(_pageChildId,
-                  '(function(){var q=_historyQueue.slice();_historyQueue.length=0;return JSON.stringify(q);})()');
-                if (typeof _hqRaw === 'string') {
-                  if (_hqRaw.length >= 2 && _hqRaw[0] === '"') _hqRaw = JSON.parse(_hqRaw);
-                  var _hq: any[] = [];
-                  try { _hq = JSON.parse(_hqRaw); } catch(_) {}
-                  for (var _hi = 0; _hi < _hq.length; _hi++) {
-                    var _he = _hq[_hi];
-                    if (_he && _he.url) {
-                      try {
-                        if (_he.type === 'push') (window as any).history.pushState(_he.state, '', _he.url);
-                        else (window as any).history.replaceState(_he.state, '', _he.url);
-                      } catch (_histErr) { /* ignore */ }
-                    }
-                  }
-                }
-              } catch (_hqErr) { /* non-critical */ }
-              // ── Drain _lsQueue: persist localStorage changes to main runtime
-              try {
-                var _lsqRaw: any = (kernel as any).procEval(_pageChildId,
-                  '(function(){var q=_lsQueue.slice();_lsQueue.length=0;return JSON.stringify(q);})()');
-                if (typeof _lsqRaw === 'string') {
-                  if (_lsqRaw.length >= 2 && _lsqRaw[0] === '"') _lsqRaw = JSON.parse(_lsqRaw);
-                  var _lsq: any[] = [];
-                  try { _lsq = JSON.parse(_lsqRaw); } catch(_) {}
-                  for (var _lsi = 0; _lsi < _lsq.length; _lsi++) {
-                    var _lse = _lsq[_lsi];
-                    if (!_lse) continue;
-                    try {
-                      if (_lse.op === 'set') _localStorage.setItem(_lse.k, _lse.v);
-                      else if (_lse.op === 'del') _localStorage.removeItem(_lse.k);
-                      else if (_lse.op === 'clear') _localStorage.clear();
+                if (_exB.hq && _exB.hq.length) {
+                  for (var _exHi = 0; _exHi < _exB.hq.length; _exHi++) {
+                    var _exHe = _exB.hq[_exHi]; if (_exHe && _exHe.url) try {
+                      if (_exHe.type === 'push') (window as any).history.pushState(_exHe.state, '', _exHe.url);
+                      else (window as any).history.replaceState(_exHe.state, '', _exHe.url);
                     } catch(_) {}
                   }
                 }
-              } catch (_lsqErr) { /* non-critical */ }
-            } catch (_bridgeErr) {
-              // Ignore bridge errors — not critical
-            }
-            // Collect any messages from the child (DOM mutations, etc.)
-            var _childMsg: string | null;
-            while ((_childMsg = (kernel as any).procRecv(_pageChildId)) !== null) {
-              // Future: process structured mutation messages
-            }
+                if (_exB.lq && _exB.lq.length) {
+                  for (var _exLi = 0; _exLi < _exB.lq.length; _exLi++) {
+                    var _exLe = _exB.lq[_exLi]; if (!_exLe) continue;
+                    try {
+                      if (_exLe.op === 'set') _localStorage.setItem(_exLe.k, _exLe.v);
+                      else if (_exLe.op === 'del') _localStorage.removeItem(_exLe.k);
+                      else if (_exLe.op === 'clear') _localStorage.clear();
+                    } catch(_) {}
+                  }
+                }
+              }
+            } catch (_exBridgeErr) {}
+            // Drain pending messages (future: structured mutation events)
+            try { while ((kernel as any).procRecv(_pageChildId) !== null) {} } catch(_) {}
           } catch(e) {
             cb.log('[JS child exec error] ' + String(e));
           }
@@ -10323,6 +10275,12 @@ export function createPageJS(
   // The cache persists across session to accelerate revisits, but we flush if
   // the origin has changed to avoid stale closures with wrong window refs.
   // (Within same origin, cached Functions get re-bound correctly.)
+
+  // ── Progressive render: paint parsed HTML before any scripts execute ──────
+  // The DOM is fully parsed at this point; rendering now gives the user
+  // immediate visual feedback while scripts load/execute asynchronously.
+  checkDirty();
+  if (needsRerender) doRerender();
 
   runScripts(0);
 
