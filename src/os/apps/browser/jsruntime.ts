@@ -406,10 +406,14 @@ export function createPageJS(
     '};',
 
     // ── history ──────────────────────────────────────────────────────────
+    'var _historyQueue = [];',
     'var history = {',
     '  length: 1, state: null, scrollRestoration: "auto",',
-    '  pushState: function(){}, replaceState: function(){},',
-    '  back: function(){}, forward: function(){}, go: function(){}',
+    '  pushState: function(st,_t,url){ history.state=st; _historyQueue.push({type:"push",state:st,url:url||""}); },',
+    '  replaceState: function(st,_t,url){ history.state=st; _historyQueue.push({type:"replace",state:st,url:url||""}); },',
+    '  back: function(){ if(typeof PopStateEvent!=="undefined") window.dispatchEvent(new PopStateEvent("popstate",{state:history.state})); },',
+    '  forward: function(){ if(typeof PopStateEvent!=="undefined") window.dispatchEvent(new PopStateEvent("popstate",{state:history.state})); },',
+    '  go: function(){ if(typeof PopStateEvent!=="undefined") window.dispatchEvent(new PopStateEvent("popstate",{state:history.state})); }',
     '};',
 
     // ── screen ───────────────────────────────────────────────────────────
@@ -778,11 +782,13 @@ export function createPageJS(
     'var Attr = function(n,v){return {name:n,localName:n,value:v||"",nodeType:2,namespaceURI:null,prefix:null};};',
     'var Range = function(){this.collapsed=true;this.commonAncestorContainer=null;this.startContainer=null;this.endContainer=null;this.startOffset=0;this.endOffset=0;};',
     'Range.prototype.setStart=Range.prototype.setEnd=Range.prototype.setStartBefore=Range.prototype.setStartAfter=Range.prototype.setEndBefore=Range.prototype.setEndAfter=Range.prototype.collapse=Range.prototype.selectNode=Range.prototype.selectNodeContents=Range.prototype.insertNode=Range.prototype.detach=Range.prototype.surroundContents=function(){return undefined;};',
-    'Range.prototype.deleteContents=Range.prototype.extractContents=Range.prototype.cloneContents=function(){return document.createDocumentFragment();};',
+    'Range.prototype.deleteContents=function(){if(this.startContainer&&this.startContainer.parentNode)this.startContainer.parentNode.removeChild(this.startContainer);};',
+    'Range.prototype.extractContents=function(){var f=document.createDocumentFragment();if(this.startContainer&&this.startContainer.parentNode){this.startContainer.parentNode.removeChild(this.startContainer);f.appendChild(this.startContainer);}return f;};',
+    'Range.prototype.cloneContents=function(){var f=document.createDocumentFragment();if(this.startContainer&&this.startContainer.cloneNode)f.appendChild(this.startContainer.cloneNode(true));return f;};',
     'Range.prototype.cloneRange=function(){return new Range();};',
     'Range.prototype.getBoundingClientRect=function(){return {x:0,y:0,width:0,height:0,top:0,left:0,right:0,bottom:0,toJSON:function(){return this;}};};',
     'Range.prototype.getClientRects=function(){return [];};',
-    'Range.prototype.createContextualFragment=function(h){return document.createDocumentFragment();};',
+    'Range.prototype.createContextualFragment=function(h){var f=document.createDocumentFragment();_parseHTML(String(h),f);return f;};',
     'Range.prototype.toString=function(){return "";};',
     'Range.START_TO_START=0;Range.START_TO_END=1;Range.END_TO_END=2;Range.END_TO_START=3;',
     'var StaticRange=function(s){Object.assign(this,{startContainer:s.startContainer,startOffset:s.startOffset,endContainer:s.endContainer,endOffset:s.endOffset,collapsed:s.startContainer===s.endContainer&&s.startOffset===s.endOffset});};',
@@ -884,6 +890,7 @@ export function createPageJS(
     '  currentScript: null,',
     '  lastModified: "",',
     '  referrer: "",',
+    '  title: "",',
     '  URL: typeof location!=="undefined"&&location.href||"",',
     '  documentURI: typeof location!=="undefined"&&location.href||"",',
     '  domain: "",',
@@ -1101,6 +1108,11 @@ export function createPageJS(
     '_StubElement.prototype.removeEventListener = EventTarget.prototype.removeEventListener;',
     '_StubElement.prototype.dispatchEvent = EventTarget.prototype.dispatchEvent;',
     '[_docEl,_docHead,_docBody].forEach(function(e){if(e&&!e._listeners)e._listeners={};});',
+    // Wire document and window with proper EventTarget methods
+    'document._listeners = {};',
+    'document.addEventListener = EventTarget.prototype.addEventListener.bind(document);',
+    'document.removeEventListener = EventTarget.prototype.removeEventListener.bind(document);',
+    'document.dispatchEvent = EventTarget.prototype.dispatchEvent.bind(document);',
 
     // ── DOMException stub ─────────────────────────────────────────────────
     'function DOMException(msg,name){ this.message=msg||""; this.name=name||"Error"; this.code=0; }',
@@ -1172,13 +1184,14 @@ export function createPageJS(
     'BroadcastChannel.prototype.removeEventListener = _noop;',
 
     // ── MessageChannel / MessagePort ─────────────────────────────────────
-    'function MessagePort(){ this._ls=[]; this.onmessage=null; this.onmessageerror=null; }',
-    'MessagePort.prototype.postMessage = _noop;',
+    'function MessagePort(){ this._ls=[]; this.onmessage=null; this.onmessageerror=null; this._other=null; }',
+    'MessagePort.prototype.postMessage = function(data,transfer){ var other=this._other; if(!other) return; var ev={data:data,ports:transfer||[],source:null}; setTimeout(function(){ try{ if(other.onmessage) other.onmessage(ev); var ls=other._ls; for(var i=0;i<ls.length;i++) if(ls[i].type==="message") ls[i].fn(ev); }catch(e){} },0); };',
     'MessagePort.prototype.start = _noop;',
-    'MessagePort.prototype.close = _noop;',
-    'MessagePort.prototype.addEventListener = _noop;',
-    'MessagePort.prototype.removeEventListener = _noop;',
-    'function MessageChannel(){ this.port1=new MessagePort(); this.port2=new MessagePort(); }',
+    'MessagePort.prototype.close = function(){ this._other=null; };',
+    'MessagePort.prototype.addEventListener = function(t,fn){ this._ls.push({type:t,fn:fn}); };',
+    'MessagePort.prototype.removeEventListener = function(t,fn){ this._ls=this._ls.filter(function(l){return !(l.type===t&&l.fn===fn);}); };',
+    'MessagePort.prototype.dispatchEvent = function(ev){ if(ev.type==="message"&&this.onmessage) this.onmessage(ev); return true; };',
+    'function MessageChannel(){ this.port1=new MessagePort(); this.port2=new MessagePort(); this.port1._other=this.port2; this.port2._other=this.port1; }',
 
     // ── PromiseRejectionEvent ─────────────────────────────────────────────
     'function PromiseRejectionEvent(t,o){ Event.call(this,t,o); this.promise=(o&&o.promise)||Promise.resolve(); this.reason=(o&&o.reason)||undefined; }',
@@ -1873,17 +1886,29 @@ export function createPageJS(
     '    for(var _i=0;_i<_msgListeners.length;_i++)try{_msgListeners[_i](ev);}catch(_){}',
     '  },0);',
     '};',
-    // Patch globalThis.addEventListener to intercept "message" listeners for postMessage
+    // Patch globalThis.addEventListener to handle all event types properly
     '(function(){',
-    '  var _origAEL = typeof addEventListener !== "undefined" ? addEventListener : null;',
-    '  var _origREL = typeof removeEventListener !== "undefined" ? removeEventListener : null;',
+    '  var _winListeners = {};',
+    '  globalThis._winListeners = _winListeners;',
     '  globalThis.addEventListener = function(type, fn, opts) {',
     '    if(type==="message") { if(fn && _msgListeners.indexOf(fn)<0) _msgListeners.push(fn); return; }',
-    '    if(_origAEL) _origAEL.call(this, type, fn, opts);',
+    '    if(!_winListeners[type]) _winListeners[type]=[];',
+    '    var _once=opts&&typeof opts==="object"&&opts.once;',
+    '    var _fn=_once?function(e){fn.call(this,e);globalThis.removeEventListener(type,_fn);}:fn;',
+    '    _winListeners[type].push({fn:_fn,orig:fn});',
     '  };',
-    '  globalThis.removeEventListener = function(type, fn, opts) {',
+    '  globalThis.removeEventListener = function(type, fn) {',
     '    if(type==="message") { var i=_msgListeners.indexOf(fn); if(i>=0)_msgListeners.splice(i,1); return; }',
-    '    if(_origREL) _origREL.call(this, type, fn, opts);',
+    '    if(_winListeners[type]) _winListeners[type]=_winListeners[type].filter(function(h){return h.orig!==fn&&h.fn!==fn;});',
+    '  };',
+    '  globalThis.dispatchEvent = function(ev) {',
+    '    if(!ev||!ev.type) return true;',
+    '    var type=ev.type;',
+    '    ev.target=ev.target||globalThis; ev.currentTarget=globalThis;',
+    '    var _oh=globalThis["on"+type]; if(typeof _oh==="function")try{_oh.call(globalThis,ev);}catch(_){}',
+    '    var ls=_winListeners[type]||[]; var lsc=ls.slice();',
+    '    for(var i=0;i<lsc.length;i++){if(ev._stopImm)break;try{lsc[i].fn.call(globalThis,ev);}catch(_){}}',
+    '    return !ev.defaultPrevented;',
     '  };',
     '})();',
     // MessageChannel / MessagePort
@@ -9401,6 +9426,39 @@ export function createPageJS(
                   }
                 }
               }
+              // ── Sync document.title ──────────────────────────────────────
+              try {
+                var _childTitle: any = (kernel as any).procEval(_pageChildId,
+                  'try{document.title}catch(_e){""}');
+                if (typeof _childTitle === 'string') {
+                  if (_childTitle.length >= 2 && _childTitle[0] === '"')
+                    _childTitle = JSON.parse(_childTitle);
+                  if (_childTitle && _childTitle !== (doc as any)._childTitle) {
+                    (doc as any)._childTitle = _childTitle;
+                    doc.title = _childTitle;
+                    doc._dirty = true;
+                  }
+                }
+              } catch (_titleErr) { /* non-critical */ }
+              // ── Drain _historyQueue ──────────────────────────────────────
+              try {
+                var _hqRaw: any = (kernel as any).procEval(_pageChildId,
+                  '(function(){var q=_historyQueue.slice();_historyQueue.length=0;return JSON.stringify(q);})()');
+                if (typeof _hqRaw === 'string') {
+                  if (_hqRaw.length >= 2 && _hqRaw[0] === '"') _hqRaw = JSON.parse(_hqRaw);
+                  var _hq: any[] = [];
+                  try { _hq = JSON.parse(_hqRaw); } catch(_) {}
+                  for (var _hi = 0; _hi < _hq.length; _hi++) {
+                    var _he = _hq[_hi];
+                    if (_he && _he.url) {
+                      try {
+                        if (_he.type === 'push') (window as any).history.pushState(_he.state, '', _he.url);
+                        else (window as any).history.replaceState(_he.state, '', _he.url);
+                      } catch (_histErr) { /* ignore */ }
+                    }
+                  }
+                }
+              } catch (_hqErr) { /* non-critical */ }
             } catch (_bridgeErr) {
               // Ignore bridge errors — not critical
             }
@@ -9773,6 +9831,21 @@ export function createPageJS(
       var loadEv = new VEvent('load');
       (win['dispatchEvent'] as (e: VEvent) => void)(loadEv);
       doc.dispatchEvent(loadEv);
+      // Also fire DOMContentLoaded + load inside the child process so frameworks
+      // that register document.addEventListener('DOMContentLoaded', ...) will boot
+      if (_pageChildId >= 0) {
+        try {
+          (kernel as any).procEval(_pageChildId, [
+            'try{document.readyState="interactive";}catch(_){}',
+            'try{document.dispatchEvent(new Event("DOMContentLoaded",{bubbles:true}));}catch(_){}',
+            'try{if(typeof onDOMContentLoaded==="function")onDOMContentLoaded(new Event("DOMContentLoaded"));}catch(_){}',
+            'try{document.readyState="complete";}catch(_){}',
+            'try{window.dispatchEvent(new Event("load"));}catch(_){}',
+            'try{document.dispatchEvent(new Event("load"));}catch(_){}',
+          ].join('\n'));
+          (kernel as any).procTick(_pageChildId);
+        } catch(_dclErr) {}
+      }
 
       // ── SPA detection: analyse loaded scripts for framework fingerprints ──
       var _loadedSources: string[] = [];
