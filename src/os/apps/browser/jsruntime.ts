@@ -1368,19 +1368,21 @@ export function createPageJS(
     'var print = _noop;',
 
     // ── Storage stubs ────────────────────────────────────────────────────
-    'var _makeStorage = function(){',
+    'var _lsQueue = [];',
+    'var _makeStorage = function(isSession){',
     '  var d={};',
     '  return{',
-    '    getItem:function(k){return d[k]||null;},',
-    '    setItem:function(k,v){d[k]=String(v);},',
-    '    removeItem:function(k){delete d[k];},',
-    '    clear:function(){d={};},',
+    '    getItem:function(k){return k in d ? d[k] : null;},',
+    '    setItem:function(k,v){d[k]=String(v);if(!isSession)_lsQueue.push({op:"set",k:String(k),v:String(v)});},',
+    '    removeItem:function(k){delete d[k];if(!isSession)_lsQueue.push({op:"del",k:String(k)});},',
+    '    clear:function(){d={};if(!isSession)_lsQueue.push({op:"clear"});},',
     '    key:function(n){return Object.keys(d)[n]||null;},',
-    '    get length(){return Object.keys(d).length;}',
+    '    get length(){return Object.keys(d).length;},',
+    '    _import:function(obj){for(var k in obj)d[k]=obj[k];}',
     '  };',
     '};',
-    'var localStorage = _makeStorage();',
-    'var sessionStorage = _makeStorage();',
+    'var localStorage = _makeStorage(false);',
+    'var sessionStorage = _makeStorage(true);',
 
     // ── fetch stub (relays to coordinator via postMessage) ───────────────
     'var _fetchId = 0, _fetchQueue = [], _fetchResolvers = {};',
@@ -9412,6 +9414,13 @@ export function createPageJS(
                 'document.domain = ' + JSON.stringify(_locPart('hostname')) + ';',
               ].join('\n');
               (kernel as any).procEval(_pageChildId, _locCtx);
+              // Inject persisted localStorage data into child
+              try {
+                var _lsInit: Record<string, string> = {};
+                _localStorage._data.forEach((v: string, k: string) => { _lsInit[k] = v; });
+                if (Object.keys(_lsInit).length > 0)
+                  (kernel as any).procEval(_pageChildId, 'localStorage._import(' + JSON.stringify(_lsInit) + ')');
+              } catch (_lsInitErr) {}
               _useChildRuntime = true;
               cb.log('[JS] child runtime ready');
             }
@@ -9574,6 +9583,25 @@ export function createPageJS(
                   }
                 }
               } catch (_hqErr) { /* non-critical */ }
+              // ── Drain _lsQueue: persist localStorage changes to main runtime
+              try {
+                var _lsqRaw: any = (kernel as any).procEval(_pageChildId,
+                  '(function(){var q=_lsQueue.slice();_lsQueue.length=0;return JSON.stringify(q);})()');
+                if (typeof _lsqRaw === 'string') {
+                  if (_lsqRaw.length >= 2 && _lsqRaw[0] === '"') _lsqRaw = JSON.parse(_lsqRaw);
+                  var _lsq: any[] = [];
+                  try { _lsq = JSON.parse(_lsqRaw); } catch(_) {}
+                  for (var _lsi = 0; _lsi < _lsq.length; _lsi++) {
+                    var _lse = _lsq[_lsi];
+                    if (!_lse) continue;
+                    try {
+                      if (_lse.op === 'set') _localStorage.setItem(_lse.k, _lse.v);
+                      else if (_lse.op === 'del') _localStorage.removeItem(_lse.k);
+                      else if (_lse.op === 'clear') _localStorage.clear();
+                    } catch(_) {}
+                  }
+                }
+              } catch (_lsqErr) { /* non-critical */ }
             } catch (_bridgeErr) {
               // Ignore bridge errors — not critical
             }
