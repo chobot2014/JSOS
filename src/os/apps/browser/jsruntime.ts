@@ -608,10 +608,11 @@ export function createPageJS(
     '_StubElement.prototype.addEventListener = _noop;',
     '_StubElement.prototype.removeEventListener = _noop;',
     '_StubElement.prototype.dispatchEvent = _noopTrue;',
-    '_StubElement.prototype.appendChild = function(c){ this.childNodes.push(c); c.parentNode=this; return c; };',
-    '_StubElement.prototype.removeChild = function(c){ var i=this.childNodes.indexOf(c); if(i>=0) this.childNodes.splice(i,1); c.parentNode=null; return c; };',
-    '_StubElement.prototype.insertBefore = function(n,r){ if(!r) return this.appendChild(n); var i=this.childNodes.indexOf(r); if(i>=0) this.childNodes.splice(i,0,n); n.parentNode=this; return n; };',
-    '_StubElement.prototype.replaceChild = function(n,o){ var i=this.childNodes.indexOf(o); if(i>=0){ this.childNodes[i]=n; n.parentNode=this; o.parentNode=null; } return o; };',
+    'function _linkAll(el){var ch=el.childNodes;el.firstChild=ch[0]||null;el.lastChild=ch[ch.length-1]||null;for(var _i=0;_i<ch.length;_i++){ch[_i].previousSibling=_i>0?ch[_i-1]:null;ch[_i].nextSibling=_i<ch.length-1?ch[_i+1]:null;}}',
+    '_StubElement.prototype.appendChild = function(c){ if(c.parentNode&&c.parentNode!==this) c.parentNode.removeChild(c); this.childNodes.push(c); c.parentNode=this; c.parentElement=this; _linkAll(this); return c; };',
+    '_StubElement.prototype.removeChild = function(c){ var i=this.childNodes.indexOf(c); if(i>=0) this.childNodes.splice(i,1); c.parentNode=null; c.parentElement=null; c.nextSibling=null; c.previousSibling=null; _linkAll(this); return c; };',
+    '_StubElement.prototype.insertBefore = function(n,r){ if(!r) return this.appendChild(n); if(n.parentNode&&n.parentNode!==this) n.parentNode.removeChild(n); var i=this.childNodes.indexOf(r); if(i>=0) this.childNodes.splice(i,0,n); else this.childNodes.push(n); n.parentNode=this; n.parentElement=this; _linkAll(this); return n; };',
+    '_StubElement.prototype.replaceChild = function(n,o){ if(n.parentNode&&n.parentNode!==this) n.parentNode.removeChild(n); var i=this.childNodes.indexOf(o); if(i>=0){ this.childNodes[i]=n; n.parentNode=this; n.parentElement=this; o.parentNode=null; o.parentElement=null; _linkAll(this); } return o; };',
     '_StubElement.prototype.cloneNode = function(){ return new _StubElement(this.tagName); };',
     '_StubElement.prototype.querySelector = _noopNull;',
     '_StubElement.prototype.querySelectorAll = _noopArr;',
@@ -675,7 +676,7 @@ export function createPageJS(
     '_StubElement.prototype.animate = function(){ return {play:_noop,pause:_noop,cancel:_noop,finish:_noop,finished:Promise.resolve(),currentTime:0,playState:"idle",effect:null,onfinish:null,oncancel:null,addEventListener:_noop,removeEventListener:_noop}; };',
     '_StubElement.prototype.requestFullscreen = _noopPromise;',
     '_StubElement.prototype.requestPointerLock = _noop;',
-    '_StubElement.prototype.attachShadow = function(){ return new _StubElement("shadow-root"); };',
+    '_StubElement.prototype.attachShadow = function(o){ var sr=new _StubElement("shadow-root"); sr.mode=(o&&o.mode)||"open"; sr.host=this; this.shadowRoot=sr; return sr; };',
     '_StubElement.prototype.shadowRoot = null;',
     '_StubElement.prototype.assignedSlot = null;',
     '_StubElement.prototype.slot = "";',
@@ -691,6 +692,15 @@ export function createPageJS(
     '_StubElement.prototype.firstElementChild = null;',
     '_StubElement.prototype.lastElementChild = null;',
     '_StubElement.prototype.childElementCount = 0;',
+    // Text input selection methods
+    '_StubElement.prototype.selectionStart = 0;',
+    '_StubElement.prototype.selectionEnd = 0;',
+    '_StubElement.prototype.selectionDirection = "none";',
+    '_StubElement.prototype.setSelectionRange = function(s,e,d){ this.selectionStart=s; this.selectionEnd=e; this.selectionDirection=d||"none"; };',
+    '_StubElement.prototype.setRangeText = function(r,s,e,sel){ var v=this.value||this.textContent||""; var start=s!==undefined?s:this.selectionStart; var end=e!==undefined?e:this.selectionEnd; var nv=v.slice(0,start)+r+v.slice(end); if(this.value!==undefined)this.value=nv; else this.textContent=nv; if(sel==="select"||sel===undefined){this.selectionStart=start;this.selectionEnd=start+r.length;} };',
+    '_StubElement.prototype.select = function(){ this.selectionStart=0; this.selectionEnd=(this.value||this.textContent||"").length; };',
+    // contentEditable setter with isContentEditable sync
+    'Object.defineProperty(_StubElement.prototype,"contentEditable",{get:function(){return this._contentEditable||"false";},set:function(v){this._contentEditable=String(v);this.isContentEditable=(v==="true"||v==="plaintext-only");},configurable:true});',
 
     // FontFaceSet stub
     'var _fontFaceSet = {',
@@ -766,7 +776,21 @@ export function createPageJS(
     'NodeIterator.prototype.nextNode=NodeIterator.prototype.previousNode=function(){return null;};',
     'NodeIterator.prototype.detach=function(){};',
     'var TreeWalker=function(root,whatToShow,filter){this.root=root;this.currentNode=root;this.whatToShow=whatToShow||0xFFFFFFFF;this.filter=filter||null;};',
-    'TreeWalker.prototype.nextNode=TreeWalker.prototype.previousNode=TreeWalker.prototype.firstChild=TreeWalker.prototype.lastChild=TreeWalker.prototype.nextSibling=TreeWalker.prototype.previousSibling=TreeWalker.prototype.parentNode=function(){return null;};',
+    // Helper: does this node pass the whatToShow mask and optional filter?
+    'function _twOk(n,w,f){var b=1<<((n.nodeType||1)-1);if(!(w&b))return false;if(f){var r=typeof f==="function"?f(n):(f.acceptNode?f.acceptNode(n):1);if(r===2||r===3)return false;}return true;}',
+    // Depth-first descent: first matching node in subtree (pre-order)
+    'function _twDesc(n,w,f){var ch=n.childNodes||[];for(var _i=0;_i<ch.length;_i++){var _n=ch[_i];if(_twOk(_n,w,f))return _n;var d=_twDesc(_n,w,f);if(d)return d;}return null;}',
+    // Last-descendant helper for previousNode
+    'function _twLastDesc(n,w,f){var ch=n.childNodes||[];for(var _i=ch.length-1;_i>=0;_i--){var d=_twLastDesc(ch[_i],w,f);if(d)return d;if(_twOk(ch[_i],w,f))return ch[_i];}return null;}',
+    'TreeWalker.prototype.nextNode=function(){var _cur=this.currentNode,_w=this.whatToShow,_f=this.filter;'+
+    'var _d=_twDesc(_cur,_w,_f);if(_d){this.currentNode=_d;return _d;}'+
+    'var _node=_cur;while(_node&&_node!==this.root){var _p=_node.parentNode;if(!_p)break;var _s=_p.childNodes||[];var _idx=_s.indexOf(_node);for(var _j=_idx+1;_j<_s.length;_j++){if(_twOk(_s[_j],_w,_f)){this.currentNode=_s[_j];return _s[_j];}var _d2=_twDesc(_s[_j],_w,_f);if(_d2){this.currentNode=_d2;return _d2;}}  _node=_p;}return null;};',
+    'TreeWalker.prototype.firstChild=function(){var ch=this.currentNode.childNodes||[],w=this.whatToShow,f=this.filter;for(var i=0;i<ch.length;i++){if(_twOk(ch[i],w,f)){this.currentNode=ch[i];return ch[i];}}return null;};',
+    'TreeWalker.prototype.lastChild=function(){var ch=this.currentNode.childNodes||[],w=this.whatToShow,f=this.filter;for(var i=ch.length-1;i>=0;i--){if(_twOk(ch[i],w,f)){this.currentNode=ch[i];return ch[i];}}return null;};',
+    'TreeWalker.prototype.nextSibling=function(){var p=this.currentNode.parentNode,w=this.whatToShow,f=this.filter;if(!p||this.currentNode===this.root)return null;var s=p.childNodes||[];var i=s.indexOf(this.currentNode);for(var j=i+1;j<s.length;j++){if(_twOk(s[j],w,f)){this.currentNode=s[j];return s[j];}}return null;};',
+    'TreeWalker.prototype.previousSibling=function(){var p=this.currentNode.parentNode,w=this.whatToShow,f=this.filter;if(!p||this.currentNode===this.root)return null;var s=p.childNodes||[];var i=s.indexOf(this.currentNode);for(var j=i-1;j>=0;j--){if(_twOk(s[j],w,f)){this.currentNode=s[j];return s[j];}}return null;};',
+    'TreeWalker.prototype.parentNode=function(){if(this.currentNode===this.root)return null;var n=this.currentNode.parentNode,w=this.whatToShow,f=this.filter;while(n&&n!==this.root){if(_twOk(n,w,f)){this.currentNode=n;return n;}n=n.parentNode;}return null;};',
+    'TreeWalker.prototype.previousNode=function(){if(this.currentNode===this.root)return null;var p=this.currentNode.parentNode,w=this.whatToShow,f=this.filter;if(!p)return null;var s=p.childNodes||[];var i=s.indexOf(this.currentNode);for(var j=i-1;j>=0;j--){var d=_twLastDesc(s[j],w,f);var n=d||((_twOk(s[j],w,f))?s[j]:null);if(n){this.currentNode=n;return n;}}if(p!==this.root&&_twOk(p,w,f)){this.currentNode=p;return p;}return null;};',
     'var XPathResult=function(){this.numberValue=0;this.stringValue="";this.booleanValue=false;this.singleNodeValue=null;this.resultType=0;this.snapshotLength=0;};',
     'XPathResult.ANY_TYPE=0;XPathResult.NUMBER_TYPE=1;XPathResult.STRING_TYPE=2;XPathResult.BOOLEAN_TYPE=3;XPathResult.UNORDERED_NODE_ITERATOR_TYPE=4;XPathResult.ORDERED_NODE_ITERATOR_TYPE=5;XPathResult.UNORDERED_NODE_SNAPSHOT_TYPE=6;XPathResult.ORDERED_NODE_SNAPSHOT_TYPE=7;XPathResult.ANY_UNORDERED_NODE_TYPE=8;XPathResult.FIRST_ORDERED_NODE_TYPE=9;',
     'XPathResult.prototype.iterateNext=function(){return null;};',
@@ -816,7 +840,9 @@ export function createPageJS(
     '  createComment: function(t){ return {nodeType:8,textContent:String(t),parentNode:null}; },',
     '  createEvent: function(t){ return {type:"",target:null,bubbles:false,cancelable:false,preventDefault:_noop,stopPropagation:_noop,initEvent:function(t2){this.type=t2;}}; },',
     '  createRange: function(){ return {setStart:_noop,setEnd:_noop,collapse:_noop,cloneContents:function(){return new _StubElement("FRAGMENT");},getBoundingClientRect:function(){return{x:0,y:0,width:0,height:0,top:0,left:0,right:0,bottom:0};}}; },',
-    '  createTreeWalker: function(){ return {nextNode:_noopNull,currentNode:null}; },',
+    '  createTreeWalker: function(root,whatToShow,filter){ return new TreeWalker(root,whatToShow,filter); },',
+    '  createNodeIterator: function(root,whatToShow,filter){ var tw=new TreeWalker(root,whatToShow,filter); return {currentNode:root,nextNode:function(){return tw.nextNode();},previousNode:function(){return tw.previousNode();},detach:function(){}}; },',
+    '  ELEMENT_NODE:1,ATTRIBUTE_NODE:2,TEXT_NODE:3,COMMENT_NODE:8,DOCUMENT_NODE:9,DOCUMENT_FRAGMENT_NODE:11,',
     '  getElementById: _noopNull,',
     '  getElementsByClassName: _noopArr,',
     '  getElementsByTagName: _noopArr,',
@@ -5544,6 +5570,36 @@ export function createPageJS(
       }
     }
 
+    // Also walk shadow root adoptedStyleSheets if element is inside one (Shadow DOM scoping)
+    var _shadowRoot: any = null;
+    {
+      var _n: any = el;
+      while (_n) {
+        var _rn: any = _n.getRootNode ? _n.getRootNode() : null;
+        if (_rn && _rn !== _n && _rn.mode && _rn !== doc) { _shadowRoot = _rn; break; }
+        _n = _n.parentNode;
+      }
+    }
+    if (_shadowRoot) {
+      var _srSS = _shadowRoot.adoptedStyleSheets as unknown[] | undefined;
+      if (Array.isArray(_srSS)) {
+        for (var _sri = 0; _sri < _srSS.length; _sri++) {
+          var _srSheet = _srSS[_sri] as any as CSSStyleSheet_;
+          if (!_srSheet || _srSheet.disabled) continue;
+          walkRules(_srSheet.cssRules ?? []);
+        }
+      }
+      // Also walk <style> elements inside the shadow root
+      var _srStyles = (_shadowRoot as any)._styleSheets as CSSStyleSheet_[] | undefined;
+      if (Array.isArray(_srStyles)) {
+        for (var _srsi = 0; _srsi < _srStyles.length; _srsi++) {
+          var _srSSheet = _srStyles[_srsi];
+          if (!_srSSheet || (_srSSheet as any).disabled) continue;
+          walkRules((_srSSheet as any).cssRules ?? []);
+        }
+      }
+    }
+
     // Sort: normal rules by layer (earlier layers first), then specificity, then source order
     // [Item 436] unlayered rules (layerIdx=0x7FFFFFFF) sort last = highest cascade priority
     matched.sort((a, b2) => {
@@ -7932,6 +7988,7 @@ export function createPageJS(
   };
   // Wire document.getSelection() to the same selection object (item 581)
   (doc as any)._selectionRef = _selection;
+  (doc as any)._osClipboard = { read: () => { try { return os.clipboard.read(); } catch(_) { return ''; } }, write: (t: string) => { try { os.clipboard.write(t); } catch(_) {} } };
 
   // ── HTMLCanvasElement (real 2D context — item 3.3) ───────────────────────
 
@@ -9754,6 +9811,8 @@ export function createPageJS(
   (doc as any)._defaultView = win;
   (doc as any)._url = cb.baseURL;
   (doc as any)._selectionRef = _selection;
+  // Wire OS clipboard so execCommand('copy'/'paste') works
+  (doc as any)._osClipboard = { read: () => { try { return os.clipboard.read(); } catch(_) { return ''; } }, write: (t: string) => { try { os.clipboard.write(t); } catch(_) {} } };
 
   // Wire document.adoptedStyleSheets (Constructable Stylesheets — LitElement, Shadow DOM, etc.)
   Object.defineProperty(doc, 'adoptedStyleSheets', {

@@ -2145,10 +2145,77 @@ export class VDocument extends VNode {
     var n = new VNode(); (n as any).nodeType = 7; (n as any).nodeName = target; (n as any).target = target; (n as any).data = data; n.ownerDocument = this; return n;
   }
   hasFocus(): boolean { return true; }
-  execCommand(_cmd: string, _show?: boolean, _val?: string): boolean { return false; }
-  queryCommandState(_cmd: string): boolean { return false; }
-  queryCommandEnabled(_cmd: string): boolean { return false; }
-  queryCommandSupported(_cmd: string): boolean { return false; }
+  execCommand(cmd: string, _show?: boolean, val?: string): boolean {
+    var c = cmd.toLowerCase();
+    var sel = (this as any)._selectionRef ?? null;
+    if (c === 'selectall') {
+      // Mark entire document as selected (selection object is a stub but signals can read it)
+      if (sel) { try { sel.selectAllChildren(this.body ?? this); } catch (_) {} }
+      return true;
+    }
+    if (c === 'copy' || c === 'cut') {
+      var txt = sel ? String(sel) : '';
+      try {
+        var _osClip = (this as any)._osClipboard;
+        if (_osClip) _osClip.write(txt);
+      } catch (_) {}
+      if (c === 'cut') {
+        var _range = sel?.getRangeAt ? sel.getRangeAt(0) : null;
+        if (_range) try { _range.deleteContents(); } catch (_2) {}
+      }
+      return true;
+    }
+    if (c === 'paste') {
+      try {
+        var _osClip2 = (this as any)._osClipboard;
+        var _pasteTxt = _osClip2 ? _osClip2.read() : '';
+        if (_pasteTxt) {
+          var _ae = (this as any).activeElement;
+          if (_ae && typeof _ae.value === 'string') {
+            var _ss = _ae.selectionStart ?? _ae.value.length;
+            var _se = _ae.selectionEnd ?? _ae.value.length;
+            _ae.value = _ae.value.slice(0, _ss) + _pasteTxt + _ae.value.slice(_se);
+          }
+        }
+      } catch (_3) {}
+      return true;
+    }
+    if (c === 'bold' || c === 'italic' || c === 'underline' || c === 'strikethrough') {
+      // contenteditable formatting — fire input event on focused element
+      var _ae2 = (this as any).activeElement;
+      if (_ae2 && _ae2.isContentEditable) {
+        var _tag = c === 'bold' ? 'strong' : c === 'italic' ? 'em' : c === 'underline' ? 'u' : 's';
+        try {
+          var _r = sel?.getRangeAt ? sel.getRangeAt(0) : null;
+          if (_r) { var _w = this.createElement(_tag); _r.surroundContents(_w); }
+        } catch (_4) {}
+      }
+      return true;
+    }
+    if (c === 'inserttext' || c === 'inserthtml') {
+      var _ae3 = (this as any).activeElement;
+      if (_ae3 && typeof _ae3.value === 'string' && val !== undefined) {
+        var _ss2 = _ae3.selectionStart ?? _ae3.value.length;
+        var _se2 = _ae3.selectionEnd ?? _ae3.value.length;
+        _ae3.value = _ae3.value.slice(0, _ss2) + (c === 'inserthtml' ? val.replace(/<[^>]+>/g, '') : val) + _ae3.value.slice(_se2);
+      }
+      return true;
+    }
+    return false;
+  }
+  queryCommandState(cmd: string): boolean {
+    var c = cmd.toLowerCase();
+    // In contenteditable context, check if selection is wrapped in the given element
+    if (c === 'bold' || c === 'italic' || c === 'underline' || c === 'strikethrough') return false;
+    return false;
+  }
+  queryCommandEnabled(cmd: string): boolean {
+    var c = cmd.toLowerCase();
+    return ['copy','cut','paste','selectall','bold','italic','underline','strikethrough','inserttext','inserthtml'].indexOf(c) >= 0;
+  }
+  queryCommandSupported(cmd: string): boolean {
+    return this.queryCommandEnabled(cmd);
+  }
   designMode = 'off';
   getSelection(): unknown { return (this as any)._selectionRef ?? null; }
   /**
