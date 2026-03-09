@@ -948,7 +948,23 @@ export function createPageJS(
     // Real Base64 implementations (atob/btoa)
     'var atob = function(b64) { var chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; var out="",buf=0,bits=0; for(var i=0;i<b64.length;i++){var idx=chars.indexOf(b64[i]);if(idx<0)continue;buf=(buf<<6)|idx;bits+=6;if(bits>=8){bits-=8;out+=String.fromCharCode((buf>>bits)&0xFF);}} return out; };',
     'var btoa = function(s) { var chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; var out="",buf=0,bits=0; for(var i=0;i<s.length;i++){buf=(buf<<8)|s.charCodeAt(i);bits+=8;while(bits>=6){bits-=6;out+=chars[(buf>>bits)&63];}} if(bits>0)out+=chars[(buf<<(6-bits))&63]; while(out.length%4)out+="="; return out; };',
-    'var structuredClone = function(v, opts) { try { return JSON.parse(JSON.stringify(v)); } catch(_) { return v; } };',
+    '(function(){',
+    '  function _sc(x,seen){',
+    '    if(x===null||x===undefined||(typeof x!=="object"&&typeof x!=="function"))return x;',
+    '    if(x instanceof Date)return new Date(x.getTime());',
+    '    if(x instanceof RegExp)return new RegExp(x.source,x.flags);',
+    '    if(x instanceof ArrayBuffer)return x.slice(0);',
+    '    if(typeof ArrayBuffer!=="undefined"&&ArrayBuffer.isView&&ArrayBuffer.isView(x)){try{return new x.constructor(x);}catch(_){}}',
+    '    if(typeof Map!=="undefined"&&x instanceof Map){var m=new Map();x.forEach(function(v,k){m.set(_sc(k,seen),_sc(v,seen));});return m;}',
+    '    if(typeof Set!=="undefined"&&x instanceof Set){var s=new Set();x.forEach(function(v){s.add(_sc(v,seen));});return s;}',
+    '    if(seen.has(x))return seen.get(x);',
+    '    if(Array.isArray(x)){var a=[];seen.set(x,a);for(var i=0;i<x.length;i++)a.push(_sc(x[i],seen));return a;}',
+    '    var o=Object.create(null);seen.set(x,o);',
+    '    var ks=Object.getOwnPropertyNames(x);for(var j=0;j<ks.length;j++){try{o[ks[j]]=_sc(x[ks[j]],seen);}catch(_){}}',
+    '    return o;',
+    '  }',
+    '  var structuredClone=function(v,opts){try{return _sc(v,new Map());}catch(_){try{return JSON.parse(JSON.stringify(v));}catch(__){return v;}}};',
+    '})();',
 
     // ── window-level API ─────────────────────────────────────────────────
     'var getComputedStyle = function(el, pseudo) {',
@@ -1327,10 +1343,30 @@ export function createPageJS(
     'XMLHttpRequest.UNSENT=0;XMLHttpRequest.OPENED=1;XMLHttpRequest.HEADERS_RECEIVED=2;',
     'XMLHttpRequest.LOADING=3;XMLHttpRequest.DONE=4;',
 
-    // ── AbortController / AbortSignal stubs ──────────────────────────────
-    'function AbortController(){ this.signal={aborted:false,reason:undefined,addEventListener:_noop,removeEventListener:_noop,throwIfAborted:_noop}; }',
-    'AbortController.prototype.abort=function(r){this.signal.aborted=true;this.signal.reason=r;};',
-    'var AbortSignal = { abort: function(){ return {aborted:true,addEventListener:_noop,removeEventListener:_noop}; }, timeout: function(){ return {aborted:false,addEventListener:_noop,removeEventListener:_noop}; } };',
+    // ── AbortController / AbortSignal ─────────────────────────────────────
+    'var AbortController=(function(){',
+    '  function AC(){',
+    '    var _ls=[]; var _me=this;',
+    '    this.signal={aborted:false,reason:undefined,onabort:null,_ls:_ls,',
+    '      addEventListener:function(t,fn){if(t==="abort"&&fn&&_ls.indexOf(fn)<0)_ls.push(fn);},',
+    '      removeEventListener:function(t,fn){var i=_ls.indexOf(fn);if(i>=0)_ls.splice(i,1);},',
+    '      throwIfAborted:function(){if(this.aborted){var e=this.reason;throw e!==undefined?e:new DOMException("The operation was aborted.","AbortError");}},',
+    '      dispatchEvent:function(e){if(e&&e.type==="abort"){if(typeof this.onabort==="function")try{this.onabort(e);}catch(_){}for(var i=0;i<_ls.length;i++)try{_ls[i](e);}catch(_){}}},',
+    '    };',
+    '    this.abort=function(r){',
+    '      if(_me.signal.aborted)return;',
+    '      _me.signal.aborted=true;',
+    '      _me.signal.reason=r!==undefined?r:new DOMException("The user aborted a request.","AbortError");',
+    '      _me.signal.dispatchEvent({type:"abort",target:_me.signal});',
+    '    };',
+    '  }',
+    '  return AC;',
+    '})();',
+    'var AbortSignal={',
+    '  abort:function(r){var c=new AbortController();c.abort(r);return c.signal;},',
+    '  timeout:function(ms){var c=new AbortController();setTimeout(function(){c.abort(new DOMException("TimeoutError","TimeoutError"));},ms);return c.signal;},',
+    '  any:function(sigs){var c=new AbortController();for(var i=0;i<sigs.length;i++){var s=sigs[i];if(s.aborted){c.abort(s.reason);break;}s.addEventListener("abort",function(){if(!c.signal.aborted)c.abort(this.reason);});}return c.signal;}',
+    '};',
 
     // ── URL / URLSearchParams ────────────────────────────────────────────
     // (QJS built-in URL class should be available, but add fallbacks)
@@ -5354,6 +5390,55 @@ export function createPageJS(
   var _csProxyCache = new WeakMap<VElement, { gen: number; proxy: any }>();
 
   function getComputedStyle(el: VElement, _pseudoElt?: string | null): any {
+    // ── Pseudo-element shortcut (::before / ::after) ────────────────────────
+    if (_pseudoElt && typeof _pseudoElt === 'string' && _pseudoElt.trim()) {
+      var _pNorm = _pseudoElt.trim().replace(/^:{1}([a-z])/, '::$1'); // :before → ::before
+      var _pMerged = new Map<string, string>();
+      function _walkPseudo(rules: any[]): void {
+        for (var _pr of rules) {
+          if (!_pr) continue;
+          if (_pr.type === 1 && _pr.selectorText) {
+            var _pSels = (_pr.selectorText as string).split(',');
+            var _pMaxSpec = -1;
+            for (var _psi = 0; _psi < _pSels.length; _psi++) {
+              var _pSel = _pSels[_psi].trim();
+              // Match selectors ending with ::before / ::after (also single-colon variants)
+              var _pEnd = _pSel.endsWith(_pNorm) || _pSel.endsWith(_pNorm.replace('::', ':'));
+              if (!_pEnd) continue;
+              var _pBase = _pSel.slice(0, _pSel.lastIndexOf(':')).replace(/:$/, '').trim() || '*';
+              try {
+                if (_matchSel(_pBase, el)) {
+                  var _pSp = _calcSpecificity(_pSel);
+                  if (_pSp > _pMaxSpec) _pMaxSpec = _pSp;
+                }
+              } catch (_) {}
+            }
+            if (_pMaxSpec >= 0) {
+              for (var _ppk in _pr.style) {
+                if (_ppk !== 'cssText' && _pr.style[_ppk]) _pMerged.set(_ppk, _pr.style[_ppk]);
+              }
+              if (_pr.important) (_pr.important as Set<string>).forEach((k: string) => {
+                if (_pr.style[k]) _pMerged.set(k, _pr.style[k]);
+              });
+            }
+          } else if ((_pr.type === 4 || _pr.type === 12) && _pr.cssRules) {
+            _walkPseudo(_pr.cssRules);
+          }
+        }
+      }
+      for (var _pShI = 0; _pShI < doc._styleSheets.length; _pShI++) {
+        var _pSh = doc._styleSheets[_pShI] as any;
+        if (!_pSh || _pSh.disabled) continue;
+        _walkPseudo(_pSh.cssRules ?? []);
+      }
+      var _pResult: any = Object.create(null);
+      _pMerged.forEach((v, k) => { _pResult[k] = v; });
+      _pResult.content = _pResult.content || 'none';
+      _pResult.display = _pResult.display || 'inline';
+      _pResult.getPropertyValue = (p: string) => _pResult[p] || '';
+      _pResult.setProperty = (_p: string, _v: string) => {};
+      return _pResult;
+    }
     // ── Computed style cache check (item 944) ───────────────────────────────────
     var _csGen = currentStyleGeneration();
     var _csHit = _csProxyCache.get(el);
