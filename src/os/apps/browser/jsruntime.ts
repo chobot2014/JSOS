@@ -336,6 +336,7 @@ export function createPageJS(
   // DOM mutations in the child are relayed back via postMessage.
   var _pageChildId: number = -1;              // child proc slot (-1 = not created)
   var _useChildRuntime = false;               // activate after coordinator fault
+  var _childTickBusy = false;                 // re-entrancy guard for _childTick()
 
   /** Bootstrap code evaluated in the child runtime to set up DOM stubs. */
   var _childBootstrap = [
@@ -10330,6 +10331,160 @@ export function createPageJS(
     return false;
   }
 
+  // ── Child process periodic DOM bridge ────────────────────────────────────
+  // Called every frame from tick() to keep child async JS alive: drives
+  // Promise chains, setTimeout callbacks, React re-renders, etc.
+  function _childTick(): void {
+    if (_childTickBusy || _pageChildId < 0) return;
+    _childTickBusy = true;
+    try {
+      // 1. Pump QuickJS job queue (Promise.then, setTimeout(fn,0), etc.)
+      var _ct = (kernel as any).procTick(_pageChildId);
+      if (_ct < 0) {
+        cb.log('[JS] child runtime faulted during periodic tick — recycling');
+        try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
+        _pageChildId = -1;
+        return;
+      }
+      // 2. Sync DOM: check _domDirty flag and apply body HTML to main runtime
+      var _ctDf: any = (kernel as any).procEval(_pageChildId,
+        '(function(){var d=_domDirty;_domDirty=false;return d?"y":"n";})()');
+      if (_ctDf === 'y' || _ctDf === '"y"') {
+        var _ctBH: any = (kernel as any).procEval(_pageChildId,
+          'try{document.body?document.body.innerHTML:""}catch(_e){""}');
+        if (typeof _ctBH === 'string') {
+          if (_ctBH.length >= 2 && _ctBH[0] === '"') _ctBH = JSON.parse(_ctBH);
+          var _ctPrev = (doc as any)._childBodyHTML || '';
+          if (_ctBH !== _ctPrev && _ctBH.length > 20) {
+            (doc as any)._childBodyHTML = _ctBH;
+            try { doc.body.innerHTML = _ctBH; doc._dirty = true; } catch(_) {}
+          }
+        }
+      }
+      // 3. Sync document.title
+      try {
+        var _ctTitle: any = (kernel as any).procEval(_pageChildId,
+          'try{document.title}catch(_e){""}');
+        if (typeof _ctTitle === 'string') {
+          if (_ctTitle.length >= 2 && _ctTitle[0] === '"') _ctTitle = JSON.parse(_ctTitle);
+          if (_ctTitle && _ctTitle !== (doc as any)._childTitle) {
+            (doc as any)._childTitle = _ctTitle; doc.title = _ctTitle; doc._dirty = true;
+          }
+        }
+      } catch(_) {}
+      // 4. Drain _fetchQueue — satisfy pending child fetch() calls via os.fetchAsync
+      try {
+        var _ctFqRaw: any = (kernel as any).procEval(_pageChildId,
+          '(function(){var q=_fetchQueue.slice();_fetchQueue.length=0;return JSON.stringify(q);})()');
+        if (typeof _ctFqRaw === 'string') {
+          if (_ctFqRaw.length >= 2 && _ctFqRaw[0] === '"') _ctFqRaw = JSON.parse(_ctFqRaw);
+          var _ctFq: any[] = [];
+          try { _ctFq = JSON.parse(_ctFqRaw); } catch(_) {}
+          for (var _ctFi = 0; _ctFi < _ctFq.length; _ctFi++) {
+            (function(_ctFreq: any) {
+              var _ctFreqId: number = _ctFreq.id;
+              var _ctCid: number = _pageChildId;
+              var _ctFOpts: any = { method: _ctFreq.method || 'GET' };
+              if (_ctFreq.body) _ctFOpts.body = _ctFreq.body;
+              if (_ctFreq.headers && Object.keys(_ctFreq.headers).length)
+                _ctFOpts.headers = _ctFreq.headers;
+              try {
+                os.fetchAsync(_ctFreq.url, (resp: any) => {
+                  if (_ctCid < 0) return;
+                  try {
+                    if (resp && resp.status) {
+                      var _ctFBody = resp.bodyText || '';
+                      var _ctFB64 = btoa(unescape(encodeURIComponent(_ctFBody)));
+                      var _ctFHdrs: Record<string, string> = {};
+                      if (resp.headers && typeof resp.headers.forEach === 'function')
+                        resp.headers.forEach((v: string, k: string) => { _ctFHdrs[k.toLowerCase()] = v; });
+                      var _ctFMime = _ctFHdrs['content-type'] || 'text/plain';
+                      (kernel as any).procEval(_ctCid,
+                        '_resolveRequest(' + _ctFreqId + ',' + resp.status + ',' +
+                        JSON.stringify(resp.statusText || 'OK') + ',' +
+                        JSON.stringify(_ctFHdrs) + ',' +
+                        JSON.stringify(_ctFB64) + ',' +
+                        JSON.stringify(_ctFMime) + ')');
+                    } else {
+                      (kernel as any).procEval(_ctCid,
+                        '_rejectRequest(' + _ctFreqId + ',' + JSON.stringify('Network error') + ')');
+                    }
+                    (kernel as any).procTick(_ctCid);
+                    // Mini DOM sync after fetch resolve
+                    try {
+                      var _ctDf2: any = (kernel as any).procEval(_ctCid,
+                        '(function(){var d=_domDirty;_domDirty=false;return d?"y":"n";})()');
+                      if (_ctDf2 === 'y' || _ctDf2 === '"y"') {
+                        var _ctBH2: any = (kernel as any).procEval(_ctCid,
+                          'try{document.body?document.body.innerHTML:""}catch(_e){""}');
+                        if (typeof _ctBH2 === 'string') {
+                          if (_ctBH2.length >= 2 && _ctBH2[0] === '"') _ctBH2 = JSON.parse(_ctBH2);
+                          if (_ctBH2 !== (doc as any)._childBodyHTML && _ctBH2.length > 20) {
+                            (doc as any)._childBodyHTML = _ctBH2;
+                            doc.body.innerHTML = _ctBH2; doc._dirty = true; needsRerender = true;
+                          }
+                        }
+                      }
+                    } catch(_ctDb2) {}
+                    // Process any new fetches chained from response handler (re-entrant guard inside)
+                    _childTick();
+                  } catch(_ctInjE) {}
+                }, _ctFOpts);
+              } catch(_ctFe) {
+                try { (kernel as any).procEval(_ctCid,
+                  '_rejectRequest(' + _ctFreqId + ',' + JSON.stringify(String(_ctFe)) + ')'); } catch(_) {}
+              }
+            })(_ctFq[_ctFi]);
+          }
+        }
+      } catch(_ctFqErr) {}
+      // 5. Drain _historyQueue
+      try {
+        var _ctHqRaw: any = (kernel as any).procEval(_pageChildId,
+          '(function(){var q=_historyQueue.slice();_historyQueue.length=0;return JSON.stringify(q);})()');
+        if (typeof _ctHqRaw === 'string') {
+          if (_ctHqRaw.length >= 2 && _ctHqRaw[0] === '"') _ctHqRaw = JSON.parse(_ctHqRaw);
+          var _ctHq: any[] = [];
+          try { _ctHq = JSON.parse(_ctHqRaw); } catch(_) {}
+          for (var _ctHi = 0; _ctHi < _ctHq.length; _ctHi++) {
+            var _ctHe = _ctHq[_ctHi];
+            if (_ctHe && _ctHe.url) {
+              try {
+                if (_ctHe.type === 'push') (window as any).history.pushState(_ctHe.state, '', _ctHe.url);
+                else (window as any).history.replaceState(_ctHe.state, '', _ctHe.url);
+              } catch(_) {}
+            }
+          }
+        }
+      } catch(_ctHqErr) {}
+      // 6. Drain _lsQueue: persist child localStorage mutations to main runtime
+      try {
+        var _ctLqRaw: any = (kernel as any).procEval(_pageChildId,
+          '(function(){var q=_lsQueue.slice();_lsQueue.length=0;return JSON.stringify(q);})()');
+        if (typeof _ctLqRaw === 'string') {
+          if (_ctLqRaw.length >= 2 && _ctLqRaw[0] === '"') _ctLqRaw = JSON.parse(_ctLqRaw);
+          var _ctLq: any[] = [];
+          try { _ctLq = JSON.parse(_ctLqRaw); } catch(_) {}
+          for (var _ctLi = 0; _ctLi < _ctLq.length; _ctLi++) {
+            var _ctLe = _ctLq[_ctLi];
+            if (!_ctLe) continue;
+            try {
+              if (_ctLe.op === 'set') _localStorage.setItem(_ctLe.k, _ctLe.v);
+              else if (_ctLe.op === 'del') _localStorage.removeItem(_ctLe.k);
+              else if (_ctLe.op === 'clear') _localStorage.clear();
+            } catch(_) {}
+          }
+        }
+      } catch(_ctLqErr) {}
+      // Apply accumulated DOM changes
+      if (doc._dirty) checkDirty();
+    } catch(_ctErr) {
+      cb.log('[JS childTick err] ' + String(_ctErr));
+    } finally {
+      _childTickBusy = false;
+    }
+  }
+
   return {
     fireClick(id: string): boolean {
       return fireAndCheck(() => {
@@ -10517,6 +10672,11 @@ export function createPageJS(
       if (_sseSockets.length > 0) _tickSSE();
       // Pump all Web Workers
       tickAllWorkers();
+      // Pump child runtime (drives setTimeout, Promise chains, React re-renders in child proc)
+      if (_pageChildId >= 0) {
+        _childTick();
+        if (needsRerender) doRerender();
+      }
       // Record frame timing
       _perf.recordFrame(frameStart, _perf.now() - frameStart);
     },
