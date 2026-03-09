@@ -632,9 +632,9 @@ export function createPageJS(
     '_StubElement.prototype.getElementsByTagNameNS = function(_ns,tag){ return this.getElementsByTagName(tag); };',
     '_StubElement.prototype.getBoundingClientRect = function(){ return {x:0,y:0,width:0,height:0,top:0,left:0,right:0,bottom:0,toJSON:function(){return this;}}; };',
     '_StubElement.prototype.getClientRects = function(){ return []; };',
-    '_StubElement.prototype.closest = _noopNull;',
-    '_StubElement.prototype.matches = _noopFalse;',
-    '_StubElement.prototype.contains = function(n){ return n===this||this.childNodes.indexOf(n)>=0; };',
+    '_StubElement.prototype.closest = function(sel){ var n=this; while(n&&n.nodeType===1){if(_stubMatch(n,sel.trim()))return n; n=n.parentNode;} return null; };',
+    '_StubElement.prototype.matches = function(sel){ return _stubMatch(this,sel.trim()); };',
+    '_StubElement.prototype.contains = function(n){ if(n===this)return true; var ch=this.childNodes||[]; for(var i=0;i<ch.length;i++){if(ch[i]===n||(_StubElement.prototype.contains&&ch[i].contains&&ch[i].contains(n)))return true;} return false; };',
     '_StubElement.prototype.focus = _noop;',
     '_StubElement.prototype.blur = _noop;',
     '_StubElement.prototype.click = _noop;',
@@ -848,9 +848,8 @@ export function createPageJS(
     '  createElement: function(t){ return new _StubElement(t); },',
     '  createElementNS: function(ns,t){ return new _StubElement(t); },',
     '  createDocumentFragment: function(){ return new _StubElement("FRAGMENT"); },',
-    '  createTextNode: function(t){ var n={nodeType:3,textContent:String(t),parentNode:null}; return n; },',
-    '  createComment: function(t){ return {nodeType:8,textContent:String(t),parentNode:null}; },',
-    '  createEvent: function(t){ return {type:"",target:null,bubbles:false,cancelable:false,preventDefault:_noop,stopPropagation:_noop,initEvent:function(t2){this.type=t2;}}; },',
+    '  createTextNode: function(t){ var n={nodeType:3,textContent:String(t),nodeValue:String(t),parentNode:null,parentElement:null,nextSibling:null,previousSibling:null}; return n; },',
+    '  createComment: function(t){ return {nodeType:8,textContent:String(t),nodeValue:String(t),parentNode:null,parentElement:null,nextSibling:null,previousSibling:null}; },',    '  createEvent: function(t){ return {type:"",target:null,bubbles:false,cancelable:false,preventDefault:_noop,stopPropagation:_noop,initEvent:function(t2){this.type=t2;}}; },',
     '  createRange: function(){ return {setStart:_noop,setEnd:_noop,collapse:_noop,cloneContents:function(){return new _StubElement("FRAGMENT");},getBoundingClientRect:function(){return{x:0,y:0,width:0,height:0,top:0,left:0,right:0,bottom:0};}}; },',
     '  createTreeWalker: function(root,whatToShow,filter){ return new TreeWalker(root,whatToShow,filter); },',
     '  createNodeIterator: function(root,whatToShow,filter){ var tw=new TreeWalker(root,whatToShow,filter); return {currentNode:root,nextNode:function(){return tw.nextNode();},previousNode:function(){return tw.previousNode();},detach:function(){}}; },',
@@ -909,10 +908,10 @@ export function createPageJS(
     '};',
 
     // ── Event constructors ───────────────────────────────────────────────
-    'function Event(t,o){this.type=t||"";this.bubbles=!!(o&&o.bubbles);this.cancelable=!!(o&&o.cancelable);this.target=null;this.currentTarget=null;this.defaultPrevented=false;this.isTrusted=false;this.timeStamp=Date.now();this.eventPhase=0;this.composed=!!(o&&o.composed);}',
+    'function Event(t,o){this.cancelBubble=false;this._stopImm=false;this.type=t||"";this.bubbles=!!(o&&o.bubbles);this.cancelable=!!(o&&o.cancelable);this.target=null;this.currentTarget=null;this.defaultPrevented=false;this.isTrusted=false;this.timeStamp=Date.now();this.eventPhase=0;this.composed=!!(o&&o.composed);}',
     'Event.prototype.preventDefault=function(){if(this.cancelable)this.defaultPrevented=true;};',
-    'Event.prototype.stopPropagation=_noop;',
-    'Event.prototype.stopImmediatePropagation=_noop;',
+    'Event.prototype.stopPropagation=function(){this.cancelBubble=true;};',
+    'Event.prototype.stopImmediatePropagation=function(){this.cancelBubble=true;this._stopImm=true;};',
     'Event.prototype.composedPath=function(){return this.target?[this.target,document,window]:[];};',
     'Event.prototype.initEvent=function(t,b,c){this.type=t;this.bubbles=!!b;this.cancelable=!!c;};',
     'Event.NONE=0;Event.CAPTURING_PHASE=1;Event.AT_TARGET=2;Event.BUBBLING_PHASE=3;',
@@ -1079,9 +1078,14 @@ export function createPageJS(
 
     // ── EventTarget base class ────────────────────────────────────────────
     'function EventTarget() { this._listeners = {}; }',
-    'EventTarget.prototype.addEventListener = function(t,fn,opts) { if(!this._listeners[t]) this._listeners[t]=[]; this._listeners[t].push(fn); };',
-    'EventTarget.prototype.removeEventListener = function(t,fn) { if(!this._listeners[t]) return; var i=this._listeners[t].indexOf(fn); if(i>=0)this._listeners[t].splice(i,1); };',
-    'EventTarget.prototype.dispatchEvent = function(ev) { var ls=this._listeners[ev.type]; if(ls){ev.target=this;ls.slice().forEach(function(f){try{f(ev);}catch(_){}});} return !ev.defaultPrevented; };',
+    'EventTarget.prototype.addEventListener = function(t,fn,opts) { if(!this._listeners) this._listeners={}; var _once=opts&&opts.once; var _fn=_once?function(e){fn.call(this,e);this.removeEventListener(t,_fn);}.bind(this):fn; if(!this._listeners[t]) this._listeners[t]=[]; this._listeners[t].push({fn:_fn,orig:fn}); };',
+    'EventTarget.prototype.removeEventListener = function(t,fn) { if(!this._listeners||!this._listeners[t]) return; this._listeners[t]=this._listeners[t].filter(function(h){return h.orig!==fn&&h.fn!==fn;}); };',
+    'EventTarget.prototype.dispatchEvent = function(ev) { if(!this._listeners) this._listeners={}; var _type=ev.type; ev.target=ev.target||this; ev.currentTarget=this; var _oh=this["on"+_type]; if(typeof _oh==="function")try{_oh.call(this,ev);}catch(_){} var _ls=this._listeners[_type]; if(_ls){var _lsc=_ls.slice();for(var _li=0;_li<_lsc.length;_li++){if(ev._stopImm)break;try{_lsc[_li].fn.call(this,ev);}catch(_){}}} if(ev.bubbles&&!ev.cancelBubble){var _ep=this.parentNode;while(_ep&&!ev.cancelBubble){ev.currentTarget=_ep;var _poh=_ep["on"+_type];if(typeof _poh==="function")try{_poh.call(_ep,ev);}catch(_){}if(_ep._listeners&&_ep._listeners[_type]){var _pls=_ep._listeners[_type].slice();for(var _pli=0;_pli<_pls.length;_pli++){if(ev._stopImm||ev.cancelBubble)break;try{_pls[_pli].fn.call(_ep,ev);}catch(_){}}} _ep=_ep.parentNode;}} return !ev.defaultPrevented; };',
+    // Copy EventTarget methods to _StubElement (overrides the _noop placeholders set at construction)
+    '_StubElement.prototype.addEventListener = EventTarget.prototype.addEventListener;',
+    '_StubElement.prototype.removeEventListener = EventTarget.prototype.removeEventListener;',
+    '_StubElement.prototype.dispatchEvent = EventTarget.prototype.dispatchEvent;',
+    '[_docEl,_docHead,_docBody].forEach(function(e){if(e&&!e._listeners)e._listeners={};});',
 
     // ── DOMException stub ─────────────────────────────────────────────────
     'function DOMException(msg,name){ this.message=msg||""; this.name=name||"Error"; this.code=0; }',
