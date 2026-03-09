@@ -606,10 +606,10 @@ export function createPageJS(
     '  set:function(v){ this.classList._arr.length=0; String(v).split(/\\s+/).forEach(function(t){ if(t) this.classList._arr.push(t); }.bind(this)); },',
     '  configurable:true',
     '});',
-    '_StubElement.prototype.getAttribute = function(n){ return this._attrs[n]||null; };',
-    '_StubElement.prototype.setAttribute = function(n,v){ this._attrs[n]=String(v); _domDirty=true; _dispatchMO("attributes",this,[],[],n); };',
-    '_StubElement.prototype.removeAttribute = function(n){ delete this._attrs[n]; _domDirty=true; _dispatchMO("attributes",this,[],[],n); };',
-    '_StubElement.prototype.hasAttribute = function(n){ return n in this._attrs; };',
+    '_StubElement.prototype.getAttribute = function(n){ if(n==="class") return this.classList._arr.join(" ")||null; if(n==="id") return this.id||null; return n in this._attrs ? this._attrs[n] : null; };',
+    '_StubElement.prototype.setAttribute = function(n,v){ var sv=String(v); this._attrs[n]=sv; if(n==="class"){this.classList._arr.length=0;sv.split(/\\s+/).forEach(function(t){if(t)this.classList._arr.push(t);}.bind(this));} else if(n==="id"){this.id=sv;} else if(n==="style"&&sv.indexOf(":")>=0){var _p=sv.split(";");for(var _pi=0;_pi<_p.length;_pi++){var _pv=_p[_pi].indexOf(":");if(_pv>0)this.style.setProperty(_p[_pi].slice(0,_pv).trim(),_p[_pi].slice(_pv+1).trim());}} _domDirty=true; _dispatchMO("attributes",this,[],[],n); };',
+    '_StubElement.prototype.removeAttribute = function(n){ delete this._attrs[n]; if(n==="class"){this.classList._arr.length=0;}else if(n==="id"){this.id="";} _domDirty=true; _dispatchMO("attributes",this,[],[],n); };',
+    '_StubElement.prototype.hasAttribute = function(n){ if(n==="class") return this.classList._arr.length>0; if(n==="id") return !!this.id; return n in this._attrs; };',
     '_StubElement.prototype.addEventListener = _noop;',
     '_StubElement.prototype.removeEventListener = _noop;',
     '_StubElement.prototype.dispatchEvent = _noopTrue;',
@@ -617,7 +617,7 @@ export function createPageJS(
     'var _domDirty = false;',
     'function _linkAll(el){_domDirty=true;var ch=el.childNodes;el.firstChild=ch[0]||null;el.lastChild=ch[ch.length-1]||null;var _ech=[];for(var _i=0;_i<ch.length;_i++){ch[_i].previousSibling=_i>0?ch[_i-1]:null;ch[_i].nextSibling=_i<ch.length-1?ch[_i+1]:null;if(ch[_i].nodeType===1)_ech.push(ch[_i]);}for(var _j=0;_j<_ech.length;_j++){_ech[_j].previousElementSibling=_j>0?_ech[_j-1]:null;_ech[_j].nextElementSibling=_j<_ech.length-1?_ech[_j+1]:null;}el.firstElementChild=_ech[0]||null;el.lastElementChild=_ech[_ech.length-1]||null;el.childElementCount=_ech.length;el.children=_ech;}',
     // HTML serializer for innerHTML getter
-    'function _serHTML(n){var t=n.nodeType;if(t===3)return (n.textContent||n.nodeValue||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");if(t===8)return "<!--"+(n.textContent||n.nodeValue||"")+"-->";if(t!==1)return "";var tag=n.tagName.toLowerCase();var a="";var _a=n._attrs||{};for(var k in _a){if(k!=="class"&&k!=="style")a+=" "+k+"=\""+String(_a[k]).replace(/&/g,"&amp;").replace(/"/g,"&quot;")+"\"";}var _cls=n.classList&&n.classList._arr&&n.classList._arr.length?n.classList._arr.join(" "):"";if(_cls)a+=" class=\""+_cls+"\"";var _st=n.style;if(_st){var _sc="";for(var _sk in _st){if(typeof _st[_sk]==="string"&&_sk!=="cssText")_sc+=_sk+":"+_st[_sk]+";";}if(_sc)a+=" style=\""+_sc.replace(/"/g,"&quot;")+"\"";} var VOID=/^(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/;if(VOID.test(tag))return "<"+tag+a+">";var inner="";var ch=n.childNodes||[];for(var i=0;i<ch.length;i++)inner+=_serHTML(ch[i]);return "<"+tag+a+">"+inner+"</"+tag+">";}',
+    'function _serHTML(n){var t=n.nodeType;if(t===3)return (n.textContent||n.nodeValue||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");if(t===8)return "<!--"+(n.textContent||n.nodeValue||"")+"-->";if(t!==1)return "";var tag=n.tagName.toLowerCase();var a="";var _a=n._attrs||{};for(var k in _a){if(k!=="class"&&k!=="style"&&k!=="id")a+=" "+k+"=\""+String(_a[k]).replace(/&/g,"&amp;").replace(/"/g,"&quot;")+"\"";}var _id=_a["id"]||n.id||"";if(_id)a=" id=\""+String(_id).replace(/"/g,"&quot;")+"\""+a;var _cls=n.classList&&n.classList._arr&&n.classList._arr.length?n.classList._arr.join(" "):"";if(_cls)a+=" class=\""+_cls+"\"";var _st=n.style;if(_st){var _stBase=_st._styleBase||_st;var _sc="";for(var _sk in _stBase){if(typeof _stBase[_sk]==="string"&&_sk!=="cssText")_sc+=_sk+":"+_stBase[_sk]+";";}if(_sc)a+=" style=\""+_sc.replace(/"/g,"&quot;")+"\"";} var VOID=/^(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/;if(VOID.test(tag))return "<"+tag+a+">";var inner="";var ch=n.childNodes||[];for(var i=0;i<ch.length;i++)inner+=_serHTML(ch[i]);return "<"+tag+a+">"+inner+"</"+tag+">";}',
     // HTML parser for innerHTML setter
     'function _parseHTML(html,parent){while(parent.childNodes.length)parent.removeChild(parent.childNodes[0]);var i=0,len=html.length;var VOID=/^(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i;var stack=[parent];while(i<len){if(html[i]==="<"){if(html[i+1]==="!"&&html[i+2]==="-"&&html[i+3]==="-"){var ce=html.indexOf("-->",i+4);if(ce<0)ce=len-3;stack[stack.length-1].appendChild({nodeType:8,textContent:html.slice(i+4,ce),nodeValue:html.slice(i+4,ce),parentNode:null,nextSibling:null,previousSibling:null});i=ce+3;continue;}if(html[i+1]==="/"){var ce2=html.indexOf(">",i+2);if(ce2<0){i++;continue;}var ct=html.slice(i+2,ce2).trim().toLowerCase();for(var j=stack.length-1;j>0;j--){if(stack[j].tagName&&stack[j].tagName.toLowerCase()===ct){stack.length=j;break;}}i=ce2+1;continue;}var ce3=html.indexOf(">",i+1);if(ce3<0){i++;continue;}var ts=html.slice(i+1,ce3);var sc=ts[ts.length-1]==="/";if(sc)ts=ts.slice(0,-1);var mo=ts.match(/^([a-zA-Z][a-zA-Z0-9:-]*)(.*)/s);if(!mo){i=ce3+1;continue;}var tn=mo[1],as=mo[2]||"";var el=document.createElement(tn);var arx=/([a-zA-Z_:][a-zA-Z0-9_.:-]*)(?:\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|(\\S+)))?/g,am;while((am=arx.exec(as))!==null){el.setAttribute(am[1],am[2]!==undefined?am[2]:am[3]!==undefined?am[3]:am[4]!==undefined?am[4]:"");}stack[stack.length-1].appendChild(el);if(!sc&&!VOID.test(tn))stack.push(el);i=ce3+1;}else{var te=html.indexOf("<",i);if(te<0)te=len;var tx=html.slice(i,te);if(tx){var tn2=document.createTextNode(tx.replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&amp;/g,"&").replace(/&nbsp;/g,"\\u00a0").replace(/&quot;/g,"\""));stack[stack.length-1].appendChild(tn2);}i=te;}}}',
     // querySelector/querySelectorAll helpers
@@ -1415,6 +1415,32 @@ export function createPageJS(
     '  });',
     '}',
     'function _rejectRequest(id,msg){ var r=_fetchResolvers[id]; if(!r)return; delete _fetchResolvers[id]; r.reject(new TypeError(String(msg))); }',
+    // Dynamic import() support for child runtime
+    'var _dynModCache = {};',
+    'var __jsos_dynamic_import__ = function(specifier) {',
+    '  var url = String(specifier);',
+    '  if(url.startsWith("./") || url.startsWith("../")) {',
+    '    try { url = new URL(url, location.href).href; } catch(_) {}',
+    '  }',
+    '  if(_dynModCache[url]) return Promise.resolve(_dynModCache[url]);',
+    '  return fetch(url).then(function(r){',
+    '    if(!r.ok) throw new Error("Failed to load module: "+url+" ("+r.status+")");',
+    '    return r.text();',
+    '  }).then(function(code){',
+    '    var _exports = {};',
+    '    try {',
+    '      // Strip export keywords and collect into _exports',
+    '      var _wrapped = code',
+    '        .replace(/^\\s*export\\s+default\\s+/gm, "_exports.default = ")',
+    '        .replace(/^\\s*export\\s+(const|let|var|function|class)\\s+([\\w$]+)/gm,',
+    '          function(_,kw,name){ return kw+" "+name+"; _exports."+name+" = "+name; })',
+    '        .replace(/^\\s*export\\s+\\{[^}]*\\}/gm, "");',
+    '      (new Function("_exports",_wrapped))(_exports);',
+    '    } catch(e) { /* module exec error — return partial exports */ }',
+    '    _dynModCache[url] = _exports;',
+    '    return _exports;',
+    '  });',
+    '};',
 
     // ── XMLHttpRequest (backed by fetch queue) ───────────────────────────
     'function XMLHttpRequest() {',
@@ -9436,6 +9462,9 @@ export function createPageJS(
             _guardedCode = _guardedCode.replace(/^#!.*/, '');
           // Strip 'use strict' — not needed in child global context
           _guardedCode = _guardedCode.replace(/^\s*(?:'use strict'|"use strict")\s*;?/, '');
+          // Replace dynamic import() — child doesn't have native import support
+          if (_guardedCode.indexOf('import(') >= 0)
+            _guardedCode = _guardedCode.replace(/\bimport\s*\(/g, '__jsos_dynamic_import__(');
           try {
             var _childResult = (kernel as any).procEval(_pageChildId, _guardedCode);
             // procEval returns "Error: ..." on exception in the child
