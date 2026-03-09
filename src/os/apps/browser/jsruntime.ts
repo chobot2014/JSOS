@@ -918,6 +918,9 @@ export function createPageJS(
     '  startViewTransition: function(cb){ if(cb) setTimeout(cb,0); return {ready:Promise.resolve(),finished:Promise.resolve(),skipTransition:_noop}; },',
     '  fonts: _fontFaceSet',
     '};',
+    // Reactive document.cookie: reads from _cookieStr (init at page start),
+    // writes queue name=value pairs for bridge to sync to cookieJar.
+    'try{Object.defineProperty(document,"cookie",{get:function(){return _cookieStr;},set:function(v){var kv=(v||"").split(";")[0].trim();if(!kv)return;_cookieQueue.push(kv);var nm=kv.split("=")[0].trim();var re=new RegExp("(?:^|; *)"+nm+"=[^;]*");if(re.test(_cookieStr)){_cookieStr=_cookieStr.replace(re,function(m){return m.charAt(0)===";"?"; "+kv:kv;});}else{_cookieStr=(_cookieStr?_cookieStr+"; ":"")+kv;}},configurable:true,enumerable:true});}catch(_ckDE){}',
 
     // ── Event constructors ───────────────────────────────────────────────
     'function Event(t,o){this.cancelBubble=false;this._stopImm=false;this.type=t||"";this.bubbles=!!(o&&o.bubbles);this.cancelable=!!(o&&o.cancelable);this.target=null;this.currentTarget=null;this.defaultPrevented=false;this.isTrusted=false;this.timeStamp=Date.now();this.eventPhase=0;this.composed=!!(o&&o.composed);}',
@@ -1388,6 +1391,7 @@ export function createPageJS(
 
     // ── fetch stub (relays to coordinator via postMessage) ───────────────
     'var _fetchId = 0, _fetchQueue = [], _fetchResolvers = {};',
+    'var _cookieStr = "", _cookieQueue = [];',
     'var fetch = function(url, opts) {',
     '  url = String(url && typeof url === "object" ? (url.url||url.href||String(url)) : url);',
     '  opts = opts || {};',
@@ -9440,8 +9444,14 @@ export function createPageJS(
                 'document.URL = ' + JSON.stringify(_effectiveHref()) + ';',
                 'document.referrer = ' + JSON.stringify(cb.baseURL) + ';',
                 'document.domain = ' + JSON.stringify(_locPart('hostname')) + ';',
-              ].join('\n');
-              (kernel as any).procEval(_pageChildId, _locCtx);
+              ];
+              // Inject current cookies so document.cookie read works immediately
+              try {
+                var _ckHdr = cookieJar.getCookieHeader(
+                  _locPart('hostname'), _locPart('pathname'), _locPart('protocol') === 'https:');
+                if (_ckHdr) _locCtx.push('_cookieStr = ' + JSON.stringify(_ckHdr) + ';');
+              } catch(_ckE) {}
+              (kernel as any).procEval(_pageChildId, _locCtx.join('\n'));
               // Inject persisted localStorage data into child
               try {
                 var _lsInit: Record<string, string> = {};
@@ -9468,7 +9478,10 @@ export function createPageJS(
           if (_guardedCode.indexOf('import(') >= 0)
             _guardedCode = _guardedCode.replace(/\bimport\s*\(/g, '__jsos_dynamic_import__(');
           try {
+            var _t0Eval = Date.now();
             var _childResult = (kernel as any).procEval(_pageChildId, _guardedCode);
+            var _evalMs = Date.now() - _t0Eval;
+            if (_evalMs > 100) cb.log('[JS eval] ' + _evalMs + 'ms ' + (code.length/1024).toFixed(0) + 'KB ' + (scriptURL||'inline').slice(0,80));
             // procEval returns "Error: ..." on exception in the child
             if (typeof _childResult === 'string' && _childResult.indexOf('Error') === 0) {
               cb.log('[JS child error] ' + _childResult.slice(0, 300));
@@ -9501,7 +9514,8 @@ export function createPageJS(
                 '(function(){var d=_domDirty;_domDirty=false;' +
                 'var H=d&&document.body?document.body.innerHTML:null;' +
                 'var fq=_fetchQueue.splice(0);var hq=_historyQueue.splice(0);var lq=_lsQueue.splice(0);' +
-                'return JSON.stringify({d:d,H:H,t:document.title,fq:fq,hq:hq,lq:lq});})()');
+                'var cq=_cookieQueue.splice(0);' +
+                'return JSON.stringify({d:d,H:H,t:document.title,fq:fq,hq:hq,lq:lq,cq:cq});})()');
               var _exB: any = null;
               try {
                 var _exBr = typeof _exBRaw === 'string' ? _exBRaw : String(_exBRaw);
@@ -9587,6 +9601,13 @@ export function createPageJS(
                       else if (_exLe.op === 'del') _localStorage.removeItem(_exLe.k);
                       else if (_exLe.op === 'clear') _localStorage.clear();
                     } catch(_) {}
+                  }
+                }
+                // Drain _cookieQueue — sync child document.cookie writes to cookieJar
+                if (_exB.cq && _exB.cq.length) {
+                  var _ckOrigin = _locPart('protocol') + '//' + _locPart('host');
+                  for (var _exCi = 0; _exCi < _exB.cq.length; _exCi++) {
+                    try { cookieJar.setCookie(_exB.cq[_exCi], _ckOrigin); } catch(_) {}
                   }
                 }
               }
@@ -10334,7 +10355,8 @@ export function createPageJS(
           '(function(){var d=_domDirty;_domDirty=false;' +
           'var H=d&&document.body?document.body.innerHTML:null;' +
           'var fq=_fetchQueue.splice(0);var hq=_historyQueue.splice(0);var lq=_lsQueue.splice(0);' +
-          'return JSON.stringify({d:d,H:H,t:document.title,fq:fq,hq:hq,lq:lq});})()');
+          'var cq=_cookieQueue.splice(0);' +
+          'return JSON.stringify({d:d,H:H,t:document.title,fq:fq,hq:hq,lq:lq,cq:cq});})()');
       } catch(_) { return; }
       var _b: any = null;
       try {
@@ -10431,6 +10453,20 @@ export function createPageJS(
             else if (_ctLe.op === 'del') _localStorage.removeItem(_ctLe.k);
             else if (_ctLe.op === 'clear') _localStorage.clear();
           } catch(_) {}
+        }
+      }
+      // Drain _cookieQueue — sync child document.cookie writes to cookieJar
+      if (_b.cq && _b.cq.length) {
+        var _ctCkOrigin = _locPart('protocol') + '//' + _locPart('host');
+        for (var _ctCki = 0; _ctCki < _b.cq.length; _ctCki++) {
+          try { cookieJar.setCookie(_b.cq[_ctCki], _ctCkOrigin); } catch(_) {}
+        }
+      }
+      // Drain _cookieQueue — sync child document.cookie writes to cookieJar
+      if (_b.cq && _b.cq.length) {
+        var _ctCkOrigin = _locPart('protocol') + '//' + _locPart('host');
+        for (var _ctCki = 0; _ctCki < _b.cq.length; _ctCki++) {
+          try { cookieJar.setCookie(_b.cq[_ctCki], _ctCkOrigin); } catch(_) {}
         }
       }
       if (doc._dirty) checkDirty();
