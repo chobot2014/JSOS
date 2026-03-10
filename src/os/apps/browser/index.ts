@@ -2402,6 +2402,44 @@ export class BrowserApp implements App {
     }
     os.debug.log('[browser] css:', sheets.length, 'rules, uncached:', _uncachedCSSLinks.length);
 
+    // ── Start CSS fetch EARLY — overlaps network with pass2 + _layoutPage ────────
+    // JS is single-threaded: callbacks only fire after _showHTML() returns so they
+    // see the FINAL values of `sheets`, `_cachedIndex`, `_htmlTokens` (captured by
+    // reference via closure).  Starting fetches here instead of after _layoutPage
+    // overlaps ~2s of CSS download with ~3s of CSS matching in pass2.
+    var _self_css = this;
+    var _newCSSRules: CSSRule[] = [];
+    var _cssPending = _uncachedCSSLinks.length;
+    if (_uncachedCSSLinks.length > 0) {
+      for (var _uli = 0; _uli < _uncachedCSSLinks.length; _uli++) {
+        (function(cssURL: string) {
+          os.fetchAsync(cssURL, function(resp: FetchResponse | null) {
+            if (resp && resp.status === 200 && resp.bodyText.trim()) {
+              var _fetchedRules = parseStylesheet(resp.bodyText);
+              // Cache rules by URL — instant application on next same-site navigation
+              _self_css._cssCache.set(cssURL, _fetchedRules);
+              for (var _ri = 0; _ri < _fetchedRules.length; _ri++) _newCSSRules.push(_fetchedRules[_ri]);
+            }
+            _cssPending--;
+            if (_cssPending === 0 && _newCSSRules.length > 0) {
+              // Re-parse and re-layout with all sheets (inline + cached + newly fetched).
+              // Update `sheets` in-place so the `rerender` closure (used when JS
+              // mutates the DOM) also sees the external CSS — not just inline rules.
+              sheets = sheets.concat(_newCSSRules);
+              // Rebuild cached index since sheets changed (new rules added)
+              // Also flush CSS match cache so next rerender is fresh
+              flushCSSMatchCache();
+              _cachedIndex = buildSheetIndex(sheets);
+              var r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex);  // reuses tokens — no re-tokenize
+              _self_css._forms       = r3.forms;
+              _self_css._pageBaseURL = r3.baseURL ? _self_css._resolveHref(r3.baseURL) : '';
+              _self_css._layoutPage(r3.nodes as any, r3.widgets as any, r3.title || fallbackTitle || url, url);
+            }
+          });
+        })(_uncachedCSSLinks[_uli]!);
+      }
+    }
+
     // ── Pass 2: re-parse with all available CSS (inline + any cached external) ─
     // Build the RuleIndex once here; cache it so the rerender closure and r3 path
     // can reuse it without rebuilding 800+ rules on every DOM mutation tick.
@@ -2450,40 +2488,6 @@ export class BrowserApp implements App {
           }
         }
       });
-    }
-
-    // ── Fetch uncached external stylesheets; cache + re-render when all arrive ─
-    if (_uncachedCSSLinks.length > 0) {
-      var self = this;
-      var _newCSSRules: CSSRule[] = [];
-      var _cssPending = _uncachedCSSLinks.length;
-      for (var _uli = 0; _uli < _uncachedCSSLinks.length; _uli++) {
-        (function(cssURL: string) {
-          os.fetchAsync(cssURL, function(resp: FetchResponse | null) {
-            if (resp && resp.status === 200 && resp.bodyText.trim()) {
-              var _fetchedRules = parseStylesheet(resp.bodyText);
-              // Cache rules by URL — instant application on next same-site navigation
-              self._cssCache.set(cssURL, _fetchedRules);
-              for (var _ri = 0; _ri < _fetchedRules.length; _ri++) _newCSSRules.push(_fetchedRules[_ri]);
-            }
-            _cssPending--;
-            if (_cssPending === 0 && _newCSSRules.length > 0) {
-              // Re-parse and re-layout with all sheets (inline + cached + newly fetched).
-              // Update `sheets` in-place so the `rerender` closure (used when JS
-              // mutates the DOM) also sees the external CSS — not just inline rules.
-              sheets = sheets.concat(_newCSSRules);
-              // Rebuild cached index since sheets changed (new rules added)
-              // Also flush CSS match cache so next rerender is fresh
-              flushCSSMatchCache();
-              _cachedIndex = buildSheetIndex(sheets);
-              var r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex);  // reuses tokens — no re-tokenize
-              self._forms       = r3.forms;
-              self._pageBaseURL = r3.baseURL ? self._resolveHref(r3.baseURL) : '';
-              self._layoutPage(r3.nodes as any, r3.widgets as any, r3.title || fallbackTitle || url, url);
-            }
-          });
-        })(_uncachedCSSLinks[_uli]!);
-      }
     }
 
     // Start JS engine for the new page (after layout so widgets have positions).
