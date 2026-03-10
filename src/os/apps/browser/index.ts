@@ -36,7 +36,7 @@ import type {
 } from './types.js';
 
 import { parseURL, urlEncode, encodeFormData, decodeBMP, readPNGDimensions, decodeBase64 } from './utils.js';
-import { parseHTML, parseHTMLFromTokens } from './html.js';
+import { parseHTML, parseHTMLFromTokens, tokenise } from './html.js';
 import { parseStylesheet, buildSheetIndex, type CSSRule, type RuleIndex, resetCSSVars, setViewport, flushCSSMatchCache, getCSSMatchCacheStats } from './stylesheet.js';
 import { decodePNG }    from './img-png.js';
 import { decodeJPEG }   from './img-jpeg.js';
@@ -2350,7 +2350,11 @@ export class BrowserApp implements App {
     // ── Pass 1: collect <style> blocks + <link rel="stylesheet"> hrefs ────────
     var _shT0 = Date.now();
     os.debug.log('[browser] showHTML', (html.length / 1024).toFixed(1) + 'KB', url.slice(0, 60));
-    var r = parseHTML(html);
+    // Tokenize ONCE — all three parse passes (pass1, pass2, r3) reuse the same
+    // token array.  On Google's ~100KB HTML this saves 2 redundant O(HTML) scans
+    // and eliminates all associated string allocation in passes 2 and 3.
+    var _htmlTokens = tokenise(html);
+    var r = parseHTMLFromTokens(_htmlTokens);
     var _shT1 = Date.now();
     os.debug.log('[browser] pass1:', r.nodes.length, 'nodes', r.scripts.length, 'scripts', r.styles.length, 'styles', r.styleLinks.length, 'cssLinks', 'in', (_shT1 - _shT0) + 'ms');
     // ── Pre-fetch external scripts ASAP — overlaps download with CSS parse + pass2 ──
@@ -2405,7 +2409,7 @@ export class BrowserApp implements App {
     if (sheets.length > 0) {
       try {
         var _shT2b = Date.now();
-        r = parseHTML(html, sheets, _cachedIndex);
+        r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex);  // reuses tokens — no re-tokenize
         os.debug.log('[browser] pass2 parseHTML:', r.nodes.length, 'nodes in', (Date.now() - _shT2b) + 'ms');
         this._forms       = r.forms;
         this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
@@ -2472,7 +2476,7 @@ export class BrowserApp implements App {
               // Also flush CSS match cache so next rerender is fresh
               flushCSSMatchCache();
               _cachedIndex = buildSheetIndex(sheets);
-              var r3 = parseHTML(html, sheets, _cachedIndex);
+              var r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex);  // reuses tokens — no re-tokenize
               self._forms       = r3.forms;
               self._pageBaseURL = r3.baseURL ? self._resolveHref(r3.baseURL) : '';
               self._layoutPage(r3.nodes as any, r3.widgets as any, r3.title || fallbackTitle || url, url);
