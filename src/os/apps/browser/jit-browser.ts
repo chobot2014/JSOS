@@ -647,8 +647,8 @@ function deduplicatedFetch(
   }
 
   var pending = _pendingFetches.get(url);
-  if (pending && (Date.now() - pending.startedAt < 5000)) {
-    // Piggyback onto existing fetch
+  if (pending && (Date.now() - pending.startedAt < 30000)) {
+    // Piggyback onto existing fetch (30s window to support early script pre-fetching)
     _fetchStats.deduplicated++;
     pending.callbacks.push(callback);
     return;

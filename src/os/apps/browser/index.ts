@@ -43,6 +43,7 @@ import { decodeJPEG }   from './img-jpeg.js';
 import { layoutNodes }  from './layout.js';
 import { aboutJsosHTML, aboutJstestHTML, errorHTML, jsonViewerHTML } from './pages.js';
 import { createPageJS, getBlobURLContent, type PageJS } from './jsruntime.js';
+import { JITBrowserEngine } from './jit-browser.js';
 import { flushAllCaches } from './cache.js';
 import { renderGradientCSS } from './gradient.js';
 import { parseCSP, type CSPPolicy } from './csp.js';
@@ -2352,6 +2353,15 @@ export class BrowserApp implements App {
     var r = parseHTML(html);
     var _shT1 = Date.now();
     os.debug.log('[browser] pass1:', r.nodes.length, 'nodes', r.scripts.length, 'scripts', r.styles.length, 'styles', r.styleLinks.length, 'cssLinks', 'in', (_shT1 - _shT0) + 'ms');
+    // ── Pre-fetch external scripts ASAP — overlaps download with CSS parse + pass2 ──
+    // deduplicatedFetch dedup (30s window) ensures loadExternalScript joins in-flight
+    // fetch instead of starting a new one.  ~4s head-start on 500KB Google XJS bundle.
+    for (var _preSci = 0; _preSci < r.scripts.length; _preSci++) {
+      var _preSrec = r.scripts[_preSci];
+      if (_preSrec && !_preSrec.inline && _preSrec.src && _preSrec.type !== 'module') {
+        JITBrowserEngine.prefetchURL(this._resolveHref(_preSrec.src));
+      }
+    }
     this._forms       = r.forms;
     this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
 

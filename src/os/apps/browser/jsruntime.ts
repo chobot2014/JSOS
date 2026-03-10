@@ -9740,15 +9740,16 @@ export function createPageJS(
     var url = src.startsWith('http') ? src : _resolveURL(src, _baseHref);
     cb.log('[JS] loadExternalScript: ' + url.slice(0, 120));
     var _lsFinished = false;
-    // 15-second wall-clock timeout: if the fetch hangs, continue to next script
+    // 30-second wall-clock timeout: if the fetch hangs, continue to next script
     // rather than blocking the entire page load indefinitely.
+    // Generous timeout allows time for pre-fetched scripts to arrive over slow QEMU network.
     var _lsTimer = setTimeout_(() => {
       if (!_lsFinished) {
         _lsFinished = true;
-        cb.log('[JS] loadExternalScript timeout (15s): ' + url.slice(0, 80));
+        cb.log('[JS] loadExternalScript timeout (30s): ' + url.slice(0, 80));
         done(undefined);
       }
-    }, 15000);
+    }, 30000);
     // Use deduplicated fetch to avoid redundant network requests for the same
     // script URL (common in SPAs with code-splitting / React.lazy / Suspense).
     JITBrowserEngine.deduplicatedFetch(url, (resp: FetchResponse | null, _err?: string) => {
