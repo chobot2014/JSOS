@@ -335,6 +335,8 @@ export function createPageJS(
   // console, setTimeout, etc.) so page scripts can run without crashing.
   // DOM mutations in the child are relayed back via postMessage.
   var _pageChildId: number = -1;              // child proc slot (-1 = not created)
+  var _pageChildCreatedMs: number = 0;        // wall-clock ms when child was created
+  var _CHILD_MAX_LIFETIME_MS = 13000;         // recycle child before 15s timers can corrupt JIT
   var _useChildRuntime = false;               // activate after coordinator fault
   var _childTickBusy = false;                 // re-entrancy guard for _childTick()
 
@@ -2060,12 +2062,16 @@ export function createPageJS(
   var _rerenderCount = 0;
   var _rerenderBusy  = false;     // re-entrancy guard
   var _lastRerenderMs = 0;        // last rerender wall-clock ms (Date.now())
-  var _MIN_RERENDER_INTERVAL = 500; // minimum ms between rerenders to avoid JIT stack overflow
+  var _MIN_RERENDER_INTERVAL = 500;  // minimum ms between rerenders to avoid JIT stack overflow
+  var _FULL_RERENDER_COOLDOWN = 10000; // after first full rerender, suppress re-renders for 10s
   function doRerender(): void {
     needsRerender = false;
     if (_rerenderBusy) return;  // prevent re-entrant rerender
     var _nowMs = Date.now();
     if (_nowMs - _lastRerenderMs < _MIN_RERENDER_INTERVAL && _rerenderCount > 0) return;  // throttle
+    // After the first full rerender, suppress additional rerenders for 10s to prevent
+    // a GC double-free in QuickJS triggered by simultaneous timer callbacks (~15s mark).
+    if (_rerenderCount >= 1 && _nowMs - _lastRerenderMs < _FULL_RERENDER_COOLDOWN) return;
     // Update title if changed
     if (doc.title) cb.setTitle(doc.title);
     var _bodyTokens = vdocToTokens(doc);
@@ -9433,6 +9439,7 @@ export function createPageJS(
         if (_pageChildId < 0) {
           try {
             _pageChildId = (kernel as any).procCreate();
+            _pageChildCreatedMs = Date.now();
           } catch(_) { _pageChildId = -1; }
           if (_pageChildId >= 0) {
             cb.log('[JS] child runtime created (slot ' + _pageChildId + ')');
@@ -9740,16 +9747,15 @@ export function createPageJS(
     var url = src.startsWith('http') ? src : _resolveURL(src, _baseHref);
     cb.log('[JS] loadExternalScript: ' + url.slice(0, 120));
     var _lsFinished = false;
-    // 30-second wall-clock timeout: if the fetch hangs, continue to next script
+    // 15-second wall-clock timeout: if the fetch hangs, continue to next script
     // rather than blocking the entire page load indefinitely.
-    // Generous timeout allows time for pre-fetched scripts to arrive over slow QEMU network.
     var _lsTimer = setTimeout_(() => {
       if (!_lsFinished) {
         _lsFinished = true;
-        cb.log('[JS] loadExternalScript timeout (30s): ' + url.slice(0, 80));
+        cb.log('[JS] loadExternalScript timeout (15s): ' + url.slice(0, 80));
         done(undefined);
       }
-    }, 30000);
+    }, 15000);
     // Use deduplicated fetch to avoid redundant network requests for the same
     // script URL (common in SPAs with code-splitting / React.lazy / Suspense).
     JITBrowserEngine.deduplicatedFetch(url, (resp: FetchResponse | null, _err?: string) => {
@@ -10347,6 +10353,16 @@ export function createPageJS(
   var _childIdleFrames = 0;  // consecutive frames with no child activity
   function _childTick(): void {
     if (_childTickBusy || _pageChildId < 0) return;
+    // Proactively recycle the child runtime before its 15s timers fire.
+    // Those timers run complex JIT-compiled Google JS that can corrupt QuickJS heap
+    // via a JIT page fault -> longjmp recovery leaving ref-counts unbalanced.
+    if (_pageChildCreatedMs > 0 && Date.now() - _pageChildCreatedMs > _CHILD_MAX_LIFETIME_MS) {
+      cb.log('[JS] child runtime lifetime (' + _CHILD_MAX_LIFETIME_MS + 'ms) expired, recycling to prevent 15s JIT crash');
+      try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
+      _pageChildId = -1;
+      _pageChildCreatedMs = 0;
+      return;
+    }
     _childTickBusy = true;
     try {
       // 1. Fire expired C-backed timers (setTimeout / setInterval / RAF via setTimeout(fn,16))
