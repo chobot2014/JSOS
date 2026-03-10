@@ -266,6 +266,7 @@ interface InFlightFetch {
   pooled:       boolean;  // true if sock/tls came from the keep-alive pool
   h2conn:       HTTP2Connection | null;  // HTTP/2 multiplexed connection (if ALPN h2)
   h2streamId:   number;                  // HTTP/2 stream ID for this request
+  h2Retries:    number;                  // how many times we fell back from dead h2 conn
 }
 
 // ── TLS connection keep-alive pool ──────────────────────────────────────────
@@ -708,6 +709,47 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
     // ── HTTP/2: Send request via multiplexed stream ──────────────────────
     if (f.stage === 'h2-sending') {
       var h2 = f.h2conn!;
+      (kernel as any).serialPut('[h2 send] coro=' + f.coroId + ' host=' + f.parsed.host + ' path=' + f.parsed.path.slice(0, 60) + ' alive=' + h2.isAlive() + '\n');
+      // If the pooled H2 connection received GOAWAY or is dead, evict it and
+      // fall back to a fresh TCP connection for this request.
+      if (!h2.isAlive()) {
+        f.h2Retries = (f.h2Retries || 0) + 1;
+        (kernel as any).serialPut('[h2 send] coro=' + f.coroId + ' connection dead/GOAWAY — falling back to new TCP (retry ' + f.h2Retries + ')\n');
+        // Evict dead connection from pool immediately so other coroutines don't get it
+        var _deadH2 = f.h2conn;
+        f.h2conn = null;
+        f.pooled = false;
+        for (var _pi = _h2Pool.length - 1; _pi >= 0; _pi--) {
+          if (_h2Pool[_pi].conn === _deadH2) {
+            try { (_deadH2 as any).close(); } catch(_) {}
+            _h2Pool.splice(_pi, 1);
+            break;
+          }
+        }
+        // Abort after 2 retries to prevent infinite loop / heap corruption
+        if (f.h2Retries > 2) {
+          (kernel as any).serialPut('[h2 send] coro=' + f.coroId + ' too many h2 retries — aborting\n');
+          _cleanupFetch(f);
+          f.callback(null, 'HTTP/2 connection repeatedly died for ' + f.parsed.host);
+          return 'done';
+        }
+        var _ip2 = f.fetchIP || dnsResolveCached(f.parsed.host);
+        if (_ip2) {
+          f.fetchIP   = _ip2;
+          f.stage     = 'connecting';
+          f.deadline  = kernel.getTicks() + 5000;
+          f.sock      = net.createSocket('tcp');
+          net.connectAsync(f.sock, _ip2, f.parsed.port);
+        } else {
+          // No cached IP — full DNS re-query
+          f.stage    = 'dns';
+          f.deadline = kernel.getTicks() + 5000;
+          var _dq2   = dnsSendQueryAsync(f.parsed.host);
+          f.dnsPort  = _dq2.port;
+          f.dnsId    = _dq2.id;
+        }
+        return 'pending';
+      }
       var h2method = (f.opts.method || 'GET').toUpperCase();
       var h2path   = f.parsed.path;
       var h2extras: [string, string][] = [];
@@ -728,6 +770,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       }
       var h2sid = h2.request(h2method, h2path, f.parsed.host, h2extras);
       f.h2streamId = h2sid;
+      (kernel as any).serialPut('[h2 req] coro=' + f.coroId + ' stream=' + h2sid + ' ' + h2method + ' ' + f.parsed.host + f.parsed.path.slice(0, 60) + '\n');
       // Send body for POST/PUT etc.
       if (f.opts.body && h2method !== 'GET' && h2method !== 'HEAD') {
         var h2body: number[];
@@ -749,7 +792,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       var h2r = f.h2conn!;
       var stream = h2r.receive(f.h2streamId, 10);  // short poll, 100ms — don't block coroutine
       if (stream && (stream.state === 'half_closed_remote' || stream.state === 'closed')) {
-        // Extract status and headers from :status pseudo-header
+        (kernel as any).serialPut('[h2 done] coro=' + f.coroId + ' stream=' + f.h2streamId + ' body=' + stream.body.length + 'B\n');
         var h2status = 200;
         var h2headers = new Map<string, string>();
         for (var _hi = 0; _hi < stream.headers.length; _hi++) {
@@ -844,8 +887,14 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       }
 
       if (kernel.getTicks() >= f.deadline) {
+        (kernel as any).serialPut('[h2 timeout] coro=' + f.coroId + ' stream=' + f.h2streamId + ' alive=' + h2r.isAlive() + ' rxBufLen=' + (h2r as any).rxBuf.length + '\n');
         f.callback(null, 'HTTP/2 response timeout from ' + f.parsed.host);
         return 'done';
+      }
+      // Periodic heartbeat log every ~5000 ticks (~5s) for debugging hangs
+      var _h2Ticks = kernel.getTicks();
+      if (f.deadline - _h2Ticks < 25000 && (f.deadline - _h2Ticks) % 5000 < 50) {
+        (kernel as any).serialPut('[h2 wait] coro=' + f.coroId + ' stream=' + f.h2streamId + ' alive=' + h2r.isAlive() + ' remaining=' + Math.round((f.deadline - _h2Ticks) / 1000) + 's\n');
       }
       return 'pending';
     }
@@ -1171,6 +1220,16 @@ function _dlgPrompt(question: string, title: string, defaultValue: string, cb: (
 
 // ── Internal fetch function ───────────────────────────────────────────────────
 
+/**
+ * Deduplication map for in-flight GET/HEAD fetches.
+ * Maps URL → array of pending callbacks.  When a URL is already being fetched,
+ * additional requests for the same URL queue their callbacks here instead of
+ * launching duplicate coroutines.  When the first request completes, all queued
+ * callbacks are called with the same response.  Only applies to idempotent
+ * requests (GET/HEAD with no custom body/headers).
+ */
+var _fetchDedup = new Map<string, Array<(resp: FetchResponse | null, error?: string) => void>>();
+
 function _doFetch(
   url: string,
   callback: (resp: FetchResponse | null, error?: string) => void,
@@ -1184,6 +1243,30 @@ function _doFetch(
       return 'done';
     });
     return _deferCoroId;
+  }
+
+  // ── Deduplication: coalesce concurrent GET/HEAD fetches for the same URL ──
+  // Prevents duplicate H2 streams (and HPACK encoder corruption) when the page
+  // triggers multiple fetches for the same resource (e.g. duplicate <link> tags).
+  var _isIdempotent = !o.body && (!o.method || o.method === 'GET' || o.method === 'HEAD') && !o.headers;
+  if (_isIdempotent) {
+    var _existing = _fetchDedup.get(url);
+    if (_existing) {
+      // Already in-flight — queue this callback and return the same coro id
+      _existing.push(callback);
+      (kernel as any).serialPut('[fetch] dedup hit for ' + parsed.host + parsed.path.slice(0, 60) + ' queued=' + _existing.length + '\n');
+      return -1;  // No new coroutine; caller doesn't need the id
+    }
+    // Register this URL as in-flight with the initial callback in the list
+    _fetchDedup.set(url, [callback]);
+    // Wrap callback to drain all queued callbacks when the fetch completes
+    callback = function(resp, err) {
+      var _pending = _fetchDedup.get(url) || [];
+      _fetchDedup.delete(url);
+      for (var _pi = 0; _pi < _pending.length; _pi++) {
+        try { _pending[_pi](resp, err); } catch (_e) {}
+      }
+    };
   }
 
   var f: InFlightFetch = {
@@ -1211,6 +1294,7 @@ function _doFetch(
     pooled:       false,
     h2conn:       null,
     h2streamId:   0,
+    h2Retries:    0,
   };
 
   // Try HTTP/2 multiplexed connection pool first (HTTPS only)

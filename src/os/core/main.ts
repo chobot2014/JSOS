@@ -380,9 +380,25 @@ function main(): void {
         try { init.tick(kernel.getUptime()); } catch(e) { kernel.serialPut('[tick] init error: ' + String(e).slice(0, 100) + '\n'); }
         try { writebackTimer.tick(kernel.getTicks()); } catch(e) { kernel.serialPut('[tick] wb error: ' + String(e).slice(0, 100) + '\n'); }
       };
+      // Fault storm detection: if guardedRun returns -1 (CPU fault) more than
+      // _FAULT_THRESHOLD consecutive times, we assume a coroutine is stuck in a
+      // crash loop.  Clear all pending coroutines to break the cycle so the OS
+      // can continue operating.  The threshold is low (3) so recovery is fast.
+      var _consecutiveFaults = 0;
+      var _FAULT_THRESHOLD = 3;
       for (;;) {
         if (_guardedRun) {
-          _guardedRun(_tickFn);
+          var _gr = _guardedRun(_tickFn);
+          if (_gr === -1) {
+            _consecutiveFaults++;
+            if (_consecutiveFaults >= _FAULT_THRESHOLD) {
+              kernel.serialPut('[main] fault storm (' + _consecutiveFaults + ' consecutive faults) — clearing coroutines\n');
+              threadManager.clearCoroutines();
+              _consecutiveFaults = 0;
+            }
+          } else {
+            _consecutiveFaults = 0;
+          }
         } else {
           try { _tickFn(); } catch (_) {}
         }

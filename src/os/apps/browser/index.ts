@@ -37,7 +37,7 @@ import type {
 
 import { parseURL, urlEncode, encodeFormData, decodeBMP, readPNGDimensions, decodeBase64 } from './utils.js';
 import { parseHTML, parseHTMLFromTokens } from './html.js';
-import { parseStylesheet, buildSheetIndex, type CSSRule, type RuleIndex, resetCSSVars, setViewport } from './stylesheet.js';
+import { parseStylesheet, buildSheetIndex, type CSSRule, type RuleIndex, resetCSSVars, setViewport, flushCSSMatchCache, getCSSMatchCacheStats } from './stylesheet.js';
 import { decodePNG }    from './img-png.js';
 import { decodeJPEG }   from './img-jpeg.js';
 import { layoutNodes }  from './layout.js';
@@ -1811,6 +1811,7 @@ export class BrowserApp implements App {
   private _navigate(url: string): void {
     // Flush all per-page caches (layout, styles, images) before loading new page
     flushAllCaches();
+    flushCSSMatchCache();
     resetCSSVars();
     this._histIdx++;
     this._history.splice(this._histIdx);
@@ -1862,6 +1863,7 @@ export class BrowserApp implements App {
   private _hardReload(): void {
     // Flush all browser-level caches (layout, style, fetch, image, etc.)
     flushAllCaches();
+    flushCSSMatchCache();
     // Also clear the local image cache for this tab
     this._imgCache.clear();
     // Re-navigate from scratch
@@ -2343,9 +2345,11 @@ export class BrowserApp implements App {
     );
 
     // ── Pass 1: collect <style> blocks + <link rel="stylesheet"> hrefs ────────
+    var _shT0 = Date.now();
     os.debug.log('[browser] showHTML', (html.length / 1024).toFixed(1) + 'KB', url.slice(0, 60));
     var r = parseHTML(html);
-    os.debug.log('[browser] pass1:', r.nodes.length, 'nodes', r.scripts.length, 'scripts', r.styles.length, 'styles', r.styleLinks.length, 'cssLinks');
+    var _shT1 = Date.now();
+    os.debug.log('[browser] pass1:', r.nodes.length, 'nodes', r.scripts.length, 'scripts', r.styles.length, 'styles', r.styleLinks.length, 'cssLinks', 'in', (_shT1 - _shT0) + 'ms');
     this._forms       = r.forms;
     this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
 
@@ -2358,6 +2362,8 @@ export class BrowserApp implements App {
     } catch (_cssErr) {
       os.debug.log('[browser] parseStylesheet THREW:', String(_cssErr).slice(0, 200));
     }
+    var _shT2 = Date.now();
+    os.debug.log('[browser] parseStylesheet:', sheets.length, 'rules in', (_shT2 - _shT1) + 'ms');
 
     // ── Pre-apply cached external CSS — avoids deferred re-layout on same-site nav
     var _uncachedCSSLinks: string[] = [];
@@ -2374,9 +2380,14 @@ export class BrowserApp implements App {
     os.debug.log('[browser] css:', sheets.length, 'rules, uncached:', _uncachedCSSLinks.length);
 
     // ── Pass 2: re-parse with all available CSS (inline + any cached external) ─
+    // Build the RuleIndex once here; cache it so the rerender closure and r3 path
+    // can reuse it without rebuilding 800+ rules on every DOM mutation tick.
+    var _cachedIndex: RuleIndex | null = sheets.length > 0 ? buildSheetIndex(sheets) : null;
     if (sheets.length > 0) {
       try {
-        r = parseHTML(html, sheets);
+        var _shT2b = Date.now();
+        r = parseHTML(html, sheets, _cachedIndex);
+        os.debug.log('[browser] pass2 parseHTML:', r.nodes.length, 'nodes in', (Date.now() - _shT2b) + 'ms');
         this._forms       = r.forms;
         this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
       } catch (_p2Err) {
@@ -2386,8 +2397,10 @@ export class BrowserApp implements App {
 
     // Dispose any previous page JS before setting up the new page
     if (this._pageJS) { this._pageJS.dispose(); this._pageJS = null; }
+    var _shT3 = Date.now();
     os.debug.log('[browser] parse:', r.scripts.length, 'scripts,', r.nodes.length, 'nodes @', url.slice(0, 72));
     this._layoutPage(r.nodes as any, r.widgets as any, r.title || fallbackTitle || url, url);
+    os.debug.log('[browser] layoutPage in', (Date.now() - _shT3) + 'ms, total showHTML so far', (Date.now() - _shT0) + 'ms');
 
     // ── Favicon: fetch <link rel="icon"> image and store on current tab (item 628) ──
     if (r.favicon) {
@@ -2436,7 +2449,11 @@ export class BrowserApp implements App {
               // Update `sheets` in-place so the `rerender` closure (used when JS
               // mutates the DOM) also sees the external CSS — not just inline rules.
               sheets = sheets.concat(_newCSSRules);
-              var r3 = parseHTML(html, sheets);
+              // Rebuild cached index since sheets changed (new rules added)
+              // Also flush CSS match cache so next rerender is fresh
+              flushCSSMatchCache();
+              _cachedIndex = buildSheetIndex(sheets);
+              var r3 = parseHTML(html, sheets, _cachedIndex);
               self._forms       = r3.forms;
               self._pageBaseURL = r3.baseURL ? self._resolveHref(r3.baseURL) : '';
               self._layoutPage(r3.nodes as any, r3.widgets as any, r3.title || fallbackTitle || url, url);
@@ -2464,17 +2481,38 @@ export class BrowserApp implements App {
           var bodyTokens: any[] = [{ kind: 'open', tag: 'body', text: '', attrs: new Map() }];
           for (var _ti = 0; _ti < tokens.length; _ti++) bodyTokens.push(tokens[_ti]);
           bodyTokens.push({ kind: 'close', tag: 'body', text: '', attrs: new Map() });
-          // Also extract any dynamically injected <style> tags (e.g. styled-components, MUI).
-          var rTmp = parseHTMLFromTokens(bodyTokens);
-          // Merge any new inline styles from JS-injected <style> tags into sheets
-          if (rTmp.styles.length > 0) {
-            var _dynStyles = rTmp.styles.join('\n');
-            var _dynRules  = parseStylesheet(_dynStyles);
-            if (_dynRules.length > 0) sheets = sheets.concat(_dynRules);
+          // Check for dynamically injected <style> tags (e.g. styled-components, MUI).
+          // To avoid a full CSS re-parse on every rerender, do a cheap check first:
+          // only run the style-extraction pass if any token is a 'style' tag.
+          var _hasStyleTag = false;
+          for (var _si2 = 0; _si2 < tokens.length; _si2++) {
+            if (tokens[_si2] && tokens[_si2].tag === 'style') { _hasStyleTag = true; break; }
           }
-          var r2 = parseHTMLFromTokens(bodyTokens, sheets);
+          if (_hasStyleTag) {
+            // Merge any new inline styles from JS-injected <style> tags into sheets
+            var rTmp = parseHTMLFromTokens(bodyTokens);
+            if (rTmp.styles.length > 0) {
+              var _dynStyles = rTmp.styles.join('\n');
+              var _dynRules  = parseStylesheet(_dynStyles);
+              if (_dynRules.length > 0) {
+                sheets = sheets.concat(_dynRules);
+                // Rebuild cached index since sheets changed
+                // Also flush CSS match cache so cache reflects new rules
+                flushCSSMatchCache();
+                _cachedIndex = buildSheetIndex(sheets);
+              }
+            }
+          }
+          // Pass cached RuleIndex to avoid rebuilding 800+ rules on every DOM mutation
+          var _rrT0 = Date.now();
+          var r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex);
+          var [_cacheHits, _cacheTotal, _cacheSize] = getCSSMatchCacheStats();
+          os.debug.log('[browser] rerender CSS in', (Date.now() - _rrT0) + 'ms, rules:', sheets.length, 'idx:', _cachedIndex ? 'cached' : 'none', 'cacheHit:', _cacheHits + '/' + _cacheTotal + ' sz:' + _cacheSize);
+          os.debug.log('[browser] rerender: assigning forms nodes=' + r2.nodes.length + ' widgets=' + r2.widgets.length);
           self2._forms = r2.forms;
-          self2._layoutPage(r2.nodes as any, r2.widgets as any, self2._pageTitle, self2._pageURL);
+          os.debug.log('[browser] rerender: calling _layoutPage');
+          self2._layoutPage(r2.nodes as any, r2.widgets as any, self2._pageTitle, self2._pageURL, true /*isRerender*/);
+          os.debug.log('[browser] rerender: _layoutPage done');
         },
         log: (msg: string) => os.debug.log(msg),
         getWidgetValue: (id: string) => {
@@ -2515,7 +2553,8 @@ export class BrowserApp implements App {
     nodes:   any[],
     bps:     any[],
     title:   string,
-    url:     string
+    url:     string,
+    isRerender?: boolean
   ): void {
     this._loading   = false;
     this._pageTitle = title;
@@ -2524,7 +2563,9 @@ export class BrowserApp implements App {
     this._scrollY   = 0;
 
     var w  = this._win ? this._win.canvas.width : 800;
+    os.debug.log('[browser] _layoutPage: calling layoutNodes nodes=' + nodes.length + ' w=' + w);
     var lr = layoutNodes(nodes, bps, w);
+    os.debug.log('[browser] _layoutPage: layoutNodes done lines=' + lr.lines.length);
     this._pageLines = lr.lines;
     this._contentVersion++;          // Phase 3: invalidate tile cache on new layout
     this._widgets   = lr.widgets;
@@ -2549,7 +2590,9 @@ export class BrowserApp implements App {
     if (hasImages || hasBgImages) this._fetchImages();
 
     // ── Write layout rects back to VElements for getBoundingClientRect() ──────
+    os.debug.log('[browser] _layoutPage: calling _pushLayoutRects isRerender=' + (isRerender ? 'yes' : 'no'));
     if (this._pageJS) this._pushLayoutRects();
+    os.debug.log('[browser] _layoutPage: _pushLayoutRects done');
 
     this._dirty = true;
   }

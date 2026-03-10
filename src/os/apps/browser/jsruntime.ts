@@ -2057,13 +2057,21 @@ export function createPageJS(
 
   // Re-render helper
   var _rerenderCount = 0;
+  var _rerenderBusy  = false;     // re-entrancy guard
+  var _lastRerenderMs = 0;        // last rerender wall-clock ms (Date.now())
+  var _MIN_RERENDER_INTERVAL = 500; // minimum ms between rerenders to avoid JIT stack overflow
   function doRerender(): void {
     needsRerender = false;
+    if (_rerenderBusy) return;  // prevent re-entrant rerender
+    var _nowMs = Date.now();
+    if (_nowMs - _lastRerenderMs < _MIN_RERENDER_INTERVAL && _rerenderCount > 0) return;  // throttle
     // Update title if changed
     if (doc.title) cb.setTitle(doc.title);
     var _bodyTokens = vdocToTokens(doc);
     _rerenderCount++;
-    cb.rerender(_bodyTokens);
+    _rerenderBusy = true;
+    _lastRerenderMs = _nowMs;
+    try { cb.rerender(_bodyTokens); } finally { _rerenderBusy = false; }
     // Rebuild the DOM from the new HTML so subsequent JS keeps working
     // (we keep the existing doc object but sync values back from serialized form)
   }

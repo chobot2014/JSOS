@@ -300,7 +300,33 @@ export function buildRuleIndex(rules: CSSRule[]): RuleIndex {
 
   for (var ri = 0; ri < rules.length; ri++) {
     var rule = rules[ri];
+    rule.order = ri;  // stamp source order for O(1) cascade ordering (avoids indexOf O(n²))
     var placed = false;
+
+    // Fast-path: if parsedSels are available, use them directly (no regex)
+    if (rule.parsedSels && rule.parsedSels.length > 0) {
+      for (var psi = 0; psi < rule.parsedSels.length; psi++) {
+        var psels = rule.parsedSels[psi];
+        var pc    = psels && psels.compounds[0];  // rightmost compound (subject element)
+        if (!pc) continue;
+        // Prefer ID > class > tag for bucket selection (most specific first)
+        if (pc.ids.length > 0) {
+          bucket(idBuckets, pc.ids[0], rule); placed = true; continue;
+        }
+        if (pc.classes.length > 0) {
+          bucket(classBuckets, pc.classes[0], rule); placed = true; continue;
+        }
+        if (pc.tag && pc.tag !== '*') {
+          bucket(tagBuckets, pc.tag, rule); placed = true; continue;
+        }
+        // Universal / pseudo / attr only — falls through to universalRules
+        if (!placed) { universalRules.push(rule); placed = true; }
+      }
+      if (!placed) universalRules.push(rule);
+      continue;  // handled via parsedSels; skip the string-regex path below
+    }
+
+    // Fallback: string-based bucketing (for rules without parsedSels)
     for (var si = 0; si < rule.sels.length; si++) {
       var sel = rule.sels[si].trim();
       // Rightmost compound part

@@ -984,9 +984,10 @@ export class HPack {
   // ── String encoding/decoding (RFC 7541 §5.2) ─────────────────────────
 
   private _encStr(s: string): number[] {
-    var bytes: number[] = [];
-    for (var i = 0; i < s.length; i++) bytes.push(s.charCodeAt(i) & 0xff);
-    return [bytes.length, ...bytes];
+    var out: number[] = new Array(s.length + 1);
+    out[0] = s.length & 0xff;
+    for (var i = 0; i < s.length; i++) out[i + 1] = s.charCodeAt(i) & 0xff;
+    return out;
   }
 
   private _decStr(buf: number[], off: number): { s: string; off: number } {
@@ -998,8 +999,10 @@ export class HPack {
       var s = _hpackHuffDecode(bytes);
       return { s, off };
     }
-    var s = String.fromCharCode(...bytes);
-    return { s, off };
+    // Build string without spread to avoid large argument lists (QuickJS stability)
+    var _sc = '';
+    for (var _si = 0; _si < bytes.length; _si++) _sc += String.fromCharCode(bytes[_si]);
+    return { s: _sc, off };
   }
 
   // ── Public API ───────────────────────────────────────────────────────────
@@ -1008,23 +1011,30 @@ export class HPack {
   encode(headers: [string, string][]): number[] {
     var out: number[] = [];
     for (var i = 0; i < headers.length; i++) {
-      var [name, value] = headers[i];
-      var { idx, nameOnly } = this._lookupIdx(name, value);
+      var _hdr = headers[i];
+      var _name = _hdr[0]; var _val = _hdr[1];
+      var _lk = this._lookupIdx(_name, _val);
+      var idx = _lk.idx; var nameOnly = _lk.nameOnly;
       if (idx && !nameOnly) {
         // Indexed header field (§6.1)
-        out.push(...this._encInt(idx, 7).map((b, j) => j === 0 ? b | 0x80 : b));
+        var _enc7 = this._encInt(idx, 7);
+        _enc7[0] = _enc7[0] | 0x80;
+        for (var _j = 0; _j < _enc7.length; _j++) out.push(_enc7[_j]);
       } else if (idx) {
         // Literal with incremental indexing, name referenced (§6.2.1)
         var idxBytes = this._encInt(idx, 6);
         idxBytes[0] |= 0x40;
-        out.push(...idxBytes);
-        out.push(...this._encStr(value));
-        this._addDyn(name, value);
+        for (var _j2 = 0; _j2 < idxBytes.length; _j2++) out.push(idxBytes[_j2]);
+        var _vs = this._encStr(_val);
+        for (var _j3 = 0; _j3 < _vs.length; _j3++) out.push(_vs[_j3]);
+        this._addDyn(_name, _val);
       } else {
         // Literal without indexing, new name (§6.2.2)
         out.push(0x00);
-        out.push(...this._encStr(name));
-        out.push(...this._encStr(value));
+        var _ns = this._encStr(_name);
+        for (var _j4 = 0; _j4 < _ns.length; _j4++) out.push(_ns[_j4]);
+        var _vs2 = this._encStr(_val);
+        for (var _j5 = 0; _j5 < _vs2.length; _j5++) out.push(_vs2[_j5]);
       }
     }
     return out;
@@ -1115,6 +1125,9 @@ export class HTTP2Connection {
   private _pendingHeaderBlock: number[] = [];
   private _pendingHeaderEndStream = false;
 
+  /** Set to true when we receive a GOAWAY frame — no new streams allowed. */
+  private _goawayReceived = false;
+
   constructor(host: string) {
     this.tls = new TLSSocket(host);
   }
@@ -1186,7 +1199,7 @@ export class HTTP2Connection {
 
   /** Check if this connection is still usable (not closed by GOAWAY). */
   isAlive(): boolean {
-    return !this.tls.isEOF();
+    return !this._goawayReceived && !this.tls.isEOF();
   }
 
   /** Get the underlying TLS socket (for pool management). */
@@ -1397,6 +1410,9 @@ export class HTTP2Connection {
           st.headers = hdrs;
           if (endStream) st.state = 'half_closed_remote';
         }
+        // Log status
+        var _statH = hdrs.find(function(h) { return h[0] === ':status'; });
+        (kernel as any).serialPut('[h2 hdr] stream=' + sid + ' status=' + (_statH ? _statH[1] : '?') + ' endStream=' + endStream + '\n');
       } else {
         // Header block continues in CONTINUATION frames — buffer the fragment.
         // RFC 9113 §6.10: do NOT call hpackDec.decode() on a partial block;
@@ -1450,9 +1466,14 @@ export class HTTP2Connection {
     } else if (type === H2_RST_STREAM) {
       var rst = this.streams.get(sid);
       if (rst) rst.state = 'closed';
+      (kernel as any).serialPut('[h2 RST_STREAM] stream=' + sid + '\n');
     } else if (type === H2_GOAWAY) {
-      // Server is shutting down; mark all streams closed
+      // Server is shutting down; mark all streams closed and flag this connection
+      this._goawayReceived = true;
       this.streams.forEach(s => { s.state = 'closed'; });
+      var lastSid = ((payload[0] & 0x7f) << 24) | (payload[1] << 16) | (payload[2] << 8) | payload[3];
+      var errCode = (payload[4] << 24) | (payload[5] << 16) | (payload[6] << 8) | payload[7];
+      (kernel as any).serialPut('[h2 GOAWAY] lastStream=' + lastSid + ' err=' + errCode + '\n');
     } else if (type === H2_WINDOW_UPDATE) {
       // [Item 310] Peer is increasing our send window
       var incr = ((payload[0] & 0x7f) << 24) | (payload[1] << 16) | (payload[2] << 8) | payload[3];
@@ -1473,12 +1494,18 @@ export class HTTP2Connection {
 
   private _buildFrame(type: number, flags: number, sid: number, payload: number[]): number[] {
     var len = payload.length;
-    return [
-      (len >> 16) & 0xff, (len >> 8) & 0xff, len & 0xff,
-      type, flags,
-      (sid >> 24) & 0x7f, (sid >> 16) & 0xff, (sid >> 8) & 0xff, sid & 0xff,
-      ...payload,
-    ];
+    var out = new Array(9 + len);
+    out[0] = (len >> 16) & 0xff;
+    out[1] = (len >> 8)  & 0xff;
+    out[2] = len & 0xff;
+    out[3] = type;
+    out[4] = flags;
+    out[5] = (sid >> 24) & 0x7f;
+    out[6] = (sid >> 16) & 0xff;
+    out[7] = (sid >> 8)  & 0xff;
+    out[8] = sid & 0xff;
+    for (var _i = 0; _i < len; _i++) out[9 + _i] = payload[_i];
+    return out;
   }
 
   // ── Push promise cache pre-population (Item 320) ──────────────────────────

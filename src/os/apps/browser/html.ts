@@ -5,7 +5,7 @@ import type {
 import { parseInlineStyle, parseCSSColor } from './css.js';
 import { isGradient } from './gradient.js';
 import { type CSSRule, type AncestorEl, computeElementStyle, getPseudoContent } from './stylesheet.js';
-import { markContainLayout } from './cache.js';
+import { buildRuleIndex, type RuleIndex, markContainLayout } from './cache.js';
 import { renderSVG } from './svg.js';
 
 // ── HTML5 Named Entity Table (items 350–351) ──────────────────────────────────
@@ -209,18 +209,18 @@ function _parseColorCSS(val: string): number | undefined {
 // ── HTML parser ───────────────────────────────────────────────────────────────
 
 /** Parse pre-tokenised input (skips tokenise() allocation — item 1.2). */
-export function parseHTMLFromTokens(tokens: HtmlToken[], sheets: CSSRule[] = []): ParseResult {
-  return _parseTokens(tokens, sheets, false);
+export function parseHTMLFromTokens(tokens: HtmlToken[], sheets: CSSRule[] = [], ruleIndex?: RuleIndex | null): ParseResult {
+  return _parseTokens(tokens, sheets, false, ruleIndex);
 }
 
-export function parseHTML(html: string, sheets: CSSRule[] = []): ParseResult {
+export function parseHTML(html: string, sheets: CSSRule[] = [], ruleIndex?: RuleIndex | null): ParseResult {
   var tokens   = tokenise(html);
   // Detect quirks mode from raw HTML (needs the source string)
   var _dtMatch = /<!DOCTYPE\s+html\s*>/i.test(html.slice(0, 512));
-  return _parseTokens(tokens, sheets, !_dtMatch);
+  return _parseTokens(tokens, sheets, !_dtMatch, ruleIndex);
 }
 
-function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolean): ParseResult {
+function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolean, prebuiltIndex?: RuleIndex | null): ParseResult {
   var nodes:   RenderNode[]      = [];
   var title    = '';
   var forms:   FormState[]       = [];
@@ -230,6 +230,12 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
   var styleLinks: string[]       = [];
   var baseURL  = '';
   var favicon  = '';   // href from <link rel="icon"> (item 628)
+
+  // ── Pre-build rule index for O(1) candidate pre-filtering ─────────────────
+  // Reduces CSS matching from O(rules) to O(candidates) per element.
+  // Accept a pre-built index (passed from the rerender closure) to avoid
+  // rebuilding 801 rules on every rerender tick.
+  var _ruleIndex: RuleIndex | null = prebuiltIndex !== undefined ? (prebuiltIndex ?? null) : (sheets.length > 0 ? buildRuleIndex(sheets) : null);
 
   // ── Template element support (item 357) ──────────────────────────────────── 
   var templates: Map<string, RenderNode[]> = new Map();
@@ -720,11 +726,11 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       }
       return false;
     }
-    var ep = computeElementStyle(tag, id, cls, attrs, curCSS, sheets, inl, undefined, ancestorStack, _sibIdx);
+    var ep = computeElementStyle(tag, id, cls, attrs, curCSS, sheets, inl, _ruleIndex ?? undefined, ancestorStack, _sibIdx);
     // Apply counter-reset / counter-increment from computed style (item 434)
     _applyCounters(ep);
     if (hasPseudo) {
-      var pseudo = getPseudoContent(tag, id, cls, attrs, sheets, undefined, _counters, ancestorStack, _sibIdx);
+      var pseudo = getPseudoContent(tag, id, cls, attrs, sheets, _ruleIndex, _counters, ancestorStack, _sibIdx);
       if (pseudo.before) ep._pseudoBefore = pseudo.before;
       if (pseudo.after)  ep._pseudoAfter  = pseudo.after;
     }
