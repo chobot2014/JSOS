@@ -136,8 +136,15 @@ export function tokenise(html: string): HtmlToken[] {
     var close = false;
     if (html[i] === '/') { close = true; i++; }
     if (html[i] === '!' || html[i] === '?') {
-      while (i < n && html[i] !== '>') i++;
-      if (i < n) i++;
+      // Comment, CDATA, DOCTYPE, or PI: skip to end of tag in one scan
+      // Special case: <!-- --> requires finding -->
+      if (html[i] === '!' && html[i+1] === '-' && html[i+2] === '-') {
+        var _cmEnd = html.indexOf('-->', i + 3);
+        i = _cmEnd >= 0 ? _cmEnd + 3 : n;
+      } else {
+        var _gtPos = html.indexOf('>', i);
+        i = _gtPos >= 0 ? _gtPos + 1 : n;
+      }
       return null;
     }
     var tag = '';
@@ -197,7 +204,9 @@ export function tokenise(html: string): HtmlToken[] {
       var _ltPos = html.indexOf('<', i);
       i = _ltPos >= 0 ? _ltPos : n;
       var raw = html.slice(start, i);
-      var dec = _decodeEntities(raw);
+      // Skip entity decoding for the common case where no '&' appears —
+      // avoids an O(n) regex scan for every whitespace-only or plain-text node.
+      var dec = raw.indexOf('&') >= 0 ? _decodeEntities(raw) : raw;
       tokens.push({ kind: 'text', tag: '', text: dec, attrs: new Map() });
     }
   }
