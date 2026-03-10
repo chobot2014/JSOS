@@ -103,6 +103,12 @@ function _decodeEntities(raw: string): string {
     });
 }
 
+// Shared empty attrs Map for tokens that never have attributes (close/text).
+// Avoids allocating a new Map() for each such token — reduces GC pressure
+// on large HTML pages with hundreds of close tags and text nodes.
+// IMPORTANT: never mutate this sentinel; it is shared across all such tokens.
+// NOTE: declared as a local inside tokenise() to keep per-call scope safe.
+
 // ── Tokeniser ─────────────────────────────────────────────────────────────────
 
 export function tokenise(html: string): HtmlToken[] {
@@ -152,6 +158,13 @@ export function tokenise(html: string): HtmlToken[] {
            html[i] !== ' ' && html[i] !== '\t' && html[i] !== '\n')
       tag += html[i++];
     tag = tag.toLowerCase();
+    // Close tags never have attributes — skip to '>' and return early.
+    // Use indexOf for the skip to avoid char-by-char on malformed close tags.
+    if (close) {
+      var _ctEnd = html.indexOf('>', i);
+      i = _ctEnd >= 0 ? _ctEnd + 1 : n;
+      return { kind: 'close', tag, text: '', attrs: new Map() };
+    }
     var attrs = new Map<string, string>();
     skipWS();
     while (i < n && html[i] !== '>' && html[i] !== '/') {
@@ -169,7 +182,7 @@ export function tokenise(html: string): HtmlToken[] {
     var self = false;
     if (i < n && html[i] === '/') { self = true; i++; }
     if (i < n && html[i] === '>') i++;
-    var kind: 'open' | 'close' | 'self' = close ? 'close' : (self ? 'self' : 'open');
+    var kind: 'open' | 'close' | 'self' = self ? 'self' : 'open';
     return { kind, tag, text: '', attrs };
   }
 
@@ -192,7 +205,7 @@ export function tokenise(html: string): HtmlToken[] {
           var rawContent = html.slice(i, rawEnd);
           if (rawContent) {
             // No entity decoding — script/style content is raw text
-            tokens.push({ kind: 'text', tag: '', text: rawContent, attrs: new Map() });
+            tokens.push({ kind: 'text', tag: '', text: rawContent, attrs: new Map<string, string>() });
           }
           i = rawEnd; // advance past raw content; close tag parsed next
         }
@@ -207,7 +220,7 @@ export function tokenise(html: string): HtmlToken[] {
       // Skip entity decoding for the common case where no '&' appears —
       // avoids an O(n) regex scan for every whitespace-only or plain-text node.
       var dec = raw.indexOf('&') >= 0 ? _decodeEntities(raw) : raw;
-      tokens.push({ kind: 'text', tag: '', text: dec, attrs: new Map() });
+      tokens.push({ kind: 'text', tag: '', text: dec, attrs: new Map<string, string>() });
     }
   }
   return tokens;
