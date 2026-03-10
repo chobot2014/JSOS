@@ -117,9 +117,13 @@ export function tokenise(html: string): HtmlToken[] {
   function readAttrValue(): string {
     if (i >= n) return '';
     if (html[i] === '"' || html[i] === "'") {
-      var q = html[i++]; var v = '';
-      while (i < n && html[i] !== q) v += html[i++];
-      if (i < n) i++;
+      var q = html[i++];
+      // Use indexOf to jump to closing quote in one shot (O(1) scan) rather
+      // than character-by-character (O(attr_length)) — big win for long URLs,
+      // style= strings, data-* attributes, etc.
+      var _qClose = html.indexOf(q, i);
+      var v = _qClose >= 0 ? html.slice(i, _qClose) : html.slice(i);
+      i = _qClose >= 0 ? _qClose + 1 : n;
       return v;
     }
     var v2 = '';
@@ -188,7 +192,10 @@ export function tokenise(html: string): HtmlToken[] {
       }
     } else {
       var start = i;
-      while (i < n && html[i] !== '<') i++;
+      // Use indexOf to find next '<' in one C-level scan rather than
+      // iterating char-by-char — O(text_length) → O(1) for typical text nodes.
+      var _ltPos = html.indexOf('<', i);
+      i = _ltPos >= 0 ? _ltPos : n;
       var raw = html.slice(start, i);
       var dec = _decodeEntities(raw);
       tokens.push({ kind: 'text', tag: '', text: dec, attrs: new Map() });
