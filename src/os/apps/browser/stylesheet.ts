@@ -905,7 +905,7 @@ export function parseStylesheet(css: string): CSSRule[] {
           // @layer — always include (layer ordering not implemented)
           if (shouldInclude) {
             var innerRules = parseStylesheet(inner);
-            rules.push(...innerRules);
+            for (var _iri = 0; _iri < innerRules.length; _iri++) rules.push(innerRules[_iri]!);
           }
         } else {
           // Skip other at-rule blocks (@keyframes, @font-face, etc.)
@@ -978,7 +978,7 @@ export function parseStylesheet(css: string): CSSRule[] {
             }
             // Recursively parse nested rule (supports multi-level nesting)
             var nestedRules = parseStylesheet(flatSel + '{' + nestedBody + '}');
-            rules.push(...nestedRules);
+            for (var _nri = 0; _nri < nestedRules.length; _nri++) rules.push(nestedRules[_nri]!);
           }
         } else {
           // Regular declaration — collect until ;

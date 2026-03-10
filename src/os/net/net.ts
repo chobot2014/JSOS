@@ -2980,8 +2980,10 @@ export class NetworkStack {
       this.close(sock);
 
       if (respBytes.length === 0) return null;
-      // Parse status line
-      var respStr = String.fromCharCode(...respBytes);
+      // Parse status line — build string without spread to avoid large argument lists
+      var _rStr = '';
+      for (var _rsi = 0; _rsi < respBytes.length; _rsi++) _rStr += String.fromCharCode(respBytes[_rsi]!);
+      var respStr = _rStr;
       var statusM = respStr.match(/^HTTP\/[12]\.\d (\d{3})/);
       var status  = statusM ? parseInt(statusM[1]) : 0;
       var bodyStart = respStr.indexOf('\r\n\r\n');

@@ -21,7 +21,7 @@ class XDREncoder {
 
   opaque(data: Uint8Array): this {
     this.uint32(data.length);
-    this._buf.push(...data);
+    for (var _nfi = 0; _nfi < data.length; _nfi++) this._buf.push(data[_nfi]!);
     const pad = (4 - (data.length % 4)) % 4;
     for (let i = 0; i < pad; i++) this._buf.push(0);
     return this;

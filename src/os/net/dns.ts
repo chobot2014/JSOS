@@ -1090,7 +1090,8 @@ export async function dohResolve(
     var contentType: string;
     if (config.wireFormat) {
       // Application/dns-message: raw binary POST body
-      body        = String.fromCharCode(...wire);
+      var _dnsWireStr = ''; for (var _dwi = 0; _dwi < wire.length; _dwi++) _dnsWireStr += String.fromCharCode(wire[_dwi]!);
+      body        = _dnsWireStr;
       contentType = 'application/dns-message';
     } else {
       // Application/dns-json (Google / Cloudflare JSON API variant)

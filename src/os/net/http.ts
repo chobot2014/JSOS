@@ -872,7 +872,12 @@ function _hpackHuffDecode(bytes: number[]): string {
       node = dir ? node.right! : node.left!;
       if (!node) break; // invalid code
       if (node.sym !== undefined) {
-        if (node.sym === 256) return String.fromCharCode(...out); // EOS
+        if (node.sym === 256) {
+          // EOS — build string without spread to avoid large argument lists
+          var _eosStr = '';
+          for (var _ei = 0; _ei < out.length; _ei++) _eosStr += String.fromCharCode(out[_ei]!);
+          return _eosStr;
+        }
         out.push(node.sym);
         node = _huffRoot;
       }
@@ -880,7 +885,10 @@ function _hpackHuffDecode(bytes: number[]): string {
     if (!node) break;
   }
   // Remaining bits should be all 1s (EOS padding per RFC 7541 §5.2)
-  return String.fromCharCode(...out);
+  // Build string without spread to avoid large argument lists (QuickJS stability)
+  var _hdStr = '';
+  for (var _hdi = 0; _hdi < out.length; _hdi++) _hdStr += String.fromCharCode(out[_hdi]!);
+  return _hdStr;
 }
 
 interface _HuffNode { left?: _HuffNode; right?: _HuffNode; sym?: number; }

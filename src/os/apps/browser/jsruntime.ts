@@ -3820,7 +3820,10 @@ export function createPageJS(
       blob.arrayBuffer().then(ab => {
         if (this._aborted) { this.result = null; this.readyState = 2; this._fire('abort'); this._fire('loadend'); return; }
         var bytes = new Uint8Array(ab);
-        var b64 = btoa(String.fromCharCode(...bytes));
+        // Build binary string without spread to avoid large argument lists
+        var _bChars = '';
+        for (var _bi = 0; _bi < bytes.length; _bi++) _bChars += String.fromCharCode(bytes[_bi]!);
+        var b64 = btoa(_bChars);
         this.result = 'data:' + (blob.type || 'application/octet-stream') + ';base64,' + b64;
         this.readyState = 2; this._fire('load'); this._fire('loadend');
       }).catch(err => {
@@ -6716,7 +6719,8 @@ export function createPageJS(
         var raw = (key as any)?._raw as Uint8Array | undefined;
         if (fmt === 'raw') return Promise.resolve(raw ? raw.buffer : new ArrayBuffer(0));
         if (fmt === 'jwk') {
-          var b64 = raw ? btoa(String.fromCharCode(...Array.from(raw))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'') : '';
+          var _b64chars = ''; if (raw) { for (var _rki = 0; _rki < raw.length; _rki++) _b64chars += String.fromCharCode(raw[_rki]!); }
+          var b64 = raw ? btoa(_b64chars).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'') : '';
           return Promise.resolve({ kty:'oct', k:b64, alg:'HS256', key_ops:(key as any)?.usages||[] });
         }
         return Promise.resolve({});

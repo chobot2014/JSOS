@@ -81,7 +81,8 @@ export class BrowserPerformanceObserver {
       if (opts.buffered) {
         var buffered: PerformanceEntry[] = [];
         for (var t2 of this._types) {
-          buffered.push(...this._perf._buffer.filter(e => e.entryType === t2));
+          var _perfEntries = this._perf._buffer.filter(e => e.entryType === t2);
+          for (var _pei = 0; _pei < _perfEntries.length; _pei++) buffered.push(_perfEntries[_pei]!);
         }
         if (buffered.length) {
           try { this._cb(new PerformanceObserverEntryList(buffered), this); } catch (_) {}

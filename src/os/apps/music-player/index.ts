@@ -182,7 +182,7 @@ export class OGGDecoder {
       let pktBuf: number[] = [];
       for (let s = 0; s < numSegs; s++) {
         const segLen = segTable[s];
-        pktBuf.push(...Array.from(data.subarray(pos, pos + segLen)));
+        var _seg = data.subarray(pos, pos + segLen); for (var _sgi = 0; _sgi < _seg.length; _sgi++) pktBuf.push(_seg[_sgi]!);
         pos += segLen;
         if (segLen < 255) {
           packets.push(new Uint8Array(pktBuf));

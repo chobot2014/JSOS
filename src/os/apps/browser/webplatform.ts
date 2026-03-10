@@ -150,7 +150,7 @@ function collectSlots(children: HTMLCustomElement[]): SlotElement[] {
   const result: SlotElement[] = [];
   for (const child of children) {
     if (child.tagName === 'SLOT') result.push(child as unknown as SlotElement);
-    if (child.children) result.push(...collectSlots(child.children));
+    if (child.children) { var _cs = collectSlots(child.children); for (var _csi = 0; _csi < _cs.length; _csi++) result.push(_cs[_csi]!); }
   }
   return result;
 }

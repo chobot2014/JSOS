@@ -366,7 +366,7 @@ function renderPath(buf: PixelBuf, d: string, ctx: PaintCtx, m: Matrix): void {
   var curPolyXs: number[] = [], curPolyYs: number[] = [];
 
   function flush(): void {
-    if (curPolyXs.length > 0) { polylines.push([[...curPolyXs], [...curPolyYs]]); allXs.push(...curPolyXs); allYs.push(...curPolyYs); }
+    if (curPolyXs.length > 0) { polylines.push([[...curPolyXs], [...curPolyYs]]); for (var _pxi = 0; _pxi < curPolyXs.length; _pxi++) allXs.push(curPolyXs[_pxi]!); for (var _pyi = 0; _pyi < curPolyYs.length; _pyi++) allYs.push(curPolyYs[_pyi]!); }
     curPolyXs = []; curPolyYs = [];
   }
 

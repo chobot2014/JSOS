@@ -116,7 +116,7 @@ export class Path2D {
   bezierCurveTo(cp1x: number, cp1y: number, cp2x: number, cp2y: number, x: number, y: number): void {
     this._cmds.push({ type:'B', args:[cp1x,cp1y,cp2x,cp2y,x,y] });
   }
-  addPath(other: Path2D): void { this._cmds.push(...other._cmds); }
+  addPath(other: Path2D): void { for (var _api = 0; _api < other._cmds.length; _api++) this._cmds.push(other._cmds[_api]!); }
 }
 
 // ── Transform matrix ─────────────────────────────────────────────────────────

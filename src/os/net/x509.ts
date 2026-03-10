@@ -104,7 +104,7 @@ export function decodeOID(bytes: number[]): string {
 
 /** Decode a DER UTCTime or GeneralizedTime to a Date. */
 export function decodeTime(el: ASN1Element): Date {
-  var s = String.fromCharCode(...el.value);
+  var _sv = el.value; var s = ''; for (var _si = 0; _si < _sv.length; _si++) s += String.fromCharCode(_sv[_si]!);
   if (el.tag === 0x17) {
     // UTCTime: YYMMDDHHMMSSZ
     var y = parseInt(s.slice(0, 2));
@@ -179,7 +179,7 @@ export function parseCertificate(der: number[]): X509Certificate | null {
       for (var rdn of seq.children) {
         for (var atv of rdn.children) {
           var oid = decodeOID(atv.children[0]?.value ?? []);
-          var val = String.fromCharCode(...(atv.children[1]?.value ?? []));
+          var _rdnV = atv.children[1]?.value ?? []; var val = ''; for (var _rdni = 0; _rdni < _rdnV.length; _rdni++) val += String.fromCharCode(_rdnV[_rdni]!);
           m.set(oid, val);
         }
       }
@@ -233,7 +233,7 @@ export function getSANHosts(cert: X509Certificate): string[] {
   for (var gn of san.children) {
     if (gn.tagClass === 2 && gn.tag === 2) {
       // dNSName [2] IA5String
-      hosts.push(String.fromCharCode(...gn.value));
+      var _gnV = gn.value; var _gnStr = ''; for (var _gni = 0; _gni < _gnV.length; _gni++) _gnStr += String.fromCharCode(_gnV[_gni]!); hosts.push(_gnStr);
     }
   }
   return hosts;
@@ -568,7 +568,7 @@ export function getAIAOcspUrl(cert: X509Certificate): string | null {
       if (!loc) continue;
       // GeneralName [6] = uniformResourceIdentifier (IA5String)
       if (loc.tagClass === 2 && loc.tag === 6) {
-        return String.fromCharCode(...loc.value);
+        var _locV = loc.value; var _locStr = ''; for (var _loci = 0; _loci < _locV.length; _loci++) _locStr += String.fromCharCode(_locV[_loci]!); return _locStr;
       }
     }
   } catch (_) { /* malformed AIA — fall through */ }

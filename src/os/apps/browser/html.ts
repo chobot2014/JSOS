@@ -2578,7 +2578,7 @@ export class IncrementalHTMLParser {
 
     // Tokenize the safe portion using the WHATWG tokeniser
     var newTokens = tokeniseWHATWG(parseStr);
-    this._tokens.push(...newTokens);
+    for (var _nti = 0; _nti < newTokens.length; _nti++) this._tokens.push(newTokens[_nti]!);
 
     // Return only the tokens not yet returned by a previous flush()
     var result = this._tokens.slice(this._seenTokenIdx);
@@ -2595,7 +2595,7 @@ export class IncrementalHTMLParser {
     if (this._buf.length > 0) {
       var remaining = tokeniseWHATWG(this._buf);
       this._buf = '';
-      this._tokens.push(...remaining);
+      for (var _rti = 0; _rti < remaining.length; _rti++) this._tokens.push(remaining[_rti]!);
     }
     var result = this._tokens.slice(this._seenTokenIdx);
     this._seenTokenIdx = this._tokens.length;

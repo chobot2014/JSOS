@@ -57,7 +57,7 @@ class SSHPacketWriter {
     return this.uint32(b.length).bytes(b);
   }
 
-  bytes(b: Uint8Array): this { this._bytes.push(...b); return this; }
+  bytes(b: Uint8Array): this { for (var _sbi = 0; _sbi < b.length; _sbi++) this._bytes.push(b[_sbi]!); return this; }
 
   mpint(n: bigint): this {
     if (n === 0n) return this.uint32(0);
