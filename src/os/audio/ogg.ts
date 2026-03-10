@@ -89,7 +89,7 @@ export interface VorbisInfo {
 function parseVorbisIdent(pkt: Uint8Array): VorbisInfo | null {
   if (pkt.length < 30) return null;
   if (pkt[0] !== 1) return null;                       // type
-  if (String.fromCharCode(...pkt.slice(1, 7)) !== 'vorbis') return null;
+    var _oggb = pkt.slice(1, 7); var _oggS = ''; for (var _ogi = 0; _ogi < _oggb.length; _ogi++) _oggS += String.fromCharCode(_oggb[_ogi]!); if (_oggS !== 'vorbis') return null;
   const version    = readU32LE(pkt, 7);
   const channels   = pkt[11];
   const sampleRate = readU32LE(pkt, 12);

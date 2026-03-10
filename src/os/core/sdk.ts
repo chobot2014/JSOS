@@ -166,22 +166,19 @@ export interface FetchResponse {
 
 // ── Internal fetch state ──────────────────────────────────────────────────────
 
-/** Convert a raw byte array to a Latin-1 string efficiently.
- *  Uses chunked String.fromCharCode.apply() to avoid O(n²) concatenation.
- *  Chunk size of 8192 is well below QuickJS's 65534 argument limit.
+/** Convert a raw byte array to a Latin-1 string.
+ *  Pre-allocates output array and fills per-char, then joins in one pass — O(n).
+ *  QuickJS caches all single-byte (ASCII/Latin-1) char strings so
+ *  String.fromCharCode(byte) is allocation-free for bytes 0-255.
+ *  Avoids String.fromCharCode.apply(null, largeArray) which can overflow
+ *  QuickJS's C call stack when the array exceeds ~300 elements.
  */
 function _bytesToString(bytes: number[]): string {
-  var CHUNK = 8192;
-  if (bytes.length === 0) return '';
-  if (bytes.length <= CHUNK) {
-    return String.fromCharCode.apply(null, bytes as unknown as number[]);
-  }
-  var parts: string[] = [];
-  for (var _ci = 0; _ci < bytes.length; _ci += CHUNK) {
-    var _end = _ci + CHUNK < bytes.length ? _ci + CHUNK : bytes.length;
-    parts.push(String.fromCharCode.apply(null, bytes.slice(_ci, _end) as unknown as number[]));
-  }
-  return parts.join('');
+  var _len = bytes.length;
+  if (_len === 0) return '';
+  var _parts = new Array(_len);
+  for (var _bsi = 0; _bsi < _len; _bsi++) _parts[_bsi] = String.fromCharCode(bytes[_bsi]!);
+  return _parts.join('');
 }
 
 type FetchStage =

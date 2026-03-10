@@ -1012,6 +1012,7 @@ export function createPageJS(
     // Real Base64 implementations (atob/btoa)
     'var atob = function(b64) { var chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; var out="",buf=0,bits=0; for(var i=0;i<b64.length;i++){var idx=chars.indexOf(b64[i]);if(idx<0)continue;buf=(buf<<6)|idx;bits+=6;if(bits>=8){bits-=8;out+=String.fromCharCode((buf>>bits)&0xFF);}} return out; };',
     'var btoa = function(s) { var chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; var out="",buf=0,bits=0; for(var i=0;i<s.length;i++){buf=(buf<<8)|s.charCodeAt(i);bits+=8;while(bits>=6){bits-=6;out+=chars[(buf>>bits)&63];}} if(bits>0)out+=chars[(buf<<(6-bits))&63]; while(out.length%4)out+="="; return out; };',
+
     '(function(){',
     '  function _sc(x,seen){',
     '    if(x===null||x===undefined||(typeof x!=="object"&&typeof x!=="function"))return x;',

@@ -64,7 +64,7 @@ function parseCpioHeader(buf: Uint8Array, offset: number): CPIOHeader | null {
 
   // Parse 13 hex fields of 8 chars each, starting at offset+6
   function hex8(pos: number): number {
-    var s = String.fromCharCode(...buf.slice(offset + pos, offset + pos + 8));
+    var _ifb = buf.slice(offset + pos, offset + pos + 8); var s = ''; for (var _ifi = 0; _ifi < _ifb.length; _ifi++) s += String.fromCharCode(_ifb[_ifi]!);
     return parseInt(s, 16) || 0;
   }
 

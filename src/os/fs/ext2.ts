@@ -170,7 +170,7 @@ function parseDirEntry(data: Uint8Array, offset: number): Ext2DirEntry | null {
   var nameLen = u8(dv, offset + 6);
   var fileType = u8(dv, offset + 7);
   if (ino === 0 || recLen < 8 || offset + recLen > data.length) return null;
-  var name = String.fromCharCode(...data.slice(offset + 8, offset + 8 + nameLen));
+  var _enb = data.slice(offset + 8, offset + 8 + nameLen); var name = ''; for (var _eni = 0; _eni < _enb.length; _eni++) name += String.fromCharCode(_enb[_eni]!);
   return { ino, recLen, nameLen, fileType, name };
 }
 

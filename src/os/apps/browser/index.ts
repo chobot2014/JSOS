@@ -201,6 +201,8 @@ export class BrowserApp implements App {
   private _bgImageMap  = new Map<string, DecodedImage | null>();
   // External CSS cache: URL → parsed CSSRule[] (avoids re-fetch on same-site navigation)
   private _cssCache    = new Map<string, CSSRule[]>();
+  // Inline style cache: joined <style> text → parsed CSSRule[] (avoids re-parsing same inline CSS)
+  private _inlineStyleCache = new Map<string, CSSRule[]>();
 
   // Find in page
   private _findMode  = false;
@@ -2353,14 +2355,21 @@ export class BrowserApp implements App {
     this._forms       = r.forms;
     this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
 
-    // Build inline-sheet rules immediately (synchronous)
+    // ── Build inline stylesheet — serve from cache on same-site revisits where
+    // <style> blocks are identical (saves ~1.6s re-parse of 800+ rules).
     var sheets: CSSRule[] = [];
-    try {
-      sheets = r.styles.length > 0
-        ? parseStylesheet(r.styles.join('\n'))
-        : [];
-    } catch (_cssErr) {
-      os.debug.log('[browser] parseStylesheet THREW:', String(_cssErr).slice(0, 200));
+    var _styleKey = r.styles.join('\n');
+    var _cachedInlineSheets = _styleKey.length > 0 ? this._inlineStyleCache.get(_styleKey) : undefined;
+    if (_cachedInlineSheets) {
+      sheets = _cachedInlineSheets;
+      os.debug.log('[browser] parseStylesheet: inline cache hit', sheets.length, 'rules');
+    } else {
+      try {
+        sheets = r.styles.length > 0 ? parseStylesheet(_styleKey) : [];
+        if (sheets.length > 0) this._inlineStyleCache.set(_styleKey, sheets);
+      } catch (_cssErr) {
+        os.debug.log('[browser] parseStylesheet THREW:', String(_cssErr).slice(0, 200));
+      }
     }
     var _shT2 = Date.now();
     os.debug.log('[browser] parseStylesheet:', sheets.length, 'rules in', (_shT2 - _shT1) + 'ms');
@@ -2463,11 +2472,15 @@ export class BrowserApp implements App {
       }
     }
 
-    // Start JS engine for the new page (after layout so widgets have positions)
+    // Start JS engine for the new page (after layout so widgets have positions).
     os.debug.log('[browser] about to createPageJS, scripts:', r.scripts.length);
     if (r.scripts.length > 0) {
       var self2 = this;
       this._jsStartMs = Date.now();
+      // Track dynamically-injected <style> content already folded into sheets,
+      // so the rerender closure doesn't re-parse and re-append the same Google
+      // CSS on every DOM mutation (which would grow sheets unboundedly).
+      var _seenDynStyles = new Set<string>();
       this._pageJS = createPageJS(html, r.scripts, {
         baseURL: url,
         navigate: (u: string) => self2._navigate(u),
@@ -2489,17 +2502,32 @@ export class BrowserApp implements App {
             if (tokens[_si2] && tokens[_si2].tag === 'style') { _hasStyleTag = true; break; }
           }
           if (_hasStyleTag) {
-            // Merge any new inline styles from JS-injected <style> tags into sheets
-            var rTmp = parseHTMLFromTokens(bodyTokens);
-            if (rTmp.styles.length > 0) {
-              var _dynStyles = rTmp.styles.join('\n');
-              var _dynRules  = parseStylesheet(_dynStyles);
-              if (_dynRules.length > 0) {
-                sheets = sheets.concat(_dynRules);
-                // Rebuild cached index since sheets changed
-                // Also flush CSS match cache so cache reflects new rules
-                flushCSSMatchCache();
-                _cachedIndex = buildSheetIndex(sheets);
+            // Merge any new inline styles from JS-injected <style> tags into sheets.
+            // Deduplicate by style text content — Google re-injects the same <style>
+            // block on every DOM mutation which would grow sheets unboundedly.
+            // Extract style text directly from tokens (open/text/close triples) —
+            // avoids a redundant full parseHTMLFromTokens call just to get style content.
+            var _styleTexts: string[] = [];
+            var _inStyleTag = false;
+            for (var _si3 = 0; _si3 < tokens.length; _si3++) {
+              var _stok = tokens[_si3];
+              if (!_stok) continue;
+              if (_stok.kind === 'open'  && _stok.tag === 'style') { _inStyleTag = true;  continue; }
+              if (_stok.kind === 'close' && _stok.tag === 'style') { _inStyleTag = false; continue; }
+              if (_inStyleTag && _stok.kind === 'text' && _stok.text) _styleTexts.push(_stok.text);
+            }
+            if (_styleTexts.length > 0) {
+              var _dynStyles = _styleTexts.join('\n');
+              if (!_seenDynStyles.has(_dynStyles)) {
+                _seenDynStyles.add(_dynStyles);
+                var _dynRules  = parseStylesheet(_dynStyles);
+                if (_dynRules.length > 0) {
+                  sheets = sheets.concat(_dynRules);
+                  // Rebuild cached index since sheets changed
+                  // Also flush CSS match cache so cache reflects new rules
+                  flushCSSMatchCache();
+                  _cachedIndex = buildSheetIndex(sheets);
+                }
               }
             }
           }

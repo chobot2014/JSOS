@@ -432,7 +432,7 @@ export class Ext4FS implements VFSMount {
       var nameLen = u8(dv, off + 6);
       var fType  = u8(dv, off + 7);
       if (eIno !== 0 && nameLen > 0) {
-        var eName = String.fromCharCode(...raw.slice(off + 8, off + 8 + nameLen));
+        var _e4nb = raw.slice(off + 8, off + 8 + nameLen); var eName = ''; for (var _e4ni = 0; _e4ni < _e4nb.length; _e4ni++) eName += String.fromCharCode(_e4nb[_e4ni]!);
         if (eName !== '.' && eName !== '..') {
           entries.push({ name: eName, ino: eIno, type: fType });
         }

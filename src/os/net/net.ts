@@ -52,17 +52,12 @@ export function strToBytes(s: string): number[] {
   return b;
 }
 export function bytesToStr(b: number[]): string {
-  // String.fromCharCode.apply eliminates the intermediate parts[] array and join
-  // call for every byte.  TCP MSS segments are ≤1460 bytes so a single apply
-  // is safe (QuickJS arg-count limit is far above 1460).
-  // For larger buffers (e.g. recvBuf drain) chunk to 4096 to stay stack-safe.
+  // Build string from byte array using explicit loop (avoids Function.apply
+  // stack overflow; .apply with 1460+ args crashes QuickJS 32-bit builds).
   if (b.length === 0) return '';
-  if (b.length <= 4096) return String.fromCharCode.apply(null, b as any);
-  var s = '';
-  for (var off = 0; off < b.length; off += 4096) {
-    s += String.fromCharCode.apply(null, b.slice(off, off + 4096) as any);
-  }
-  return s;
+  var _bts = '';
+  for (var _btsi = 0; _btsi < b.length; _btsi++) _bts += String.fromCharCode(b[_btsi]!);
+  return _bts;
 }
 
 // ── Address helpers ──────────────────────────────────────────────────────────
@@ -1663,7 +1658,7 @@ export class NetworkStack {
 
         // ── Data delivery ──────────────────────────────────────────────────
         if (seg.payload.length > 0) {
-          Array.prototype.push.apply(conn.recvBuf, seg.payload);
+          for (var _rpli = 0; _rpli < seg.payload.length; _rpli++) conn.recvBuf.push(seg.payload[_rpli]!);
           conn.recvSeq = (conn.recvSeq + seg.payload.length) >>> 0;
           var sockD = this._findSockForConn(conn);
           if (sockD) sockD.recvQueue.push(bytesToStr(seg.payload));
@@ -2133,7 +2128,7 @@ export class NetworkStack {
       var conn = this._connForSock(sock);
       if (!conn || conn.state !== 'ESTABLISHED') return false;
       // Nagle: push into nagleBuf, then try to flush
-      Array.prototype.push.apply(conn.nagleBuf, bytes);
+      for (var _ngli = 0; _ngli < bytes.length; _ngli++) conn.nagleBuf.push(bytes[_ngli]!);
       this._tcpFlushNagle(conn);
     } else {
       if (!sock.remoteIP || !sock.remotePort) return false;

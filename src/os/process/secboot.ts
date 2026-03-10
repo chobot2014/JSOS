@@ -88,7 +88,7 @@ export function verifyBundle(bundleBytes: Uint8Array, sigBytes: Uint8Array): Sec
   if (sigBytes.length < 8) return { verified: false, error: 'secboot.sig too short' };
 
   // Check magic
-  const magic = String.fromCharCode(...sigBytes.subarray(0, 4));
+    var _sbm = sigBytes.subarray(0, 4); var magic = ''; for (var _sbmi = 0; _sbmi < _sbm.length; _sbmi++) magic += String.fromCharCode(_sbm[_sbmi]!);
   if (magic !== 'JSSB') return { verified: false, error: 'Invalid secboot.sig magic' };
 
   const count = sigBytes[4] | (sigBytes[5] << 8) | (sigBytes[6] << 16) | (sigBytes[7] << 24);
