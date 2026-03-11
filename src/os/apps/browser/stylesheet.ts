@@ -1355,11 +1355,6 @@ export function computeElementStyle(
     colorScheme:    inherited.colorScheme,
   };
 
-  // ── Choose candidate set: indexed fast-path or full linear scan ────────────
-  var candidates: CSSRule[] = index
-    ? candidateRules(index, tag, id, cls)
-    : sheets;
-
   // ── Collect matching rules (with result cache for stable elements) ─────────
   // Cache key: tag + id + sorted-cls only — inlineStyle is intentionally
   // excluded so that elements with unique inline styles (e.g. style="left: Npx")
@@ -1374,6 +1369,11 @@ export function computeElementStyle(
     _cssMatchHits++;
     matches = _cachedMatch;
   } else {
+    // ── Choose candidate set: indexed fast-path or full linear scan ──────
+    // Deferred to cache-miss path to avoid Set + array allocation on hits.
+    var candidates: CSSRule[] = index
+      ? candidateRules(index, tag, id, cls)
+      : sheets;
     // Build O(1) class lookup Set for this element.
     var _clsSet: Set<string> | null = cls.length > 0 ? new Set<string>(cls) : null;
     matches = [];
@@ -1415,7 +1415,7 @@ export function computeElementStyle(
       importantRules.push(match);
     }
     mergeProps(result, match.props);
-    _applyKeywords(result, match.props, inherited);
+    if (match.props._inherit || match.props._initial) _applyKeywords(result, match.props, inherited);
   }
 
   // ── Inline style wins over normal sheet rules ──────────────────────────────
@@ -1427,7 +1427,7 @@ export function computeElementStyle(
       if (_declBlockCache.size < 4096) _declBlockCache.set(inlineStyle, inlineParsed);
     }
     mergeProps(result, inlineParsed);
-    _applyKeywords(result, inlineParsed, inherited);
+    if (inlineParsed._inherit || inlineParsed._initial) _applyKeywords(result, inlineParsed, inherited);
     // Inline !important overrides even !important sheet rules
     if (inlineParsed.important && inlineParsed.important.size > 0) {
       // already applied above — nothing more to do
@@ -1440,7 +1440,7 @@ export function computeElementStyle(
   importantRules.sort((a, b) => a.spec !== b.spec ? a.spec - b.spec : a.order - b.order);
   for (var ii = 0; ii < importantRules.length; ii++) {
     mergeProps(result, importantRules[ii]!.props, importantRules[ii]!.props.important);
-    _applyKeywords(result, importantRules[ii]!.props, inherited);
+    if (importantRules[ii]!.props._inherit || importantRules[ii]!.props._initial) _applyKeywords(result, importantRules[ii]!.props, inherited);
   }
 
   return result;
@@ -1467,125 +1467,16 @@ export function buildSheetIndex(rules: CSSRule[]): RuleIndex {
 }
 
 function mergeProps(target: CSSProps, src: CSSProps, importantOnly?: Set<string>): void {
-  // Helper: only apply if no existing !important blocks it, and if we're
-  // allowed to apply (either it's not guarded by importantOnly, or it IS important).
-  function set<K extends keyof CSSProps>(k: K, v: CSSProps[K]): void {
-    if (v === undefined) return;
-    if (importantOnly && !importantOnly.has(k as string)) return;
-    // Don't overwrite a target value that was set by !important in a later rule
-    // (handled by the cascade ordering — sort ensures higher-spec goes last)
-    (target as Record<string, unknown>)[k as string] = v;
-  }
-  // ── Text ──────────────────────────────────────────────────────────────────
-  set('color', src.color); set('bgColor', src.bgColor);
-  set('bold', src.bold); set('italic', src.italic);
-  set('underline', src.underline); set('strike', src.strike);
-  set('align', src.align); set('hidden', src.hidden);
-  set('fontScale', src.fontScale); set('fontFamily', src.fontFamily);
-  set('fontWeight', src.fontWeight); set('lineHeight', src.lineHeight);
-  set('letterSpacing', src.letterSpacing); set('wordSpacing', src.wordSpacing);
-  set('textTransform', src.textTransform); set('textDecoration', src.textDecoration);
-  set('textOverflow', src.textOverflow); set('whiteSpace', src.whiteSpace);
-  set('verticalAlign', src.verticalAlign); set('listStyleType', src.listStyleType);
-  // ── Box model ─────────────────────────────────────────────────────────────
-  set('display', src.display); set('boxSizing', src.boxSizing);
-  set('width', src.width); set('height', src.height);
-  set('minWidth', src.minWidth); set('minHeight', src.minHeight);
-  set('maxWidth', src.maxWidth); set('maxHeight', src.maxHeight);
-  set('paddingTop', src.paddingTop); set('paddingRight', src.paddingRight);
-  set('paddingBottom', src.paddingBottom); set('paddingLeft', src.paddingLeft);
-  set('marginTop', src.marginTop); set('marginRight', src.marginRight);
-  set('marginBottom', src.marginBottom); set('marginLeft', src.marginLeft);
-  set('indent', src.indent);
-  // ── Border ────────────────────────────────────────────────────────────────
-  set('borderWidth', src.borderWidth); set('borderStyle', src.borderStyle);
-  set('borderColor', src.borderColor); set('borderRadius', src.borderRadius);
-  set('borderTopLeftRadius', src.borderTopLeftRadius);
-  set('borderTopRightRadius', src.borderTopRightRadius);
-  set('borderBottomRightRadius', src.borderBottomRightRadius);
-  set('borderBottomLeftRadius', src.borderBottomLeftRadius);
-  set('outlineWidth', src.outlineWidth); set('outlineColor', src.outlineColor);
-  // ── Visual ────────────────────────────────────────────────────────────────
-  set('opacity', src.opacity); set('boxShadow', src.boxShadow);
-  set('textShadow', src.textShadow);
-  // ── Positioning ───────────────────────────────────────────────────────────
-  set('position', src.position); set('top', src.top); set('right', src.right);
-  set('bottom', src.bottom); set('left', src.left); set('zIndex', src.zIndex);
-  set('float', src.float); set('clear', src.clear);
-  set('overflow', src.overflow);
-  set('overflowX', src.overflowX); set('overflowY', src.overflowY);
-  // ── Transform / transition ────────────────────────────────────────────────
-  set('transform', src.transform); set('transformOrigin', src.transformOrigin);
-  set('transition', src.transition); set('animation', src.animation);
-  set('transitionProperty', src.transitionProperty);
-  set('transitionDuration', src.transitionDuration);
-  set('transitionTimingFunction', src.transitionTimingFunction);
-  set('transitionDelay', src.transitionDelay);
-  set('animationName', src.animationName);
-  set('animationDuration', src.animationDuration);
-  set('animationTimingFunction', src.animationTimingFunction);
-  set('animationDelay', src.animationDelay);
-  set('animationIterationCount', src.animationIterationCount);
-  set('animationDirection', src.animationDirection);
-  set('animationFillMode', src.animationFillMode);
-  set('animationPlayState', src.animationPlayState);
-  // ── Cursor / pointer ──────────────────────────────────────────────────────
-  set('cursor', src.cursor); set('pointerEvents', src.pointerEvents);
-  // ── Flexbox ───────────────────────────────────────────────────────────────
-  set('flexDirection', src.flexDirection); set('flexWrap', src.flexWrap);
-  set('justifyContent', src.justifyContent); set('alignItems', src.alignItems);
-  set('alignContent', src.alignContent); set('flexGrow', src.flexGrow);
-  set('flexShrink', src.flexShrink); set('flexBasis', src.flexBasis);
-  set('alignSelf', src.alignSelf); set('order', src.order);
-  set('gap', src.gap); set('rowGap', src.rowGap); set('columnGap', src.columnGap);
-  // ── Grid ──────────────────────────────────────────────────────────────────
-  set('gridTemplateColumns', src.gridTemplateColumns);
-  set('gridTemplateRows', src.gridTemplateRows);
-  set('gridTemplateAreas', src.gridTemplateAreas);
-  set('gridAutoColumns', src.gridAutoColumns);
-  set('gridAutoRows', src.gridAutoRows);
-  set('gridAutoFlow', src.gridAutoFlow);
-  set('gridColumn', src.gridColumn); set('gridRow', src.gridRow);
-  set('gridColumnStart', src.gridColumnStart); set('gridColumnEnd', src.gridColumnEnd);
-  set('gridRowStart', src.gridRowStart); set('gridRowEnd', src.gridRowEnd);
-  set('gridArea', src.gridArea);
-  set('justifyItems', src.justifyItems); set('justifySelf', src.justifySelf);
-  set('placeItems', src.placeItems); set('placeContent', src.placeContent);
-  set('placeSelf', src.placeSelf);
-  // ── Background ────────────────────────────────────────────────────────────
-  set('backgroundImage', src.backgroundImage); set('backgroundSize', src.backgroundSize);
-  set('backgroundPosition', src.backgroundPosition); set('backgroundRepeat', src.backgroundRepeat);
-  set('backgroundAttachment', src.backgroundAttachment); set('backgroundClip', src.backgroundClip);
-  set('backgroundOrigin', src.backgroundOrigin);
-  // ── Text wrapping / table / visibility ───────────────────────────────────
-  set('wordBreak', src.wordBreak); set('overflowWrap', src.overflowWrap);
-  set('lineBreak', src.lineBreak); set('tabSize', src.tabSize);
-  set('tableLayout', src.tableLayout); set('borderCollapse', src.borderCollapse);
-  set('borderSpacing', src.borderSpacing);
-  set('visibility', src.visibility);
-  set('userSelect', src.userSelect); set('appearance', src.appearance);
-  set('caretColor', src.caretColor); set('accentColor', src.accentColor);
-  set('fontStretch', src.fontStretch);
-  set('outlineStyle', src.outlineStyle); set('outlineOffset', src.outlineOffset);
-  set('listStylePosition', src.listStylePosition); set('listStyleImage', src.listStyleImage);
-  set('content', src.content);
-  set('counterReset', src.counterReset); set('counterIncrement', src.counterIncrement);
-  // ── Image / media ──────────────────────────────────────────────────────────────
-  set('objectFit', src.objectFit); set('objectPosition', src.objectPosition);
-  set('aspectRatio', src.aspectRatio); set('imageRendering', src.imageRendering);
-  // ── Multi-column ──────────────────────────────────────────────────────────────
-  set('columnCount', src.columnCount); set('columnWidth', src.columnWidth);
-  // ── Text (extended) ───────────────────────────────────────────────────────────
-  set('textIndent', src.textIndent); set('textAlignLast', src.textAlignLast);
-  set('fontVariant', src.fontVariant); set('fontKerning', src.fontKerning);
-  set('hyphens', src.hyphens); set('lineClamp', src.lineClamp); set('quotes', src.quotes);
-  // ── Layout / interaction helpers ──────────────────────────────────────────────
-  set('isolation', src.isolation); set('touchAction', src.touchAction);
-  set('colorScheme', src.colorScheme);
-  // ── SVG CSS ───────────────────────────────────────────────────────────────────
-  set('fill', src.fill); set('stroke', src.stroke); set('strokeWidth', src.strokeWidth);
-  // ── Visual effects ───────────────────────────────────────────────────────────
-  set('filter', src.filter); set('clipPath', src.clipPath);
-  set('backdropFilter', src.backdropFilter); set('mixBlendMode', src.mixBlendMode);
-  set('resize', src.resize); set('willChange', src.willChange); set('contain', src.contain);
-}
+  // Fast path: iterate only the keys actually set in src (typically 5–15)
+  // instead of checking all 130+ possible CSSProps fields.
+  // CSSProps from parseDeclBlock/parseInlineStyle only have own enumerable keys
+  // for properties that were actually parsed, so for...in is efficient here.
+  var t = target as Record<string, unknown>;
+  var s = src as Record<string, unknown>;
+  for (var k in s) {
+    if (k === 'important' || k === '_inherit' || k === '_initial') continue;
+    var v = s[k];
+    if (v === undefined) continue;
+    if (importantOnly && !importantOnly.has(k)) continue;
+    t[k] = v;
+  }}
