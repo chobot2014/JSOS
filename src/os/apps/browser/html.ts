@@ -390,7 +390,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (p.strike    !== undefined) curCSS.strike    = p.strike;
     if (p.align     !== undefined) curCSS.align     = p.align;
     if (p.hidden) { curCSS.hidden = true; skipDepth++; }
-    else if (p.hidden === false && curCSS.hidden) { curCSS.hidden = false; skipDepth = Math.max(0, skipDepth - 1); }
+    else if (p.hidden === false) { if (curCSS.hidden) skipDepth = Math.max(0, skipDepth - 1); curCSS.hidden = false; }
+    if (p.visibility !== undefined) curCSS.visibility = p.visibility;
     if (p.fontScale     !== undefined) curCSS.fontScale     = p.fontScale;
     if (p.fontFamily    !== undefined) curCSS.fontFamily    = p.fontFamily;
     if (p.fontWeight    !== undefined) curCSS.fontWeight    = p.fontWeight;
@@ -750,6 +751,9 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       return;
     }
     if (skipDepth > 0) return;
+    // visibility:hidden — element is invisible but its space is reserved;
+    // children can override with visibility:visible so we don't skip subtree
+    if (curCSS.visibility === 'hidden' || curCSS.visibility === 'collapse') return;
     var sp: InlineSpan = { text };
     if (linkHref)                          sp.href      = linkHref;
     if (linkDownload)                      sp.download  = linkDownload;   // item 636
@@ -979,7 +983,11 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
           inScriptType = tok.attrs.get('type') || 'text/javascript';
           inScriptSrc  = tok.attrs.get('src')  || '';
           if (inScriptSrc) {
-            scripts.push({ inline: false, src: inScriptSrc, code: '', type: inScriptType });
+            scripts.push({
+              inline: false, src: inScriptSrc, code: '', type: inScriptType,
+              defer: tok.attrs.has('defer'),
+              async: tok.attrs.has('async'),
+            });
             // content (if any) is still buffered but won't be used
           }
           inScript = true;
@@ -1036,7 +1044,10 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
           break;
         }
         case 'noscript': {
-          skipUntilClose = 'noscript'; break;  // We have JS, so skip noscript fallback content
+          // Render noscript fallback content — our JS engine cannot fully
+          // execute complex page scripts (e.g. Google), so the noscript
+          // fallback provides essential visible content.
+          break;
         }
         case 'object': case 'embed': case 'noembed': {
           var objType = tok.attrs.get('type') || tok.tag;

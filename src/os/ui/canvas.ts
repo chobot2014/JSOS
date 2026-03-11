@@ -804,6 +804,41 @@ export class Canvas {
   }
 
   /**
+   * Alpha-compositing blit from a raw Uint32Array (0xAARRGGBB) onto this
+   * canvas.  Transparent source pixels (alpha=0) leave destination unchanged;
+   * opaque ones overwrite directly; partial alpha blends normally.
+   */
+  blitPixelsAlpha(src: Uint32Array, srcW: number, srcH: number,
+                  dx: number, dy: number): void {
+    var cols = Math.min(srcW, this.width  - dx);
+    var rows = Math.min(srcH, this.height - dy);
+    if (cols <= 0 || rows <= 0) return;
+    var buf = this._buf;
+    var w = this.width;
+    for (var row = 0; row < rows; row++) {
+      var dstY = dy + row;
+      if (dstY < 0 || dstY >= this.height) continue;
+      var srcBase = row * srcW;
+      var dstBase = dstY * w + dx;
+      for (var col = 0; col < cols; col++) {
+        var sp = src[srcBase + col]!;
+        var sa = (sp >>> 24) & 0xFF;
+        if (sa === 0) continue;    // fully transparent — skip
+        if (sa === 255) { buf[dstBase + col] = sp; continue; } // opaque — overwrite
+        // Alpha blend: src over dst
+        var sr = (sp >>> 16) & 0xFF, sg = (sp >>> 8) & 0xFF, sb = sp & 0xFF;
+        var dp = buf[dstBase + col]!;
+        var dr = (dp >>> 16) & 0xFF, dg = (dp >>> 8) & 0xFF, db = dp & 0xFF;
+        var ia = 255 - sa;
+        var or = (sr * sa + dr * ia + 127) / 255 | 0;
+        var og = (sg * sa + dg * ia + 127) / 255 | 0;
+        var ob = (sb * sa + db * ia + 127) / 255 | 0;
+        buf[dstBase + col] = (0xFF000000 | (or << 16) | (og << 8) | ob) >>> 0;
+      }
+    }
+  }
+
+  /**
    * Scroll-blit: shift the pixel buffer vertically by deltaY pixels within a
    * sub-region [y0..y0+h).  Avoids a full repaint for scroll-only frames.
    * The caller must repaint the newly-exposed strip afterwards.  (Item 2.2)

@@ -632,13 +632,13 @@ export function parseInlineStyle(style: string): CSSProps {
         break;
       }
       case 'visibility': {
-        if (vl === 'hidden' || vl === 'collapse') { p.visibility = vl as CSSProps['visibility']; p.hidden = true; }
-        else { p.visibility = 'visible'; p.hidden = false; }
+        if (vl === 'hidden' || vl === 'collapse') { p.visibility = vl as CSSProps['visibility']; }
+        else { p.visibility = 'visible'; }
         break;
       }
       case 'opacity': {
         var opv = parseFloat(vl);
-        if (!isNaN(opv)) { p.opacity = Math.max(0, Math.min(1, opv)); if (opv < 0.05) p.hidden = true; }
+        if (!isNaN(opv)) { p.opacity = Math.max(0, Math.min(1, opv)); }
         break;
       }
 

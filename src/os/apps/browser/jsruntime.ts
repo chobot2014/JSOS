@@ -41,6 +41,8 @@ export interface ScriptRecord {
   src:    string;   // for external scripts — absolute or root-relative URL
   code:   string;   // for inline scripts — the source text
   type:   string;   // mime-type, default 'text/javascript'
+  defer?: boolean;  // <script defer>
+  async?: boolean;  // <script async>
 }
 
 // ── Callbacks from BrowserApp into the runtime ────────────────────────────────
@@ -336,7 +338,7 @@ export function createPageJS(
   // DOM mutations in the child are relayed back via postMessage.
   var _pageChildId: number = -1;              // child proc slot (-1 = not created)
   var _pageChildCreatedMs: number = 0;        // wall-clock ms when child was created
-  var _CHILD_MAX_LIFETIME_MS = 13000;         // recycle child before 15s timers can corrupt JIT
+  var _CHILD_MAX_LIFETIME_MS = 30000;         // recycle child before 15s timers can corrupt JIT
   var _useChildRuntime = false;               // activate after coordinator fault
   var _childTickBusy = false;                 // re-entrancy guard for _childTick()
 
@@ -641,8 +643,19 @@ export function createPageJS(
     '_StubElement.prototype.getElementsByClassName = function(cn){ return _stubQSA(this,"."+cn.split(/\\s+/).join("."),false); };',
     '_StubElement.prototype.getElementsByTagName = function(tag){ if(tag==="*")return _stubQSA(this,"*",false);return _stubQSA(this,tag,false); };',
     '_StubElement.prototype.getElementsByTagNameNS = function(_ns,tag){ return this.getElementsByTagName(tag); };',
-    '_StubElement.prototype.getBoundingClientRect = function(){ return {x:0,y:0,width:0,height:0,top:0,left:0,right:0,bottom:0,toJSON:function(){return this;}}; };',
-    '_StubElement.prototype.getClientRects = function(){ return []; };',
+    // getBoundingClientRect — heuristic dimensions instead of zeros
+    '_StubElement.prototype.getBoundingClientRect = function(){',
+    '  var w=0,h=0;',
+    '  var dn=this.style&&this.style.display==="none";',
+    '  if(!dn){',
+    '    w=parseInt(this.style&&this.style.width)||parseInt(this.getAttribute&&this.getAttribute("width"))||0;',
+    '    h=parseInt(this.style&&this.style.height)||parseInt(this.getAttribute&&this.getAttribute("height"))||0;',
+    '    if(!w){var t=this.tagName;if(t==="BODY"||t==="HTML")w=1024;else if(t==="DIV"||t==="SECTION"||t==="MAIN"||t==="ARTICLE"||t==="NAV"||t==="HEADER"||t==="FOOTER")w=1024;else if(t==="SPAN"||t==="A"||t==="LABEL")w=Math.max(8,(this.textContent||"").length*8);else if(t==="INPUT")w=200;else if(t==="TEXTAREA")w=300;else if(t==="SELECT")w=150;else if(t==="BUTTON")w=80;else if(t==="IMG")w=parseInt(this.getAttribute&&this.getAttribute("width"))||300;else if(t==="TABLE")w=600;else w=100;}',
+    '    if(!h){var t=this.tagName;if(t==="BODY"||t==="HTML")h=768;else if(t==="INPUT"||t==="SELECT"||t==="BUTTON")h=30;else if(t==="TEXTAREA")h=100;else if(t==="IMG")h=parseInt(this.getAttribute&&this.getAttribute("height"))||200;else if(t==="TABLE")h=200;else h=20;}',
+    '  }',
+    '  return {x:0,y:0,width:w,height:h,top:0,left:0,right:w,bottom:h,toJSON:function(){return this;}};',
+    '};',
+    '_StubElement.prototype.getClientRects = function(){ var r=this.getBoundingClientRect(); return r.width>0?[r]:[]; };',
     '_StubElement.prototype.closest = function(sel){ var n=this; while(n&&n.nodeType===1){if(_stubMatch(n,sel.trim()))return n; n=n.parentNode;} return null; };',
     '_StubElement.prototype.matches = function(sel){ return _stubMatch(this,sel.trim()); };',
     '_StubElement.prototype.contains = function(n){ if(n===this)return true; var ch=this.childNodes||[]; for(var i=0;i<ch.length;i++){if(ch[i]===n||(_StubElement.prototype.contains&&ch[i].contains&&ch[i].contains(n)))return true;} return false; };',
@@ -669,14 +682,15 @@ export function createPageJS(
     '_StubElement.prototype.removeAttributeNS = function(_ns,n){ this.removeAttribute(n.replace(/^[^:]+:/,"")); };',
     '_StubElement.prototype.getAttributeNames = function(){ return Object.keys(this._attrs); };',
     '_StubElement.prototype.getRootNode = function(){ var n=this; while(n.parentNode)n=n.parentNode; return n; };',
-    '_StubElement.prototype.isConnected = false;',
-    // Dimensions — scrollWidth/Height/clientWidth/Height/offsetWidth/Height
-    '_StubElement.prototype.scrollWidth = 0;',
-    '_StubElement.prototype.scrollHeight = 0;',
-    '_StubElement.prototype.clientWidth = 0;',
-    '_StubElement.prototype.clientHeight = 0;',
-    '_StubElement.prototype.offsetWidth = 0;',
-    '_StubElement.prototype.offsetHeight = 0;',
+    // isConnected — walk parentNode chain to check if we reach document
+    'Object.defineProperty(_StubElement.prototype,"isConnected",{get:function(){var n=this;while(n){if(n===document||n===document.documentElement||n===document.body||n===document.head)return true;n=n.parentNode;}return false;},configurable:true});',
+    // Dimensions — use getBoundingClientRect to provide consistent values
+    'Object.defineProperty(_StubElement.prototype,"clientWidth",{get:function(){return this.getBoundingClientRect().width;},configurable:true});',
+    'Object.defineProperty(_StubElement.prototype,"clientHeight",{get:function(){return this.getBoundingClientRect().height;},configurable:true});',
+    'Object.defineProperty(_StubElement.prototype,"offsetWidth",{get:function(){return this.getBoundingClientRect().width;},configurable:true});',
+    'Object.defineProperty(_StubElement.prototype,"offsetHeight",{get:function(){return this.getBoundingClientRect().height;},configurable:true});',
+    'Object.defineProperty(_StubElement.prototype,"scrollWidth",{get:function(){return this.getBoundingClientRect().width;},configurable:true});',
+    'Object.defineProperty(_StubElement.prototype,"scrollHeight",{get:function(){return this.getBoundingClientRect().height;},configurable:true});',
     '_StubElement.prototype.offsetTop = 0;',
     '_StubElement.prototype.offsetLeft = 0;',
     '_StubElement.prototype.scrollTop = 0;',
@@ -1034,13 +1048,16 @@ export function createPageJS(
     '})();',
 
     // ── window-level API ─────────────────────────────────────────────────
+    'var _defaultDisplayMap={SPAN:"inline",A:"inline",STRONG:"inline",B:"inline",EM:"inline",I:"inline",U:"inline",S:"inline",SMALL:"inline",SUB:"inline",SUP:"inline",LABEL:"inline",CODE:"inline",KBD:"inline",SAMP:"inline",VAR:"inline",ABBR:"inline",CITE:"inline",Q:"inline",DFN:"inline",MARK:"inline",TIME:"inline",WBR:"inline",BDO:"inline",BDI:"inline",BR:"inline",IMG:"inline",INPUT:"inline-block",SELECT:"inline-block",BUTTON:"inline-block",TEXTAREA:"inline-block",TABLE:"table",TR:"table-row",TD:"table-cell",TH:"table-cell",THEAD:"table-header-group",TBODY:"table-row-group",TFOOT:"table-footer-group",COLGROUP:"table-column-group",COL:"table-column",CAPTION:"table-caption",LI:"list-item",SCRIPT:"none",STYLE:"none",LINK:"none",META:"none",HEAD:"none",TITLE:"none",TEMPLATE:"none",NOSCRIPT:"none"};',
     'var getComputedStyle = function(el, pseudo) {',
     '  var s = (el && el.style) ? el.style : {};',
+    '  var tag = el && el.tagName || "";',
+    '  var defDisp = _defaultDisplayMap[tag] || "block";',
     '  var computed = {',
-    '    getPropertyValue: function(k) { return s[k]||s.getPropertyValue?s.getPropertyValue(k):""; },',
+    '    getPropertyValue: function(k) { var v=s[k]; if(v)return v; if(s.getPropertyValue)v=s.getPropertyValue(k); if(v)return v; return computed[k]||""; },',
     '    setProperty: function(){},',
     '    removeProperty: function(){},',
-    '    display: s.display||"block",',
+    '    display: s.display||defDisp,',
     '    visibility: s.visibility||"visible",',
     '    opacity: s.opacity!==undefined?s.opacity:"1",',
     '    position: s.position||"static",',
@@ -9981,79 +9998,24 @@ export function createPageJS(
     return loading;
   }
 
+  // Separate scripts into: sync (blocking), deferred, and async
+  var _syncScripts: ScriptRecord[] = [];
+  var _deferScripts: ScriptRecord[] = [];
+  var _asyncScripts: ScriptRecord[] = [];
+  for (var _si0 = 0; _si0 < scripts.length; _si0++) {
+    var _s0 = scripts[_si0];
+    if (_s0.async && !_s0.inline) _asyncScripts.push(_s0);
+    else if (_s0.defer && !_s0.inline) _deferScripts.push(_s0);
+    else _syncScripts.push(_s0);
+  }
+
   function runScripts(idx: number): void {
-    if (idx >= scripts.length) {
-      (doc as any)._readyState = 'interactive';
-
-      // Wire <body on*="..."> attribute event handlers to window (item 571)
-      // Real browsers treat <body onload>, <body onDOMContentLoaded>, etc. as
-      // window-level event handlers, not body element handlers.
-      var _bodyEl = doc.body as any;
-      if (_bodyEl) {
-        var _bodyEventAttrs = ['onload', 'onunload', 'onbeforeunload', 'onpagehide', 'onpageshow',
-          'onhashchange', 'onpopstate', 'onstorage', 'onmessage', 'onerror', 'onresize', 'onscroll',
-          'onoffline', 'ononline', 'onfocus', 'onblur'];
-        for (var _bae = 0; _bae < _bodyEventAttrs.length; _bae++) {
-          var _bAttr = _bodyEventAttrs[_bae];
-          var _bAttrVal = typeof _bodyEl.getAttribute === 'function' ? _bodyEl.getAttribute(_bAttr) : null;
-          if (_bAttrVal && !(win as any)[_bAttr]) {
-            var _bHandler = _makeHandler(_bAttrVal);
-            if (_bHandler) {
-              (win as any)[_bAttr] = _bHandler;
-            }
-          }
-        }
-      }
-
-      var dclEv = new VEvent('DOMContentLoaded', { bubbles: true });
-      doc.dispatchEvent(dclEv);
-      (doc as any)._readyState = 'complete';
-      var loadEv = new VEvent('load');
-      (win['dispatchEvent'] as (e: VEvent) => void)(loadEv);
-      doc.dispatchEvent(loadEv);
-      // Also fire DOMContentLoaded + load inside the child process so frameworks
-      // that register document.addEventListener('DOMContentLoaded', ...) will boot
-      if (_pageChildId >= 0) {
-        try {
-          (kernel as any).procEval(_pageChildId, [
-            'try{document.readyState="interactive";}catch(_){}',
-            'try{document.dispatchEvent(new Event("DOMContentLoaded",{bubbles:true}));}catch(_){}',
-            'try{if(typeof onDOMContentLoaded==="function")onDOMContentLoaded(new Event("DOMContentLoaded"));}catch(_){}',
-            'try{document.readyState="complete";}catch(_){}',
-            'try{window.dispatchEvent(new Event("load"));}catch(_){}',
-            'try{document.dispatchEvent(new Event("load"));}catch(_){}',
-          ].join('\n'));
-          (kernel as any).procTick(_pageChildId);
-        } catch(_dclErr) {}
-      }
-
-      // ── SPA detection: analyse loaded scripts for framework fingerprints ──
-      var _loadedSources: string[] = [];
-      for (var _si = 0; _si < scripts.length; _si++) {
-        if (scripts[_si].code) _loadedSources.push(scripts[_si].code);
-      }
-      // (SPA detection removed — detectSPA is a no-op)
-
-      // (site-specific mutation batch removed — no endMutationBatch needed)
-
-      // ── Prefetch visible links for instant navigation ─────────────────────
-      try {
-        var _links = doc.querySelectorAll('a[href]');
-        var _prefetchCount = 0;
-        for (var _li = 0; _li < _links.length && _prefetchCount < 5; _li++) {
-          var _lHref = (_links[_li] as VElement).getAttribute('href');
-          if (_lHref && _lHref.startsWith('http') && _lHref.indexOf(_locPart('hostname')) >= 0) {
-            JITBrowserEngine.prefetchURL(_lHref);
-            _prefetchCount++;
-          }
-        }
-      } catch(_) {}
-
-      checkDirty();
-      if (needsRerender) doRerender();
+    if (idx >= _syncScripts.length) {
+      // Run deferred scripts in document order, then fire events
+      _runDeferred(0);
       return;
     }
-    var s = scripts[idx];
+    var s = _syncScripts[idx];
 
     // importmap — populate _importMap before any scripts run
     if (s.type && s.type.trim().toLowerCase() === 'importmap') {
@@ -10115,6 +10077,103 @@ export function createPageJS(
         loadExternalScript(s.src, function() { runScripts(idx + 1); }, false);
       }
     }
+  }
+
+  // ── Deferred scripts: run after all sync scripts, in document order ───────
+  function _runDeferred(idx: number): void {
+    if (idx >= _deferScripts.length) {
+      _firePostScriptEvents();
+      return;
+    }
+    var ds = _deferScripts[idx];
+    var isModule = !!(ds.type && ds.type.toLowerCase().includes('module'));
+    if (ds.inline) {
+      execScript(ds.code);
+      _drainMicrotasks();
+      _runDeferred(idx + 1);
+    } else if (isModule) {
+      __jsos_dynamic_import__(ds.src, _baseHref).then(function() {
+        checkDirty(); _runDeferred(idx + 1);
+      }).catch(function(e: unknown) { _fireScriptError(e); _runDeferred(idx + 1); });
+    } else {
+      loadExternalScript(ds.src, function() { _runDeferred(idx + 1); }, false);
+    }
+  }
+
+  // ── Async scripts: fire-and-forget, loaded in parallel ────────────────────
+  function _launchAsyncScripts(): void {
+    for (var _ai = 0; _ai < _asyncScripts.length; _ai++) {
+      (function(as: ScriptRecord) {
+        var isModule = !!(as.type && as.type.toLowerCase().includes('module'));
+        if (isModule) {
+          __jsos_dynamic_import__(as.src, _baseHref).then(function() {
+            checkDirty(); if (needsRerender) doRerender();
+          }).catch(function(e: unknown) { _fireScriptError(e); });
+        } else {
+          loadExternalScript(as.src, function() {
+            checkDirty(); if (needsRerender) doRerender();
+          }, false);
+        }
+      })(_asyncScripts[_ai]);
+    }
+  }
+
+  // ── Post-script events: DOMContentLoaded, load, link prefetch ─────────────
+  function _firePostScriptEvents(): void {
+    (doc as any)._readyState = 'interactive';
+
+    // Wire <body on*="..."> attribute event handlers to window
+    var _bodyEl = doc.body as any;
+    if (_bodyEl) {
+      var _bodyEventAttrs = ['onload', 'onunload', 'onbeforeunload', 'onpagehide', 'onpageshow',
+        'onhashchange', 'onpopstate', 'onstorage', 'onmessage', 'onerror', 'onresize', 'onscroll',
+        'onoffline', 'ononline', 'onfocus', 'onblur'];
+      for (var _bae = 0; _bae < _bodyEventAttrs.length; _bae++) {
+        var _bAttr = _bodyEventAttrs[_bae];
+        var _bAttrVal = typeof _bodyEl.getAttribute === 'function' ? _bodyEl.getAttribute(_bAttr) : null;
+        if (_bAttrVal && !(win as any)[_bAttr]) {
+          var _bHandler = _makeHandler(_bAttrVal);
+          if (_bHandler) { (win as any)[_bAttr] = _bHandler; }
+        }
+      }
+    }
+
+    var dclEv = new VEvent('DOMContentLoaded', { bubbles: true });
+    doc.dispatchEvent(dclEv);
+    (doc as any)._readyState = 'complete';
+    var loadEv = new VEvent('load');
+    (win['dispatchEvent'] as (e: VEvent) => void)(loadEv);
+    doc.dispatchEvent(loadEv);
+    // Also fire DOMContentLoaded + load inside the child process
+    if (_pageChildId >= 0) {
+      try {
+        (kernel as any).procEval(_pageChildId, [
+          'try{document.readyState="interactive";}catch(_){}',
+          'try{document.dispatchEvent(new Event("DOMContentLoaded",{bubbles:true}));}catch(_){}',
+          'try{if(typeof onDOMContentLoaded==="function")onDOMContentLoaded(new Event("DOMContentLoaded"));}catch(_){}',
+          'try{document.readyState="complete";}catch(_){}',
+          'try{window.dispatchEvent(new Event("load"));}catch(_){}',
+          'try{document.dispatchEvent(new Event("load"));}catch(_){}',
+        ].join('\n'));
+        (kernel as any).procTick(_pageChildId);
+      } catch(_dclErr) {}
+    }
+
+    // Prefetch visible links for instant navigation
+    try {
+      var _links = doc.querySelectorAll('a[href]');
+      var _prefetchCount = 0;
+      for (var _li = 0; _li < _links.length && _prefetchCount < 5; _li++) {
+        var _lHref = (_links[_li] as VElement).getAttribute('href');
+        if (_lHref && _lHref.startsWith('http') && _lHref.indexOf(_locPart('hostname')) >= 0) {
+          JITBrowserEngine.prefetchURL(_lHref);
+          _prefetchCount++;
+        }
+      }
+    } catch(_) {}
+
+    checkDirty();
+    if (needsRerender) doRerender();
   }
 
 
@@ -10325,6 +10384,9 @@ export function createPageJS(
 
   runScripts(0);
 
+  // Launch async scripts in parallel (non-blocking, per HTML spec)
+  _launchAsyncScripts();
+
   // ── PageJS interface returned to BrowserApp ───────────────────────────────
 
   var disposed = false;
@@ -10507,6 +10569,28 @@ export function createPageJS(
     }
   }
 
+  // ── Forward UI events into child process ─────────────────────────────────
+  // The child runtime has its own stub DOM.  UI events fired on the coordinator
+  // DOM never reach child event listeners, so we inject them via procEval.
+  function _childDispatch(jsCode: string): void {
+    if (_pageChildId < 0) return;
+    try {
+      (kernel as any).procEval(_pageChildId, 'try{' + jsCode + '}catch(_){}');
+      (kernel as any).procTick(_pageChildId);
+    } catch(_) {}
+  }
+
+  /** Build dispatch code for a mouse-like event on element with given id attribute. */
+  function _childMouseEvent(id: string, types: string[]): void {
+    if (_pageChildId < 0) return;
+    var sel = id ? 'document.getElementById(' + JSON.stringify(id) + ')' : 'document.body';
+    var js = '';
+    for (var i = 0; i < types.length; i++) {
+      js += 'var _el=' + sel + ';if(_el){var _ev=new Event(' + JSON.stringify(types[i]) + ',{bubbles:true,cancelable:true});_el.dispatchEvent(_ev);}';
+    }
+    _childDispatch(js);
+  }
+
   return {
     fireClick(id: string): boolean {
       return fireAndCheck(() => {
@@ -10520,6 +10604,8 @@ export function createPageJS(
           ev.getModifierState = (_k: string) => false;
           el.dispatchEvent(ev);
         }
+        // Forward to child runtime
+        _childMouseEvent(id, ['mousedown', 'mouseup', 'click']);
       });
     },
     fireChange(id: string, newValue: string): boolean {
@@ -10528,6 +10614,8 @@ export function createPageJS(
         el._attrs.set('value', newValue);
         if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') el.value = newValue;
         var ev: any = new VEvent('change', { bubbles: true }); ev.target = el; el.dispatchEvent(ev);
+        // Forward to child
+        _childDispatch('var _el=document.getElementById(' + JSON.stringify(id) + ');if(_el){_el.value=' + JSON.stringify(newValue) + ';_el.dispatchEvent(new Event("change",{bubbles:true}));}');
       });
     },
     fireInput(id: string, newValue: string): boolean {
@@ -10536,6 +10624,8 @@ export function createPageJS(
         el._attrs.set('value', newValue);
         if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') el.value = newValue;
         var ev: any = new VEvent('input', { bubbles: true }); ev.target = el; ev.data = newValue.slice(-1); ev.inputType = 'insertText'; el.dispatchEvent(ev);
+        // Forward to child
+        _childDispatch('var _el=document.getElementById(' + JSON.stringify(id) + ');if(_el){_el.value=' + JSON.stringify(newValue) + ';_el.dispatchEvent(new Event("input",{bubbles:true}));}');
       });
     },
     fireKeydown(id: string, key: string, keyCode: number): boolean {
@@ -10555,6 +10645,12 @@ export function createPageJS(
         evup.ctrlKey = false; evup.shiftKey = false; evup.altKey = false; evup.metaKey = false;
         evup.getModifierState = (_k: string) => false;
         el.dispatchEvent(evup);
+        // Forward to child
+        _childDispatch('var _el=' + (id ? 'document.getElementById(' + JSON.stringify(id) + ')' : 'document.body') +
+          ';if(_el){var _kev=new Event("keydown",{bubbles:true,cancelable:true});_kev.key=' + JSON.stringify(key) +
+          ';_kev.keyCode=' + keyCode + ';_kev.which=' + keyCode + ';_el.dispatchEvent(_kev);' +
+          'var _kup=new Event("keyup",{bubbles:true});_kup.key=' + JSON.stringify(key) +
+          ';_kup.keyCode=' + keyCode + ';_el.dispatchEvent(_kup);}');
       });
     },
     fireSubmit(formId: string): boolean {
@@ -10562,6 +10658,9 @@ export function createPageJS(
         var el = formId ? findEl(formId) : doc.querySelector('form');
         if (!el) return;
         var ev = new VEvent('submit', { bubbles: true, cancelable: true }); el.dispatchEvent(ev);
+        // Forward to child
+        _childDispatch('var _f=' + (formId ? 'document.getElementById(' + JSON.stringify(formId) + ')' : 'document.querySelector("form")') +
+          ';if(_f)_f.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));');
       });
     },
     fireLoad(): boolean {

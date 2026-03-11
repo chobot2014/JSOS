@@ -1381,8 +1381,8 @@ export class BrowserApp implements App {
       return;
     }
     if (wp.imgData) {
-      // Fast bulk blit: zero per-pixel overhead via Uint32Array.set() per row
-      canvas.blitPixelsDirect(wp.imgData, wp.pw, wp.ph, wp.px, wy);
+      // Alpha-compositing blit: SVGs may have transparent backgrounds
+      canvas.blitPixelsAlpha(wp.imgData, wp.pw, wp.ph, wp.px, wy);
     } else {
       canvas.fillRect(wp.px, wy, wp.pw, wp.ph, CLR_IMG_PH_BG);
       canvas.drawRect(wp.px, wy, wp.pw, wp.ph, 0xFFFF9999);
