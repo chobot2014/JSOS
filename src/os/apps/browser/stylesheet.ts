@@ -118,10 +118,11 @@ interface ParsedSel {
  *  C  = # of type/element       (×0x1)
  */
 export function selectorSpecificity(sel: string): number {
-  // Use pre-parsed selector data to compute specificity without regex.
-  // _parseSel caches via _parseSelectorParts + _parsedCompoundCache,
-  // so repeated calls for the same selector are free.
-  var ps = _parseSel(sel.trim());
+  return _specFromParsed(_parseSel(sel.trim()));
+}
+
+/** Compute specificity from pre-parsed selector data (no regex). */
+function _specFromParsed(ps: ParsedSel): number {
   var a = 0, b = 0, c = 0;
   for (var ci = 0; ci < ps.compounds.length; ci++) {
     var comp = ps.compounds[ci]!;
@@ -1031,28 +1032,33 @@ export function parseStylesheet(css: string): CSSRule[] {
       if (decls.trim()) {
         var props = parseDeclBlock(decls);
         var sels2 = splitSelectors(selText);
+        var parsedSels2: ParsedSel[] = [];
         var spec2 = 0;
         for (var si2 = 0; si2 < sels2.length; si2++) {
-          var s3 = selectorSpecificity(sels2[si2]!);
+          var _ps2 = _parseSel(sels2[si2]!);
+          parsedSels2.push(_ps2);
+          var s3 = _specFromParsed(_ps2);
           if (s3 > spec2) spec2 = s3;
         }
-        rules.push({ sels: sels2, props, spec: spec2, order: rules.length });
+        rules.push({ sels: sels2, parsedSels: parsedSels2, props, spec: spec2, order: rules.length });
       }
     } else {
       // No nesting — simple rule
       var props = parseDeclBlock(fullBlock);
       var sels  = splitSelectors(selText);
+      var parsedSels: ParsedSel[] = [];
       var spec = 0;
       for (var si = 0; si < sels.length; si++) {
-        var s2 = selectorSpecificity(sels[si]!);
+        var _ps = _parseSel(sels[si]!);
+        parsedSels.push(_ps);
+        var s2 = _specFromParsed(_ps);
         if (s2 > spec) spec = s2;
       }
-      rules.push({ sels, props, spec, order: rules.length });
+      rules.push({ sels, parsedSels, props, spec, order: rules.length });
     }
   }
 
-  // Pre-parse all selectors into structured form so matching avoids regex
-  preParseSelectorRules(rules);
+  // parsedSels are now built inline during rule creation (no separate pass needed)
   return rules;
 }
 
