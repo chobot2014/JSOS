@@ -1916,7 +1916,7 @@ static JSValue js_proc_tick(JSContext *c, JSValueConst this_val,
     JS_UpdateStackTop(_procs[id].rt);
     int count = 0;
     JSContext *job_ctx = NULL;
-    while (JS_ExecutePendingJob(_procs[id].rt, &job_ctx) > 0 && count < 256) count++;
+    while (JS_ExecutePendingJob(_procs[id].rt, &job_ctx) > 0 && count < 32) count++;
     _js_fault_active = _saved_fault_active;
     _js_in_page_eval = _saved_in_page_eval;
     memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));

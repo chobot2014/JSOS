@@ -184,7 +184,7 @@ export class ProcessScheduler {
   private blockedQueue:  ProcessContext[] = [];
   private currentProcess: ProcessContext | null = null;
   private nextPid        = 1;
-  private timeSlice      = 10;   // frames (~200 ms at 50 fps)
+  private timeSlice      = 3;    // frames (~60 ms at 50 fps)
   private algorithm: SchedulingAlgorithm = 'round-robin';
 
   /**

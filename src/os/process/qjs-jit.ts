@@ -87,7 +87,7 @@ export const JSVALUE_SIZE = 8;
 export const DEOPT_SENTINEL = 0x7FFFDEAD;
 
 /** Call count threshold at which a function is compiled. */
-export const JIT_THRESHOLD = 2;
+export const JIT_THRESHOLD = 50;
 
 /** Maximum allowed deoptimisations before a function is blacklisted. */
 export const MAX_DEOPTS = 3;
@@ -96,7 +96,7 @@ export const MAX_DEOPTS = 3;
 export const MAX_BAILS = 3;
 
 /** Maximum bytecode length the JIT will attempt to compile. */
-export const MAX_BC_LEN = 4096;
+export const MAX_BC_LEN = 16384;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  QJSOffsets — field byte offsets within JSFunctionBytecode
@@ -404,28 +404,66 @@ export class QJSJITCompiler {
   }
 
   // Returns offset of arg i inside stack frame.
-  // When reg-alloc is active we push EBX, shifting args up by 4.
+  // When reg-alloc is active we push callee-saved registers, shifting args up.
   private _argDisp(i: number): number  {
-    const base = this._regAlloc ? 12 : 8;
+    const base = 8 + this._savedRegCount() * 4;
     return base + i * 4;
   }
   // Returns displacement of local i from EBP (negative).
-  // When reg-alloc is active: EBP-4 = saved EBX, EBP-8 = local0, EBP-12 = local1 …
-  // When not active:          EBP-4 = local0, EBP-8 = local1 …
+  // Saved registers sit between EBP and locals in the frame.
   private _locDisp(i: number): number  {
-    const base = this._regAlloc ? 8 : 4;
+    const base = 4 + this._savedRegCount() * 4;
     return -(base + i * 4);
   }
 
-  // Is local i mapped to EBX by the register allocator?  (item 855)
-  private _isRegLocal(i: number): boolean {
-    return !!(this._regAlloc && this._regAlloc.ebxLocal === i);
+  /** Number of callee-saved registers pushed in the prologue (0–3). */
+  private _savedRegCount(): number {
+    if (!this._regAlloc) return 0;
+    let n = 1; // EBX always
+    if (this._regAlloc.esiLocal >= 0) n++;
+    if (this._regAlloc.ediLocal >= 0) n++;
+    return n;
   }
 
-  /** Emit the function epilogue, restoring EBX when reg-alloc is active. */
+  /** Which callee-saved register holds local i, or null if on-stack only. */
+  private _regForLocal(i: number): 'ebx' | 'esi' | 'edi' | null {
+    if (!this._regAlloc) return null;
+    if (this._regAlloc.ebxLocal === i) return 'ebx';
+    if (this._regAlloc.esiLocal === i) return 'esi';
+    if (this._regAlloc.ediLocal === i) return 'edi';
+    return null;
+  }
+
+  // Is local i mapped to a callee-saved register by reg-alloc?
+  private _isRegLocal(i: number): boolean {
+    return this._regForLocal(i) !== null;
+  }
+
+  /** Emit MOV EAX, <reg> for a register-allocated local. */
+  private _emitGetRegLocal(reg: 'ebx' | 'esi' | 'edi'): void {
+    if (reg === 'ebx') this._e.movEaxEbx();
+    else if (reg === 'esi') this._e.movEaxEsi();
+    else this._e.movEaxEdi();
+  }
+
+  /** Emit MOV <reg>, EAX to sync a register-allocated local from EAX. */
+  private _emitSyncRegLocal(reg: 'ebx' | 'esi' | 'edi'): void {
+    if (reg === 'ebx') this._e.movEbxEax();
+    else if (reg === 'esi') this._e.movEsiEax();
+    else this._e.movEdiEax();
+  }
+
+  /** Emit the function epilogue, restoring all callee-saved registers.
+   *  Uses EBP-relative loads (not POP) so it works regardless of eval-stack state. */
   private _emitEpilogue(): void {
     const e = this._e;
     if (this._regAlloc) {
+      // Restore in reverse push order from known frame positions:
+      //   EBP-4  = saved EBX (always)
+      //   EBP-8  = saved ESI (if active)
+      //   EBP-12 = saved EDI (if active, implies ESI active too)
+      if (this._regAlloc.ediLocal >= 0) e.movEdiEbpDisp(-12);
+      if (this._regAlloc.esiLocal >= 0) e.movEsiEbpDisp(-8);
       e.restoreSavedEbx();  // MOV EBX, [EBP-4]
     }
     e.epilogue();
@@ -471,12 +509,15 @@ export class QJSJITCompiler {
                                  OP_throw, OP_throw_error,
                                  OP_special_object]);
 
-    // Prologue — save EBX for reg-alloc path (item 855)
+    // Prologue — save callee-saved regs for reg-alloc path (item 855)
     if (this._regAlloc) {
       e.prologue(0);      // PUSH EBP; MOV EBP, ESP
       e.pushEbx();        // PUSH EBX  (callee-saved)
-      // Reserve space for locals + eval-stack; subtract 4 (already used by PUSH EBX)
-      const stackBytes = localBytes - 4;
+      if (this._regAlloc.esiLocal >= 0) e.pushEsi();  // PUSH ESI
+      if (this._regAlloc.ediLocal >= 0) e.pushEdi();  // PUSH EDI
+      // Reserve space for locals + eval-stack; subtract bytes already used by PUSHes
+      const savedBytes = this._savedRegCount() * 4;
+      const stackBytes = localBytes - savedBytes;
       if (stackBytes > 0) e.subEsp(stackBytes);
     } else {
       e.prologue(localBytes);
@@ -488,10 +529,20 @@ export class QJSJITCompiler {
       e.store(this._locDisp(i));
     }
 
-    // Load hottest local into EBX (item 855)
-    if (this._regAlloc && this._regAlloc.ebxLocal >= 0) {
-      e.load(this._locDisp(this._regAlloc.ebxLocal));
-      e.movEbxEax();
+    // Load hottest locals into callee-saved registers (item 855)
+    if (this._regAlloc) {
+      if (this._regAlloc.ebxLocal >= 0) {
+        e.load(this._locDisp(this._regAlloc.ebxLocal));
+        e.movEbxEax();
+      }
+      if (this._regAlloc.esiLocal >= 0) {
+        e.load(this._locDisp(this._regAlloc.esiLocal));
+        e.movEsiEax();
+      }
+      if (this._regAlloc.ediLocal >= 0) {
+        e.load(this._locDisp(this._regAlloc.ediLocal));
+        e.movEdiEax();
+      }
     }
 
     // ── Closure prologue: save _jit_current_closure global to local frame ──
@@ -569,29 +620,30 @@ export class QJSJITCompiler {
         // ── Local variable access (get = push, put = pop & discard, set = peek) ─
         case OP_get_loc: {
           const i = bc.u16(pc + 1);
-          if (this._isRegLocal(i)) { e.movEaxEbx(); } else { e.load(this._locDisp(i)); }
+          const r = this._regForLocal(i);
+          if (r) { this._emitGetRegLocal(r); } else { e.load(this._locDisp(i)); }
           e.pushEax(); _lastPushLocal = i; pc += 3; break;
         }
         case OP_put_loc: {
           const i = bc.u16(pc + 1);
           e.popEax();
           e.store(this._locDisp(i));  // always keep stack copy in sync
-          if (this._isRegLocal(i)) e.movEbxEax();  // also update EBX register (item 855)
+          { const r = this._regForLocal(i); if (r) this._emitSyncRegLocal(r); }
           pc += 3; break;
         }
-        case OP_set_loc: { const i = bc.u16(pc + 1); e.peekTOS(); e.store(this._locDisp(i)); if (this._isRegLocal(i)) e.movEbxEax(); pc += 3; break; }
-        case OP_get_loc0: { if (this._isRegLocal(0)) { e.movEaxEbx(); } else { e.load(this._locDisp(0)); } e.pushEax(); pc++; break; }
-        case OP_get_loc1: { if (this._isRegLocal(1)) { e.movEaxEbx(); } else { e.load(this._locDisp(1)); } e.pushEax(); pc++; break; }
-        case OP_get_loc2: { if (this._isRegLocal(2)) { e.movEaxEbx(); } else { e.load(this._locDisp(2)); } e.pushEax(); pc++; break; }
-        case OP_get_loc3: { if (this._isRegLocal(3)) { e.movEaxEbx(); } else { e.load(this._locDisp(3)); } e.pushEax(); pc++; break; }
-        case OP_put_loc0: { e.popEax(); e.store(this._locDisp(0)); if (this._isRegLocal(0)) e.movEbxEax(); pc++; break; }
-        case OP_put_loc1: { e.popEax(); e.store(this._locDisp(1)); if (this._isRegLocal(1)) e.movEbxEax(); pc++; break; }
-        case OP_put_loc2: { e.popEax(); e.store(this._locDisp(2)); if (this._isRegLocal(2)) e.movEbxEax(); pc++; break; }
-        case OP_put_loc3: { e.popEax(); e.store(this._locDisp(3)); if (this._isRegLocal(3)) e.movEbxEax(); pc++; break; }
-        case OP_set_loc0: { e.peekTOS(); e.store(this._locDisp(0)); if (this._isRegLocal(0)) e.movEbxEax(); pc++; break; }
-        case OP_set_loc1: { e.peekTOS(); e.store(this._locDisp(1)); if (this._isRegLocal(1)) e.movEbxEax(); pc++; break; }
-        case OP_set_loc2: { e.peekTOS(); e.store(this._locDisp(2)); if (this._isRegLocal(2)) e.movEbxEax(); pc++; break; }
-        case OP_set_loc3: { e.peekTOS(); e.store(this._locDisp(3)); if (this._isRegLocal(3)) e.movEbxEax(); pc++; break; }
+        case OP_set_loc: { const i = bc.u16(pc + 1); e.peekTOS(); e.store(this._locDisp(i)); { const r = this._regForLocal(i); if (r) this._emitSyncRegLocal(r); } pc += 3; break; }
+        case OP_get_loc0: { { const r = this._regForLocal(0); if (r) { this._emitGetRegLocal(r); } else { e.load(this._locDisp(0)); } } e.pushEax(); pc++; break; }
+        case OP_get_loc1: { { const r = this._regForLocal(1); if (r) { this._emitGetRegLocal(r); } else { e.load(this._locDisp(1)); } } e.pushEax(); pc++; break; }
+        case OP_get_loc2: { { const r = this._regForLocal(2); if (r) { this._emitGetRegLocal(r); } else { e.load(this._locDisp(2)); } } e.pushEax(); pc++; break; }
+        case OP_get_loc3: { { const r = this._regForLocal(3); if (r) { this._emitGetRegLocal(r); } else { e.load(this._locDisp(3)); } } e.pushEax(); pc++; break; }
+        case OP_put_loc0: { e.popEax(); e.store(this._locDisp(0)); { const r = this._regForLocal(0); if (r) this._emitSyncRegLocal(r); } pc++; break; }
+        case OP_put_loc1: { e.popEax(); e.store(this._locDisp(1)); { const r = this._regForLocal(1); if (r) this._emitSyncRegLocal(r); } pc++; break; }
+        case OP_put_loc2: { e.popEax(); e.store(this._locDisp(2)); { const r = this._regForLocal(2); if (r) this._emitSyncRegLocal(r); } pc++; break; }
+        case OP_put_loc3: { e.popEax(); e.store(this._locDisp(3)); { const r = this._regForLocal(3); if (r) this._emitSyncRegLocal(r); } pc++; break; }
+        case OP_set_loc0: { e.peekTOS(); e.store(this._locDisp(0)); { const r = this._regForLocal(0); if (r) this._emitSyncRegLocal(r); } pc++; break; }
+        case OP_set_loc1: { e.peekTOS(); e.store(this._locDisp(1)); { const r = this._regForLocal(1); if (r) this._emitSyncRegLocal(r); } pc++; break; }
+        case OP_set_loc2: { e.peekTOS(); e.store(this._locDisp(2)); { const r = this._regForLocal(2); if (r) this._emitSyncRegLocal(r); } pc++; break; }
+        case OP_set_loc3: { e.peekTOS(); e.store(this._locDisp(3)); { const r = this._regForLocal(3); if (r) this._emitSyncRegLocal(r); } pc++; break; }
 
         // ── Argument access ──────────────────────────────────────────────
         case OP_get_arg: { const i = bc.u16(pc + 1); e.load(this._argDisp(i)); e.pushEax(); pc += 3; break; }
@@ -628,10 +680,10 @@ export class QJSJITCompiler {
         }
 
         // ── Increment / decrement in-place ───────────────────────────────
-        case OP_inc_loc:  { const i = bc.u16(pc + 1); e.load(this._locDisp(i)); e.addEaxImm32(1); e.store(this._locDisp(i)); pc += 3; break; }
-        case OP_dec_loc:  { const i = bc.u16(pc + 1); e.load(this._locDisp(i)); e.subEaxImm32(1); e.store(this._locDisp(i)); pc += 3; break; }
-        case OP_inc_loc8: { const i = bc.u8(pc + 1);  e.load(this._locDisp(i)); e.addEaxImm32(1); e.store(this._locDisp(i)); pc += 2; break; }
-        case OP_dec_loc8: { const i = bc.u8(pc + 1);  e.load(this._locDisp(i)); e.subEaxImm32(1); e.store(this._locDisp(i)); pc += 2; break; }
+        case OP_inc_loc:  { const i = bc.u16(pc + 1); { const r = this._regForLocal(i); if (r) { this._emitGetRegLocal(r); } else { e.load(this._locDisp(i)); } } e.addEaxImm32(1); e.store(this._locDisp(i)); { const r = this._regForLocal(i); if (r) this._emitSyncRegLocal(r); } pc += 3; break; }
+        case OP_dec_loc:  { const i = bc.u16(pc + 1); { const r = this._regForLocal(i); if (r) { this._emitGetRegLocal(r); } else { e.load(this._locDisp(i)); } } e.subEaxImm32(1); e.store(this._locDisp(i)); { const r = this._regForLocal(i); if (r) this._emitSyncRegLocal(r); } pc += 3; break; }
+        case OP_inc_loc8: { const i = bc.u8(pc + 1);  { const r = this._regForLocal(i); if (r) { this._emitGetRegLocal(r); } else { e.load(this._locDisp(i)); } } e.addEaxImm32(1); e.store(this._locDisp(i)); { const r = this._regForLocal(i); if (r) this._emitSyncRegLocal(r); } pc += 2; break; }
+        case OP_dec_loc8: { const i = bc.u8(pc + 1);  { const r = this._regForLocal(i); if (r) { this._emitGetRegLocal(r); } else { e.load(this._locDisp(i)); } } e.subEaxImm32(1); e.store(this._locDisp(i)); { const r = this._regForLocal(i); if (r) this._emitSyncRegLocal(r); } pc += 2; break; }
 
         // ── Binary arithmetic ────────────────────────────────────────────
         case OP_add: { e.popEcx(); e.popEax(); e.addAC();  e.pushEax(); pc++; break; }
@@ -677,17 +729,19 @@ export class QJSJITCompiler {
         case OP_add_loc: {
           const i = bc.u16(pc + 1);
           e.popEcx();                      // ECX = TOS (addend)
-          e.load(this._locDisp(i));        // EAX = local[i]
+          { const r = this._regForLocal(i); if (r) { this._emitGetRegLocal(r); } else { e.load(this._locDisp(i)); } }
           e.addAC();                       // EAX += ECX
           e.store(this._locDisp(i));       // local[i] = EAX
+          { const r = this._regForLocal(i); if (r) this._emitSyncRegLocal(r); }
           pc += 3; break;
         }
         case OP_add_loc8: {
           const i = bc.u8(pc + 1);
           e.popEcx();
-          e.load(this._locDisp(i));
+          { const r = this._regForLocal(i); if (r) { this._emitGetRegLocal(r); } else { e.load(this._locDisp(i)); } }
           e.addAC();
           e.store(this._locDisp(i));
+          { const r = this._regForLocal(i); if (r) this._emitSyncRegLocal(r); }
           pc += 2; break;
         }
 
@@ -1666,8 +1720,8 @@ export class QJSJITHook {
     // Phase 2: sort by lastAccess ascending (coldest first).
     live.sort((a, b) => a.lastAccess - b.lastAccess);
 
-    // Phase 3: evict the coldest 50% — clear their native pointers.
-    const evictCount = Math.max(1, Math.floor(live.length / 2));
+    // Phase 3: evict the coldest 25% — clear their native pointers.
+    const evictCount = Math.max(1, Math.floor(live.length / 4));
     const evicted = new Set<number>();
     for (let i = 0; i < evictCount; i++) {
       evicted.add(live[i].bcAddr);
@@ -2594,13 +2648,18 @@ export class DevirtualMap {
 
 // =============================================================================
 //  Item 855: Linear-scan register allocator
-//  Assigns the single hottest local variable to EBX (callee-saved in cdecl).
-//  The compiler saves EBX in the prologue and restores it before every return.
+//  Assigns the three hottest local variables to EBX, ESI, EDI (callee-saved
+//  in cdecl).  The compiler saves all used registers in the prologue and
+//  restores them before every return.
 // =============================================================================
 
 export interface RegAllocInfo {
   /** Local index assigned to EBX, or -1 if none. */
   ebxLocal: number;
+  /** Local index assigned to ESI, or -1 if none. */
+  esiLocal: number;
+  /** Local index assigned to EDI, or -1 if none. */
+  ediLocal: number;
 }
 
 export class RegAllocPass {
@@ -2636,15 +2695,30 @@ export class RegAllocPass {
       }
     }
 
-    // Find the local with the highest access count
+    // Find the top-3 locals with the highest access counts
     let best = -1, bestCount = 0;
+    let second = -1, secondCount = 0;
+    let third = -1, thirdCount = 0;
     for (let i = 0; i < bc.varCount; i++) {
-      if (count[i] > bestCount) { bestCount = count[i]; best = i; }
+      if (count[i] > bestCount) {
+        third = second; thirdCount = secondCount;
+        second = best; secondCount = bestCount;
+        bestCount = count[i]; best = i;
+      } else if (count[i] > secondCount) {
+        third = second; thirdCount = secondCount;
+        secondCount = count[i]; second = i;
+      } else if (count[i] > thirdCount) {
+        thirdCount = count[i]; third = i;
+      }
     }
 
-    // Only bother if the local is accessed often enough to justify reg overhead
+    // Only bother if the hottest local is accessed often enough to justify reg overhead
     if (bestCount < 4) return null;
-    return { ebxLocal: best };
+    return {
+      ebxLocal: best,
+      esiLocal: secondCount >= 4 ? second : -1,
+      ediLocal: thirdCount >= 4 ? third : -1,
+    };
   }
 }
 

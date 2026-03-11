@@ -51,6 +51,9 @@ export class VirtualMemoryManager {
     return (kernel.getRamBytes && kernel.getRamBytes()) || (4 * 1024 * 1024 * 1024);
   }
   private allocatedPhysicalPages = new Set<number>();
+  /** O(1) free-page stack: pop to allocate, push to free. */
+  private freePageStack: number[] = [];
+  private freePageStackInitialized = false;
 
   /**
    * Guard pages for expandable stacks.
@@ -648,26 +651,37 @@ export class VirtualMemoryManager {
   }
 
   /**
-   * Allocate a physical page
+   * Lazily initialise the free-page stack on first allocation.
+   * Pushes all unallocated page numbers so pop() gives O(1) alloc.
    */
-  private allocatePhysicalPage(): number | null {
+  private ensureFreePageStack(): void {
+    if (this.freePageStackInitialized) return;
+    this.freePageStackInitialized = true;
     const totalPages = Math.floor(this.physicalMemorySize / this.pageSize);
-
-    for (let i = 0; i < totalPages; i++) {
+    for (let i = totalPages - 1; i >= 0; i--) {
       if (!this.allocatedPhysicalPages.has(i)) {
-        this.allocatedPhysicalPages.add(i);
-        return i;
+        this.freePageStack.push(i);
       }
     }
-
-    return null; // No free pages
   }
 
   /**
-   * Free a physical page
+   * Allocate a physical page — O(1) via free-page stack.
+   */
+  private allocatePhysicalPage(): number | null {
+    this.ensureFreePageStack();
+    if (this.freePageStack.length === 0) return null;
+    const page = this.freePageStack.pop()!;
+    this.allocatedPhysicalPages.add(page);
+    return page;
+  }
+
+  /**
+   * Free a physical page — O(1) push back onto stack.
    */
   private freePhysicalPage(pageNumber: number): void {
     this.allocatedPhysicalPages.delete(pageNumber);
+    this.freePageStack.push(pageNumber);
   }
 
   /**

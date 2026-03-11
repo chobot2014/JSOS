@@ -985,6 +985,18 @@ export class _Emit {
   movEsiEax(): void { this._w(0x89); this._w(0xC6); }
   /** MOV EDI, EAX — set destination for REP MOVSD/STOSD. */
   movEdiEax(): void { this._w(0x89); this._w(0xC7); }
+  /** MOV EAX, ESI — read register-allocated local from ESI. */
+  movEaxEsi(): void { this._w(0x89); this._w(0xF0); }
+  /** MOV EAX, EDI — read register-allocated local from EDI. */
+  movEaxEdi(): void { this._w(0x89); this._w(0xF8); }
+  /** MOV ESI, [EBP+disp] — load local from stack frame into ESI. */
+  movEsiEbpDisp(d: number): void { this._w(0x8B); this._w(0x75); this._w(d & 0xFF); }
+  /** MOV EDI, [EBP+disp] — load local from stack frame into EDI. */
+  movEdiEbpDisp(d: number): void { this._w(0x8B); this._w(0x7D); this._w(d & 0xFF); }
+  /** MOV [EBP+disp], ESI — spill ESI to stack frame local. */
+  movEbpDispEsi(d: number): void { this._w(0x89); this._w(0x75); this._w(d & 0xFF); }
+  /** MOV [EBP+disp], EDI — spill EDI to stack frame local. */
+  movEbpDispEdi(d: number): void { this._w(0x89); this._w(0x7D); this._w(d & 0xFF); }
   /** PUSH ESI — callee-save. */
   pushEsi(): void { this._w(0x56); }
   /** POP ESI — callee-restore. */

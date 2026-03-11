@@ -386,6 +386,7 @@ function main(): void {
       // can continue operating.  The threshold is low (3) so recovery is fast.
       var _consecutiveFaults = 0;
       var _FAULT_THRESHOLD = 3;
+      var _idleCount = 0;
       for (;;) {
         if (_guardedRun) {
           var _gr = _guardedRun(_tickFn);
@@ -402,7 +403,10 @@ function main(): void {
         } else {
           try { _tickFn(); } catch (_) {}
         }
-        kernel.sleep(8);         // halt CPU until next timer tick (~10 ms at 100 Hz)
+        // Adaptive sleep: 1 ms when active (fast poll), ramp to 8 ms when idle
+        if (_consecutiveFaults > 0) { kernel.sleep(2); _idleCount = 0; }
+        else if (_idleCount < 4) { kernel.sleep(1); _idleCount++; }
+        else { kernel.sleep(4); }
       }
     }
   }
