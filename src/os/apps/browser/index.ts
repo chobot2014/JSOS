@@ -13,7 +13,7 @@
  */
 
 import {
-  os, Canvas,
+  os, Canvas, pumpCursor,
   type App, type WMWindow, type KeyEvent, type MouseEvent, type FetchResponse,
 } from '../../core/sdk.js';
 
@@ -2380,7 +2380,9 @@ export class BrowserApp implements App {
     // token array.  On Google's ~100KB HTML this saves 2 redundant O(HTML) scans
     // and eliminates all associated string allocation in passes 2 and 3.
     var _htmlTokens = tokenise(html);
+    pumpCursor();  // keep cursor alive after tokenise (~200-500ms)
     var r = parseHTMLFromTokens(_htmlTokens);
+    pumpCursor();  // keep cursor alive after pass1 parse (~500-1500ms)
     var _shT1 = Date.now();
     os.debug.log('[browser] pass1:', r.nodes.length, 'nodes', r.scripts.length, 'scripts', r.styles.length, 'styles', r.styleLinks.length, 'cssLinks', 'in', (_shT1 - _shT0) + 'ms');
     // ── Pre-fetch external scripts ASAP — overlaps download with CSS parse + pass2 ──
@@ -2406,6 +2408,7 @@ export class BrowserApp implements App {
     } else {
       try {
         sheets = r.styles.length > 0 ? parseStylesheet(_styleKey) : [];
+        pumpCursor();  // keep cursor alive after stylesheet parse (~500-1600ms)
         if (sheets.length > 0) this._inlineStyleCache.set(_styleKey, sheets);
       } catch (_cssErr) {
         os.debug.log('[browser] parseStylesheet THREW:', String(_cssErr).slice(0, 200));
@@ -2442,6 +2445,7 @@ export class BrowserApp implements App {
           os.fetchAsync(cssURL, function(resp: FetchResponse | null) {
             if (resp && resp.status === 200 && resp.bodyText.trim()) {
               var _fetchedRules = parseStylesheet(resp.bodyText);
+              pumpCursor();  // keep cursor alive after external CSS parse
               // Cache rules by URL — instant application on next same-site navigation
               _self_css._cssCache.set(cssURL, _fetchedRules);
               for (var _ri = 0; _ri < _fetchedRules.length; _ri++) _newCSSRules.push(_fetchedRules[_ri]);
@@ -2457,9 +2461,11 @@ export class BrowserApp implements App {
               flushCSSMatchCache();
               _cachedIndex = buildSheetIndex(sheets);
               var r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex);  // reuses tokens — no re-tokenize
+              pumpCursor();  // keep cursor alive after CSS re-parse
               _self_css._forms       = r3.forms;
               _self_css._pageBaseURL = r3.baseURL ? _self_css._resolveHref(r3.baseURL) : '';
               _self_css._layoutPage(r3.nodes as any, r3.widgets as any, r3.title || fallbackTitle || url, url);
+              pumpCursor();  // keep cursor alive after CSS re-layout
             }
           });
         })(_uncachedCSSLinks[_uli]!);
@@ -2474,6 +2480,7 @@ export class BrowserApp implements App {
       try {
         var _shT2b = Date.now();
         r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex);  // reuses tokens — no re-tokenize
+        pumpCursor();  // keep cursor alive after pass2 parse (~500-2000ms)
         os.debug.log('[browser] pass2 parseHTML:', r.nodes.length, 'nodes in', (Date.now() - _shT2b) + 'ms');
         this._forms       = r.forms;
         this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
@@ -2487,6 +2494,7 @@ export class BrowserApp implements App {
     var _shT3 = Date.now();
     os.debug.log('[browser] parse:', r.scripts.length, 'scripts,', r.nodes.length, 'nodes @', url.slice(0, 72));
     this._layoutPage(r.nodes as any, r.widgets as any, r.title || fallbackTitle || url, url);
+    pumpCursor();  // keep cursor alive after layout (~300-1000ms)
     os.debug.log('[browser] layoutPage in', (Date.now() - _shT3) + 'ms, total showHTML so far', (Date.now() - _shT0) + 'ms');
 
     // ── Favicon: fetch <link rel="icon"> image and store on current tab (item 628) ──
@@ -2578,12 +2586,14 @@ export class BrowserApp implements App {
           // Pass cached RuleIndex to avoid rebuilding 800+ rules on every DOM mutation
           var _rrT0 = Date.now();
           var r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex);
+          pumpCursor();  // keep cursor alive after rerender parse
           var [_cacheHits, _cacheTotal, _cacheSize] = getCSSMatchCacheStats();
           os.debug.log('[browser] rerender CSS in', (Date.now() - _rrT0) + 'ms, rules:', sheets.length, 'idx:', _cachedIndex ? 'cached' : 'none', 'cacheHit:', _cacheHits + '/' + _cacheTotal + ' sz:' + _cacheSize);
           os.debug.log('[browser] rerender: assigning forms nodes=' + r2.nodes.length + ' widgets=' + r2.widgets.length);
           self2._forms = r2.forms;
           os.debug.log('[browser] rerender: calling _layoutPage');
           self2._layoutPage(r2.nodes as any, r2.widgets as any, self2._pageTitle, self2._pageURL, true /*isRerender*/);
+          pumpCursor();  // keep cursor alive after rerender layout
           os.debug.log('[browser] rerender: _layoutPage done');
         },
         log: (msg: string) => os.debug.log(msg),

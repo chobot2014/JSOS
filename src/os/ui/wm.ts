@@ -704,6 +704,29 @@ export class WindowManager {
   /** Mark the WM as needing a repaint (call from app code or external events). */
   markDirty(): void { this._wmDirty = true; }
 
+  /**
+   * Lightweight cursor-only pump: read mouse packets, update cursor position,
+   * and redraw the cursor sprite without dispatching events.
+   * Safe to call from anywhere (e.g., during long synchronous operations like
+   * HTML/CSS parsing) to keep the cursor visually responsive.
+   */
+  pumpCursor(): void {
+    for (var _pi = 0; _pi < 8; _pi++) {
+      var pkt = kernel.readMouse();
+      if (!pkt) break;
+      this._cursorX = Math.max(0, Math.min(this._screen.width  - 1, this._cursorX + pkt.dx));
+      this._cursorY = Math.max(0, Math.min(this._screen.height - 1, this._cursorY + pkt.dy));
+      this._cursorDirty = true;
+    }
+    if (this._cursorDirty && this._cursorSaveValid) {
+      this._restoreCursorSaveUnder();
+      this._saveCursorUnder();
+      this._drawCursor();
+      this._screen.flip();
+      this._cursorDirty = false;
+    }
+  }
+
   /** Register a proc ID as app-managed (WM will skip it in _tickChildProcs). */
   registerManagedProc(id: number): void { this._appManagedProcs.add(id); }
   /** Unregister a managed proc ID. */
@@ -1524,6 +1547,14 @@ export function setWM(instance: WindowManager): void { wm = instance; }
 export function getWM(): WindowManager {
   if (!wm) throw new Error('WindowManager not yet initialised');
   return wm;
+}
+
+/**
+ * Module-level cursor pump — keeps mouse cursor alive during long synchronous
+ * work (HTML parse, CSS parse, layout).  Safe to call from any module.
+ */
+export function pumpCursor(): void {
+  if (wm) wm.pumpCursor();
 }
 
 // ================================================================================

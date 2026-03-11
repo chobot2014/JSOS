@@ -44,7 +44,7 @@ import { ProcessSupervisor, supervisor as _defaultSupervisor } from '../process/
 import { ipc, Pipe } from '../ipc/ipc.js';
 import { users } from '../users/users.js';
 import { audio as _pcmAudio } from '../audio/index.js';
-import { wm, type App, type WMWindow, type KeyEvent, type MouseEvent, type MenuItem } from '../ui/wm.js';
+import { wm, pumpCursor as _pumpCursor, type App, type WMWindow, type KeyEvent, type MouseEvent, type MenuItem } from '../ui/wm.js';
 import { Canvas } from '../ui/canvas.js';
 import { Colors } from '../ui/canvas.js';
 import { Mutex, Condvar, Semaphore } from '../process/sync.js';
@@ -61,6 +61,7 @@ import type { User, Group } from '../users/users.js';
 export { Canvas, Colors, defaultFont, type PixelColor } from '../ui/canvas.js';
 export { Color } from '../core/kernel.js';
 export type { App, WMWindow, KeyEvent, MouseEvent, MenuItem } from '../ui/wm.js';
+export { pumpCursor } from '../ui/wm.js';
 export { JSProcess } from '../process/jsprocess.js';
 export { ProcessSupervisor } from '../process/supervisor.js';
 export type { SupervisedProcessOptions, SupervisedProcessStats, CrashEvent, CrashReason, RestartPolicy, SupervisedProcessState } from '../process/supervisor.js';

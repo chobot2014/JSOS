@@ -32,6 +32,7 @@ import {
 import { sha384, hmacSha384 } from './crypto.js';
 import { net, strToBytes } from './net.js';
 import type { Socket } from './net.js';
+import { pumpCursor } from '../ui/wm.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -921,6 +922,7 @@ export class TLSSocket {
   read(timeoutTicks: number = 200): number[] | null {
     var deadline = kernel.getTicks() + timeoutTicks;
     while (kernel.getTicks() < deadline) {
+      pumpCursor();  // keep cursor alive during TLS read
       // Always poll for more data to ensure rxBuf grows when partial records exist
       var more = net.recvBytes(this.sock, 10);
       if (more && more.length > 0) { for (var _pi = 0; _pi < more.length; _pi++) this.rxBuf.push(more[_pi]); }
@@ -1205,6 +1207,7 @@ export class TLSSocket {
     // Read until we have at least 5 bytes (record header)
     var deadline = kernel.getTicks() + 50;
     while (this.rxBuf.length < 5 && kernel.getTicks() < deadline) {
+      pumpCursor();  // keep cursor alive during TLS handshake
       var chunk = net.recvBytes(this.sock, 3);
       if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
     }
@@ -1215,6 +1218,7 @@ export class TLSSocket {
     if (recType === 21 /* TLS_ALERT */) {
       var alertDeadline = kernel.getTicks() + 20;
       while (this.rxBuf.length < 5 + recLen && kernel.getTicks() < alertDeadline) {
+        pumpCursor();
         var achunk = net.recvBytes(this.sock, 3);
         if (achunk && achunk.length > 0) for (var _ai = 0; _ai < achunk.length; _ai++) this.rxBuf.push(achunk[_ai]);
       }
@@ -1231,6 +1235,7 @@ export class TLSSocket {
     // Wait for full record
     deadline = kernel.getTicks() + 50;
     while (this.rxBuf.length < 5 + recLen && kernel.getTicks() < deadline) {
+      pumpCursor();  // keep cursor alive during TLS handshake
       var chunk = net.recvBytes(this.sock, 3);
       if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
     }
@@ -1372,6 +1377,7 @@ export class TLSSocket {
     for (var skip = 0; skip < 5; skip++) {
       var deadline = kernel.getTicks() + 50;
       while (this.rxBuf.length < 5 && kernel.getTicks() < deadline) {
+        pumpCursor();  // keep cursor alive during TLS encrypted HS
         var chunk = net.recvBytes(this.sock, 3);
         if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
       }
@@ -1380,6 +1386,7 @@ export class TLSSocket {
       var recLen    = u16(this.rxBuf, 3);
       deadline = kernel.getTicks() + 50;
       while (this.rxBuf.length < 5 + recLen && kernel.getTicks() < deadline) {
+        pumpCursor();
         var chunk = net.recvBytes(this.sock, 3);
         if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this.rxBuf.push(chunk[_pi]); }
       }
@@ -1565,6 +1572,7 @@ export class TLSSocket {
     }
     var deadline = kernel.getTicks() + 50;
     while (kernel.getTicks() < deadline) {
+      pumpCursor();  // keep cursor alive during TLS 1.2 HS
       if (this.rxBuf.length >= 5) {
         var rt  = u8(this.rxBuf, 0);
         var rl  = u16(this.rxBuf, 3);
@@ -1599,6 +1607,7 @@ export class TLSSocket {
   private _readEncryptedHS12(): { type: number; data: number[] } | null {
     var deadline = kernel.getTicks() + 50;
     while (this.rxBuf.length < 5 && kernel.getTicks() < deadline) {
+      pumpCursor();  // keep cursor alive during TLS 1.2 encrypted HS
       var c = net.recvBytes(this.sock, 3);
       if (c && c.length > 0) for (var _pi = 0; _pi < c.length; _pi++) this.rxBuf.push(c[_pi]);
     }
@@ -1607,6 +1616,7 @@ export class TLSSocket {
     var rl  = u16(this.rxBuf, 3);
     deadline = kernel.getTicks() + 50;
     while (this.rxBuf.length < 5 + rl && kernel.getTicks() < deadline) {
+      pumpCursor();
       var c = net.recvBytes(this.sock, 3);
       if (c && c.length > 0) for (var _pi = 0; _pi < c.length; _pi++) this.rxBuf.push(c[_pi]);
     }
@@ -2358,6 +2368,7 @@ export class TLS12Socket {
   private _readRecord(): { type: number; data: number[] } | null {
     var deadline = kernel.getTicks() + 500;
     while (this._rxBuf.length < 5 && kernel.getTicks() < deadline) {
+      pumpCursor();  // keep cursor alive during TLS12 read
       var chunk = net.recvBytes(this._sock, 100);
       if (chunk && chunk.length > 0) { for (var _pi = 0; _pi < chunk.length; _pi++) this._rxBuf.push(chunk[_pi]); }
     }
@@ -2365,6 +2376,7 @@ export class TLS12Socket {
     var type   = this._rxBuf[0];
     var recLen = (this._rxBuf[3] << 8) | this._rxBuf[4];
     while (this._rxBuf.length < 5 + recLen && kernel.getTicks() < deadline) {
+      pumpCursor();
       var c2 = net.recvBytes(this._sock, 100);
       if (c2 && c2.length > 0) { for (var _pi2 = 0; _pi2 < c2.length; _pi2++) this._rxBuf.push(c2[_pi2]); }
     }
@@ -2403,6 +2415,7 @@ export class TLS12Socket {
     var got_ccs        = false;
     var deadline = kernel.getTicks() + 2000;
     while (!got_ccs && kernel.getTicks() < deadline) {
+      pumpCursor();  // keep cursor alive during TLS12 handshake
       var rec = this._readRecord();
       if (!rec) continue;
       if (rec.type === 22) { gotServerHello = true; }  // handshake
@@ -2436,6 +2449,7 @@ export class TLS12Socket {
   read(timeoutTicks: number): number[] | null {
     var deadline = kernel.getTicks() + timeoutTicks;
     while (kernel.getTicks() < deadline) {
+      pumpCursor();  // keep cursor alive during TLS12 read
       var rec = this._readRecord();
       if (rec && rec.type === 23) return rec.data;
     }

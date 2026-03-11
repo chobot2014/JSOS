@@ -11,6 +11,7 @@ import { TLSSocket } from './tls.js';
 import { httpDecompress } from './deflate.js';
 import { waterfallRecorder } from './net-perf.js';
 import { ArrayBufferPool } from '../process/gc.js';
+import { pumpCursor } from '../ui/wm.js';
 import {
   hkdfExtract, hkdfExpandLabel,
   gcmEncrypt, x25519PublicKey, generateKey32, getHardwareRandom,
@@ -510,6 +511,7 @@ export function httpGet(
   var deadline = kernel.getTicks() + 500;  // 5 seconds
   var _ttfbMarked = false;
   while (kernel.getTicks() < deadline) {
+    pumpCursor();  // keep cursor alive during sync httpGet
     if (net.nicReady) net.pollNIC();
     var chunk = net.recvBytes(sock, 50);
     if (chunk && chunk.length > 0) {
@@ -629,6 +631,7 @@ export function httpsGet(
   var tlsDeadline = kernel.getTicks() + 500;  // 5 seconds
   var _ttfb2Marked = false;
   while (kernel.getTicks() < tlsDeadline) {
+    pumpCursor();  // keep cursor alive during sync httpsGet
     var chunk2 = tls.read(100);
     if (chunk2 && chunk2.length > 0) {
       if (!_ttfb2Marked) { _wt2.markTtfb(); _ttfb2Marked = true; }
@@ -680,6 +683,7 @@ export function httpPost(
   var chunks: number[][] = [];
   var deadline = kernel.getTicks() + 500;
   while (kernel.getTicks() < deadline) {
+    pumpCursor();  // keep cursor alive during sync httpPost
     if (net.nicReady) net.pollNIC();
     var chunk = net.recvBytes(sock, 50);
     if (chunk && chunk.length > 0) { chunks.push(chunk); deadline = kernel.getTicks() + 100; }
@@ -740,6 +744,7 @@ export function httpsPost(
   var tlsChunks: number[][] = [];
   var tlsDeadline = kernel.getTicks() + 500;
   while (kernel.getTicks() < tlsDeadline) {
+    pumpCursor();  // keep cursor alive during sync httpsPost
     var chunk2 = tls.read(100);
     if (chunk2 && chunk2.length > 0) { tlsChunks.push(chunk2); tlsDeadline = kernel.getTicks() + 100; }
   }
@@ -2197,6 +2202,7 @@ export class QUICConnection {
       // Wait for Initial response from server (QUIC Long Header, top bit = 1)
       var deadline = kernel.getTicks() + 3000;  // ~3 s at 1000 Hz
       while (kernel.getTicks() < deadline) {
+        pumpCursor();  // keep cursor alive during QUIC handshake
         if (net.nicReady) net.pollNIC();
         var resp = net.recvUDPRawNB(srcPort);
         if (resp && resp.data && resp.data.length > 0) {
@@ -2998,6 +3004,7 @@ export function corsPreflightRequest(
       var tlsBuf: number[] = [];
       var tlsDl = kernel.getTicks() + 500;
       while (kernel.getTicks() < tlsDl) {
+        pumpCursor();  // keep cursor alive during CORS preflight
         var c = tls.read(100);
         if (c && c.length > 0) { for (var bi = 0; bi < c.length; bi++) tlsBuf.push(c[bi]); tlsDl = kernel.getTicks() + 100; }
       }
@@ -3010,6 +3017,7 @@ export function corsPreflightRequest(
       var rawBuf: number[] = [];
       var dl = kernel.getTicks() + 500;
       while (kernel.getTicks() < dl) {
+        pumpCursor();  // keep cursor alive during CORS preflight
         if (net.nicReady) net.pollNIC();
         var chunk = net.recvBytes(sock, 50);
         if (chunk && chunk.length > 0) { for (var bj = 0; bj < chunk.length; bj++) rawBuf.push(chunk[bj]); dl = kernel.getTicks() + 100; }

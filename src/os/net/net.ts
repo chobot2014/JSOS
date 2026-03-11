@@ -19,6 +19,7 @@
  */
 
 import { JITChecksum } from '../process/jit-os.js';
+import { pumpCursor } from '../ui/wm.js';
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
 // ── Byte-level helpers ───────────────────────────────────────────────────────
@@ -2190,6 +2191,7 @@ export class NetworkStack {
         // Block-poll NIC until ESTABLISHED or timeout (200 ticks ≈ 2 s)
         var deadline = kernel.getTicks() + 200;
         while (kernel.getTicks() < deadline && conn.state === 'SYN_SENT') {
+          pumpCursor();  // keep cursor alive during TCP connect
           this.pollNIC();
           this.processRxQueue();
           kernel.sleep(1);  // yield to QEMU for virtio BH processing
@@ -2277,6 +2279,7 @@ export class NetworkStack {
   recvBytes(sock: Socket, timeoutTicks: number = 0): number[] | null {
     var deadline = timeoutTicks > 0 ? kernel.getTicks() + timeoutTicks : 0;
     do {
+      pumpCursor();  // keep cursor alive during blocking recv
       if (this.nicReady) this.pollNIC();
       this.processRxQueue();
       var conn = this._connForSock(sock);
@@ -2380,6 +2383,7 @@ export class NetworkStack {
     var inbox = this.udpRxMap.get(localPort)!;
     var deadline = kernel.getTicks() + timeoutTicks;
     while (kernel.getTicks() < deadline) {
+      pumpCursor();  // keep cursor alive during UDP recv
       if (this.nicReady) this.pollNIC(); else this.processRxQueue();
       this.processRxQueue();
       if (inbox.length > 0) {
