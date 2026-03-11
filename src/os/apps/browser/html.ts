@@ -111,6 +111,11 @@ function _decodeEntities(raw: string): string {
 
 // ── Tokeniser ─────────────────────────────────────────────────────────────────
 
+// Singleton empty Map shared by text/close tokens — saves hundreds of Map
+// allocations per page.  Safe because the parse loop only reads (.get/.has)
+// token attrs, never modifies them.
+var _emptyAttrs = new Map<string, string>();
+
 export function tokenise(html: string): HtmlToken[] {
   var tokens: HtmlToken[] = [];
   var n = html.length;
@@ -178,7 +183,7 @@ export function tokenise(html: string): HtmlToken[] {
     if (close) {
       var _ctEnd = html.indexOf('>', i);
       i = _ctEnd >= 0 ? _ctEnd + 1 : n;
-      return { kind: 'close', tag, text: '', attrs: new Map() };
+      return { kind: 'close', tag, text: '', attrs: _emptyAttrs };
     }
     var attrs = new Map<string, string>();
     skipWS();
@@ -223,7 +228,7 @@ export function tokenise(html: string): HtmlToken[] {
           var rawContent = html.slice(i, rawEnd);
           if (rawContent) {
             // No entity decoding — script/style content is raw text
-            tokens.push({ kind: 'text', tag: '', text: rawContent, attrs: new Map<string, string>() });
+            tokens.push({ kind: 'text', tag: '', text: rawContent, attrs: _emptyAttrs });
           }
           i = rawEnd; // advance past raw content; close tag parsed next
         }
@@ -238,7 +243,7 @@ export function tokenise(html: string): HtmlToken[] {
       // Skip entity decoding for the common case where no '&' appears —
       // avoids an O(n) regex scan for every whitespace-only or plain-text node.
       var dec = raw.indexOf('&') >= 0 ? _decodeEntities(raw) : raw;
-      tokens.push({ kind: 'text', tag: '', text: dec, attrs: new Map<string, string>() });
+      tokens.push({ kind: 'text', tag: '', text: dec, attrs: _emptyAttrs });
     }
   }
   return tokens;
