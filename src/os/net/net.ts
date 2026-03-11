@@ -1656,20 +1656,53 @@ export class NetworkStack {
           }
         }
 
-        // ── Data delivery ──────────────────────────────────────────────────
+        // ── Data delivery (with sequence number validation) ────────────────
         if (seg.payload.length > 0) {
-          for (var _rpli = 0; _rpli < seg.payload.length; _rpli++) conn.recvBuf.push(seg.payload[_rpli]!);
-          conn.recvSeq = (conn.recvSeq + seg.payload.length) >>> 0;
-          var sockD = this._findSockForConn(conn);
-          if (sockD) sockD.recvQueue.push(bytesToStr(seg.payload));
-          this._sendTCPSeg(conn, TCP_ACK, []);
+          // Sequence-number-aware delivery: reject duplicates & out-of-order
+          var segEnd = (seg.seq + seg.payload.length) >>> 0;
+          // Check if this segment carries any NEW data (above conn.recvSeq).
+          // Use signed 32-bit comparison to handle wrapping correctly.
+          var seqDiff = (seg.seq - conn.recvSeq) | 0;
+          var endDiff = (segEnd - conn.recvSeq) | 0;
+
+          if (endDiff <= 0) {
+            // Entirely duplicate data (retransmission already received) — just ACK
+            this._sendTCPSeg(conn, TCP_ACK, []);
+          } else if (seqDiff === 0) {
+            // In-order segment at the expected sequence number
+            for (var _rpli = 0; _rpli < seg.payload.length; _rpli++) conn.recvBuf.push(seg.payload[_rpli]!);
+            conn.recvSeq = segEnd;
+            var sockD = this._findSockForConn(conn);
+            if (sockD) sockD.recvQueue.push(bytesToStr(seg.payload));
+            this._sendTCPSeg(conn, TCP_ACK, []);
+          } else if (seqDiff < 0 && endDiff > 0) {
+            // Partial overlap: segment starts before recvSeq but extends past it.
+            // Trim the already-received prefix and accept only the new bytes.
+            var trimBytes = conn.recvSeq - seg.seq;  // how many bytes to skip
+            var newData = seg.payload.slice(trimBytes);
+            for (var _rpli2 = 0; _rpli2 < newData.length; _rpli2++) conn.recvBuf.push(newData[_rpli2]!);
+            conn.recvSeq = segEnd;
+            var sockD2 = this._findSockForConn(conn);
+            if (sockD2) sockD2.recvQueue.push(bytesToStr(newData));
+            this._sendTCPSeg(conn, TCP_ACK, []);
+          } else {
+            // Out-of-order (seqDiff > 0): segment is ahead of what we expect.
+            // For now, send a duplicate ACK to trigger fast retransmit on the peer.
+            // Future: buffer the gap for SACK-based recovery.
+            this._sendTCPSeg(conn, TCP_ACK, []);
+          }
         }
 
         // ── FIN handling ───────────────────────────────────────────────────
+        // Only accept FIN if sequence matches (FIN after all data delivered)
         if (seg.flags & TCP_FIN) {
-          conn.recvSeq = (conn.recvSeq + 1) >>> 0;
-          conn.state = 'CLOSE_WAIT';
-          this._sendTCPSeg(conn, TCP_ACK, []);
+          var finSeq = (seg.seq + seg.payload.length) >>> 0;
+          if (finSeq === conn.recvSeq) {
+            conn.recvSeq = (conn.recvSeq + 1) >>> 0;
+            conn.state = 'CLOSE_WAIT';
+            this._sendTCPSeg(conn, TCP_ACK, []);
+          }
+          // else: FIN for data we haven't received yet — ignore until gap filled
         }
         break;
       }
@@ -2159,7 +2192,22 @@ export class NetworkStack {
     if (sock.type !== 'tcp') return false;
     var conn = this._connForSock(sock);
     if (!conn || conn.state !== 'ESTABLISHED') return false;
-    this._sendTCPSeg(conn, TCP_PSH | TCP_ACK, bytes);
+    // Segment large payloads into MSS-sized chunks to stay within MTU.
+    // Each chunk becomes a separate TCP segment so the Ethernet frame
+    // never exceeds 1514 bytes (14 eth + 20 IP + 20-32 TCP + payload).
+    var mss = conn.mss;
+    if (bytes.length <= mss) {
+      this._sendTCPSeg(conn, TCP_PSH | TCP_ACK, bytes);
+    } else {
+      var off = 0;
+      while (off < bytes.length) {
+        var end = Math.min(off + mss, bytes.length);
+        var chunk = bytes.slice(off, end);
+        var flags = TCP_ACK | (end >= bytes.length ? TCP_PSH : 0);
+        this._sendTCPSeg(conn, flags, chunk);
+        off = end;
+      }
+    }
     if (this.nicReady) this.pollNIC();
     this.processRxQueue();
     return true;

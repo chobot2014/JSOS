@@ -218,31 +218,13 @@ export class ThreadManager {
     (kernel as any).serialPut('[threadManager] clearCoroutines: removed ' + n + ' coroutines\n');
   }
 
-  private _dbgLogN = 0;
-  private _totalTicks = 0;
-
   /**
    * Advance every registered coroutine by one step.
    * Uses a snapshot so that a step() may add or cancel coroutines safely.
    */
   tickCoroutines(): void {
-    this._totalTicks++;
-    // Probe: log total at tick 1000 (about 10s in) to confirm tickCoroutines is running
-    if (this._totalTicks === 1000) {
-      (kernel as any).serialPut('[corotick-alive] totalTicks=1000 coroutines=' + this._coroutines.length + '\n');
-    }
     if (this._coroutines.length === 0) return;
     var snap = this._coroutines.slice();   // snapshot before iteration
-    // Debug: log first few times we have fetch coroutines pending
-    if (this._dbgLogN < 5) {
-      for (var _dbg = 0; _dbg < snap.length; _dbg++) {
-        if (snap[_dbg].name.indexOf('fetch:') === 0) {
-          this._dbgLogN++;
-          (kernel as any).serialPut('[corotick#' + this._dbgLogN + '] ticks=' + this._totalTicks + ' n=' + snap.length + ' ids=' + snap.map(function(c: {id:number}) { return c.id; }).join(',') + '\n');
-          break;
-        }
-      }
-    }
     var keep: Array<{ id: number; name: string; step: CoroutineStep }> = [];
     for (var i = 0; i < snap.length; i++) {
       var c = snap[i];

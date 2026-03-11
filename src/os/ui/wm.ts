@@ -643,6 +643,7 @@ export class WindowManager {
     this._tickChildProcs();
     scheduler.tick();
     threadManager.tickCoroutines();   // cooperative fetch / async coroutines
+    net.tcpTick();                    // TCP retransmit / keepalive / TIME_WAIT timers
     systemProfiler.tick();
     // GC incremental slice — runs every frame, max 1ms budget (item 877/878)
     try { globalGC.tick(_wmGCTick++); } catch (_) {}

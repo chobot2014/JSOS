@@ -992,9 +992,12 @@ export class HPack {
   // ── String encoding/decoding (RFC 7541 §5.2) ─────────────────────────
 
   private _encStr(s: string): number[] {
-    var out: number[] = new Array(s.length + 1);
-    out[0] = s.length & 0xff;
-    for (var i = 0; i < s.length; i++) out[i + 1] = s.charCodeAt(i) & 0xff;
+    // RFC 7541 §5.2: String literal with 7-bit integer prefix, no Huffman (bit 7 = 0)
+    var lenBytes = this._encInt(s.length, 7);
+    lenBytes[0] = lenBytes[0] & 0x7f;  // clear Huffman flag
+    var out: number[] = new Array(lenBytes.length + s.length);
+    for (var li = 0; li < lenBytes.length; li++) out[li] = lenBytes[li];
+    for (var i = 0; i < s.length; i++) out[lenBytes.length + i] = s.charCodeAt(i) & 0xff;
     return out;
   }
 
@@ -1215,6 +1218,15 @@ export class HTTP2Connection {
 
   /** [Item 927] Open a new request stream, send HEADERS frame, return stream id. */
   request(method: string, path: string, host: string, extraHeaders: [string, string][] = []): number {
+    // Drain any pending TLS data before sending new request (process GOAWAY, PING, etc.)
+    for (var _pre = 0; _pre < 16; _pre++) {
+      var _preRaw = this.tls.readNB();
+      if (!_preRaw || _preRaw.length === 0) break;
+      for (var _pri = 0; _pri < _preRaw.length; _pri++) this.rxBuf.push(_preRaw[_pri]);
+    }
+    if (this.rxBuf.length > 0) this._drainFrames();
+    // Check if GOAWAY was received during drain
+    if (this._goawayReceived) return -1;
     var sid = this.nextStreamId; this.nextStreamId += 2;
     var hdrs: [string, string][] = [
       [':method', method], [':path', path],
