@@ -7,10 +7,32 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <stddef.h>
+#include <setjmp.h>
 #include "platform.h"
 
 #undef errno
 extern int errno;
+
+/* Fault recovery globals from irq.c */
+extern jmp_buf       _js_fault_buf;
+extern volatile int  _js_fault_active;
+extern volatile int  _js_fault_vector;
+
+/* JSOS-specific abort(): instead of halting the OS, trigger fault recovery
+ * via longjmp if one is armed.  This handles QuickJS assert() failures,
+ * which call abort() through newlib.  On bare metal, halting is death. */
+void abort(void)
+{
+    platform_serial_puts("[JSOS] abort() called — ");
+    if (_js_fault_active) {
+        platform_serial_puts("recovering via longjmp\n");
+        _js_fault_vector = 0xFF;  /* synthetic "abort" vector */
+        longjmp(_js_fault_buf, 1);
+    }
+    /* No fault guard active — must halt */
+    platform_serial_puts("no fault guard, halting\n");
+    for(;;) __asm__ volatile("hlt");
+}
 
 // Environment variables
 char *__env[1] = { 0 };

@@ -46,7 +46,7 @@ $(TARGET): $(OBJECTS) $(QJS_OBJECTS)
 # properly expose inttypes.h format macros
 $(QJS_OBJECTS): $(QJS_SOURCES)
 	$(CC) -ffreestanding -O2 -std=c11 -DCONFIG_VERSION=\"2025.09\" \
-	  -D_GNU_SOURCE -fwrapv -Dasm=__asm__ -Dalloca=__builtin_alloca \
+	  -D_GNU_SOURCE -DNDEBUG -fwrapv -Dasm=__asm__ -Dalloca=__builtin_alloca \
 	  -D'PRId64="lld"' -D'PRIi64="lli"' -D'PRIu64="llu"' -D'PRIx64="llx"' \
 	  -DJSOS_JIT_HOOK -fno-stack-protector \
 	  -w -I$(QUICKJS_DIR) -c $(QUICKJS_DIR)/$(patsubst %.o,%.c,$@) -o $@

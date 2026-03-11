@@ -30,6 +30,18 @@ extern volatile int  _js_in_page_eval;
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdlib.h>
+#include <assert.h>
+
+/* Match QuickJS's MALLOC_OVERHEAD for consistent GC threshold accounting */
+#ifndef MALLOC_OVERHEAD
+#define MALLOC_OVERHEAD  8
+#endif
+
+/* QuickJS uses unlikely() for branch prediction hints */
+#ifndef unlikely
+#define unlikely(x)  __builtin_expect(!!(x), 0)
+#endif
 
 /* Static ATA sector buffer: 8 sectors × 256 words = 4 KB on BSS, not stack */
 static uint16_t ata_sector_buf[256 * 8];
@@ -571,6 +583,91 @@ static JSValue js_eval(JSContext *c, JSValueConst this_val, int argc, JSValueCon
     return ret;
 }
 
+/* ── JSOS Custom Malloc Allocator ────────────────────────────────────────
+ *
+ * Replaces QuickJS's default malloc functions (which depend on the
+ * platform-specific `malloc_usable_size`) with an allocator that stores
+ * the allocation size in an 8-byte header before the returned pointer.
+ *
+ * Benefits:
+ *   1. Eliminates implicit `malloc_usable_size` dependency (no header on
+ *      i686-elf / newlib — worked by luck)
+ *   2. Precise size tracking (malloc_usable_size may over-report, causing
+ *      GC threshold accounting drift)
+ *   3. Foundation for future heap corruption detection (canary bytes)
+ *
+ * Layout:  [ 8 bytes: size_t requested_size ] [ user payload ... ]
+ *          ^                                   ^
+ *          actual malloc ptr                   returned to caller
+ */
+#define JSOS_MALLOC_HDR_SIZE  8  /* keep 8-byte aligned */
+
+static size_t jsos_malloc_usable_size(const void *ptr)
+{
+    if (!ptr) return 0;
+    const size_t *hdr = (const size_t *)((const char *)ptr - JSOS_MALLOC_HDR_SIZE);
+    return *hdr;
+}
+
+static void *jsos_malloc(JSMallocState *s, size_t size)
+{
+    void *raw;
+    size_t real;
+    assert(size != 0);
+    real = size + JSOS_MALLOC_HDR_SIZE;
+    if (unlikely(s->malloc_size + size > s->malloc_limit))
+        return NULL;
+    raw = malloc(real);
+    if (!raw)
+        return NULL;
+    *(size_t *)raw = size;  /* store requested size in header */
+    s->malloc_count++;
+    s->malloc_size += size + MALLOC_OVERHEAD;
+    return (char *)raw + JSOS_MALLOC_HDR_SIZE;
+}
+
+static void jsos_free(JSMallocState *s, void *ptr)
+{
+    if (!ptr) return;
+    size_t *hdr = (size_t *)((char *)ptr - JSOS_MALLOC_HDR_SIZE);
+    size_t size = *hdr;
+    s->malloc_count--;
+    s->malloc_size -= size + MALLOC_OVERHEAD;
+    free(hdr);
+}
+
+static void *jsos_realloc(JSMallocState *s, void *ptr, size_t size)
+{
+    size_t old_size;
+    if (!ptr) {
+        if (size == 0) return NULL;
+        return jsos_malloc(s, size);
+    }
+    size_t *hdr = (size_t *)((char *)ptr - JSOS_MALLOC_HDR_SIZE);
+    old_size = *hdr;
+    if (size == 0) {
+        s->malloc_count--;
+        s->malloc_size -= old_size + MALLOC_OVERHEAD;
+        free(hdr);
+        return NULL;
+    }
+    if (s->malloc_size + size - old_size > s->malloc_limit)
+        return NULL;
+    hdr = realloc(hdr, size + JSOS_MALLOC_HDR_SIZE);
+    if (!hdr)
+        return NULL;
+    *hdr = size;  /* update stored size */
+    s->malloc_size += size - old_size;
+    return (char *)hdr + JSOS_MALLOC_HDR_SIZE;
+}
+
+static const JSMallocFunctions jsos_malloc_funcs = {
+    jsos_malloc,
+    jsos_free,
+    jsos_realloc,
+    jsos_malloc_usable_size,
+};
+
 /*
  * kernel.evalGuarded(code [, filename])
  *
@@ -620,6 +717,9 @@ static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JS
         platform_serial_puts(") — returning sentinel\n");
         return JS_NewInt32(c, -9999);
     }
+    /* Recalibrate stack top before entering the interpreter — the current
+     * ESP may differ from the value captured at JS_NewRuntime() time. */
+    JS_UpdateStackTop(JS_GetRuntime(c));
     JSValue result = JS_Eval(c, code, len, filename, JS_EVAL_TYPE_GLOBAL);
     _js_fault_active = _saved_fault_active;
     _js_in_page_eval = _saved_in_page_eval;
@@ -668,6 +768,7 @@ static JSValue js_call_guarded(JSContext *c, JSValueConst this_val, int argc, JS
         platform_serial_puts("[kernel] callGuarded fault recovered\n");
         return JS_NewInt32(c, -9999);
     }
+    JS_UpdateStackTop(JS_GetRuntime(c));
     JSValue result = JS_Call(c, argv[0], JS_UNDEFINED,
                              argc - 1,
                              argc > 1 ? argv + 1 : (JSValueConst *)NULL);
@@ -732,6 +833,7 @@ static JSValue js_guarded_run(JSContext *c, JSValueConst this_val,
         platform_serial_puts(")\n");
         return JS_NewInt32(c, -1);
     }
+    JS_UpdateStackTop(JS_GetRuntime(c));
     JSValue r = JS_Call(c, argv[0], JS_UNDEFINED, 0, NULL);
     _js_fault_active = _saved_fault_active;
     _js_in_page_eval = _saved_in_page_eval;
@@ -1410,6 +1512,7 @@ static JSValue js_drain_jobs(JSContext *c, JSValueConst this_val,
         JS_ResetAfterFault(c, _saved_frame);
         return JS_NewInt32(c, -1);  /* negative = fault during drain */
     }
+    JS_UpdateStackTop(rt);
     int count = 0;
     JSContext *job_ctx = NULL;
     while (JS_ExecutePendingJob(rt, &job_ctx) > 0 && count < 10000) count++;
@@ -1638,7 +1741,7 @@ static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
     if (id < 0) return JS_NewInt32(c, -1);
     JSProc_t *p = &_procs[id];
     memset(p, 0, sizeof(*p));
-    p->rt = JS_NewRuntime();
+    p->rt = JS_NewRuntime2(&jsos_malloc_funcs, NULL);
     if (!p->rt) return JS_NewInt32(c, -1);
     JS_SetMemoryLimit(p->rt, 1u * 1024u * 1024u * 1024u); /* 1 GB per child.
                                                     * Covers heavy tabs: Gmail, Google Docs,
@@ -1654,9 +1757,12 @@ static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
                                                     * (~1-1.3 GB real peak). If sbrk exhausts
                                                     * the window, that child gets ENOMEM —
                                                     * kernel continues unaffected. */
-    JS_SetGCThreshold(p->rt, 256u * 1024u * 1024u); /* GC at 256 MB — keeps heap tidy during
-                                                    * React/Vue reconciliation bursts without
-                                                    * waiting until near the 1 GB wall. */
+    JS_SetGCThreshold(p->rt, 64u * 1024u * 1024u);  /* GC at 64 MB — on 32-bit i686, 256 MB
+                                                    * allowed massive garbage accumulation that
+                                                    * made GC cycles slow and increased the
+                                                    * window for heap corruption.  64 MB keeps
+                                                    * the live set compact while still giving
+                                                    * headroom for React/Vue reconciliation. */
     JS_SetMaxStackSize(p->rt, 512 * 1024);        /* 512 KB — deep component trees (React,
                                                     * Angular), recursive HTML parser, deeply
                                                     * nested JS eval all need headroom. */
@@ -1736,6 +1842,7 @@ static JSValue js_proc_eval(JSContext *c, JSValueConst this_val,
     if (_pf_recovered != 0) {
         _js_in_page_eval = _saved_in_page_eval;
         __asm__ volatile("sti");
+        JS_ResetAfterFault(_procs[id].ctx, NULL);  /* reset child GC state */
         _js_fault_active = _saved_fault_active;
         memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
         _cur_proc = -1;
@@ -1749,6 +1856,7 @@ static JSValue js_proc_eval(JSContext *c, JSValueConst this_val,
     }
 
     _cur_proc = id;
+    JS_UpdateStackTop(_procs[id].rt);
     JSValue result = JS_Eval(_procs[id].ctx, code, strlen(code),
                              "<process>", JS_EVAL_TYPE_GLOBAL);
     _js_fault_active = _saved_fault_active;
@@ -1795,6 +1903,7 @@ static JSValue js_proc_tick(JSContext *c, JSValueConst this_val,
     if (_pt_recovered != 0) {
         _js_in_page_eval = _saved_in_page_eval;
         __asm__ volatile("sti");
+        JS_ResetAfterFault(_procs[id].ctx, NULL);  /* reset child GC state */
         _js_fault_active = _saved_fault_active;
         memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
         _cur_proc = -1;
@@ -1804,6 +1913,7 @@ static JSValue js_proc_tick(JSContext *c, JSValueConst this_val,
         return JS_NewInt32(c, -1);   /* negative = fault indicator */
     }
     _cur_proc = id;
+    JS_UpdateStackTop(_procs[id].rt);
     int count = 0;
     JSContext *job_ctx = NULL;
     while (JS_ExecutePendingJob(_procs[id].rt, &job_ctx) > 0 && count < 256) count++;
@@ -1953,6 +2063,7 @@ static JSValue js_proc_eval_slice(JSContext *c, JSValueConst this_val,
     if (_ps_recovered != 0) {
         _js_in_page_eval = _saved_in_page_eval;
         __asm__ volatile("sti");
+        JS_ResetAfterFault(_procs[id].ctx, NULL);  /* reset child GC state */
         _js_fault_active = _saved_fault_active;
         memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
         _proc_slice_deadline = 0;
@@ -1966,6 +2077,7 @@ static JSValue js_proc_eval_slice(JSContext *c, JSValueConst this_val,
     else
         _proc_slice_deadline = 0;
     _cur_proc = id;
+    JS_UpdateStackTop(_procs[id].rt);
     JSValue result = JS_Eval(_procs[id].ctx, code, strlen(code),
                              "<slice>", JS_EVAL_TYPE_GLOBAL);
     _js_fault_active = _saved_fault_active;
@@ -3890,7 +4002,7 @@ int quickjs_initialize(void) {
         platform_boot_print("[ATA] No drive\n");
     }
 
-    rt = JS_NewRuntime();
+    rt = JS_NewRuntime2(&jsos_malloc_funcs, NULL);
     if (!rt) return -1;
 
     JS_SetMemoryLimit(rt, 512u * 1024u * 1024u); /* 512 MB — main runtime: JS bundle + DOM + net stack + JIT */

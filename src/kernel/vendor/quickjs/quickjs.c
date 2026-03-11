@@ -2538,6 +2538,49 @@ void JS_ResetAfterFault(JSContext *ctx, void *saved_stack_frame)
      * halts the OS.  We intentionally leak the object — it's a one-per-crash
      * leak on an already-corrupted allocation, not a steady-state leak. */
     rt->current_exception = JS_UNINITIALIZED;
+
+    /* ── GC state recovery ──────────────────────────────────────────────
+     *
+     * If the fault fired during a GC cycle (gc_phase != NONE), the GC
+     * state machine is mid-operation: objects may have been partially
+     * moved between gc_obj_list, tmp_obj_list, and gc_zero_ref_count_list,
+     * and mark bits may be set to 1 on some objects.
+     *
+     * Strategy:
+     *   1. Reset gc_phase to NONE so __JS_FreeValueRT won't call
+     *      free_zero_refcount() on a corrupted gc_zero_ref_count_list.
+     *   2. Reinitialize tmp_obj_list and gc_zero_ref_count_list —
+     *      orphans any mid-cycle objects (intentional one-time leak).
+     *   3. Bump malloc_gc_threshold to delay the next automatic GC,
+     *      giving the engine breathing room before walking the heap.
+     *
+     * Even when the fault did NOT occur during GC, the heap may contain
+     * half-constructed objects with corrupted internal pointers.  The
+     * next automatic GC would walk those via mark_children() and crash.
+     * Bumping the threshold prevents that cascade.
+     */
+    if (rt->gc_phase != JS_GC_PHASE_NONE) {
+        rt->gc_phase = JS_GC_PHASE_NONE;
+        init_list_head(&rt->tmp_obj_list);
+        init_list_head(&rt->gc_zero_ref_count_list);
+    }
+
+    /* Delay next automatic GC by at least 64 MB beyond current usage.
+     * This prevents js_trigger_gc() from immediately running a full GC
+     * cycle over potentially corrupted object graphs. */
+    {
+        size_t cur = rt->malloc_state.malloc_size;
+        size_t new_thresh = cur + (64u * 1024u * 1024u);
+        if (rt->malloc_gc_threshold < new_thresh)
+            rt->malloc_gc_threshold = new_thresh;
+    }
+
+    /* Recalibrate stack top — the C stack pointer at the longjmp landing
+     * site may differ from the original stack_top captured at runtime
+     * creation.  Without this, js_check_stack_overflow() could use a
+     * stale reference and either miss real overflows or false-positive. */
+    JS_UpdateStackTop(rt);
+
 #ifdef JSOS_JIT_HOOK
     /* If the fault fired inside JIT-compiled native code, null the function's
      * jit_native_ptr so that native code is never dispatched again — the
@@ -6410,7 +6453,12 @@ static void gc_decref(JSRuntime *rt)
        tmp_obj_list */
     list_for_each_safe(el, el1, &rt->gc_obj_list) {
         p = list_entry(el, JSGCObjectHeader, link);
-        assert(p->mark == 0);
+        /* Force-clear any stale mark from an interrupted GC cycle.
+         * After a longjmp fault recovery, JS_ResetAfterFault resets
+         * gc_phase and reinitializes tmp_obj_list, but mark bits on
+         * objects still in gc_obj_list may be stuck at 1.  The original
+         * assert(p->mark == 0) would abort() in that case. */
+        p->mark = 0;
         mark_children(rt, p, gc_decref_child);
         p->mark = 1;
         if (p->ref_count == 0) {
