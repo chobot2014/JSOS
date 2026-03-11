@@ -42,13 +42,13 @@ const _cssMatchCache = new Map<string, CSSMatchEntry>();
 var _cssMatchHits = 0;
 var _cssMatchTotal = 0;
 
-// ── Shared Set for O(1) class membership tests ───────────────────────────────
-// A single reusable Set<string> is cleared and refilled per element in the
-// cache-miss path.  This gives O(1) .has() lookups (same as per-element new
-// Set) with ZERO extra allocations — no GC pressure from 100s of discarded
-// Set objects per rerender.
-// (Module-level declaration kept but actual Set created fresh per element for JIT stability)
-var _clsMatchSet: Set<string> | null = null;
+// ── Module-level reusable buffers for cache-miss match collection ────────────
+// Avoids allocating 3 arrays per cache miss (153 misses × 3 = 459 allocs saved
+// per render).  Safe because computeElementStyle is non-recursive.
+var _gmProps: CSSProps[] = [];
+var _gmSpec:  number[]   = [];
+var _gmOrder: number[]   = [];
+var _gmLen   = 0;
 
 
 export { resetCSSVars, setViewport };
@@ -1439,13 +1439,14 @@ export function computeElementStyle(
   var candidates: CSSRule[] = index
     ? candidateRules(index, tag, id, cls)
     : sheets;
-  // Build O(1) class lookup Set for this element.
-  var _clsSet: Set<string> | null = cls.length > 0 ? new Set<string>(cls) : null;
+  // Build O(1) class lookup Set only for elements with many classes (>4).
+  // For small class lists, Array.includes() is faster than Set construction +
+  // Set.has() in QuickJS.  _matchParsedCompound already falls back to includes().
+  var _clsSet: Set<string> | null = cls.length > 4 ? new Set<string>(cls) : null;
 
-  // Collect matches as parallel arrays to avoid object allocation per match
-  var _mProps: CSSProps[] = [];
-  var _mSpec:  number[]   = [];
-  var _mOrder: number[]   = [];
+  // Collect matches into module-level parallel arrays (avoids 3 array
+  // allocations per cache miss — safe since computeElementStyle is non-recursive).
+  _gmLen = 0;
 
   for (var ri = 0; ri < candidates.length; ri++) {
     var rule = candidates[ri]!;
@@ -1454,7 +1455,7 @@ export function computeElementStyle(
       for (var si = 0; si < rule.parsedSels.length; si++) {
         if (matchesParsedSel(tag, id, cls, attrs, rule.parsedSels[si]!, ancestors, sibIdx, sibCount, _clsSet)) {
           var srcOrder = index ? rule.order : ri;
-          _mProps.push(rule.props); _mSpec.push(rule.spec); _mOrder.push(srcOrder);
+          _gmProps[_gmLen] = rule.props; _gmSpec[_gmLen] = rule.spec; _gmOrder[_gmLen] = srcOrder; _gmLen++;
           break;
         }
       }
@@ -1462,7 +1463,7 @@ export function computeElementStyle(
       for (var si = 0; si < rule.sels.length; si++) {
         if (matchesSingleSel(tag, id, cls, attrs, rule.sels[si]!, ancestors, sibIdx, sibCount)) {
           var srcOrder = index ? rule.order : ri;
-          _mProps.push(rule.props); _mSpec.push(rule.spec); _mOrder.push(srcOrder);
+          _gmProps[_gmLen] = rule.props; _gmSpec[_gmLen] = rule.spec; _gmOrder[_gmLen] = srcOrder; _gmLen++;
           break;
         }
       }
@@ -1470,16 +1471,16 @@ export function computeElementStyle(
   }
 
   // Sort by specificity then source order (insertion sort for small N)
-  if (_mProps.length > 1) {
+  if (_gmLen > 1) {
     // Simple insertion sort — typically < 20 matches
-    for (var i = 1; i < _mProps.length; i++) {
-      var tmpP = _mProps[i]!, tmpS = _mSpec[i]!, tmpO = _mOrder[i]!;
+    for (var i = 1; i < _gmLen; i++) {
+      var tmpP = _gmProps[i]!, tmpS = _gmSpec[i]!, tmpO = _gmOrder[i]!;
       var j = i - 1;
-      while (j >= 0 && (_mSpec[j]! > tmpS || (_mSpec[j]! === tmpS && _mOrder[j]! > tmpO))) {
-        _mProps[j + 1] = _mProps[j]!; _mSpec[j + 1] = _mSpec[j]!; _mOrder[j + 1] = _mOrder[j]!;
+      while (j >= 0 && (_gmSpec[j]! > tmpS || (_gmSpec[j]! === tmpS && _gmOrder[j]! > tmpO))) {
+        _gmProps[j + 1] = _gmProps[j]!; _gmSpec[j + 1] = _gmSpec[j]!; _gmOrder[j + 1] = _gmOrder[j]!;
         j--;
       }
-      _mProps[j + 1] = tmpP; _mSpec[j + 1] = tmpS; _mOrder[j + 1] = tmpO;
+      _gmProps[j + 1] = tmpP; _gmSpec[j + 1] = tmpS; _gmOrder[j + 1] = tmpO;
     }
   }
 
@@ -1488,8 +1489,8 @@ export function computeElementStyle(
   var importantProps: CSSProps[] | null = null;
   var hasKeywords = false;
 
-  for (var mi = 0; mi < _mProps.length; mi++) {
-    var mp = _mProps[mi]!;
+  for (var mi = 0; mi < _gmLen; mi++) {
+    var mp = _gmProps[mi]!;
     if (mp.important && mp.important.size > 0) {
       if (!importantProps) importantProps = [];
       importantProps.push(mp);
@@ -1510,7 +1511,12 @@ export function computeElementStyle(
       hasKeywords: hasKeywords,
     };
     // Only store individual match props when keywords require per-rule iteration
-    if (hasKeywords) cacheEntry.matchProps = _mProps;
+    // Must copy from global buffer since _gmProps is reused across calls
+    if (hasKeywords) {
+      var _mpCopy: CSSProps[] = [];
+      for (var _ci = 0; _ci < _gmLen; _ci++) _mpCopy.push(_gmProps[_ci]!);
+      cacheEntry.matchProps = _mpCopy;
+    }
     _cssMatchCache.set(_cacheKey, cacheEntry);
   }
 

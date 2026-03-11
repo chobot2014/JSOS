@@ -368,6 +368,11 @@ export function buildRuleIndex(rules: CSSRule[]): RuleIndex {
  * avoiding Set allocation on every call.
  */
 var _candidateStamp = 0;
+// Reusable buffer — avoids allocating a new CSSRule[] per candidateRules call.
+// Safe because computeElementStyle consumes the result synchronously before
+// the next call.
+var _candidateBuf: CSSRule[] = [];
+var _candidateLen = 0;
 export function candidateRules(
   index: RuleIndex,
   tag:   string,
@@ -375,13 +380,13 @@ export function candidateRules(
   cls:   string[],
 ): CSSRule[] {
   var stamp = ++_candidateStamp;
-  var result: CSSRule[] = [];
+  _candidateLen = 0;
 
   var tagRules = index.tagBuckets.get(tag);
   if (tagRules) {
     for (var i = 0; i < tagRules.length; i++) {
       var r = tagRules[i]!;
-      if (r._stamp !== stamp) { r._stamp = stamp; result.push(r); }
+      if (r._stamp !== stamp) { r._stamp = stamp; _candidateBuf[_candidateLen++] = r; }
     }
   }
   if (id) {
@@ -389,7 +394,7 @@ export function candidateRules(
     if (idRules) {
       for (var i = 0; i < idRules.length; i++) {
         var r = idRules[i]!;
-        if (r._stamp !== stamp) { r._stamp = stamp; result.push(r); }
+        if (r._stamp !== stamp) { r._stamp = stamp; _candidateBuf[_candidateLen++] = r; }
       }
     }
   }
@@ -398,17 +403,19 @@ export function candidateRules(
     if (clRules) {
       for (var i = 0; i < clRules.length; i++) {
         var r = clRules[i]!;
-        if (r._stamp !== stamp) { r._stamp = stamp; result.push(r); }
+        if (r._stamp !== stamp) { r._stamp = stamp; _candidateBuf[_candidateLen++] = r; }
       }
     }
   }
   var uniRules = index.universalRules;
   for (var i = 0; i < uniRules.length; i++) {
     var r = uniRules[i]!;
-    if (r._stamp !== stamp) { r._stamp = stamp; result.push(r); }
+    if (r._stamp !== stamp) { r._stamp = stamp; _candidateBuf[_candidateLen++] = r; }
   }
 
-  return result;
+  // Truncate to exact length so caller can iterate with .length
+  _candidateBuf.length = _candidateLen;
+  return _candidateBuf;
 }
 
 // ── RenderedLine / RenderedSpan Object Pool ─────────────────────────────────
