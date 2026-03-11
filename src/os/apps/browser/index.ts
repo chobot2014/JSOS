@@ -55,7 +55,10 @@ interface _BoxShadowLayer {
   color: number;   // ARGB
   inset: boolean;
 }
+var _boxShadowCache = new Map<string, _BoxShadowLayer[]>();
 function _parseBoxShadow(css: string): _BoxShadowLayer[] {
+  var cached = _boxShadowCache.get(css);
+  if (cached) return cached;
   var out: _BoxShadowLayer[] = [];
   // Split on commas that are NOT inside parens (e.g. rgb(…))
   var parts: string[] = [];
@@ -108,6 +111,7 @@ function _parseBoxShadow(css: string): _BoxShadowLayer[] {
     var spread  = parseFloat(lens[3] || '0');
     out.push({ offsetX, offsetY, blur, spread, color: colorVal, inset });
   }
+  _boxShadowCache.set(css, out);
   return out;
 }
 
@@ -167,6 +171,8 @@ export class BrowserApp implements App {
   private _pageSource  = '';
   private _pageBaseURL = '';    // from <base href> in current page
   private _pageLines:  RenderedLine[] = [];
+  /** Cached indices of sticky-positioned lines (avoids O(n) scan per frame). */
+  private _stickyIndices: number[] = [];
   private _scrollY     = 0;
   private _maxScrollY  = 0;
   private _loading     = false;
@@ -200,6 +206,10 @@ export class BrowserApp implements App {
   private _imgsFetching = false;
   // Background-image cache: URL → decoded (item 386)
   private _bgImageMap  = new Map<string, DecodedImage | null>();
+  // Cached tiled background-image buffers keyed by 'url:w:h'
+  private _bgTileCache = new Map<string, Uint32Array>();
+  // Reusable RGBA→BGRA canvas pixel buffer
+  private _canvasPixelBuf: Uint32Array | null = null;
   // External CSS cache: URL → parsed CSSRule[] (avoids re-fetch on same-site navigation)
   private _cssCache    = new Map<string, CSSRule[]>();
   // Inline style cache: joined <style> text → parsed CSSRule[] (avoids re-parsing same inline CSS)
@@ -271,6 +281,7 @@ export class BrowserApp implements App {
     this._pageURL = t.url; this._pageTitle = t.title;
     this._history = t.history; this._histIdx = t.histIdx;
     this._pageLines = t.pageLines; this._widgets = t.widgets;
+    this._rebuildStickyIndex();
     this._contentVersion++;          // Phase 3: invalidate tile cache on tab switch
     this._scrollY = t.scrollY; this._maxScrollY = t.maxScrollY;
     this._loading = t.loading; this._status = t.status;
@@ -662,12 +673,18 @@ export class BrowserApp implements App {
 
   // ── Rendering ──────────────────────────────────────────────────────────────
 
-  render(canvas: Canvas): boolean {
-    // Tick JS timers / RAF before dirty check
+  // Per-frame logic tick — called by WM BEFORE composite, separate from render.
+  // Drives JS timers, RAF, transitions, animations, child IPC — all the
+  // expensive logic that doesn't need to happen inside the rendering pass.
+  tick(): void {
     if (this._pageJS) {
       var nowMs = Date.now() - this._jsStartMs;
       this._pageJS.tick(nowMs);
     }
+  }
+
+  render(canvas: Canvas): boolean {
+    // Cursor blink drives dirty only when URL bar / widget focused
     if (this._urlBarFocus || this._focusedWidget >= 0) {
       var prevPhase = (this._cursorBlink >> 4) & 1;
       this._cursorBlink++;
@@ -1031,14 +1048,19 @@ export class BrowserApp implements App {
         if (_bgDec && _bgDec.data) {
           var _bw = _bgDec.w, _bh = _bgDec.h;
           var _bHh = line.lineH + 1;
-          // Build the full tiled block once, then blit in one Uint32Array.set() call
-          var _blk = new Uint32Array(_bHh * w);
-          for (var _br = 0; _br < _bHh; _br++) {
-            var _bsr = _br % _bh;
-            var _roff = _br * w;
-            for (var _bc = 0; _bc < w; _bc++) {
-              _blk[_roff + _bc] = _bgDec.data[_bsr * _bw + (_bc % _bw)] ?? 0;
+          // Cache the tiled block to avoid per-frame allocation
+          var _bgKey = line.bgImageUrl + ':' + w + ':' + _bHh;
+          var _blk = this._bgTileCache.get(_bgKey);
+          if (!_blk || _blk.length !== _bHh * w) {
+            _blk = new Uint32Array(_bHh * w);
+            for (var _br = 0; _br < _bHh; _br++) {
+              var _bsr = _br % _bh;
+              var _roff = _br * w;
+              for (var _bc = 0; _bc < w; _bc++) {
+                _blk[_roff + _bc] = _bgDec.data[_bsr * _bw + (_bc % _bw)] ?? 0;
+              }
             }
+            this._bgTileCache.set(_bgKey, _blk);
           }
           canvas.blitPixelsDirect(_blk, w, _bHh, 0, absY - 1);
         }
@@ -1098,9 +1120,9 @@ export class BrowserApp implements App {
     // ── Sticky second pass — paint "stuck" sticky elements on top of main content
     // An element is "stuck" when it has scrolled past its natural flow position
     // (line.y < scrollY) — it needs to render at y0 + stickyTop instead.
-    for (var _stpI = 0; _stpI < _lines.length; _stpI++) {
-      var _stpLine = _lines[_stpI];
-      if (_stpLine.stickyTop === undefined) continue;
+    // Uses cached _stickyIndices to avoid O(n) scan of all lines.
+    for (var _stpI = 0; _stpI < this._stickyIndices.length; _stpI++) {
+      var _stpLine = _lines[this._stickyIndices[_stpI]];
       var _stpLineY = _stpLine.y - _sv;
       if (_stpLineY >= _stpLine.stickyTop) continue; // in natural position, already painted
       var _stpAbsY = y0 + _stpLine.stickyTop;
@@ -1228,8 +1250,12 @@ export class BrowserApp implements App {
           }
         }
         if (!_cRect) continue;
-        // Convert RGBA → BGRA Uint32Array for blitPixelsDirect
-        var _cPixels = new Uint32Array(_cb.width * _cb.height);
+        // Convert RGBA → BGRA Uint32Array for blitPixelsDirect (reuse buffer)
+        var _cPixelCount = _cb.width * _cb.height;
+        if (!this._canvasPixelBuf || this._canvasPixelBuf.length < _cPixelCount) {
+          this._canvasPixelBuf = new Uint32Array(_cPixelCount);
+        }
+        var _cPixels = this._canvasPixelBuf;
         var _rgba = _cb.rgba;
         for (var _pi = 0; _pi < _cPixels.length; _pi++) {
           var _ri = _pi * 4;
@@ -2613,6 +2639,7 @@ export class BrowserApp implements App {
     var lr = layoutNodes(nodes, bps, w);
     os.debug.log('[browser] _layoutPage: layoutNodes done lines=' + lr.lines.length);
     this._pageLines = lr.lines;
+    this._rebuildStickyIndex();
     this._contentVersion++;          // Phase 3: invalidate tile cache on new layout
     this._widgets   = lr.widgets;
 
@@ -2701,6 +2728,15 @@ export class BrowserApp implements App {
     var esc = this._pageSource
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     return '<h1>Page Source: ' + this._pageURL + '</h1><pre>' + esc + '</pre>';
+  }
+
+  /** Rebuild the cached sticky-element index after _pageLines changes. */
+  private _rebuildStickyIndex(): void {
+    var idxs: number[] = [];
+    for (var i = 0; i < this._pageLines.length; i++) {
+      if (this._pageLines[i].stickyTop !== undefined) idxs.push(i);
+    }
+    this._stickyIndices = idxs;
   }
 }
 

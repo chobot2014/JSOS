@@ -2691,6 +2691,10 @@ const sdk = {
     getFocused(): WMWindow | null { return wm ? wm.getFocused() : null; },
     /** Force a full compositor redraw. */
     markDirty(): void { if (wm) wm.markDirty(); },
+    /** Register a proc ID as app-managed (WM skips it in _tickChildProcs). */
+    registerManagedProc(id: number): void { if (wm) wm.registerManagedProc(id); },
+    /** Unregister a managed proc ID. */
+    unregisterManagedProc(id: number): void { if (wm) wm.unregisterManagedProc(id); },
     /** Screen width in pixels (0 in text mode). */
     screenWidth():  number { return wm ? wm.screenWidth  : 0; },
     /** Screen height in pixels (0 in text mode). */

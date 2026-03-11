@@ -9459,13 +9459,15 @@ export function createPageJS(
             _pageChildCreatedMs = Date.now();
           } catch(_) { _pageChildId = -1; }
           if (_pageChildId >= 0) {
+            // Register with WM so _tickChildProcs skips this proc (we tick it ourselves)
+            try { os.wm.registerManagedProc(_pageChildId); } catch(_) {}
             cb.log('[JS] child runtime created (slot ' + _pageChildId + ')');
             // Bootstrap the child with DOM stubs
             var _bsResult = (kernel as any).procEval(_pageChildId, _childBootstrap);
             if (typeof _bsResult === 'string' && _bsResult.indexOf('Error') === 0) {
               cb.log('[JS] child bootstrap error: ' + _bsResult.slice(0, 200));
               (kernel as any).procDestroy(_pageChildId);
-              _pageChildId = -1;
+              _clearChildProc();
             } else {
               // Inject page-specific context (URL, origin, etc.)
               var _locCtx = [
@@ -9527,7 +9529,7 @@ export function createPageJS(
               if (_childResult.indexOf('CPU fault') >= 0) {
                 cb.log('[JS] child runtime faulted — recycling');
                 try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
-                _pageChildId = -1;
+                _clearChildProc();
                 // Will be recreated on next execScript call
                 return;
               }
@@ -9540,7 +9542,7 @@ export function createPageJS(
             if (_tickResult < 0) {
               cb.log('[JS] child runtime faulted during tick — recycling');
               try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
-              _pageChildId = -1;
+              _clearChildProc();
               return;
             }
             if (Date.now() - _t0Exec > 500)
@@ -10413,6 +10415,13 @@ export function createPageJS(
   // body HTML, title, all queues) in ONE IPC round-trip instead of 6.
   // Backs off to every 4th frame when the child has been idle for >4 frames.
   var _childIdleFrames = 0;  // consecutive frames with no child activity
+  /** Helper: unregister managed proc and clear ID. */
+  function _clearChildProc(): void {
+    if (_pageChildId >= 0) {
+      try { os.wm.unregisterManagedProc(_pageChildId); } catch(_) {}
+    }
+    _pageChildId = -1;
+  }
   function _childTick(): void {
     if (_childTickBusy || _pageChildId < 0) return;
     // Proactively recycle the child runtime before its 15s timers fire.
@@ -10421,7 +10430,7 @@ export function createPageJS(
     if (_pageChildCreatedMs > 0 && Date.now() - _pageChildCreatedMs > _CHILD_MAX_LIFETIME_MS) {
       cb.log('[JS] child runtime lifetime (' + _CHILD_MAX_LIFETIME_MS + 'ms) expired, recycling to prevent 15s JIT crash');
       try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
-      _pageChildId = -1;
+      _clearChildProc();
       _pageChildCreatedMs = 0;
       return;
     }
@@ -10434,7 +10443,7 @@ export function createPageJS(
       if (_ct < 0) {
         cb.log('[JS] child runtime faulted during periodic tick — recycling');
         try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
-        _pageChildId = -1;
+        _clearChildProc();
         return;
       }
       // 3. Adaptive idle: when no jobs ran for >4 consecutive frames, poll every 4th frame
@@ -10545,13 +10554,6 @@ export function createPageJS(
             else if (_ctLe.op === 'del') _localStorage.removeItem(_ctLe.k);
             else if (_ctLe.op === 'clear') _localStorage.clear();
           } catch(_) {}
-        }
-      }
-      // Drain _cookieQueue — sync child document.cookie writes to cookieJar
-      if (_b.cq && _b.cq.length) {
-        var _ctCkOrigin = _locPart('protocol') + '//' + _locPart('host');
-        for (var _ctCki = 0; _ctCki < _b.cq.length; _ctCki++) {
-          try { cookieJar.setCookie(_b.cq[_ctCki], _ctCkOrigin); } catch(_) {}
         }
       }
       // Drain _cookieQueue — sync child document.cookie writes to cookieJar
@@ -10718,7 +10720,7 @@ export function createPageJS(
       if (_pageChildId >= 0) {
         try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
         cb.log('[JS] child runtime destroyed (slot ' + _pageChildId + ')');
-        _pageChildId = -1;
+        _clearChildProc();
         _useChildRuntime = false;
       }
       // Close active WebSocket connections

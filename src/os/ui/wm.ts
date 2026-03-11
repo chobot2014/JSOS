@@ -71,6 +71,8 @@ export interface App {
   onBlur?(): void;
   /** Called when the window content area is resized. */
   onResize?(width: number, height: number): void;
+  /** Per-frame logic tick, called BEFORE composite (separate from render). */
+  tick?(): void;
 }
 
 // ── AppManifest ─────────────────────────────────────────────────────────────────────
@@ -248,6 +250,8 @@ export class WindowManager {
   private _wmDirty      = true;  // set on drag, resize, window ops, clock change
   private _cursorDirty  = false; // set only on cursor movement (enables fast path)
   private _lastClockMin = -1;    // track minute for clock redraw
+  // Reusable array for dirty window indices (avoids per-frame allocation)
+  private _dirtyIdxBuf: number[] = [];
 
   // Cursor save-under — 11×19 pixels saved from screen behind the sprite.
   // Lets the fast cursor path restore the background and redraw only the
@@ -287,6 +291,10 @@ export class WindowManager {
 
   // ── [Item 755] Toast notification queue ───────────────────────────────────
   private _toasts: Array<{ msg: string; bg: number; expires: number }> = [];
+
+  // Proc IDs that apps manage themselves (e.g. browser child runtimes)
+  // WM will skip these in _tickChildProcs to avoid double-ticking.
+  private _appManagedProcs = new Set<number>();
 
   constructor(screen: Canvas) {
     this._screen  = screen;
@@ -663,6 +671,14 @@ export class WindowManager {
       _activity = true;
     }
 
+    // ── App logic ticks — separate from render, runs BEFORE composite ───────
+    for (var _ati = 0; _ati < this._windows.length; _ati++) {
+      var _aw = this._windows[_ati];
+      if (!_aw.minimised && !_aw._crashed && _aw.app.tick) {
+        try { _aw.app.tick(); } catch(_) {}
+      }
+    }
+
     // ── Child processes — budget-gated ──────────────────────────────────────
     this._tickChildProcs(_t0);
     scheduler.tick();
@@ -688,6 +704,11 @@ export class WindowManager {
   /** Mark the WM as needing a repaint (call from app code or external events). */
   markDirty(): void { this._wmDirty = true; }
 
+  /** Register a proc ID as app-managed (WM will skip it in _tickChildProcs). */
+  registerManagedProc(id: number): void { this._appManagedProcs.add(id); }
+  /** Unregister a managed proc ID. */
+  unregisterManagedProc(id: number): void { this._appManagedProcs.delete(id); }
+
   /**
    * Pump every live child JS process each frame.
    * This drives Promise/async resolution and fires onMessage callbacks
@@ -699,6 +720,8 @@ export class WindowManager {
     if (list.length === 0) return;
     for (var i = 0; i < list.length; i++) {
       var id = list[i].id;
+      // Skip procs managed by apps (e.g. browser child runtimes) — they tick themselves
+      if (this._appManagedProcs.has(id)) continue;
       try {
         var _tickResult = kernel.procTick(id);
         // procTick returns -1 on hardware fault; only then destroy
@@ -1050,7 +1073,8 @@ export class WindowManager {
     // Let apps render; track content dirty separately from cursor dirty so we
     // can use the cheap cursor-only fast path when only the mouse has moved.
     var anyContentDirty = this._wmDirty;
-    var dirtyWinIdxs: number[] = [];  // indices of windows with new content
+    var dirtyWinIdxs = this._dirtyIdxBuf;
+    dirtyWinIdxs.length = 0;  // reuse array, avoid per-frame allocation
     for (var ai = 0; ai < this._windows.length; ai++) {
       var wi = this._windows[ai];
       if (!wi.minimised) {
@@ -1171,83 +1195,7 @@ export class WindowManager {
       }
     }
 
-    var drawOneWindow = (win: WMWindow): void => {
-      if (win.minimised) return;
-      if (win.opacity === 0) return;
-      var focused = (win.id === this._focused);
-
-      // Title bar
-      s.fillRect(win.x, win.y, win.width, TITLE_H,
-                 win._crashed ? 0xFF7A1111 :
-                 focused ? FOCUSED_TITLE_COLOR : TITLE_COLOR);
-      // Title text (truncate to avoid overlapping buttons)
-      var maxTitleChars = Math.floor((win.width - 58) / 8);
-      var rawTitle = win._crashed ? '\u26A0 ' + win.title + ' (crashed)' : win.title;
-      var title = rawTitle.length > maxTitleChars
-        ? rawTitle.substring(0, maxTitleChars)
-        : rawTitle;
-      s.drawText(win.x + 6, win.y + 5, title, Colors.WHITE);
-
-      // Title bar buttons (right→left: close, max, min)
-      var bb = win.x + win.width;
-      // Close
-      if (win.closeable) {
-        s.fillRect(bb - 18, win.y + 4, BTN_W, TITLE_H - 8, 0xFFCC3333);
-        s.drawText(bb - 14, win.y + 6, 'X', Colors.WHITE);
-      }
-      // Maximise
-      s.fillRect(bb - 34, win.y + 4, BTN_W, TITLE_H - 8, focused ? 0xFF226622 : 0xFF1A441A);
-      s.drawText(bb - 31, win.y + 6, win.maximised ? '\u25a4' : '\u25a1', Colors.LIGHT_GREY);
-      // Minimise
-      s.fillRect(bb - 50, win.y + 4, BTN_W, TITLE_H - 8, focused ? 0xFF664422 : 0xFF442D17);
-      s.drawText(bb - 47, win.y + 6, '_', Colors.LIGHT_GREY);
-
-      // Content area
-      s.fillRect(win.x, win.y + TITLE_H, win.width, win.height - TITLE_H, 0xFF111111);
-
-      // Blit window canvas (clamped to actual canvas dimensions to handle mid-resize)
-      var contentH = win.height - TITLE_H;
-      var blitW = Math.min(win.width, win.canvas.width);
-      var blitH = Math.min(contentH, win.canvas.height);
-      if (win.opacity >= 255) {
-        s.blit(win.canvas, 0, 0, win.x, win.y + TITLE_H, blitW, blitH);
-      } else {
-        s.blitAlpha(win.canvas, 0, 0, win.x, win.y + TITLE_H, blitW, blitH, win.opacity);
-      }
-
-      // Crash overlay: drawn over the content area when app has thrown
-      if (win._crashed) {
-        var cox = win.x;
-        var coy = win.y + TITLE_H;
-        var cow = win.width;
-        var coh = win.height - TITLE_H;
-        // Dark translucent red background
-        s.fillRect(cox, coy, cow, coh, 0xC0200000);
-        // Warning icon + title
-        s.drawText(cox + 10, coy + 10, '\u26A0  App Crashed', Colors.WHITE);
-        // Error message
-        var errLine0 = (win._crashMsg || 'Uncaught exception').substring(0, Math.floor((cow - 20) / 8));
-        s.drawText(cox + 10, coy + 26, errLine0, 0xFFFF9988);
-        // Restart button
-        var rbW = cow - 20;  var rbH = 20;
-        var rbX = cox + 10;  var rbY = coy + coh - 30;
-        s.fillRect(rbX, rbY, rbW, rbH, 0xFF1A2B3A);
-        s.drawRect(rbX, rbY, rbW, rbH, 0xFF4488BB);
-        s.drawText(rbX + Math.max(2, (rbW - 160) >> 1), rbY + 6, 'Click here to Restart', Colors.LIGHT_GREY);
-      }
-
-      // Resize grip: three diagonal lines at bottom-right
-      var gx = win.x + win.width - 1;
-      var gy = win.y + win.height - 1;
-      var gc = focused ? 0xFF6688AA : 0xFF445566;
-      s.drawLine(gx - 8, gy, gx, gy - 8, gc);
-      s.drawLine(gx - 5, gy, gx, gy - 5, gc);
-      s.drawLine(gx - 2, gy, gx, gy - 2, gc);
-
-      // Window border
-      s.drawRect(win.x, win.y, win.width, win.height,
-                 focused ? 0xFF5599CC : 0xFF445566);
-    };
+    var drawOneWindow = this._drawOneWindow.bind(this, s);
 
     for (var i = 0; i < this._windows.length; i++) {
       var win = this._windows[i];
@@ -1259,12 +1207,10 @@ export class WindowManager {
     if (modalWin !== null) {
       var buf = s.getBuffer();
       var screenH = s.height - TASKBAR_H;
-      for (var dy2 = 0; dy2 < screenH; dy2++) {
-        for (var dx2 = (dy2 & 1); dx2 < s.width; dx2 += 2) {
-          var pidx = dy2 * s.width + dx2;
-          var px2  = buf[pidx];
-          buf[pidx] = ((px2 >> 1) & 0x7F7F7F7F) | 0xFF000000;
-        }
+      // Dim entire screen in one pass with stride-4 skip (halve brightness)
+      var totalPx = screenH * s.width;
+      for (var pidx = 0; pidx < totalPx; pidx++) {
+        buf[pidx] = ((buf[pidx] >> 1) & 0x7F7F7F7F) | 0xFF000000;
       }
       drawOneWindow(modalWin);
     }
@@ -1285,6 +1231,75 @@ export class WindowManager {
 
     // 6. Flip to framebuffer
     s.flip();
+  }
+
+  /** Draw a single window (title bar, content, optional crash overlay, resize grip, border). */
+  private _drawOneWindow(s: Canvas, win: WMWindow): void {
+    if (win.minimised) return;
+    if (win.opacity === 0) return;
+    var focused = (win.id === this._focused);
+
+    // Title bar
+    s.fillRect(win.x, win.y, win.width, TITLE_H,
+               win._crashed ? 0xFF7A1111 :
+               focused ? FOCUSED_TITLE_COLOR : TITLE_COLOR);
+    var maxTitleChars = Math.floor((win.width - 58) / 8);
+    var rawTitle = win._crashed ? '\u26A0 ' + win.title + ' (crashed)' : win.title;
+    var title = rawTitle.length > maxTitleChars
+      ? rawTitle.substring(0, maxTitleChars)
+      : rawTitle;
+    s.drawText(win.x + 6, win.y + 5, title, Colors.WHITE);
+
+    // Title bar buttons (right→left: close, max, min)
+    var bb = win.x + win.width;
+    if (win.closeable) {
+      s.fillRect(bb - 18, win.y + 4, BTN_W, TITLE_H - 8, 0xFFCC3333);
+      s.drawText(bb - 14, win.y + 6, 'X', Colors.WHITE);
+    }
+    s.fillRect(bb - 34, win.y + 4, BTN_W, TITLE_H - 8, focused ? 0xFF226622 : 0xFF1A441A);
+    s.drawText(bb - 31, win.y + 6, win.maximised ? '\u25a4' : '\u25a1', Colors.LIGHT_GREY);
+    s.fillRect(bb - 50, win.y + 4, BTN_W, TITLE_H - 8, focused ? 0xFF664422 : 0xFF442D17);
+    s.drawText(bb - 47, win.y + 6, '_', Colors.LIGHT_GREY);
+
+    // Content area
+    s.fillRect(win.x, win.y + TITLE_H, win.width, win.height - TITLE_H, 0xFF111111);
+
+    var contentH = win.height - TITLE_H;
+    var blitW = Math.min(win.width, win.canvas.width);
+    var blitH = Math.min(contentH, win.canvas.height);
+    if (win.opacity >= 255) {
+      s.blit(win.canvas, 0, 0, win.x, win.y + TITLE_H, blitW, blitH);
+    } else {
+      s.blitAlpha(win.canvas, 0, 0, win.x, win.y + TITLE_H, blitW, blitH, win.opacity);
+    }
+
+    if (win._crashed) {
+      var cox = win.x;
+      var coy = win.y + TITLE_H;
+      var cow = win.width;
+      var coh = win.height - TITLE_H;
+      s.fillRect(cox, coy, cow, coh, 0xC0200000);
+      s.drawText(cox + 10, coy + 10, '\u26A0  App Crashed', Colors.WHITE);
+      var errLine0 = (win._crashMsg || 'Uncaught exception').substring(0, Math.floor((cow - 20) / 8));
+      s.drawText(cox + 10, coy + 26, errLine0, 0xFFFF9988);
+      var rbW = cow - 20;  var rbH = 20;
+      var rbX = cox + 10;  var rbY = coy + coh - 30;
+      s.fillRect(rbX, rbY, rbW, rbH, 0xFF1A2B3A);
+      s.drawRect(rbX, rbY, rbW, rbH, 0xFF4488BB);
+      s.drawText(rbX + Math.max(2, (rbW - 160) >> 1), rbY + 6, 'Click here to Restart', Colors.LIGHT_GREY);
+    }
+
+    // Resize grip
+    var gx = win.x + win.width - 1;
+    var gy = win.y + win.height - 1;
+    var gc = focused ? 0xFF6688AA : 0xFF445566;
+    s.drawLine(gx - 8, gy, gx, gy - 8, gc);
+    s.drawLine(gx - 5, gy, gx, gy - 5, gc);
+    s.drawLine(gx - 2, gy, gx, gy - 2, gc);
+
+    // Window border
+    s.drawRect(win.x, win.y, win.width, win.height,
+               focused ? 0xFF5599CC : 0xFF445566);
   }
 
   private _drawTaskbar(): void {
