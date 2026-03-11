@@ -116,35 +116,48 @@ export function tokenise(html: string): HtmlToken[] {
   var n = html.length;
   var i = 0;
 
+  // charCodeAt constants — avoids 1-char string allocation per html[i] access
+  var CC_LT = 60, CC_GT = 62, CC_SLASH = 47, CC_EQ = 61;
+  var CC_SPACE = 32, CC_TAB = 9, CC_NL = 10, CC_CR = 13;
+  var CC_DQUOT = 34, CC_SQUOT = 39, CC_BANG = 33, CC_QUES = 63;
+  var CC_DASH = 45, CC_AMP = 38;
+
   function skipWS(): void {
-    while (i < n && (html[i] === ' ' || html[i] === '\t' ||
-                     html[i] === '\n' || html[i] === '\r')) i++;
+    while (i < n) {
+      var cc = html.charCodeAt(i);
+      if (cc !== CC_SPACE && cc !== CC_TAB && cc !== CC_NL && cc !== CC_CR) break;
+      i++;
+    }
   }
   function readAttrValue(): string {
     if (i >= n) return '';
-    if (html[i] === '"' || html[i] === "'") {
-      var q = html[i++];
-      // Use indexOf to jump to closing quote in one shot (O(1) scan) rather
-      // than character-by-character (O(attr_length)) — big win for long URLs,
-      // style= strings, data-* attributes, etc.
-      var _qClose = html.indexOf(q, i);
+    var cc = html.charCodeAt(i);
+    if (cc === CC_DQUOT || cc === CC_SQUOT) {
+      var q = cc; i++;
+      // Use indexOf to jump to closing quote in one shot (O(1) scan)
+      var qChar = q === CC_DQUOT ? '"' : "'";
+      var _qClose = html.indexOf(qChar, i);
       var v = _qClose >= 0 ? html.slice(i, _qClose) : html.slice(i);
       i = _qClose >= 0 ? _qClose + 1 : n;
       return v;
     }
-    var v2 = '';
-    while (i < n && html[i] !== '>' && html[i] !== ' ' &&
-           html[i] !== '\t' && html[i] !== '\n') v2 += html[i++];
-    return v2;
+    // Unquoted: scan to boundary then slice once (avoid char-by-char concat)
+    var vs = i;
+    while (i < n) {
+      var vc = html.charCodeAt(i);
+      if (vc === CC_GT || vc === CC_SPACE || vc === CC_TAB || vc === CC_NL) break;
+      i++;
+    }
+    return html.slice(vs, i);
   }
   function readTag(): HtmlToken | null {
     i++;
     var close = false;
-    if (html[i] === '/') { close = true; i++; }
-    if (html[i] === '!' || html[i] === '?') {
-      // Comment, CDATA, DOCTYPE, or PI: skip to end of tag in one scan
-      // Special case: <!-- --> requires finding -->
-      if (html[i] === '!' && html[i+1] === '-' && html[i+2] === '-') {
+    if (html.charCodeAt(i) === CC_SLASH) { close = true; i++; }
+    var firstCC = html.charCodeAt(i);
+    if (firstCC === CC_BANG || firstCC === CC_QUES) {
+      // Comment, CDATA, DOCTYPE, or PI: skip to end
+      if (firstCC === CC_BANG && html.charCodeAt(i+1) === CC_DASH && html.charCodeAt(i+2) === CC_DASH) {
         var _cmEnd = html.indexOf('-->', i + 3);
         i = _cmEnd >= 0 ? _cmEnd + 3 : n;
       } else {
@@ -153,13 +166,15 @@ export function tokenise(html: string): HtmlToken[] {
       }
       return null;
     }
-    var tag = '';
-    while (i < n && html[i] !== '>' && html[i] !== '/' &&
-           html[i] !== ' ' && html[i] !== '\t' && html[i] !== '\n')
-      tag += html[i++];
-    tag = tag.toLowerCase();
+    // Read tag name: scan to boundary, then slice once (avoid char-by-char concat)
+    var tagStart = i;
+    while (i < n) {
+      var tc = html.charCodeAt(i);
+      if (tc === CC_GT || tc === CC_SLASH || tc === CC_SPACE || tc === CC_TAB || tc === CC_NL) break;
+      i++;
+    }
+    var tag = html.slice(tagStart, i).toLowerCase();
     // Close tags never have attributes — skip to '>' and return early.
-    // Use indexOf for the skip to avoid char-by-char on malformed close tags.
     if (close) {
       var _ctEnd = html.indexOf('>', i);
       i = _ctEnd >= 0 ? _ctEnd + 1 : n;
@@ -167,21 +182,24 @@ export function tokenise(html: string): HtmlToken[] {
     }
     var attrs = new Map<string, string>();
     skipWS();
-    while (i < n && html[i] !== '>' && html[i] !== '/') {
-      var nm = '';
-      while (i < n && html[i] !== '=' && html[i] !== '>' &&
-             html[i] !== '/' && html[i] !== ' ' &&
-             html[i] !== '\t' && html[i] !== '\n') nm += html[i++];
-      nm = nm.toLowerCase().trim();
+    while (i < n && html.charCodeAt(i) !== CC_GT && html.charCodeAt(i) !== CC_SLASH) {
+      // Read attribute name: scan to boundary, then slice
+      var nmStart = i;
+      while (i < n) {
+        var nc = html.charCodeAt(i);
+        if (nc === CC_EQ || nc === CC_GT || nc === CC_SLASH || nc === CC_SPACE || nc === CC_TAB || nc === CC_NL) break;
+        i++;
+      }
+      var nm = html.slice(nmStart, i).toLowerCase().trim();
       skipWS();
       var vl = '';
-      if (i < n && html[i] === '=') { i++; skipWS(); vl = readAttrValue(); }
+      if (i < n && html.charCodeAt(i) === CC_EQ) { i++; skipWS(); vl = readAttrValue(); }
       if (nm) attrs.set(nm, vl);
       skipWS();
     }
     var self = false;
-    if (i < n && html[i] === '/') { self = true; i++; }
-    if (i < n && html[i] === '>') i++;
+    if (i < n && html.charCodeAt(i) === CC_SLASH) { self = true; i++; }
+    if (i < n && html.charCodeAt(i) === CC_GT) i++;
     var kind: 'open' | 'close' | 'self' = self ? 'self' : 'open';
     return { kind, tag, text: '', attrs };
   }
@@ -189,7 +207,7 @@ export function tokenise(html: string): HtmlToken[] {
   // Hoisted: compute once instead of once-per-script/style-tag (was O(n×tags))
   var htmlLC = html.toLowerCase();
   while (i < n) {
-    if (html[i] === '<') {
+    if (html.charCodeAt(i) === CC_LT) {
       var tok = readTag();
       if (tok) {
         tokens.push(tok);
