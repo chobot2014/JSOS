@@ -526,11 +526,11 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
 
     // ── Receive ────────────────────────────────────────────────────────────
     if (f.stage === 'receiving') {
-      // Drain ALL available data in one coroutine step (no inter-tick yielding).
+      // Drain available data in one coroutine step (no inter-tick yielding).
       // This avoids the ~20ms WM frame latency for each NIC read when TCP delivers
       // data in multiple segments (common with gzip + chunked encoding).
-      // We spin up to 64 reads; if still pending data, we'll continue next tick.
-      var _drainLimit = 64;
+      // Cap at 16 reads to avoid monopolising the frame; remaining data next tick.
+      var _drainLimit = 16;
       for (var _dr = 0; _dr < _drainLimit; _dr++) {
         var chunk: number[] | null = f.tls ? f.tls.readNB() : net.recvBytesNB(f.sock);
         if (!chunk || chunk.length === 0) break;  // nothing available right now

@@ -374,9 +374,10 @@ function main(): void {
       // guardedRun calls — only kernel.sleep(8) which is a trivial C call.
       // _tickChildProcs now auto-destroys faulting children, so the same
       // corrupt child won't be re-ticked on the next frame.
+      var _wasActive = false;
       var _tickFn = function() {
         kernel.yield();          // cooperative scheduler tick — unblock sleeping threads
-        try { wmInst.tick(); } catch(e) { kernel.serialPut('[tick] wm error: ' + String(e).slice(0, 100) + '\n'); }
+        try { _wasActive = wmInst.tick(); } catch(e) { kernel.serialPut('[tick] wm error: ' + String(e).slice(0, 100) + '\n'); }
         try { init.tick(kernel.getUptime()); } catch(e) { kernel.serialPut('[tick] init error: ' + String(e).slice(0, 100) + '\n'); }
         try { writebackTimer.tick(kernel.getTicks()); } catch(e) { kernel.serialPut('[tick] wb error: ' + String(e).slice(0, 100) + '\n'); }
       };
@@ -403,8 +404,10 @@ function main(): void {
         } else {
           try { _tickFn(); } catch (_) {}
         }
-        // Adaptive sleep: 1 ms when active (fast poll), ramp to 8 ms when idle
+        // Adaptive sleep: 1ms when active (fast poll), ramp to 4ms when idle.
+        // Reset idle count on real activity (input, dirty windows, coroutines).
         if (_consecutiveFaults > 0) { kernel.sleep(2); _idleCount = 0; }
+        else if (_wasActive) { kernel.sleep(1); _idleCount = 0; }
         else if (_idleCount < 4) { kernel.sleep(1); _idleCount++; }
         else { kernel.sleep(4); }
       }

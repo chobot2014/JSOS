@@ -644,8 +644,12 @@ export class WindowManager {
   }
 
   // ── Per-frame tick ─────────────────────────────────────────────────────
+  // Time-budgeted: input + render always run; background work (TCP, profiler,
+  // GC) is skipped when the frame has already exceeded ~20ms (2 PIT ticks).
+  // JIT compilation is deferred to frames that are running under budget.
 
-  tick(): void {
+  tick(): boolean {
+    var _t0 = kernel.getTicks();
     this._pollInput();
 
     // ── Cursor fast blit — runs BEFORE any app render ──────────────────────
@@ -657,14 +661,23 @@ export class WindowManager {
       this._cursorDirty = false;
     }
 
-    this._tickChildProcs();
+    this._tickChildProcs(_t0);
     scheduler.tick();
-    threadManager.tickCoroutines();   // cooperative fetch / async coroutines
-    net.tcpTick();                    // TCP retransmit / keepalive / TIME_WAIT timers
-    systemProfiler.tick();
+    threadManager.tickCoroutines(_t0);   // cooperative fetch / async coroutines
+
+    // ── Low-priority subsystems — skip when frame is already over budget ──
+    if (kernel.getTicks() - _t0 < 2) {
+      net.tcpTick();                    // TCP retransmit / keepalive / TIME_WAIT timers
+    }
+    if (kernel.getTicks() - _t0 < 2) {
+      systemProfiler.tick();
+    }
     // GC incremental slice — runs every frame, max 1ms budget (item 877/878)
     try { globalGC.tick(_wmGCTick++); } catch (_) {}
     this._composite();
+
+    // Return true if there was meaningful activity this frame
+    return this._wmDirty || this._cursorDirty || threadManager.hasCoroutines();
   }
   /** Mark the WM as needing a repaint (call from app code or external events). */
   markDirty(): void { this._wmDirty = true; }
@@ -675,7 +688,7 @@ export class WindowManager {
    * without any user code needing to manually call p.tick().
    * Guard: skip the kernel.procList() allocation entirely when no children exist.
    */
-  private _tickChildProcs(): void {
+  private _tickChildProcs(_t0: number): void {
     var list = kernel.procList();
     if (list.length === 0) return;
     for (var i = 0; i < list.length; i++) {
@@ -697,9 +710,11 @@ export class WindowManager {
         kernel.serialPut('[wm] serviceTimers(' + id + ') threw: ' + String(e2).slice(0, 120) + '\n');
       }
       try {
-        /* Step 11: service any pending child JIT compilation requests */
-        var pendingBC = kernel.procPendingJIT(id);
-        if (pendingBC !== 0) { _serviceChildJIT(id, pendingBC); }
+        /* Defer JIT compilation when frame is already over budget (~20ms) */
+        if (kernel.getTicks() - _t0 < 2) {
+          var pendingBC = kernel.procPendingJIT(id);
+          if (pendingBC !== 0) { _serviceChildJIT(id, pendingBC); }
+        }
       } catch(e3) {
         kernel.serialPut('[wm] JIT(' + id + ') threw: ' + String(e3).slice(0, 120) + '\n');
       }
