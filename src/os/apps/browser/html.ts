@@ -4,7 +4,7 @@ import type {
 } from './types.js';
 import { parseInlineStyle, parseCSSColor } from './css.js';
 import { isGradient } from './gradient.js';
-import { type CSSRule, type AncestorEl, computeElementStyle, getPseudoContent } from './stylesheet.js';
+import { type CSSRule, type AncestorEl, computeElementStyle, getPseudoContent, mergeProps } from './stylesheet.js';
 import { buildRuleIndex, type RuleIndex, markContainLayout } from './cache.js';
 import { renderSVG } from './svg.js';
 
@@ -94,6 +94,8 @@ const _ENTITIES: Record<string, string> = {
  * O(n log m) — single regex pass over text + Map lookup.
  */
 function _decodeEntities(raw: string): string {
+  // Fast path: skip regex when no entity markers present (~60% of text nodes)
+  if (raw.indexOf('&') < 0) return raw;
   return raw.replace(/&(?:([a-zA-Z][a-zA-Z0-9]*)|#([0-9]{1,7})|#x([0-9a-fA-F]{1,6}));/g,
     (_m: string, name: string, dec: string, hex: string): string => {
       if (name) { var r = _ENTITIES[name]; return r !== undefined ? r : _m; }
@@ -230,7 +232,11 @@ export function tokenise(html: string): HtmlToken[] {
         if (c >= 65 && c <= 90) c += 32;
         if (c !== tag.charCodeAt(k)) { ok = false; break; }
       }
-      if (ok) return p;
+      if (ok) {
+        // Verify tag name is complete (followed by >, whitespace, or /)
+        var _nextCC = html.charCodeAt(p + 2 + tl);
+        if (_nextCC === CC_GT || _nextCC <= CC_SPACE || _nextCC === CC_SLASH || _nextCC !== _nextCC /*NaN*/) return p;
+      }
     }
     return -1;
   }
@@ -381,87 +387,11 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
 
   function pushCSS(p: CSSProps): void {
     cssStack.push({ ...curCSS });
-    // ── Text / font ────────────────────────────────────────────────────────
-    if (p.color     !== undefined) curCSS.color     = p.color;
-    if (p.bgColor   !== undefined) curCSS.bgColor   = p.bgColor;
-    if (p.bold      !== undefined) curCSS.bold      = p.bold;
-    if (p.italic    !== undefined) curCSS.italic    = p.italic;
-    if (p.underline !== undefined) curCSS.underline = p.underline;
-    if (p.strike    !== undefined) curCSS.strike    = p.strike;
-    if (p.align     !== undefined) curCSS.align     = p.align;
+    // Handle hidden visibility specially (tracks skipDepth counter)
     if (p.hidden) { curCSS.hidden = true; skipDepth++; }
     else if (p.hidden === false) { if (curCSS.hidden) skipDepth = Math.max(0, skipDepth - 1); curCSS.hidden = false; }
-    if (p.visibility !== undefined) curCSS.visibility = p.visibility;
-    if (p.fontScale     !== undefined) curCSS.fontScale     = p.fontScale;
-    if (p.fontFamily    !== undefined) curCSS.fontFamily    = p.fontFamily;
-    if (p.fontWeight    !== undefined) curCSS.fontWeight    = p.fontWeight;
-    if (p.lineHeight    !== undefined) curCSS.lineHeight    = p.lineHeight;
-    if (p.letterSpacing !== undefined) curCSS.letterSpacing = p.letterSpacing;
-    if (p.wordSpacing   !== undefined) curCSS.wordSpacing   = p.wordSpacing;
-    if (p.textTransform !== undefined) curCSS.textTransform = p.textTransform;
-    if (p.textDecoration !== undefined) curCSS.textDecoration = p.textDecoration;
-    if (p.textOverflow  !== undefined) curCSS.textOverflow  = p.textOverflow;
-    if (p.whiteSpace    !== undefined) curCSS.whiteSpace    = p.whiteSpace;
-    if (p.verticalAlign !== undefined) curCSS.verticalAlign = p.verticalAlign;
-    if (p.listStyleType !== undefined) curCSS.listStyleType = p.listStyleType;
-    // ── Layout ─────────────────────────────────────────────────────────────
-    if (p.display      !== undefined) curCSS.display      = p.display;
-    if (p.boxSizing    !== undefined) curCSS.boxSizing    = p.boxSizing;
-    if (p.float        !== undefined) curCSS.float        = p.float;
-    if (p.width        !== undefined) curCSS.width        = p.width;
-    if (p.height       !== undefined) curCSS.height       = p.height;
-    if (p.minWidth     !== undefined) curCSS.minWidth     = p.minWidth;
-    if (p.minHeight    !== undefined) curCSS.minHeight    = p.minHeight;
-    if (p.maxWidth     !== undefined) curCSS.maxWidth     = p.maxWidth;
-    if (p.maxHeight    !== undefined) curCSS.maxHeight    = p.maxHeight;
-    if (p.aspectRatio  !== undefined) curCSS.aspectRatio  = p.aspectRatio;
-    if (p.paddingTop    !== undefined) curCSS.paddingTop    = p.paddingTop;
-    if (p.paddingRight  !== undefined) curCSS.paddingRight  = p.paddingRight;
-    if (p.paddingBottom !== undefined) curCSS.paddingBottom = p.paddingBottom;
-    if (p.paddingLeft   !== undefined) curCSS.paddingLeft   = p.paddingLeft;
-    if (p.marginTop    !== undefined) curCSS.marginTop    = p.marginTop;
-    if (p.marginRight  !== undefined) curCSS.marginRight  = p.marginRight;
-    if (p.marginBottom !== undefined) curCSS.marginBottom = p.marginBottom;
-    if (p.marginLeft   !== undefined) curCSS.marginLeft   = p.marginLeft;
-    // ── Border / visual ────────────────────────────────────────────────────
-    if (p.borderWidth  !== undefined) curCSS.borderWidth  = p.borderWidth;
-    if (p.borderStyle  !== undefined) curCSS.borderStyle  = p.borderStyle;
-    if (p.borderColor  !== undefined) curCSS.borderColor  = p.borderColor;
-    if (p.borderRadius !== undefined) curCSS.borderRadius = p.borderRadius;
-    if (p.opacity      !== undefined) curCSS.opacity      = p.opacity;
-    if (p.boxShadow    !== undefined) curCSS.boxShadow    = p.boxShadow;
-    if (p.textShadow   !== undefined) curCSS.textShadow   = p.textShadow;
-    // ── Position ───────────────────────────────────────────────────────────
-    if (p.position !== undefined) curCSS.position = p.position;
-    if (p.top      !== undefined) curCSS.top      = p.top;
-    if (p.right    !== undefined) curCSS.right    = p.right;
-    if (p.bottom   !== undefined) curCSS.bottom   = p.bottom;
-    if (p.left     !== undefined) curCSS.left     = p.left;
-    if (p.zIndex   !== undefined) curCSS.zIndex   = p.zIndex;
-    if (p.overflow !== undefined) curCSS.overflow = p.overflow;
-    // ── Flex ───────────────────────────────────────────────────────────────
-    if (p.flexDirection  !== undefined) curCSS.flexDirection  = p.flexDirection;
-    if (p.flexWrap       !== undefined) curCSS.flexWrap       = p.flexWrap;
-    if (p.justifyContent !== undefined) curCSS.justifyContent = p.justifyContent;
-    if (p.alignItems     !== undefined) curCSS.alignItems     = p.alignItems;
-    if (p.alignContent   !== undefined) curCSS.alignContent   = p.alignContent;
-    if (p.flexGrow       !== undefined) curCSS.flexGrow       = p.flexGrow;
-    if (p.flexShrink     !== undefined) curCSS.flexShrink     = p.flexShrink;
-    if (p.flexBasis      !== undefined) curCSS.flexBasis      = p.flexBasis;
-    if (p.alignSelf      !== undefined) curCSS.alignSelf      = p.alignSelf;
-    if (p.order          !== undefined) curCSS.order          = p.order;
-    if (p.gap            !== undefined) curCSS.gap            = p.gap;
-    // ── Transform / cursor ─────────────────────────────────────────────────
-    if (p.transform     !== undefined) curCSS.transform     = p.transform;
-    if (p.cursor        !== undefined) curCSS.cursor        = p.cursor;
-    if (p.pointerEvents !== undefined) curCSS.pointerEvents = p.pointerEvents;
-    // ── Background extras ──────────────────────────────────────────────────
-    if (p.backgroundImage    !== undefined) curCSS.backgroundImage    = p.backgroundImage;
-    if (p.backgroundSize     !== undefined) curCSS.backgroundSize     = p.backgroundSize;
-    if (p.backgroundPosition !== undefined) curCSS.backgroundPosition = p.backgroundPosition;
-    if (p.backgroundRepeat   !== undefined) curCSS.backgroundRepeat   = p.backgroundRepeat;
-    // ── CSS contain (item 893) ─────────────────────────────────────────────
-    if (p.contain !== undefined) curCSS.contain = p.contain;
+    // Merge all defined properties from p into curCSS using fast _ks path
+    mergeProps(curCSS, p);
   }
   function popCSS(): void {
     if (cssStack.length > 0) {
@@ -1504,7 +1434,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
               if (curCSS.paddingBottom) _cp.paddingBottom = curCSS.paddingBottom;
               if (curCSS.marginTop) _cp.marginTop = curCSS.marginTop;
               if (curCSS.marginBottom) _cp.marginBottom = curCSS.marginBottom;
-              if (curCSS.textAlign) _cp.textAlign = curCSS.align;
+              if (curCSS.align) _cp.textAlign = curCSS.align;
               if (curCSS.overflow) _cp.overflow = curCSS.overflow;
               if (curCSS.borderRadius !== undefined) _cp.borderRadius = curCSS.borderRadius;
               if (curCSS.borderWidth !== undefined) _cp.borderWidth = curCSS.borderWidth;
@@ -2231,6 +2161,14 @@ const VOID_ELEMENTS = new Set([
  * Handles foster parenting for tables (items 360–361) and the major insertion
  * mode transitions defined in the WHATWG spec.
  */
+
+// ── Hoisted Set constants for hot-path functions (avoid allocating per call) ──
+var _IMPLIED_CLOSE = new Set(['dd', 'dt', 'li', 'optgroup', 'option',
+  'p', 'rb', 'rp', 'rt', 'rtc', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr']);
+var _SCOPE_MARKERS = new Set(['applet', 'caption', 'html', 'table', 'td',
+  'th', 'marquee', 'object', 'template']);
+var _TABLE_MARKERS = new Set(['html', 'table', 'template']);
+
 export function buildTreeWHATWG(tokens: HtmlToken[]): TreeNode {
   var root: TreeNode = _makeTreeNode('#document', new Map());
   var stack: TreeNode[] = [];
@@ -2282,33 +2220,28 @@ export function buildTreeWHATWG(tokens: HtmlToken[]): TreeNode {
 
   /** Close implied tags (e.g., <p> before a block-level element). */
   function closeImplied(stopAt: string = ''): void {
-    var IMPLIED_CLOSE = new Set(['dd', 'dt', 'li', 'optgroup', 'option',
-      'p', 'rb', 'rp', 'rt', 'rtc', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr']);
     while (stack.length > 0) {
       var top = stack[stack.length - 1];
       if (top.tag === stopAt) break;
-      if (!IMPLIED_CLOSE.has(top.tag)) break;
+      if (!_IMPLIED_CLOSE.has(top.tag)) break;
       stack.pop();
     }
   }
 
   /** Check if `tag` is in the stack (for in-scope checks). */
   function hasInScope(tag: string): boolean {
-    var SCOPE_MARKERS = new Set(['applet', 'caption', 'html', 'table', 'td',
-      'th', 'marquee', 'object', 'template']);
     for (var si = stack.length - 1; si >= 0; si--) {
       if (stack[si].tag === tag) return true;
-      if (SCOPE_MARKERS.has(stack[si].tag)) return false;
+      if (_SCOPE_MARKERS.has(stack[si].tag)) return false;
     }
     return false;
   }
 
   /** hasInTableScope: for table-specific scope checks. */
   function hasInTableScope(tag: string): boolean {
-    var TABLE_MARKERS = new Set(['html', 'table', 'template']);
     for (var si = stack.length - 1; si >= 0; si--) {
       if (stack[si].tag === tag) return true;
-      if (TABLE_MARKERS.has(stack[si].tag)) return false;
+      if (_TABLE_MARKERS.has(stack[si].tag)) return false;
     }
     return false;
   }

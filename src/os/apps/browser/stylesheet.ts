@@ -78,6 +78,8 @@ export interface CSSRule {
   order: number;    // source order index (set after parseStylesheet, avoids indexOf O(n²))
   parsedSels?: ParsedSel[];  // pre-parsed selectors — set by parseStylesheet for hot-path matching
   _stamp?: number;  // dedup stamp for candidateRules (avoids Set allocation)
+  /** Pre-computed pseudo-element info for content rules (avoids regex in getPseudoContent hot path) */
+  _pseudoInfos?: Array<{ pseudo: 'before' | 'after'; hostParsed: ParsedSel } | null>;
 }
 
 // ── Pre-parsed selector types (no regex at match time) ───────────────────────
@@ -524,170 +526,6 @@ export function matchesParsedSel(
   return true;
 }
 
-/**
- * Match a compound selector string (no combinators) against element descriptors.
- * E.g.: 'div.foo#bar[href]'
- */
-function matchesCompound(
-  tag: string, id: string, cls: string[],
-  attrs: Map<string, string>,
-  compound: string,
-  sibIdx?: number,
-  sibCount?: number,
-): boolean {
-  if (!compound || compound === '*') return true;
-
-  var rest = compound;
-
-  // Extract type selector at start (letter/digit chars up to ./#/[/:)
-  var typeMatch = rest.match(/^([a-zA-Z][a-zA-Z0-9-]*)/);
-  if (typeMatch) {
-    if (typeMatch[1].toLowerCase() !== tag) return false;
-    rest = rest.slice(typeMatch[1].length);
-  }
-
-  // Match remaining simple selectors
-  while (rest.length > 0) {
-    if (rest[0] === '#') {
-      // ID selector
-      var idM = rest.match(/^#([^.#[:\s]+)/);
-      if (!idM) return false;
-      if (id !== idM[1]) return false;
-      rest = rest.slice(idM[0].length);
-    } else if (rest[0] === '.') {
-      // Class selector
-      var clM = rest.match(/^\.([^.#[:\s]+)/);
-      if (!clM) return false;
-      if (!cls.includes(clM[1])) return false;
-      rest = rest.slice(clM[0].length);
-    } else if (rest[0] === '[') {
-      // Attribute selector [name] [name=val] [name^=val] etc
-      var atM = rest.match(/^\[([^\]]+)\]/);
-      if (!atM) return false;
-      var atExpr = atM[1]!;
-      var eqM    = atExpr.match(/^([a-zA-Z_-][a-zA-Z0-9_-]*)([~|^$*]?=)?(.+)?$/);
-      if (eqM) {
-        var atName = eqM[1]!.toLowerCase().trim();
-        var atOp   = eqM[2] || '';
-        var atVal  = (eqM[3] || '').replace(/^['"]|['"]$/g, '');
-        var elVal  = attrs.get(atName) ?? (atName === 'id' ? id : atName === 'class' ? cls.join(' ') : '');
-        if (atOp === '') {
-          if (!attrs.has(atName) && atName !== 'id' && atName !== 'class') return false;
-        } else if (atOp === '=')  { if (elVal !== atVal) return false; }
-        else if  (atOp === '~=') { if (!elVal.split(/\s+/).includes(atVal)) return false; }
-        else if  (atOp === '^=') { if (!elVal.startsWith(atVal)) return false; }
-        else if  (atOp === '$=') { if (!elVal.endsWith(atVal))   return false; }
-        else if  (atOp === '*=') { if (!elVal.includes(atVal))   return false; }
-      }
-      rest = rest.slice(atM[0].length);
-    } else if (rest[0] === ':') {
-      // Pseudo-class / pseudo-element handling
-      // We evaluate structural pseudo-classes (first-child, last-child, nth-child,
-      // not) and state pseudo-classes (:hover, :focus, :active, :checked, :disabled)
-      // as best-effort based on available context.
-      var psM = rest.match(/^::?([a-zA-Z-]+)(?:\(([^)]*)\))?/);
-      if (psM) {
-        var psName = psM[1]!.toLowerCase();
-        var psArg  = psM[2] || '';
-        rest = rest.slice(psM[0].length);
-        // Pseudo-elements (::before, ::after) — match the host element
-        if (psName === 'before' || psName === 'after' ||
-            psName === 'first-line' || psName === 'first-letter') {
-          // always match (host element rule applies)
-        }
-        // State pseudo-classes — always match (can't track hover/focus here)
-        else if (psName === 'hover' || psName === 'focus' || psName === 'active' ||
-                 psName === 'focus-within' || psName === 'focus-visible') {
-          // match (optimistic: apply styles as if in state)
-        }
-        // Form pseudo-classes
-        else if (psName === 'checked' || psName === 'selected') {
-          var chk = attrs.get('checked'); if (chk === undefined) return false;
-        }
-        else if (psName === 'disabled') {
-          if (!attrs.has('disabled')) return false;
-        }
-        else if (psName === 'enabled') {
-          if (attrs.has('disabled')) return false;
-        }
-        else if (psName === 'required') {
-          if (!attrs.has('required')) return false;
-        }
-        else if (psName === 'optional') {
-          if (attrs.has('required')) return false;
-        }
-        else if (psName === 'placeholder-shown') {
-          if (!attrs.has('placeholder')) return false;
-        }
-        // Link pseudo-classes
-        else if (psName === 'link' || psName === 'any-link') {
-          if (tag !== 'a' && tag !== 'area' && tag !== 'link') return false;
-        }
-        else if (psName === 'visited') {
-          // can't tell — always miss to be safe
-        }
-        // Structural pseudo-classes — use sibling info when available
-        else if (psName === 'first-child') {
-          if (sibIdx !== undefined && sibIdx !== 0) return false;
-        }
-        else if (psName === 'last-child') {
-          if (sibIdx !== undefined && sibCount !== undefined && sibIdx !== sibCount - 1) return false;
-        }
-        else if (psName === 'only-child') {
-          if (sibCount !== undefined && sibCount !== 1) return false;
-        }
-        else if (psName === 'nth-child') {
-          if (sibIdx !== undefined && psArg) {
-            if (!_matchesNth(psArg, sibIdx + 1)) return false;
-          }
-        }
-        else if (psName === 'nth-last-child') {
-          if (sibIdx !== undefined && sibCount !== undefined && psArg) {
-            if (!_matchesNth(psArg, sibCount - sibIdx)) return false;
-          }
-        }
-        else if (psName === 'first-of-type' || psName === 'last-of-type' ||
-                 psName === 'only-of-type' ||
-                 psName === 'nth-of-type' || psName === 'nth-last-of-type') {
-          // -of-type selectors need type-specific sibling info we don't have
-          // optimistic: assume match
-        }
-        // :not() negation
-        else if (psName === 'not' && psArg) {
-          // if the argument selector matches, the element does NOT match :not()
-          if (matchesCompound(tag, id, cls, attrs, psArg.trim())) return false;
-        }
-        // :is() / :where() / :has() — accept if any arg matches
-        else if (psName === 'is' || psName === 'where') {
-          var isArgs = psArg.split(',');
-          var anyMatch = false;
-          for (var ii = 0; ii < isArgs.length; ii++) {
-            if (matchesCompound(tag, id, cls, attrs, isArgs[ii]!.trim())) { anyMatch = true; break; }
-          }
-          if (!anyMatch) return false;
-        }
-        else if (psName === 'has') {
-          // :has() requires DOM tree — optimistic pass
-        }
-        // :root
-        else if (psName === 'root') {
-          if (tag !== 'html') return false;
-        }
-        // :empty — can't tell without children
-        else if (psName === 'empty') { /* pass */ }
-        else {
-          // Unknown pseudo-class — conservative pass (don't reject)
-        }
-      } else {
-        return false;
-      }
-    } else {
-      break;
-    }
-  }
-  return true;
-}
-
 // ── CSS property parser (superset of parseInlineStyle) ────────────────────────
 
 // Cache for parseDeclBlock — many CSS rules share identical declaration blocks.
@@ -875,7 +713,7 @@ function _splitOutsideParens(s: string, delim: string): string[] {
 export function parseStylesheet(css: string): CSSRule[] {
   var rules: CSSRule[] = [];
 
-  // Remove comments — indexOf scan instead of regex (avoids O(n) regex engine overhead)
+  // Remove comments — indexOf scan (faster than regex in QuickJS's regex engine)
   if (css.indexOf('/*') >= 0) {
     var _parts: string[] = [];
     var _ci = 0;
@@ -1329,19 +1167,32 @@ export function getPseudoContent(
   for (var ri = 0; ri < candidates.length; ri++) {
     var rule = candidates[ri]!;
     if (!rule.props.content) continue;   // skip rules without content
-    for (var si = 0; si < rule.sels.length; si++) {
-      var sel = rule.sels[si]!.trim();
-      // Only act on ::before / ::after pseudo-elements
-      var pem = sel.match(/::?(before|after)\s*$/i);
-      if (!pem) continue;
-      // Strip pseudo-element suffix → check if host element matches
-      var hostSel = sel.slice(0, sel.length - pem[0].length).trim() || '*';
-      if (!matchesSingleSel(tag, id, cls, attrs, hostSel, ancestors, sibIdx, sibCount)) continue;
-      var which = pem[1]!.toLowerCase();
+    // Lazily build pseudo-element info cache on first access (avoids regex per element)
+    if (!rule._pseudoInfos) {
+      rule._pseudoInfos = [];
+      for (var _pi = 0; _pi < rule.sels.length; _pi++) {
+        var _psel = rule.sels[_pi]!.trim();
+        var _ppem = _psel.match(/::?(before|after)\s*$/i);
+        if (_ppem) {
+          var _hostRaw = _psel.slice(0, _psel.length - _ppem[0].length).trim() || '*';
+          rule._pseudoInfos.push({
+            pseudo: _ppem[1]!.toLowerCase() as 'before' | 'after',
+            hostParsed: _parseSel(_hostRaw),
+          });
+        } else {
+          rule._pseudoInfos.push(null);
+        }
+      }
+    }
+    for (var si = 0; si < rule._pseudoInfos.length; si++) {
+      var pInfo = rule._pseudoInfos[si];
+      if (!pInfo) continue;
+      // Use pre-parsed host selector — no regex, no string alloc on hot path
+      if (!matchesParsedSel(tag, id, cls, attrs, pInfo.hostParsed, ancestors, sibIdx, sibCount)) continue;
       var resolved = _resolveContentValue(rule.props.content, attrs, counters);
-      if (which === 'before' && rule.spec > beforeSpec) {
+      if (pInfo.pseudo === 'before' && rule.spec > beforeSpec) {
         before = resolved; beforeSpec = rule.spec;
-      } else if (which === 'after' && rule.spec > afterSpec) {
+      } else if (pInfo.pseudo === 'after' && rule.spec > afterSpec) {
         after = resolved;  afterSpec  = rule.spec;
       }
       break;  // only one selector per rule matches per pseudo
@@ -1587,7 +1438,7 @@ export function buildSheetIndex(rules: CSSRule[]): RuleIndex {
   return idx;
 }
 
-function mergeProps(target: CSSProps, src: CSSProps, importantOnly?: Set<string>): void {
+export function mergeProps(target: CSSProps, src: CSSProps, importantOnly?: Set<string>): void {
   // Fast path: use pre-computed _ks array (set by parseInlineStyle/parseDeclBlock)
   // for O(N) counted-loop iteration instead of expensive for...in enumeration.
   var t = target as Record<string, unknown>;
