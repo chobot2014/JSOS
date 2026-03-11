@@ -357,28 +357,49 @@ export function buildRuleIndex(rules: CSSRule[]): RuleIndex {
 
 /**
  * Return the candidate rules for an element with the given tag, id, and classes.
- * Uses a Set to deduplicate rules that appear in multiple buckets.
+ * Uses a numeric stamp to deduplicate rules that appear in multiple buckets,
+ * avoiding Set allocation on every call.
  */
+var _candidateStamp = 0;
 export function candidateRules(
   index: RuleIndex,
   tag:   string,
   id:    string,
   cls:   string[],
 ): CSSRule[] {
-  var seen = new Set<CSSRule>();
+  var stamp = ++_candidateStamp;
   var result: CSSRule[] = [];
 
-  function add(rules: CSSRule[] | undefined): void {
-    if (!rules) return;
-    for (var i = 0; i < rules.length; i++) {
-      if (!seen.has(rules[i])) { seen.add(rules[i]); result.push(rules[i]); }
+  var tagRules = index.tagBuckets.get(tag);
+  if (tagRules) {
+    for (var i = 0; i < tagRules.length; i++) {
+      var r = tagRules[i]!;
+      if (r._stamp !== stamp) { r._stamp = stamp; result.push(r); }
     }
   }
-
-  add(index.tagBuckets.get(tag));
-  if (id) add(index.idBuckets.get(id));
-  for (var ci = 0; ci < cls.length; ci++) add(index.classBuckets.get(cls[ci]));
-  add(index.universalRules);
+  if (id) {
+    var idRules = index.idBuckets.get(id);
+    if (idRules) {
+      for (var i = 0; i < idRules.length; i++) {
+        var r = idRules[i]!;
+        if (r._stamp !== stamp) { r._stamp = stamp; result.push(r); }
+      }
+    }
+  }
+  for (var ci = 0; ci < cls.length; ci++) {
+    var clRules = index.classBuckets.get(cls[ci]!);
+    if (clRules) {
+      for (var i = 0; i < clRules.length; i++) {
+        var r = clRules[i]!;
+        if (r._stamp !== stamp) { r._stamp = stamp; result.push(r); }
+      }
+    }
+  }
+  var uniRules = index.universalRules;
+  for (var i = 0; i < uniRules.length; i++) {
+    var r = uniRules[i]!;
+    if (r._stamp !== stamp) { r._stamp = stamp; result.push(r); }
+  }
 
   return result;
 }

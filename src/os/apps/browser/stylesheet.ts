@@ -31,7 +31,14 @@ import { buildRuleIndex, candidateRules, type RuleIndex } from './cache.js';
 // Trade-off: cache entries per unique element signature, bounded at 8192.
 // Flushed whenever sheets change (buildSheetIndex called).
 // Hit rate is very high on rerenders where the DOM is stable.
-const _cssMatchCache = new Map<string, { props: CSSProps; spec: number; order: number }[]>();
+/** Pre-merged CSS match result — avoids re-iterating matches on cache hit */
+interface CSSMatchEntry {
+  normalMerged: CSSProps;            // all normal matches pre-merged
+  importantProps: CSSProps[] | null; // matches with !important (rare)
+  hasKeywords: boolean;              // any match has _inherit/_initial
+  matchProps?: CSSProps[];           // individual match props (only when hasKeywords)
+}
+const _cssMatchCache = new Map<string, CSSMatchEntry>();
 var _cssMatchHits = 0;
 var _cssMatchTotal = 0;
 
@@ -70,6 +77,7 @@ export interface CSSRule {
   spec:  number;    // specificity (for cascade ordering). 0xAABBCC
   order: number;    // source order index (set after parseStylesheet, avoids indexOf O(n²))
   parsedSels?: ParsedSel[];  // pre-parsed selectors — set by parseStylesheet for hot-path matching
+  _stamp?: number;  // dedup stamp for candidateRules (avoids Set allocation)
 }
 
 // ── Pre-parsed selector types (no regex at match time) ───────────────────────
@@ -1384,63 +1392,123 @@ export function computeElementStyle(
   var _cacheKey = tag + '\x00' + id + '\x00' + _sortedCls;
   _cssMatchTotal++;
   var _cachedMatch = _cssMatchCache.get(_cacheKey);
-  var matches: { props: CSSProps; spec: number; order: number }[];
+
   if (_cachedMatch) {
+    // ── Cache hit ──────────────────────────────────────────────────────────
     _cssMatchHits++;
-    matches = _cachedMatch;
-  } else {
-    // ── Choose candidate set: indexed fast-path or full linear scan ──────
-    // Deferred to cache-miss path to avoid Set + array allocation on hits.
-    var candidates: CSSRule[] = index
-      ? candidateRules(index, tag, id, cls)
-      : sheets;
-    // Build O(1) class lookup Set for this element.
-    var _clsSet: Set<string> | null = cls.length > 0 ? new Set<string>(cls) : null;
-    matches = [];
-    for (var ri = 0; ri < candidates.length; ri++) {
-      var rule = candidates[ri]!;
-      // Hot path: use pre-parsed selectors (no regex) when available
-      if (rule.parsedSels) {
-        for (var si = 0; si < rule.parsedSels.length; si++) {
-          if (matchesParsedSel(tag, id, cls, attrs, rule.parsedSels[si]!, ancestors, sibIdx, sibCount, _clsSet)) {
-            var srcOrder = index ? rule.order : ri;
-            matches.push({ props: rule.props, spec: rule.spec, order: srcOrder });
-            break;
-          }
+    if (!_cachedMatch.hasKeywords) {
+      // Fast path (common): no inherit/initial keywords — one mergeProps call
+      mergeProps(result, _cachedMatch.normalMerged);
+    } else {
+      // Slow path (rare): iterate individual matches for correct keyword ordering
+      var _mp = _cachedMatch.matchProps!;
+      for (var mi = 0; mi < _mp.length; mi++) {
+        mergeProps(result, _mp[mi]!);
+        if (_mp[mi]!._inherit || _mp[mi]!._initial) _applyKeywords(result, _mp[mi]!, inherited);
+      }
+    }
+    // Inline style
+    if (inlineStyle) {
+      var inlineParsed = _declBlockCache.get(inlineStyle);
+      if (!inlineParsed) {
+        inlineParsed = parseInlineStyle(inlineStyle);
+        if (_declBlockCache.size < 4096) _declBlockCache.set(inlineStyle, inlineParsed);
+      }
+      mergeProps(result, inlineParsed);
+      if (inlineParsed._inherit || inlineParsed._initial) _applyKeywords(result, inlineParsed, inherited);
+    }
+    // Important rules override inline normal
+    if (_cachedMatch.importantProps) {
+      for (var ii = 0; ii < _cachedMatch.importantProps.length; ii++) {
+        var imp = _cachedMatch.importantProps[ii]!;
+        mergeProps(result, imp, imp.important);
+        if (imp._inherit || imp._initial) _applyKeywords(result, imp, inherited);
+      }
+    }
+    return result;
+  }
+
+  // ── Cache miss — match rules, pre-merge, and cache ────────────────────────
+  var candidates: CSSRule[] = index
+    ? candidateRules(index, tag, id, cls)
+    : sheets;
+  // Build O(1) class lookup Set for this element.
+  var _clsSet: Set<string> | null = cls.length > 0 ? new Set<string>(cls) : null;
+
+  // Collect matches as parallel arrays to avoid object allocation per match
+  var _mProps: CSSProps[] = [];
+  var _mSpec:  number[]   = [];
+  var _mOrder: number[]   = [];
+
+  for (var ri = 0; ri < candidates.length; ri++) {
+    var rule = candidates[ri]!;
+    // Hot path: use pre-parsed selectors (no regex) when available
+    if (rule.parsedSels) {
+      for (var si = 0; si < rule.parsedSels.length; si++) {
+        if (matchesParsedSel(tag, id, cls, attrs, rule.parsedSels[si]!, ancestors, sibIdx, sibCount, _clsSet)) {
+          var srcOrder = index ? rule.order : ri;
+          _mProps.push(rule.props); _mSpec.push(rule.spec); _mOrder.push(srcOrder);
+          break;
         }
-      } else {
-        for (var si = 0; si < rule.sels.length; si++) {
-          if (matchesSingleSel(tag, id, cls, attrs, rule.sels[si]!, ancestors, sibIdx, sibCount)) {
-            var srcOrder = index ? rule.order : ri;
-            matches.push({ props: rule.props, spec: rule.spec, order: srcOrder });
-            break;
-          }
+      }
+    } else {
+      for (var si = 0; si < rule.sels.length; si++) {
+        if (matchesSingleSel(tag, id, cls, attrs, rule.sels[si]!, ancestors, sibIdx, sibCount)) {
+          var srcOrder = index ? rule.order : ri;
+          _mProps.push(rule.props); _mSpec.push(rule.spec); _mOrder.push(srcOrder);
+          break;
         }
       }
     }
-    // Sort by specificity then source order
-    matches.sort((a, b) => a.spec !== b.spec ? a.spec - b.spec : a.order - b.order);
-    // Store in cache (bounded to 8192 entries)
-    if (_cssMatchCache.size < 8192) {
-      _cssMatchCache.set(_cacheKey, matches);
+  }
+
+  // Sort by specificity then source order (insertion sort for small N)
+  if (_mProps.length > 1) {
+    // Simple insertion sort — typically < 20 matches
+    for (var i = 1; i < _mProps.length; i++) {
+      var tmpP = _mProps[i]!, tmpS = _mSpec[i]!, tmpO = _mOrder[i]!;
+      var j = i - 1;
+      while (j >= 0 && (_mSpec[j]! > tmpS || (_mSpec[j]! === tmpS && _mOrder[j]! > tmpO))) {
+        _mProps[j + 1] = _mProps[j]!; _mSpec[j + 1] = _mSpec[j]!; _mOrder[j + 1] = _mOrder[j]!;
+        j--;
+      }
+      _mProps[j + 1] = tmpP; _mSpec[j + 1] = tmpS; _mOrder[j + 1] = tmpO;
     }
   }
 
-  // ── Apply normal rules in cascade order ───────────────────────────────────
-  // !important rules are collected separately and applied after inline styles
-  var importantRules: { props: CSSProps; spec: number; order: number }[] = [];
-  for (var mi = 0; mi < matches.length; mi++) {
-    var match = matches[mi]!;
-    if (match.props.important && match.props.important.size > 0) {
-      importantRules.push(match);
+  // Pre-merge for cache + apply to result
+  var normalMerged: CSSProps = {} as CSSProps;
+  var importantProps: CSSProps[] | null = null;
+  var hasKeywords = false;
+
+  for (var mi = 0; mi < _mProps.length; mi++) {
+    var mp = _mProps[mi]!;
+    if (mp.important && mp.important.size > 0) {
+      if (!importantProps) importantProps = [];
+      importantProps.push(mp);
     }
-    mergeProps(result, match.props);
-    if (match.props._inherit || match.props._initial) _applyKeywords(result, match.props, inherited);
+    mergeProps(normalMerged, mp);
+    mergeProps(result, mp);
+    if (mp._inherit || mp._initial) {
+      hasKeywords = true;
+      _applyKeywords(result, mp, inherited);
+    }
+  }
+
+  // Store in cache (bounded to 8192 entries)
+  if (_cssMatchCache.size < 8192) {
+    var cacheEntry: CSSMatchEntry = {
+      normalMerged: normalMerged,
+      importantProps: importantProps,
+      hasKeywords: hasKeywords,
+    };
+    // Only store individual match props when keywords require per-rule iteration
+    if (hasKeywords) cacheEntry.matchProps = _mProps;
+    _cssMatchCache.set(_cacheKey, cacheEntry);
   }
 
   // ── Inline style wins over normal sheet rules ──────────────────────────────
   if (inlineStyle) {
-    // Use the same decl-block cache to avoid re-parsing identical inline styles
     var inlineParsed = _declBlockCache.get(inlineStyle);
     if (!inlineParsed) {
       inlineParsed = parseInlineStyle(inlineStyle);
@@ -1448,19 +1516,16 @@ export function computeElementStyle(
     }
     mergeProps(result, inlineParsed);
     if (inlineParsed._inherit || inlineParsed._initial) _applyKeywords(result, inlineParsed, inherited);
-    // Inline !important overrides even !important sheet rules
-    if (inlineParsed.important && inlineParsed.important.size > 0) {
-      // already applied above — nothing more to do
-    }
   }
 
   // ── !important sheet rules override inline normal style ───────────────────
-  // (but NOT inline !important, which was already applied above)
-  // Sort important rules same as normal rules
-  importantRules.sort((a, b) => a.spec !== b.spec ? a.spec - b.spec : a.order - b.order);
-  for (var ii = 0; ii < importantRules.length; ii++) {
-    mergeProps(result, importantRules[ii]!.props, importantRules[ii]!.props.important);
-    if (importantRules[ii]!.props._inherit || importantRules[ii]!.props._initial) _applyKeywords(result, importantRules[ii]!.props, inherited);
+  // importantProps is already in cascade order (from sorted matches)
+  if (importantProps) {
+    for (var ii = 0; ii < importantProps.length; ii++) {
+      var imp = importantProps[ii]!;
+      mergeProps(result, imp, imp.important);
+      if (imp._inherit || imp._initial) _applyKeywords(result, imp, inherited);
+    }
   }
 
   return result;
