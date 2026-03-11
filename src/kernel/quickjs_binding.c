@@ -76,6 +76,7 @@ typedef struct {
     JSRuntime  *rt;
     JSContext  *ctx;
     uint8_t     used;
+    uint8_t     tainted;          /* set after CPU fault — heap is corrupted, do not execute */
     uint32_t    width, height;    /* render surface dimensions set by procSetDimensions */
     /* parent → child */
     ProcMsg_t   inbox[JSPROC_MSGSLOTS];
@@ -83,6 +84,8 @@ typedef struct {
     /* child → parent */
     ProcMsg_t   outbox[JSPROC_MSGSLOTS];
     int         outbox_r, outbox_w, outbox_cnt;
+    /* Per-child slice deadline (PIT ticks); 0 = disabled */
+    volatile uint32_t slice_deadline;
 } JSProc_t;
 
 static JSProc_t _procs[JSPROC_MAX];
@@ -168,16 +171,19 @@ static void _sbuf_no_free(JSRuntime *rt, void *opaque, void *ptr) {
 }
 
 /* ── Phase 10: Time-slice interrupt handler ──────────────────────────────
- * Set on every child runtime.  When _proc_slice_deadline is non-zero and
- * the PIT tick counter reaches it, QuickJS throws "InternalError: interrupted"
- * which procEvalSlice() catches and returns as "timeout".
+ * Set on every child runtime.  Each child has its own slice_deadline in
+ * JSProc_t so concurrent eval-slices don't corrupt each other's deadlines.
+ * When the PIT tick counter reaches the deadline, QuickJS throws
+ * "InternalError: interrupted" which procEvalSlice() catches as "timeout".
  */
-static volatile uint32_t _proc_slice_deadline = 0;   /* 0 = disabled */
 
 static int _proc_interrupt_cb(JSRuntime *rt, void *opaque) {
-    (void)rt; (void)opaque;
-    if (_proc_slice_deadline == 0) return 0;
-    return (timer_get_ticks() >= _proc_slice_deadline) ? 1 : 0;
+    (void)rt;
+    int id = (int)(intptr_t)opaque;
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return 0;
+    uint32_t deadline = _procs[id].slice_deadline;
+    if (deadline == 0) return 0;
+    return (timer_get_ticks() >= deadline) ? 1 : 0;
 }
 
 /*  VGA raw access  */
@@ -615,7 +621,10 @@ static void *jsos_malloc(JSMallocState *s, size_t size)
     size_t real;
     assert(size != 0);
     real = size + JSOS_MALLOC_HDR_SIZE;
-    if (unlikely(s->malloc_size + size > s->malloc_limit))
+    /* Overflow-safe limit check: guard against both 32-bit wraparound
+     * and the edge case where malloc_size already exceeds malloc_limit. */
+    if (unlikely(s->malloc_size >= s->malloc_limit ||
+                 size > s->malloc_limit - s->malloc_size))
         return NULL;
     raw = malloc(real);
     if (!raw)
@@ -1487,9 +1496,12 @@ static JSValue js_sched_tick(JSContext *c, JSValueConst this_val,
  * Returns the number of jobs that were executed.
  * Without this, Promise callbacks in page scripts never run!
  *
- * Promise callbacks originating from page scripts can trigger the same
- * JIT/heap corruption as direct script execution, so we suppress JIT
- * dispatch during draining and run under fault guard. */
+ * drainJobs drains Promise callbacks from ALL origins, including page scripts
+ * evaluated via evalGuarded.  Page-script functions may use patterns the JIT
+ * compiler doesn't handle, so we suppress JIT during draining.  OS-level
+ * async functions that were already JIT-compiled during normal execution
+ * will still fall back to interpreted mode here — a small perf cost
+ * weighed against the stability of avoiding JIT on arbitrary page JS. */
 static JSValue js_drain_jobs(JSContext *c, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
@@ -1502,7 +1514,7 @@ static JSValue js_drain_jobs(JSContext *c, JSValueConst this_val,
     memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
     _js_fault_active = 1;
     _js_fault_vector = 0;
-    _js_in_page_eval = 1;
+    _js_in_page_eval = 1;   /* suppress JIT for page-script callbacks */
     int recovered = setjmp(_js_fault_buf);
     if (recovered != 0) {
         _js_fault_active = _saved_fault_active;
@@ -1803,9 +1815,9 @@ static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
     _procs[id].width  = 0;
     _procs[id].height = 0;
     /* Arm the time-slice interrupt handler on the child runtime.
-     * _proc_interrupt_cb fires periodically during JS_Eval and returns 1
-     * when _proc_slice_deadline (a PIT tick count) has been reached.       */
-    JS_SetInterruptHandler(p->rt, _proc_interrupt_cb, NULL);
+     * _proc_interrupt_cb uses the proc id (passed as opaque) to read
+     * the per-child slice_deadline from JSProc_t. */
+    JS_SetInterruptHandler(p->rt, _proc_interrupt_cb, (void *)(intptr_t)id);
     /* Arm the JIT hook so hot functions in the child defer compilation to
      * the main-runtime tick loop (procPendingJIT / _serviceChildJIT).     */
 #ifdef JSOS_JIT_HOOK
@@ -1815,6 +1827,8 @@ static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
     jit_proc_reset(id);
     memset(&_jit_proc_pending[id], 0, sizeof(_jit_proc_pending[id]));
     p->used = 1;
+    p->tainted = 0;
+    p->slice_deadline = 0;
     return JS_NewInt32(c, id);
 }
 
@@ -1891,6 +1905,8 @@ static JSValue js_proc_tick(JSContext *c, JSValueConst this_val,
     int32_t id = 0;
     JS_ToInt32(c, &id, argv[0]);
     if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_NewInt32(c, 0);
+    /* Tainted children must not execute — heap is corrupted from a prior fault */
+    if (_procs[id].tainted) return JS_NewInt32(c, -1);
     /* Arm fault recovery — save/restore for nesting */
     jmp_buf _saved_fault_buf;
     int _saved_fault_active = _js_fault_active;
@@ -1898,7 +1914,7 @@ static JSValue js_proc_tick(JSContext *c, JSValueConst this_val,
     memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
     _js_fault_active = 1;
     _js_fault_vector = 0;
-    _js_in_page_eval = 1;
+    _js_in_page_eval = 1;   /* suppress JIT for child page-script callbacks */
     int _pt_recovered = setjmp(_js_fault_buf);
     if (_pt_recovered != 0) {
         _js_in_page_eval = _saved_in_page_eval;
@@ -1907,9 +1923,12 @@ static JSValue js_proc_tick(JSContext *c, JSValueConst this_val,
         _js_fault_active = _saved_fault_active;
         memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
         _cur_proc = -1;
-        platform_serial_puts("[kernel] procTick fault recovered (child ");
+        /* Quarantine: mark child as tainted so no further execution occurs.
+         * The TypeScript scheduler sees -1 and should call procDestroy. */
+        _procs[id].tainted = 1;
+        platform_serial_puts("[kernel] procTick fault recovered, child ");
         { char _idb[4]; _idb[0]='0'+(char)id; _idb[1]=0; platform_serial_puts(_idb); }
-        platform_serial_puts(")\n");
+        platform_serial_puts(" quarantined\n");
         return JS_NewInt32(c, -1);   /* negative = fault indicator */
     }
     _cur_proc = id;
@@ -1973,19 +1992,32 @@ static JSValue js_proc_destroy(JSContext *c, JSValueConst this_val,
     int32_t id = 0;
     JS_ToInt32(c, &id, argv[0]);
     if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_UNDEFINED;
-    /* Free timer callbacks BEFORE FreeContext so JSValues are still valid */
-    for (int i = 0; i < MAX_TIMERS; i++) {
-        ProcTimer_t *t = &_proc_timers[id][i];
-        if (t->active) {
-            JS_FreeValue(_procs[id].ctx, t->cb);
-            t->active = 0;
+    if (_procs[id].tainted) {
+        /* Child heap is corrupted — do NOT call JS_FreeValue/JS_FreeContext/
+         * JS_FreeRuntime, as those walk corrupted object graphs and crash.
+         * Intentionally leak the runtime (one-time per-crash cost). */
+        for (int i = 0; i < MAX_TIMERS; i++)
+            _proc_timers[id][i].active = 0;
+        _procs[id].ctx  = NULL;
+        _procs[id].rt   = NULL;
+        _procs[id].used = 0;
+        _procs[id].tainted = 0;
+        platform_serial_puts("[kernel] procDestroy: tainted child leaked\n");
+    } else {
+        /* Free timer callbacks BEFORE FreeContext so JSValues are still valid */
+        for (int i = 0; i < MAX_TIMERS; i++) {
+            ProcTimer_t *t = &_proc_timers[id][i];
+            if (t->active) {
+                JS_FreeValue(_procs[id].ctx, t->cb);
+                t->active = 0;
+            }
         }
+        JS_FreeContext(_procs[id].ctx);
+        JS_FreeRuntime(_procs[id].rt);
+        _procs[id].ctx  = NULL;
+        _procs[id].rt   = NULL;
+        _procs[id].used = 0;
     }
-    JS_FreeContext(_procs[id].ctx);
-    JS_FreeRuntime(_procs[id].rt);
-    _procs[id].ctx  = NULL;
-    _procs[id].rt   = NULL;
-    _procs[id].used = 0;
     /* Clear JIT slab + pending requests for this slot */
     _jit_proc_pending[id].pending = 0;
     _jit_proc_pending[id].bc_addr = 0;
@@ -2049,6 +2081,8 @@ static JSValue js_proc_eval_slice(JSContext *c, JSValueConst this_val,
     if (argc >= 3) JS_ToInt32(c, &max_ms, argv[2]);
     if (id < 0 || id >= JSPROC_MAX || !_procs[id].used)
         return JS_NewString(c, "error:invalid process id");
+    if (_procs[id].tainted)
+        return JS_NewString(c, "error:child runtime quarantined after fault");
     const char *code = JS_ToCString(c, argv[1]);
     if (!code) return JS_NewString(c, "error:null code");
     /* Arm fault recovery — save/restore for nesting */
@@ -2066,16 +2100,18 @@ static JSValue js_proc_eval_slice(JSContext *c, JSValueConst this_val,
         JS_ResetAfterFault(_procs[id].ctx, NULL);  /* reset child GC state */
         _js_fault_active = _saved_fault_active;
         memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
-        _proc_slice_deadline = 0;
+        _procs[id].slice_deadline = 0;
         _cur_proc = -1;
-        platform_serial_puts("[kernel] procEvalSlice fault recovered\n");
+        /* Quarantine: mark child as tainted so no further execution occurs */
+        _procs[id].tainted = 1;
+        platform_serial_puts("[kernel] procEvalSlice fault recovered, child quarantined\n");
         return JS_NewString(c, "error:CPU fault in child runtime");
     }
     /* Arm deadline: timer_get_ticks() runs at TIMER_HZ (1000 Hz = 1 ms/tick) */
     if (max_ms > 0)
-        _proc_slice_deadline = timer_get_ticks() + MS_TO_TICKS((uint32_t)max_ms);
+        _procs[id].slice_deadline = timer_get_ticks() + MS_TO_TICKS((uint32_t)max_ms);
     else
-        _proc_slice_deadline = 0;
+        _procs[id].slice_deadline = 0;
     _cur_proc = id;
     JS_UpdateStackTop(_procs[id].rt);
     JSValue result = JS_Eval(_procs[id].ctx, code, strlen(code),
@@ -2083,7 +2119,7 @@ static JSValue js_proc_eval_slice(JSContext *c, JSValueConst this_val,
     _js_fault_active = _saved_fault_active;
     _js_in_page_eval = _saved_in_page_eval;
     memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
-    _proc_slice_deadline = 0;   /* always clear immediately after eval */
+    _procs[id].slice_deadline = 0;   /* always clear immediately after eval */
     _cur_proc = -1;
     JS_FreeCString(c, code);
     if (JS_IsException(result)) {
@@ -2849,6 +2885,7 @@ static JSValue js_service_timers(JSContext *c, JSValueConst this_val,
     if (argc < 1) return JS_UNDEFINED;
     int32_t id = 0; JS_ToInt32(c, &id, argv[0]);
     if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_UNDEFINED;
+    if (_procs[id].tainted) return JS_UNDEFINED;  /* quarantined */
     /* Arm fault recovery — save/restore for nesting */
     jmp_buf _saved_fault_buf;
     int _saved_fault_active = _js_fault_active;
@@ -2856,7 +2893,7 @@ static JSValue js_service_timers(JSContext *c, JSValueConst this_val,
     memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
     _js_fault_active = 1;
     _js_fault_vector = 0;
-    _js_in_page_eval = 1;
+    _js_in_page_eval = 1;   /* suppress JIT for child timer callbacks */
     int _st_recovered = setjmp(_js_fault_buf);
     if (_st_recovered != 0) {
         _js_in_page_eval = _saved_in_page_eval;
@@ -2864,9 +2901,11 @@ static JSValue js_service_timers(JSContext *c, JSValueConst this_val,
         _js_fault_active = _saved_fault_active;
         memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
         _cur_proc = -1;
-        platform_serial_puts("[kernel] serviceTimers fault recovered (child ");
+        /* Quarantine: mark child as tainted */
+        _procs[id].tainted = 1;
+        platform_serial_puts("[kernel] serviceTimers fault, child ");
         { char _idb[4]; _idb[0]='0'+(char)id; _idb[1]=0; platform_serial_puts(_idb); }
-        platform_serial_puts(")\n");
+        platform_serial_puts(" quarantined\n");
         return JS_NewInt32(c, -1);
     }
     uint32_t now = timer_get_ticks();

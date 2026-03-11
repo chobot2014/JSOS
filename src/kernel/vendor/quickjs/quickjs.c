@@ -2567,7 +2567,13 @@ void JS_ResetAfterFault(JSContext *ctx, void *saved_stack_frame)
 
     /* Delay next automatic GC by at least 64 MB beyond current usage.
      * This prevents js_trigger_gc() from immediately running a full GC
-     * cycle over potentially corrupted object graphs. */
+     * cycle over potentially corrupted object graphs.
+     *
+     * Intentionally uncapped: after a fault the heap may be corrupted and
+     * GC must NOT run (it walks corrupted pointers → re-fault → infinite
+     * loop).  Each fault adds ~64 MB to the threshold which is safe
+     * because faults are rare and the OS will eventually destroy the
+     * offending child runtime. */
     {
         size_t cur = rt->malloc_state.malloc_size;
         size_t new_thresh = cur + (64u * 1024u * 1024u);
@@ -17618,6 +17624,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
     {
     extern volatile int _js_in_page_eval;
     if (!_js_in_page_eval && b->jit_native_ptr) {
+        /* ── Stack overflow guard for JIT dispatch ─────────────────
+         * The interpreter checks js_check_stack_overflow AFTER this
+         * block.  JIT-compiled code runs on the C stack and can recurse
+         * deeply, so we must check before dispatching. */
+        if (js_check_stack_overflow(rt, 256))
+            return JS_ThrowStackOverflow(caller_ctx);
         uintptr_t _jit_raw = (uintptr_t)b->jit_native_ptr;
 
         if (_jit_raw & 1u) {
@@ -17625,9 +17637,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             extern double jit_call_d4(void *fn,
                                       double a0, double a1,
                                       double a2, double a3);
-/* Extract double from JSValue: float64→direct, int/bool→cast, else→0.0 */
+/* Extract double from JSValue: float64→direct, int/bool→cast, else→0.0
+ * IMPORTANT: Under JS_NAN_BOXING, JS_TAG_IS_FLOAT64() must be used
+ * instead of == JS_TAG_FLOAT64 because NaN-boxed floats have tags >= 8. */
 #define _DARG(i) ((i) < argc ? \
-            (JS_VALUE_GET_TAG(argv[i]) == JS_TAG_FLOAT64 \
+            (JS_TAG_IS_FLOAT64(JS_VALUE_GET_TAG(argv[i])) \
                 ? JS_VALUE_GET_FLOAT64(argv[i]) \
                 : JS_VALUE_GET_TAG(argv[i]) == JS_TAG_INT \
                     ? (double)JS_VALUE_GET_INT(argv[i]) \
@@ -17655,6 +17669,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                                    int32_t a2, int32_t a3,
                                    int32_t a4, int32_t a5,
                                    int32_t a6, int32_t a7);
+/* Extract int32 from JSValue: int→direct, object→ptr, bool→int, float64→cast, else→0.
+ * IMPORTANT: The old fallthrough to JS_VALUE_GET_FLOAT64 for unhandled tags
+ * (null/undefined/string/symbol) produced NaN under NAN_BOXING, and
+ * (uint32_t)NaN is UB on i686 → 0x80000000 → used as pointer → #PF.
+ * Now we explicitly guard float with JS_TAG_IS_FLOAT64 and return 0
+ * for all truly unhandled types (safe: null/undefined/string→0). */
 #define _JARG(i) ((i) < argc ? \
             (JS_VALUE_GET_TAG(argv[i]) == JS_TAG_INT \
                 ? (int32_t)JS_VALUE_GET_INT(argv[i]) \
@@ -17662,7 +17682,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                     ? (int32_t)(uintptr_t)JS_VALUE_GET_PTR(argv[i]) \
                     : JS_VALUE_GET_TAG(argv[i]) == JS_TAG_BOOL \
                         ? (int32_t)JS_VALUE_GET_INT(argv[i]) \
-                        : (int32_t)(uint32_t)JS_VALUE_GET_FLOAT64(argv[i])) \
+                        : JS_TAG_IS_FLOAT64(JS_VALUE_GET_TAG(argv[i])) \
+                            ? (int32_t)JS_VALUE_GET_FLOAT64(argv[i]) \
+                            : 0) \
             : 0)
         int32_t _jit_ret;
         /* Track faulting bc for JS_ResetAfterFault to invalidate on recovery */
