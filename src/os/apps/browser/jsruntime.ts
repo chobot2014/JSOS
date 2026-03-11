@@ -10745,19 +10745,16 @@ export function createPageJS(
     tick(nowMs: number): void {
       if (disposed) return;
       var frameStart = _perf.now();
-      // Fire RAF callbacks
+      // Fire RAF callbacks — coalesce rerender to end of tick
       if (rafCallbacks.length) {
         var cbs = rafCallbacks.splice(0);
         for (var r of cbs) {
           _callGuardedCtx('raf#' + r.id, r.fn, nowMs);
           _drainMicrotasks();
         }
-        checkDirty();
-        if (needsRerender) doRerender();  // flush DOM changes made by RAF handlers
       }
       // Fire elapsed timers (drain microtasks after each)
       var elapsed = nowMs;
-      var fired = false;
       for (var i = timers.length - 1; i >= 0; i--) {
         var t = timers[i];
         if (elapsed >= t.fireAt) {
@@ -10765,22 +10762,16 @@ export function createPageJS(
           _drainMicrotasks();
           if (t.interval) { t.fireAt = elapsed + t.delay; }
           else { timers.splice(i, 1); }
-          fired = true;
         }
       }
-      if (fired) { checkDirty(); if (needsRerender) doRerender(); }
       // Advance CSS transitions
       if (_activeTrans.length > 0) {
         _tickTransitions(nowMs);
-        checkDirty();
-        if (needsRerender) doRerender();
       }
       // Advance CSS @keyframes animations
       if (currentStyleGeneration() !== _lastAnimScanGen) _scanAnimations(nowMs);
       if (_activeAnims.size > 0) {
         _tickAnimations(nowMs);
-        checkDirty();
-        if (needsRerender) doRerender();
       }
       // Pump Intersection and Resize Observers (use real viewport height)
       var viewH = ((win['innerHeight'] as number) || 768);
@@ -10796,8 +10787,10 @@ export function createPageJS(
       // Pump child runtime (drives setTimeout, Promise chains, React re-renders in child proc)
       if (_pageChildId >= 0) {
         _childTick();
-        if (needsRerender) doRerender();
       }
+      // Coalesced rerender — run ONCE at end of tick instead of after every phase
+      checkDirty();
+      if (needsRerender) doRerender();
       // Record frame timing
       _perf.recordFrame(frameStart, _perf.now() - frameStart);
     },

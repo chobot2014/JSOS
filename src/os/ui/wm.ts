@@ -650,6 +650,7 @@ export class WindowManager {
 
   tick(): boolean {
     var _t0 = kernel.getTicks();
+    var _activity = false;
     this._pollInput();
 
     // ── Cursor fast blit — runs BEFORE any app render ──────────────────────
@@ -659,25 +660,30 @@ export class WindowManager {
       this._drawCursor();
       this._screen.flip();
       this._cursorDirty = false;
+      _activity = true;
     }
 
+    // ── Child processes — budget-gated ──────────────────────────────────────
     this._tickChildProcs(_t0);
     scheduler.tick();
-    threadManager.tickCoroutines(_t0);   // cooperative fetch / async coroutines
 
-    // ── Low-priority subsystems — skip when frame is already over budget ──
-    if (kernel.getTicks() - _t0 < 2) {
-      net.tcpTick();                    // TCP retransmit / keepalive / TIME_WAIT timers
+    // ── Coroutines (fetch, DHCP, etc.) — budget-gated ──────────────────────
+    threadManager.tickCoroutines(_t0);
+    if (threadManager.hasCoroutines()) _activity = true;
+
+    // ── Low-priority subsystems — skip when frame budget exhausted ──────────
+    var _elapsed = kernel.getTicks() - _t0;
+    if (_elapsed < 2) net.tcpTick();
+    if (_elapsed < 2) systemProfiler.tick();
+    // GC: run at reduced frequency (every 4th frame) to free frame budget
+    if ((_wmGCTick & 3) === 0) {
+      try { globalGC.tick(_wmGCTick); } catch (_) {}
     }
-    if (kernel.getTicks() - _t0 < 2) {
-      systemProfiler.tick();
-    }
-    // GC incremental slice — runs every frame, max 1ms budget (item 877/878)
-    try { globalGC.tick(_wmGCTick++); } catch (_) {}
+    _wmGCTick++;
+
     this._composite();
-
-    // Return true if there was meaningful activity this frame
-    return this._wmDirty || this._cursorDirty || threadManager.hasCoroutines();
+    if (this._wmDirty || this._cursorDirty) _activity = true;
+    return _activity;
   }
   /** Mark the WM as needing a repaint (call from app code or external events). */
   markDirty(): void { this._wmDirty = true; }
@@ -948,9 +954,11 @@ export class WindowManager {
             var keMsg = '';
             try { keMsg = (ke instanceof Error) ? ke.message : String(ke); } catch (_k) { keMsg = 'Unknown error'; }
             focused._crashMsg = keMsg.length > 80 ? keMsg.substring(0, 77) + '...' : keMsg;
+            this._wmDirty = true;  // only structural dirty on crash overlay
           }
         }
-        this._wmDirty = true;
+        // Don't set _wmDirty — app.render() will return true if content changed,
+        // triggering the fast partial composite instead of the expensive full path.
       }
     } else {
       // Still drain the queue even when no window is focused
@@ -1033,10 +1041,11 @@ export class WindowManager {
   private _composite(): void {
     var s = this._screen;
 
-    // Check clock — dirty on minute boundary
+    // Check clock — redraw taskbar only on minute boundary (not full composite)
     var ticks = kernel.getTicks();
     var mins = Math.floor(ticks / 6000) % 60;
-    if (mins !== this._lastClockMin) { this._lastClockMin = mins; this._wmDirty = true; }
+    var _clockChanged = false;
+    if (mins !== this._lastClockMin) { this._lastClockMin = mins; _clockChanged = true; }
 
     // Let apps render; track content dirty separately from cursor dirty so we
     // can use the cheap cursor-only fast path when only the mouse has moved.
@@ -1065,7 +1074,18 @@ export class WindowManager {
       }
     }
 
-    if (!anyContentDirty && !this._cursorDirty) return; // ★ truly nothing changed
+    if (!anyContentDirty && !this._cursorDirty && !_clockChanged) return; // ★ truly nothing changed
+
+    // ── Clock-only update: redraw just the taskbar and partial flip ─────────
+    if (!anyContentDirty && !this._cursorDirty && _clockChanged) {
+      this._drawTaskbar();
+      var _barY = s.height - TASKBAR_H;
+      this._saveCursorUnder();
+      this._drawCursor();
+      this._cursorSaveValid = true;
+      s.flipRegion(0, _barY, s.width, TASKBAR_H);
+      return;
+    }
 
     // ── FAST PATH: content-only dirty (no structural WM changes) ───────────
     // When _wmDirty is false, window positions/sizes/z-order haven't changed.
@@ -1122,6 +1142,11 @@ export class WindowManager {
       for (var dii = 0; dii < dirtyWinIdxs.length; dii++) {
         var dw = this._windows[dirtyWinIdxs[dii]];
         s.flipRegion(dw.x, dw.y, dw.width, dw.height);
+      }
+      // If clock changed too, refresh taskbar in this fast path
+      if (_clockChanged) {
+        this._drawTaskbar();
+        s.flipRegion(0, s.height - TASKBAR_H, s.width, TASKBAR_H);
       }
       return; // skip full composite
     }

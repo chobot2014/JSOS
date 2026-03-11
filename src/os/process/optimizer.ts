@@ -160,56 +160,57 @@ export class SystemProfiler {
     }
     this._lastTickMs = now;
 
-    // ── Memory pressure check ─────────────────────────────────────────────
-    var mem = kernel.getMemoryInfo();
-    var freeMB = (mem.free / (1024 * 1024)) | 0;
-    if (freeMB < MEM_LOW_MB &&
-        this._totalFrames - this._warnMemAt > WARN_SUPPRESS_FRAMES) {
-      kernel.serialPut('[profiler] LOW MEMORY: ' + freeMB + ' MB free\n');
-      this._warnMemAt = this._totalFrames;
-    }
+    // ── Expensive kernel queries: sample every 10th frame (~5 Hz) ─────────
+    if (this._totalFrames % 10 === 0) {
+      // Memory pressure check
+      var mem = kernel.getMemoryInfo();
+      var freeMB = (mem.free / (1024 * 1024)) | 0;
+      if (freeMB < MEM_LOW_MB &&
+          this._totalFrames - this._warnMemAt > WARN_SUPPRESS_FRAMES) {
+        kernel.serialPut('[profiler] LOW MEMORY: ' + freeMB + ' MB free\n');
+        this._warnMemAt = this._totalFrames;
+      }
 
-    // ── JIT pool pressure check ───────────────────────────────────────────
-    var jitUsed = kernel.jitUsedBytes();
-    var jitRatio = jitUsed / JIT_POOL_BYTES;
-    if (jitRatio > JIT_POOL_WARN_RATIO &&
-        this._totalFrames - this._warnJITAt > WARN_SUPPRESS_FRAMES) {
-      var jitPct = (jitRatio * 100) | 0;
-      kernel.serialPut('[profiler] JIT pool ' + jitPct + '% full (' +
-                       ((jitUsed / 1024) | 0) + ' KB / ' +
-                       ((JIT_POOL_BYTES / 1024) | 0) + ' KB)\n');
-      this._warnJITAt = this._totalFrames;
-    }
+      // JIT pool pressure check
+      var jitUsed = kernel.jitUsedBytes();
+      var jitRatio = jitUsed / JIT_POOL_BYTES;
+      if (jitRatio > JIT_POOL_WARN_RATIO &&
+          this._totalFrames - this._warnJITAt > WARN_SUPPRESS_FRAMES) {
+        var jitPct = (jitRatio * 100) | 0;
+        kernel.serialPut('[profiler] JIT pool ' + jitPct + '% full (' +
+                         ((jitUsed / 1024) | 0) + ' KB / ' +
+                         ((JIT_POOL_BYTES / 1024) | 0) + ' KB)\n');
+        this._warnJITAt = this._totalFrames;
+      }
 
-    // ── Sync JIT stats from the live QJSJITHook (set by main.ts) ─────────
-    var qjsJit = (globalThis as any).__qjsJit;
-    if (qjsJit) {
-      this._jitCompiled = qjsJit.compiledCount || 0;
-      this._jitBailed   = qjsJit.bailedCount   || 0;
-      this._jitDeopts   = qjsJit.deoptCount    || 0;
-    }
+      // Sync JIT stats from the live QJSJITHook
+      var qjsJit = (globalThis as any).__qjsJit;
+      if (qjsJit) {
+        this._jitCompiled = qjsJit.compiledCount || 0;
+        this._jitBailed   = qjsJit.bailedCount   || 0;
+        this._jitDeopts   = qjsJit.deoptCount    || 0;
+      }
 
-    // ── Scheduler: per-process CPU delta + starvation detection ──────────
-    var procs = scheduler.getLiveProcesses();
-    for (var i = 0; i < procs.length; i++) {
-      var p = procs[i];
-      var prev = this._prevCpuTime.get(p.pid) ?? 0;
-      var delta = p.cpuTime - prev;
-      this._prevCpuTime.set(p.pid, p.cpuTime);
+      // Scheduler: per-process CPU delta + starvation detection
+      var procs = scheduler.getLiveProcesses();
+      for (var i = 0; i < procs.length; i++) {
+        var p = procs[i];
+        var prev = this._prevCpuTime.get(p.pid) ?? 0;
+        var delta = p.cpuTime - prev;
+        this._prevCpuTime.set(p.pid, p.cpuTime);
 
-      // Track frames where a ready (runnable) process gains no CPU time
-      if (p.state === 'ready' && delta === 0) {
-        var idle = (this._framesIdle.get(p.pid) ?? 0) + 1;
-        this._framesIdle.set(p.pid, idle);
-        // Starvation: boost priority temporarily
-        if (idle === STARVATION_FRAMES) {
-          var boosted = Math.max(1, p.priority - 10);
-          scheduler.setPriority(p.pid, boosted);
-          kernel.serialPut('[profiler] starvation: pid ' + p.pid +
-                           ' (' + p.name + ') priority → ' + boosted + '\n');
+        if (p.state === 'ready' && delta === 0) {
+          var idle = (this._framesIdle.get(p.pid) ?? 0) + 1;
+          this._framesIdle.set(p.pid, idle);
+          if (idle === STARVATION_FRAMES) {
+            var boosted = Math.max(1, p.priority - 10);
+            scheduler.setPriority(p.pid, boosted);
+            kernel.serialPut('[profiler] starvation: pid ' + p.pid +
+                             ' (' + p.name + ') priority → ' + boosted + '\n');
+          }
+        } else {
+          this._framesIdle.set(p.pid, 0);
         }
-      } else {
-        this._framesIdle.set(p.pid, 0);
       }
     }
   }

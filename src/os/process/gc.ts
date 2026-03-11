@@ -37,7 +37,7 @@ const GC_SLICE_BUDGET_MS = 1;
 /** Max time for minor (nursery) GC (milliseconds). */
 const MINOR_GC_BUDGET_MS = 0.5;
 /** Frequency of background GC slices (in tick intervals). */
-const GC_TICK_INTERVAL = 2;
+const GC_TICK_INTERVAL = 6;
 
 // ── Tri-color mark state ──────────────────────────────────────────────────────
 
@@ -761,18 +761,20 @@ export class IncrementalGC {
   /** Periodic tick — called from the frame loop (items 877/878). */
   tick(tickNo: number): void {
     if (tickNo % (GC_TICK_INTERVAL * 3) === 0) {
-      // Minor GC every 6 ticks
+      // Minor GC every 18 ticks
       if (this._young.size > 1000) this.minorGC();
     }
     if (tickNo % GC_TICK_INTERVAL === 0) {
-      // Incremental major GC slice every 2 ticks
+      // Incremental major GC slice every 6 ticks
       if (this._majorPhase === 'idle' && this._old.size > 5000) {
         this.startMajorGC();
       }
       this.slice(GC_SLICE_BUDGET_MS);
     }
-    // Drain finalizers during idle
-    this.finalQueue.drainIdle(0.5);
+    // Drain finalizers only when pending
+    if (this.finalQueue.pendingCount > 0) {
+      this.finalQueue.drainIdle(0.5);
+    }
   }
 
   // ── Stats ─────────────────────────────────────────────────────────────────
