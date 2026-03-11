@@ -1237,5 +1237,14 @@ export function parseInlineStyle(style: string): CSSProps {
     }
   }
   if (important) p.important = important;
+  // Pre-compute filtered key list for fast mergeProps iteration.
+  // Replaces expensive for...in enumeration with simple counted loop.
+  var _rawKeys = Object.keys(p);
+  var _fks: string[] = [];
+  for (var _ki = 0; _ki < _rawKeys.length; _ki++) {
+    var _kk = _rawKeys[_ki]!;
+    if (_kk !== 'important' && _kk !== '_inherit' && _kk !== '_initial' && _kk !== '_ks') _fks.push(_kk);
+  }
+  p._ks = _fks;
   return p;
 }

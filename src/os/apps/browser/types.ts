@@ -516,6 +516,7 @@ export interface CSSProps {
   // ── Global keyword tracking for cascade resolution ──────────────────────
   _inherit?:      Set<string>;  // CSS prop names flagged 'inherit' or 'unset' (inheritable)
   _initial?:      Set<string>;  // CSS prop names flagged 'initial' or 'revert'
+  _ks?:           string[];     // pre-computed own-key list (excludes important/_inherit/_initial/_ks) for fast mergeProps
   // ── Pseudo-element content (resolved during HTML parsing, not cascade) ───
   _pseudoBefore?: string;  // resolved text of ::before { content: "..." }
   _pseudoAfter?:  string;  // resolved text of ::after  { content: "..." }

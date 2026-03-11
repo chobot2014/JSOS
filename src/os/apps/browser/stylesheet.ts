@@ -1505,6 +1505,14 @@ export function computeElementStyle(
 
   // Store in cache (bounded to 8192 entries)
   if (_cssMatchCache.size < 8192) {
+    // Pre-compute _ks on normalMerged so cache-hit mergeProps uses fast array path
+    var _nmKeys = Object.keys(normalMerged);
+    var _nmKs: string[] = [];
+    for (var _nki = 0; _nki < _nmKeys.length; _nki++) {
+      var _nk = _nmKeys[_nki]!;
+      if (_nk !== 'important' && _nk !== '_inherit' && _nk !== '_initial' && _nk !== '_ks') _nmKs.push(_nk);
+    }
+    (normalMerged as any)._ks = _nmKs;
     var cacheEntry: CSSMatchEntry = {
       normalMerged: normalMerged,
       importantProps: importantProps,
@@ -1565,16 +1573,31 @@ export function buildSheetIndex(rules: CSSRule[]): RuleIndex {
 }
 
 function mergeProps(target: CSSProps, src: CSSProps, importantOnly?: Set<string>): void {
-  // Fast path: iterate only the keys actually set in src (typically 5–15)
-  // instead of checking all 130+ possible CSSProps fields.
-  // CSSProps from parseDeclBlock/parseInlineStyle only have own enumerable keys
-  // for properties that were actually parsed, so for...in is efficient here.
+  // Fast path: use pre-computed _ks array (set by parseInlineStyle/parseDeclBlock)
+  // for O(N) counted-loop iteration instead of expensive for...in enumeration.
   var t = target as Record<string, unknown>;
   var s = src as Record<string, unknown>;
-  for (var k in s) {
-    if (k === 'important' || k === '_inherit' || k === '_initial') continue;
-    var v = s[k];
-    if (v === undefined) continue;
-    if (importantOnly && !importantOnly.has(k)) continue;
-    t[k] = v;
-  }}
+  var ks = (src as any)._ks as string[] | undefined;
+  if (ks) {
+    if (importantOnly) {
+      for (var i = 0; i < ks.length; i++) {
+        var k = ks[i]!;
+        if (!importantOnly.has(k)) continue;
+        t[k] = s[k];
+      }
+    } else {
+      for (var i = 0; i < ks.length; i++) {
+        t[ks[i]!] = s[ks[i]!];
+      }
+    }
+  } else {
+    // Fallback for objects without _ks (e.g. normalMerged built inline)
+    for (var k in s) {
+      if (k === 'important' || k === '_inherit' || k === '_initial' || k === '_ks') continue;
+      var v = s[k];
+      if (v === undefined) continue;
+      if (importantOnly && !importantOnly.has(k)) continue;
+      t[k] = v;
+    }
+  }
+}
