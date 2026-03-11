@@ -756,7 +756,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
   // Class-split + sorted-key cache: elements sharing the same class="" string
   // reuse both the split result and pre-computed cache key for computeElementStyle.
   var _clsSplitCache = new Map<string, { split: string[]; sortedKey: string }>();
-  function applyStyle(tag: string, attrs: Map<string, string>): boolean {
+  function applyStyle(tag: string, attrs: Map<string, string>, skipCompute?: boolean): boolean {
     var id  = attrs.get('id')    || '';
     var _clsRaw = attrs.get('class') || '';
     var cls: string[];
@@ -771,30 +771,31 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
         if (_clsSplitCache.size < 2048) _clsSplitCache.set(_clsRaw, { split: cls, sortedKey: _sortedClsKey });
       }
     }
+    // Fast path: skip expensive CSS matching for elements inside a hidden
+    // subtree (display:none).  These will never be rendered so CSS computation
+    // is pure waste.  We still maintain CSS/ancestor/child stacks for balance.
     var inl = attrs.get('style') || '';
+    // Record sibling index for this element, then start child counter (shared by both paths)
+    var _sibIdx = childCountStack.length > 0 ? childCountStack[childCountStack.length - 1]! : 0;
+    if (childCountStack.length > 0) childCountStack[childCountStack.length - 1]!++;
+    childCountStack.push(0);
+    if (skipCompute || (!inl && !sheets.length)) {
+      cssStack.push({ ...curCSS });
+      ancestorStack.push({ tag, id, cls, attrs });
+      if (id || curCSS._onclickElId) {
+        var jselIdFast = attrs.get('data-jsos-el') || (attrs.has('onclick') ? (id || '_ocl') : '');
+        if (jselIdFast) curCSS = { ...curCSS, _onclickElId: jselIdFast };
+        else if (id && !curCSS._onclickElId) curCSS = { ...curCSS, _onclickElId: id };
+      }
+      return false;
+    }
     var hasSheets = sheets.length > 0;
     // Only call getPseudoContent when there are rules with `content` property
     var hasPseudo = _ruleIndex ? _ruleIndex.contentRules.length > 0 : hasSheets;
     // Determine if this element has a JS click handler that needs hit-test dispatch.
-    // data-jsos-el is auto-set by VElement.addEventListener(); inline onclick is a fallback.
     var jselId = attrs.get('data-jsos-el') ||
                  (attrs.has('onclick') ? (attrs.get('id') || attrs.get('data-jsos-el') || '_ocl') : '') ||
                  '';
-    // Record sibling index for this element (0-based), then start a new child count for its children.
-    var _sibIdx = childCountStack.length > 0 ? childCountStack[childCountStack.length - 1]! : 0;
-    if (childCountStack.length > 0) childCountStack[childCountStack.length - 1]!++;
-    childCountStack.push(0);
-    if (!inl && !hasSheets) {
-      cssStack.push({ ...curCSS });
-      ancestorStack.push({ tag, id, cls, attrs });
-      if (jselId || id || curCSS._onclickElId) {
-        curCSS = { ...curCSS };
-        if (jselId) curCSS._onclickElId = attrs.get('data-jsos-el') || id || jselId;
-        else if (id && !curCSS._onclickElId) curCSS._onclickElId = id;  // propagate HTML id for layout rect tracking
-        // Inherit parent _onclickElId if no override on this element.
-      }
-      return false;
-    }
     var ep = computeElementStyle(tag, id, cls, attrs, curCSS, sheets, inl, _ruleIndex ?? undefined, ancestorStack, _sibIdx, undefined, _sortedClsKey);
     // Apply counter-reset / counter-increment from computed style (item 434)
     _applyCounters(ep);
@@ -941,8 +942,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
 
     if (tok.kind === 'open' || tok.kind === 'self') {
       if (skipDepth > 0) {
-        // Still need to pushCSS for any styled hidden element so pops balance
-        applyStyle(tok.tag, tok.attrs);
+        // Inside hidden subtree — skip CSS matching (pure waste) but maintain stacks
+        applyStyle(tok.tag, tok.attrs, true);
         continue;
       }
 
