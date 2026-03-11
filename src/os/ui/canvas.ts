@@ -457,6 +457,8 @@ export class Canvas {
   /**
    * Draw text using the 8×8 bitmap font scaled by `scale` pixels per dot.
    * scale=1 → normal 8×8; scale=2 → 16×16; scale=3 → 24×24.
+   * Optimisation: consecutive set bits in a glyph row are merged into a
+   * single fillRect call, reducing per-pixel JIT dispatch overhead by ~4×.
    */
   drawTextScaled(x: number, y: number, text: string, color: PixelColor, scale: number): void {
     if (scale <= 1) { this.drawText(x, y, text, color); return; }
@@ -468,9 +470,17 @@ export class Canvas {
       for (var row = 0; row < 8; row++) {
         var byte = FONT_DATA_8x8[base + row];
         if (!byte) continue;
-        for (var col = 0; col < 8; col++) {
+        // Merge consecutive set bits into single fillRect runs
+        var col = 0;
+        while (col < 8) {
           if (byte & (0x80 >> col)) {
-            this.fillRect(cx + col * scale, y + row * scale, scale, scale, color);
+            var runStart = col;
+            while (col < 8 && (byte & (0x80 >> col))) col++;
+            // Fill the entire run as one rectangle: width = (col - runStart) * scale
+            this.fillRect(cx + runStart * scale, y + row * scale,
+                          (col - runStart) * scale, scale, color);
+          } else {
+            col++;
           }
         }
       }
@@ -665,6 +675,20 @@ export class Canvas {
    */
   drawGlyph(x: number, y: number, data: Uint8Array, base: number, color: PixelColor): void {
     var bgraColor = Canvas._bgra(color);   // convert ONCE, not 64 times
+    // JIT fast-path: use compiled glyphRow kernel for each row
+    if (_ensureJIT()) {
+      var fb = this.bufPhysAddr();
+      if (fb) {
+        for (var row = 0; row < 8; row++) {
+          var py = y + row;
+          if (py < 0 || py >= this.height) continue;
+          var byte = data[base + row];
+          if (!byte) continue;
+          JITCanvas.glyphRow(fb + (py * this.width + x) * 4, byte, x, this.width, bgraColor);
+        }
+        return;
+      }
+    }
     for (var row = 0; row < 8; row++) {
       var py = y + row;
       if (py < 0 || py >= this.height) continue;
@@ -918,17 +942,35 @@ export class Canvas {
 
   /**
    * Partial update — blit a sub-region of this canvas to the framebuffer.
-   * Builds a compact typed-array region copy (one pass) then hands off
-   * its backing ArrayBuffer to C for a single memcpy.
+   * Uses the strided blit path to avoid copying into a temporary buffer.
+   * Falls back to compact copy + fbBlit when strided blit is unavailable.
    */
   flipRegion(x: number, y: number, w: number, h: number): void {
-    var region = new Uint32Array(w * h);
+    // Zero-copy fast path: let C handle the stride directly
+    if ((kernel as any).fbBlitStrided) {
+      (kernel as any).fbBlitStrided(
+        this._buf.buffer, this.width,
+        x, y,
+        this._fb_x + x, this._fb_y + y,
+        w, h,
+      );
+      return;
+    }
+    // Fallback: compact copy using cached buffer to avoid per-call allocation
+    var size = w * h;
+    if (!Canvas._regionBuf || Canvas._regionBuf.length < size) {
+      Canvas._regionBuf = new Uint32Array(size);
+    }
+    var region = Canvas._regionBuf;
     for (var row = 0; row < h; row++) {
       var srcOff = (y + row) * this.width + x;
       region.set(this._buf.subarray(srcOff, srcOff + w), row * w);
     }
     (kernel.fbBlit as any)(region.buffer, this._fb_x + x, this._fb_y + y, w, h);
   }
+
+  /** Cached region buffer for flipRegion fallback — avoids allocation per call. */
+  private static _regionBuf: Uint32Array | null = null;
 
   /** Get raw Uint32Array buffer (BGRA) for compositing without allocation */
   getBuffer(): Uint32Array { return this._buf; }
@@ -951,8 +993,37 @@ export class Canvas {
     dstX: number, dstY: number, w: number, h: number,
     srcWidthPx?: number,
   ): void {
+    this.blitFromView(new Uint32Array(srcBuf), srcX, srcY, dstX, dstY, w, h, srcWidthPx);
+  }
+
+  /**
+   * Same as blitFromBuffer but accepts a pre-built Uint32Array view,
+   * avoiding a per-call allocation when the caller caches the view.
+   */
+  blitFromView(
+    src: Uint32Array, srcX: number, srcY: number,
+    dstX: number, dstY: number, w: number, h: number,
+    srcWidthPx?: number,
+  ): void {
     var srcStride = srcWidthPx !== undefined ? srcWidthPx : w;
-    var src = new Uint32Array(srcBuf);
+    // JIT fast-path: use REP MOVSD blitRow for each scanline
+    if (_ensureJIT()) {
+      var dstBase = this.bufPhysAddr();
+      var srcBase = JITCanvas.physAddr(src.buffer as ArrayBuffer);
+      if (dstBase && srcBase) {
+        for (var row = 0; row < h; row++) {
+          var dY = dstY + row;
+          if (dY < 0 || dY >= this.height) continue;
+          var colStart = dstX < 0 ? -dstX : 0;
+          var colEnd   = (dstX + w > this.width) ? (this.width - dstX) : w;
+          if (colStart >= colEnd) continue;
+          var srcOff = (srcY + row) * srcStride + srcX + colStart;
+          var dstOff = dY * this.width + dstX + colStart;
+          JITCanvas.blitRow(dstBase + dstOff * 4, srcBase + srcOff * 4, colEnd - colStart);
+        }
+        return;
+      }
+    }
     for (var row = 0; row < h; row++) {
       var dY = dstY + row;
       if (dY < 0 || dY >= this.height) continue;

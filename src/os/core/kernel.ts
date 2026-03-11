@@ -161,6 +161,14 @@ export interface KernelAPI {
   fbBlit(pixels: ArrayBuffer | number[], x: number, y: number, w: number, h: number): void;
 
   /**
+   * Strided blit: copy a sub-rectangle from a larger source buffer to the
+   * framebuffer without allocating a temporary buffer.
+   * srcStride = full width of source buffer in pixels (not bytes).
+   */
+  fbBlitStrided(buffer: ArrayBuffer, srcStride: number, srcX: number, srcY: number,
+                dstX: number, dstY: number, w: number, h: number): void;
+
+  /**
    * Inject and execute raw x86 machine code.
    * hexBytes: space/comma-separated hex bytes, e.g. "B8 2A 00 00 00 C3" (mov eax,42; ret).
    * Runs as a cdecl void→uint32_t function in ring-0; returns the EAX result.

@@ -144,22 +144,21 @@ function tls12DecryptRecord(key: number[], implicitIV: number[], seq: number,
   var recLen  = u16(record, 3);
   if (record.length < 5 + recLen) return null;
   var explicitNonce = record.slice(5, 5 + 8);
-  var nonce = implicitIV.slice(0, 4).concat(explicitNonce);
+  var nonce: number[] = [implicitIV[0], implicitIV[1], implicitIV[2], implicitIV[3],
+    explicitNonce[0], explicitNonce[1], explicitNonce[2], explicitNonce[3],
+    explicitNonce[4], explicitNonce[5], explicitNonce[6], explicitNonce[7]];
   var cipherOffset = 5 + 8;
   var cipherLen    = recLen - 8 - 16;
   if (cipherLen < 0) return null;
   var ciphertext = record.slice(cipherOffset, cipherOffset + cipherLen);
   var tag        = record.slice(cipherOffset + cipherLen, cipherOffset + cipherLen + 16);
   // AAD = seq_num(8B) || type(1B) || version(2B) || length_of_plaintext(2B)
-  var aad: number[] = [0,0,0,0];
-  aad.push((seq >>> 24) & 0xff);
-  aad.push((seq >>> 16) & 0xff);
-  aad.push((seq >>>  8) & 0xff);
-  aad.push(seq          & 0xff);
-  aad.push(recType);
-  aad.push(0x03); aad.push(0x03);  // TLS 1.2 version
-  aad.push((cipherLen >>> 8) & 0xff);
-  aad.push(cipherLen & 0xff);
+  var aad: number[] = [
+    0, 0, 0, 0,
+    (seq >>> 24) & 0xff, (seq >>> 16) & 0xff, (seq >>> 8) & 0xff, seq & 0xff,
+    recType, 0x03, 0x03,
+    (cipherLen >>> 8) & 0xff, cipherLen & 0xff,
+  ];
   return gcmDecrypt(key, nonce, aad, ciphertext, tag);
 }
 
@@ -170,21 +169,28 @@ function tls12EncryptRecord(key: number[], implicitIV: number[], seq: number,
     recType: number, plaintext: number[]): number[] {
   // Explicit nonce = low 8 bytes of unique value (just use seq padded)
   var explicitNonce = [0,0,0,0, (seq>>>24)&0xff, (seq>>>16)&0xff, (seq>>>8)&0xff, seq&0xff];
-  var nonce = implicitIV.slice(0, 4).concat(explicitNonce);
-  // AAD
-  var aad: number[] = [0,0,0,0];
-  aad.push((seq >>> 24) & 0xff);
-  aad.push((seq >>> 16) & 0xff);
-  aad.push((seq >>>  8) & 0xff);
-  aad.push(seq          & 0xff);
-  aad.push(recType);
-  aad.push(0x03); aad.push(0x03);
-  aad.push((plaintext.length >>> 8) & 0xff);
-  aad.push(plaintext.length & 0xff);
+  // Nonce = implicit_IV(4B) || explicit_nonce(8B)
+  var nonce: number[] = [implicitIV[0], implicitIV[1], implicitIV[2], implicitIV[3],
+    0, 0, 0, 0, (seq>>>24)&0xff, (seq>>>16)&0xff, (seq>>>8)&0xff, seq&0xff];
+  // AAD = seq_num(8B) || type(1B) || version(2B) || length_of_plaintext(2B)
+  var aad: number[] = [
+    0, 0, 0, 0,
+    (seq >>> 24) & 0xff, (seq >>> 16) & 0xff, (seq >>> 8) & 0xff, seq & 0xff,
+    recType, 0x03, 0x03,
+    (plaintext.length >>> 8) & 0xff, plaintext.length & 0xff,
+  ];
   var enc = gcmEncrypt(key, nonce, aad, plaintext);
   var totalLen = 8 + enc.ciphertext.length + enc.tag.length;
-  var rec = [recType, 0x03, 0x03, (totalLen >>> 8) & 0xff, totalLen & 0xff];
-  return rec.concat(explicitNonce).concat(enc.ciphertext).concat(enc.tag);
+  // Pre-allocate output record in a single array (avoids 3× .concat())
+  var out = new Array(5 + totalLen);
+  out[0] = recType; out[1] = 0x03; out[2] = 0x03;
+  out[3] = (totalLen >>> 8) & 0xff; out[4] = totalLen & 0xff;
+  for (var _oi = 0; _oi < 8; _oi++) out[5 + _oi] = explicitNonce[_oi];
+  var _base = 13;
+  for (var _oi = 0; _oi < enc.ciphertext.length; _oi++) out[_base + _oi] = enc.ciphertext[_oi];
+  _base += enc.ciphertext.length;
+  for (var _oi = 0; _oi < enc.tag.length; _oi++) out[_base + _oi] = enc.tag[_oi];
+  return out;
 }
 
 /**
@@ -204,15 +210,12 @@ function tls12DecryptRecordChaCha(key: number[], writeIV: number[], seq: number,
   // Nonce = writeIV XOR padded sequence number (12 bytes)
   var nonce = xorIV(writeIV, seq);
   // AAD = seq_num(8B) || type(1B) || version(2B) || length_of_plaintext(2B)
-  var aad: number[] = [0,0,0,0];
-  aad.push((seq >>> 24) & 0xff);
-  aad.push((seq >>> 16) & 0xff);
-  aad.push((seq >>>  8) & 0xff);
-  aad.push(seq          & 0xff);
-  aad.push(recType);
-  aad.push(0x03); aad.push(0x03);
-  aad.push((cipherLen >>> 8) & 0xff);
-  aad.push(cipherLen & 0xff);
+  var aad: number[] = [
+    0, 0, 0, 0,
+    (seq >>> 24) & 0xff, (seq >>> 16) & 0xff, (seq >>> 8) & 0xff, seq & 0xff,
+    recType, 0x03, 0x03,
+    (cipherLen >>> 8) & 0xff, cipherLen & 0xff,
+  ];
   return chacha20poly1305Decrypt(key, nonce, aad, ciphertext, tag);
 }
 
@@ -222,20 +225,22 @@ function tls12DecryptRecordChaCha(key: number[], writeIV: number[], seq: number,
 function tls12EncryptRecordChaCha(key: number[], writeIV: number[], seq: number,
     recType: number, plaintext: number[]): number[] {
   var nonce = xorIV(writeIV, seq);
-  // AAD
-  var aad: number[] = [0,0,0,0];
-  aad.push((seq >>> 24) & 0xff);
-  aad.push((seq >>> 16) & 0xff);
-  aad.push((seq >>>  8) & 0xff);
-  aad.push(seq          & 0xff);
-  aad.push(recType);
-  aad.push(0x03); aad.push(0x03);
-  aad.push((plaintext.length >>> 8) & 0xff);
-  aad.push(plaintext.length & 0xff);
+  // AAD = seq_num(8B) || type(1B) || version(2B) || length_of_plaintext(2B)
+  var aad: number[] = [
+    0, 0, 0, 0,
+    (seq >>> 24) & 0xff, (seq >>> 16) & 0xff, (seq >>> 8) & 0xff, seq & 0xff,
+    recType, 0x03, 0x03,
+    (plaintext.length >>> 8) & 0xff, plaintext.length & 0xff,
+  ];
   var enc = chacha20poly1305Encrypt(key, nonce, aad, plaintext);
   var totalLen = enc.ciphertext.length + enc.tag.length;
-  var rec = [recType, 0x03, 0x03, (totalLen >>> 8) & 0xff, totalLen & 0xff];
-  return rec.concat(enc.ciphertext).concat(enc.tag);
+  // Pre-allocate output record
+  var out = new Array(5 + totalLen);
+  out[0] = recType; out[1] = 0x03; out[2] = 0x03;
+  out[3] = (totalLen >>> 8) & 0xff; out[4] = totalLen & 0xff;
+  for (var _ci = 0; _ci < enc.ciphertext.length; _ci++) out[5 + _ci] = enc.ciphertext[_ci];
+  for (var _ci = 0; _ci < enc.tag.length; _ci++) out[5 + enc.ciphertext.length + _ci] = enc.tag[_ci];
+  return out;
 }
 
 // â”€â”€ AEAD helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

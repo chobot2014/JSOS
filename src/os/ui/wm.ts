@@ -114,6 +114,11 @@ export class ChildProcApp implements App {
   readonly procId: number;
   private readonly _w: number;
   private readonly _h: number;
+  /** Cached Uint32Array view — avoids allocating a new view every frame. */
+  private _cachedBuf: ArrayBuffer | null = null;
+  private _cachedView: Uint32Array | null = null;
+  /** Dirty flag — set by renderReady command, cleared after render copies buffer. */
+  _renderDirty: boolean = true; // true initially so first frame always renders
 
   constructor(procId: number, w: number, h: number) {
     this.procId = procId;
@@ -145,9 +150,16 @@ export class ChildProcApp implements App {
   }
 
   render(canvas: Canvas): boolean {
+    if (!this._renderDirty) return false;
     var buf = kernel.getProcRenderBuffer(this.procId);
     if (!buf) return false;
-    canvas.blitFromBuffer(buf, 0, 0, 0, 0, this._w, this._h, this._w);
+    this._renderDirty = false;
+    // Cache Uint32Array view — only recreate when the underlying ArrayBuffer changes
+    if (buf !== this._cachedBuf) {
+      this._cachedBuf = buf;
+      this._cachedView = new Uint32Array(buf);
+    }
+    canvas.blitFromView(this._cachedView!, 0, 0, 0, 0, this._w, this._h, this._w);
     return true;
   }
 }
@@ -437,6 +449,11 @@ export class WindowManager {
           this._closeWindowByProc(procId);
           break;
         case 'renderReady':
+          // Set per-app dirty flag so ChildProcApp.render() only copies when new content exists
+          var rw = this._findWindowByProc(procId);
+          if (rw && rw.app instanceof ChildProcApp) {
+            (rw.app as ChildProcApp)._renderDirty = true;
+          }
           this._wmDirty = true;
           break;
         default:
@@ -1009,6 +1026,7 @@ export class WindowManager {
     // Let apps render; track content dirty separately from cursor dirty so we
     // can use the cheap cursor-only fast path when only the mouse has moved.
     var anyContentDirty = this._wmDirty;
+    var dirtyWinIdxs: number[] = [];  // indices of windows with new content
     for (var ai = 0; ai < this._windows.length; ai++) {
       var wi = this._windows[ai];
       if (!wi.minimised) {
@@ -1017,7 +1035,10 @@ export class WindowManager {
           anyContentDirty = true;
         } else {
           try {
-            if (wi.app.render(wi.canvas)) anyContentDirty = true;
+            if (wi.app.render(wi.canvas)) {
+              anyContentDirty = true;
+              dirtyWinIdxs.push(ai);
+            }
           } catch (err) {
             wi._crashed = true;
             var eMsg = '';
@@ -1030,6 +1051,65 @@ export class WindowManager {
     }
 
     if (!anyContentDirty && !this._cursorDirty) return; // ★ truly nothing changed
+
+    // ── FAST PATH: content-only dirty (no structural WM changes) ───────────
+    // When _wmDirty is false, window positions/sizes/z-order haven't changed.
+    // We only need to re-blit the dirty windows' canvas content areas and do
+    // partial flips — skipping the expensive full clear + all-windows redraw.
+    if (!this._wmDirty && dirtyWinIdxs.length > 0 && this._modalWinId === null) {
+      // Invalidate cursor save-under since we'll overwrite screen pixels
+      this._cursorSaveValid = false;
+
+      for (var dii = 0; dii < dirtyWinIdxs.length; dii++) {
+        var dIdx = dirtyWinIdxs[dii];
+        var dw = this._windows[dIdx];
+        // Re-blit dirty window's content canvas into the screen buffer
+        var contentH = dw.height - TITLE_H;
+        var blitW = Math.min(dw.width, dw.canvas.width);
+        var blitH = Math.min(contentH, dw.canvas.height);
+        if (dw.opacity >= 255) {
+          s.blit(dw.canvas, 0, 0, dw.x, dw.y + TITLE_H, blitW, blitH);
+        } else {
+          s.blitAlpha(dw.canvas, 0, 0, dw.x, dw.y + TITLE_H, blitW, blitH, dw.opacity);
+        }
+
+        // Re-blit any windows ABOVE this one that overlap its content area
+        // (their content is unchanged but must be composited on top)
+        for (var oi = dIdx + 1; oi < this._windows.length; oi++) {
+          var ow = this._windows[oi];
+          if (ow.minimised || ow.opacity === 0) continue;
+          // Check overlap between dirty window rect and other window rect
+          var ox1 = Math.max(dw.x, ow.x);
+          var oy1 = Math.max(dw.y + TITLE_H, ow.y);
+          var ox2 = Math.min(dw.x + dw.width, ow.x + ow.width);
+          var oy2 = Math.min(dw.y + dw.height, ow.y + ow.height);
+          if (ox1 < ox2 && oy1 < oy2) {
+            // Overlapping: re-blit the higher window's entire content
+            var owCH = ow.height - TITLE_H;
+            var owBW = Math.min(ow.width, ow.canvas.width);
+            var owBH = Math.min(owCH, ow.canvas.height);
+            if (ow.opacity >= 255) {
+              s.blit(ow.canvas, 0, 0, ow.x, ow.y + TITLE_H, owBW, owBH);
+            } else {
+              s.blitAlpha(ow.canvas, 0, 0, ow.x, ow.y + TITLE_H, owBW, owBH, ow.opacity);
+            }
+          }
+        }
+      }
+
+      // Redraw cursor and partial flip for dirty regions
+      this._saveCursorUnder();
+      this._drawCursor();
+      this._cursorSaveValid = true;
+      this._cursorDirty   = false;
+
+      // Partial flip: blit only the dirty windows' screen rects to framebuffer
+      for (var dii = 0; dii < dirtyWinIdxs.length; dii++) {
+        var dw = this._windows[dirtyWinIdxs[dii]];
+        s.flipRegion(dw.x, dw.y, dw.width, dw.height);
+      }
+      return; // skip full composite
+    }
 
     // The cursor fast blit is handled in tick() before this method is called,
     // so _cursorDirty is normally already false here.  Clear both dirty flags

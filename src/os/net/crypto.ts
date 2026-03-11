@@ -72,17 +72,22 @@ export function sha256(data: number[]): number[] {
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
   ];
-  // Padding
-  var msg = data.slice();
+  // Padding: pre-compute total padded length, allocate once
   var bitLen = data.length * 8;
-  msg.push(0x80);
-  while ((msg.length % 64) !== 56) msg.push(0);
+  var padLen = 64 - ((data.length + 1 + 8) % 64);
+  if (padLen === 64) padLen = 0;
+  var totalLen = data.length + 1 + padLen + 8;
+  var msg = new Array(totalLen);
+  for (var _sI = 0; _sI < data.length; _sI++) msg[_sI] = data[_sI];
+  msg[data.length] = 0x80;
+  for (var _sI = data.length + 1; _sI < totalLen - 8; _sI++) msg[_sI] = 0;
   // 64-bit big-endian bit length
-  msg.push(0); msg.push(0); msg.push(0); msg.push(0); // high 32 bits
-  msg.push((bitLen >>> 24) & 0xff);
-  msg.push((bitLen >>> 16) & 0xff);
-  msg.push((bitLen >>>  8) & 0xff);
-  msg.push( bitLen         & 0xff);
+  msg[totalLen - 8] = 0; msg[totalLen - 7] = 0;
+  msg[totalLen - 6] = 0; msg[totalLen - 5] = 0;
+  msg[totalLen - 4] = (bitLen >>> 24) & 0xff;
+  msg[totalLen - 3] = (bitLen >>> 16) & 0xff;
+  msg[totalLen - 2] = (bitLen >>>  8) & 0xff;
+  msg[totalLen - 1] =  bitLen         & 0xff;
 
   for (var off = 0; off < msg.length; off += 64) {
     var w: number[] = new Array(64);
@@ -111,13 +116,17 @@ export function hmacSha256(key: number[], data: number[]): number[] {
   var k = key.length > 64 ? sha256(key) : key.slice();
   while (k.length < 64) k.push(0);
 
-  var ipad: number[] = new Array(64);
-  var opad: number[] = new Array(64);
+  // Pre-allocate ipad+data and opad+hash in single arrays (avoids .concat())
+  var inner = new Array(64 + data.length);
+  var outer = new Array(64 + 32);
   for (var i = 0; i < 64; i++) {
-    ipad[i] = k[i] ^ 0x36;
-    opad[i] = k[i] ^ 0x5c;
+    inner[i] = k[i] ^ 0x36;
+    outer[i] = k[i] ^ 0x5c;
   }
-  return sha256(opad.concat(sha256(ipad.concat(data))));
+  for (var i = 0; i < data.length; i++) inner[64 + i] = data[i];
+  var innerHash = sha256(inner);
+  for (var i = 0; i < 32; i++) outer[64 + i] = innerHash[i];
+  return sha256(outer);
 }
 
 // ──────────────────────────────────────────────────────── HKDF ───────────────
@@ -266,49 +275,61 @@ export function aesEncryptBlock(block: number[], ek: number[]): number[] {
 
 // ─────────────────────────────────────────────── AES-128-GCM ─────────────────
 
-/** Multiply two 128-bit values in GF(2^128) with polynomial x^128+x^7+x^2+x+1 */
-function ghashMul(X: bigint, Y: bigint): bigint {
-  const R = BigInt('0xe1000000000000000000000000000000') << BigInt(0); // 0xe1 << 120
-  const MASK128 = (BigInt(1) << BigInt(128)) - BigInt(1);
-  const R128 = BigInt('0xe1') << BigInt(120);
-  var Z = BigInt(0);
-  var V = X & MASK128;
-  var yBits = Y;
-  for (var i = 0; i < 128; i++) {
-    if ((yBits >> BigInt(127)) & BigInt(1)) Z ^= V;
-    var lsb = V & BigInt(1);
-    V = V >> BigInt(1);
-    if (lsb) V ^= R128;
-    yBits = (yBits << BigInt(1)) & MASK128;
-  }
-  return Z;
+/**
+ * 128-bit value as four big-endian 32-bit words (w[0] = MSW).
+ * Used for GHASH — replaces BigInt with pure int32 bitwise ops.
+ */
+type GH128 = [number, number, number, number];
+
+function bytesToGH128(b: number[], off: number): GH128 {
+  return [
+    ((b[off]&0xff)<<24)|((b[off+1]&0xff)<<16)|((b[off+2]&0xff)<<8)|(b[off+3]&0xff),
+    ((b[off+4]&0xff)<<24)|((b[off+5]&0xff)<<16)|((b[off+6]&0xff)<<8)|(b[off+7]&0xff),
+    ((b[off+8]&0xff)<<24)|((b[off+9]&0xff)<<16)|((b[off+10]&0xff)<<8)|(b[off+11]&0xff),
+    ((b[off+12]&0xff)<<24)|((b[off+13]&0xff)<<16)|((b[off+14]&0xff)<<8)|(b[off+15]&0xff),
+  ];
 }
 
-function bytesToBigInt128(b: number[], off: number): bigint {
-  var v = BigInt(0);
-  for (var i = 0; i < 16; i++) {
-    v = (v << BigInt(8)) | BigInt(b[off + i] & 0xff);
-  }
-  return v;
+function gh128ToBytes(w: GH128): number[] {
+  return [
+    (w[0]>>>24)&0xff,(w[0]>>>16)&0xff,(w[0]>>>8)&0xff,w[0]&0xff,
+    (w[1]>>>24)&0xff,(w[1]>>>16)&0xff,(w[1]>>>8)&0xff,w[1]&0xff,
+    (w[2]>>>24)&0xff,(w[2]>>>16)&0xff,(w[2]>>>8)&0xff,w[2]&0xff,
+    (w[3]>>>24)&0xff,(w[3]>>>16)&0xff,(w[3]>>>8)&0xff,w[3]&0xff,
+  ];
 }
 
-function bigInt128ToBytes(v: bigint): number[] {
-  var out: number[] = new Array(16);
-  var mask = BigInt(0xff);
-  for (var i = 15; i >= 0; i--) {
-    out[i] = Number(v & mask);
-    v >>= BigInt(8);
+/**
+ * Multiply two 128-bit values in GF(2^128) with polynomial x^128+x^7+x^2+x+1.
+ * Uses pure 32-bit integer ops — no BigInt allocation.
+ */
+function ghashMul(Xw: GH128, Yw: GH128): GH128 {
+  var z0 = 0, z1 = 0, z2 = 0, z3 = 0;
+  var v0 = Xw[0], v1 = Xw[1], v2 = Xw[2], v3 = Xw[3];
+  for (var i = 0; i < 4; i++) {
+    var yi = Yw[i];
+    for (var j = 31; j >= 0; j--) {
+      if ((yi >>> j) & 1) { z0 ^= v0; z1 ^= v1; z2 ^= v2; z3 ^= v3; }
+      var lsb = v3 & 1;
+      v3 = (v3 >>> 1) | ((v2 & 1) << 31);
+      v2 = (v2 >>> 1) | ((v1 & 1) << 31);
+      v1 = (v1 >>> 1) | ((v0 & 1) << 31);
+      v0 = v0 >>> 1;
+      if (lsb) v0 ^= 0xe1000000; // R = 0xe1 << 120
+    }
   }
-  return out;
+  return [z0, z1, z2, z3];
 }
 
-function ghash(H: bigint, aad: number[], ciphertext: number[], MASK128: bigint): number[] {
-  var Y = BigInt(0);
-  // Process AAD (padded to 16 bytes)
+function ghash(H: GH128, aad: number[], ciphertext: number[]): number[] {
+  var y0 = 0, y1 = 0, y2 = 0, y3 = 0;
+  var blk: number[] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
   function processBlock(data: number[], off: number, len: number): void {
-    var block: number[] = new Array(16).fill(0);
-    for (var i = 0; i < len; i++) block[i] = data[off + i];
-    Y = ghashMul(Y ^ bytesToBigInt128(block, 0), H);
+    for (var k = 0; k < 16; k++) blk[k] = k < len ? data[off + k] : 0;
+    var b = bytesToGH128(blk, 0);
+    y0 ^= b[0]; y1 ^= b[1]; y2 ^= b[2]; y3 ^= b[3];
+    var r = ghashMul([y0, y1, y2, y3] as GH128, H);
+    y0 = r[0]; y1 = r[1]; y2 = r[2]; y3 = r[3];
   }
   var i = 0;
   while (i + 16 <= aad.length) { processBlock(aad, i, 16); i += 16; }
@@ -317,19 +338,21 @@ function ghash(H: bigint, aad: number[], ciphertext: number[], MASK128: bigint):
   while (i + 16 <= ciphertext.length) { processBlock(ciphertext, i, 16); i += 16; }
   if (i < ciphertext.length) processBlock(ciphertext, i, ciphertext.length - i);
   // Lengths block
-  var lenBlock = new Array(16).fill(0);
   var aadBits = aad.length * 8;
   var ctBits  = ciphertext.length * 8;
-  lenBlock[4]  = (aadBits >>> 24) & 0xff;
-  lenBlock[5]  = (aadBits >>> 16) & 0xff;
-  lenBlock[6]  = (aadBits >>>  8) & 0xff;
-  lenBlock[7]  =  aadBits         & 0xff;
-  lenBlock[12] = (ctBits >>> 24) & 0xff;
-  lenBlock[13] = (ctBits >>> 16) & 0xff;
-  lenBlock[14] = (ctBits >>>  8) & 0xff;
-  lenBlock[15] =  ctBits         & 0xff;
-  Y = ghashMul(Y ^ bytesToBigInt128(lenBlock, 0), H);
-  return bigInt128ToBytes(Y);
+  for (var k = 0; k < 16; k++) blk[k] = 0;
+  blk[4]  = (aadBits >>> 24) & 0xff;
+  blk[5]  = (aadBits >>> 16) & 0xff;
+  blk[6]  = (aadBits >>>  8) & 0xff;
+  blk[7]  =  aadBits         & 0xff;
+  blk[12] = (ctBits >>> 24) & 0xff;
+  blk[13] = (ctBits >>> 16) & 0xff;
+  blk[14] = (ctBits >>>  8) & 0xff;
+  blk[15] =  ctBits         & 0xff;
+  var lb = bytesToGH128(blk, 0);
+  y0 ^= lb[0]; y1 ^= lb[1]; y2 ^= lb[2]; y3 ^= lb[3];
+  var fin = ghashMul([y0, y1, y2, y3] as GH128, H);
+  return gh128ToBytes(fin);
 }
 
 function gcmCtr(ek: number[], iv: number[], counter: number, data: number[]): number[] {
@@ -356,12 +379,11 @@ export function gcmEncrypt(
     { ciphertext: number[], tag: number[] } {
   var ek = aesKeyExpand(key);
   // H = AES_k(0^128)
-  var H = bytesToBigInt128(aesEncryptBlock(new Array(16).fill(0), ek), 0);
-  var MASK128 = (BigInt(1) << BigInt(128)) - BigInt(1);
+  var H = bytesToGH128(aesEncryptBlock(new Array(16).fill(0), ek), 0);
   // Encrypt
   var ciphertext = gcmCtr(ek, iv, 2, plaintext);
   // GHASH
-  var T = ghash(H, aad, ciphertext, MASK128);
+  var T = ghash(H, aad, ciphertext);
   // E_k(J0) = AES_k(IV || 0x00000001)
   var j0 = gcmCtr(ek, iv, 1, T);
   return { ciphertext, tag: j0 };
@@ -371,10 +393,9 @@ export function gcmDecrypt(
     key: number[], iv: number[], aad: number[],
     ciphertext: number[], tag: number[]): number[] | null {
   var ek = aesKeyExpand(key);
-  var H = bytesToBigInt128(aesEncryptBlock(new Array(16).fill(0), ek), 0);
-  var MASK128 = (BigInt(1) << BigInt(128)) - BigInt(1);
+  var H = bytesToGH128(aesEncryptBlock(new Array(16).fill(0), ek), 0);
   // Verify tag
-  var T = ghash(H, aad, ciphertext, MASK128);
+  var T = ghash(H, aad, ciphertext);
   var j0 = gcmCtr(ek, iv, 1, T);
   // Constant-time compare
   var diff = 0;
@@ -867,34 +888,214 @@ function poly1305Clamp(r: number[]): void {
 
 /**
  * [Item 327] Poly1305 MAC (RFC 7539 §2.5).
+ *
+ * Uses 10 × 13-bit limb representation to keep all intermediate products
+ * within JS double-precision range (max ~2^33), eliminating BigInt entirely.
+ * Mid-computation carries after every 5 terms prevent precision loss.
+ *
  * @param key  32-byte one-time key
- * @param msg  Message bytes
+ * @param msg  Message bytes (must be a multiple of 16 for our callers)
  * @returns    16-byte tag
  */
 export function poly1305Mac(key: number[], msg: number[]): number[] {
-  var rBytes = key.slice(0, 16);
-  poly1305Clamp(rBytes);
-  var r = BigInt('0x' + rBytes.slice().reverse().map(function(b: number) {
-    return (b & 0xff).toString(16).padStart(2, '0');
-  }).join(''));
-  var s = BigInt('0x' + key.slice(16, 32).reverse().map(function(b: number) {
-    return (b & 0xff).toString(16).padStart(2, '0');
-  }).join(''));
-  var P = (1n << 130n) - 5n;
-  var acc = 0n;
+  // ── Parse and clamp r into 10 × 13-bit limbs (little-endian) ──
+  var rb = key.slice(0, 16);
+  poly1305Clamp(rb);
+
+  var t0: number, t1: number, t2: number, t3: number;
+  var t4: number, t5: number, t6: number, t7: number;
+
+  t0 = rb[0] | (rb[1] << 8);
+  t1 = rb[2] | (rb[3] << 8);
+  t2 = rb[4] | (rb[5] << 8);
+  t3 = rb[6] | (rb[7] << 8);
+  t4 = rb[8] | (rb[9] << 8);
+  t5 = rb[10] | (rb[11] << 8);
+  t6 = rb[12] | (rb[13] << 8);
+  t7 = rb[14] | (rb[15] << 8);
+
+  var r0 = t0 & 0x1fff;
+  var r1 = ((t0 >>> 13) | (t1 << 3)) & 0x1fff;
+  var r2 = ((t1 >>> 10) | (t2 << 6)) & 0x1fff;
+  var r3 = ((t2 >>> 7) | (t3 << 9)) & 0x1fff;
+  var r4 = ((t3 >>> 4) | (t4 << 12)) & 0x1fff;
+  var r5 = (t4 >>> 1) & 0x1fff;
+  var r6 = ((t4 >>> 14) | (t5 << 2)) & 0x1fff;
+  var r7 = ((t5 >>> 11) | (t6 << 5)) & 0x1fff;
+  var r8 = ((t6 >>> 8) | (t7 << 8)) & 0x1fff;
+  var r9 = (t7 >>> 5) & 0x007f;
+
+  // Pre-compute 5*r[j] for mod-(2^130-5) reduction
+  var s1 = 5*r1, s2 = 5*r2, s3 = 5*r3, s4 = 5*r4;
+  var s5 = 5*r5, s6 = 5*r6, s7 = 5*r7, s8 = 5*r8, s9 = 5*r9;
+
+  // ── Parse pad (s) from key[16..31] as 8 × 16-bit LE ──
+  var p0 = key[16] | (key[17] << 8);
+  var p1 = key[18] | (key[19] << 8);
+  var p2 = key[20] | (key[21] << 8);
+  var p3 = key[22] | (key[23] << 8);
+  var p4 = key[24] | (key[25] << 8);
+  var p5 = key[26] | (key[27] << 8);
+  var p6 = key[28] | (key[29] << 8);
+  var p7 = key[30] | (key[31] << 8);
+
+  // ── Accumulator h = 0 ──
+  var h0 = 0, h1 = 0, h2 = 0, h3 = 0, h4 = 0;
+  var h5 = 0, h6 = 0, h7 = 0, h8 = 0, h9 = 0;
+
+  // hibit = 2^128 expressed in limb 9 (bit 128 - 117 = bit 11)
+  var hibit = 1 << 11;
+
+  // ── Process message in 16-byte blocks ──
+  var c: number;
+  var d0: number, d1: number, d2: number, d3: number, d4: number;
+  var d5: number, d6: number, d7: number, d8: number, d9: number;
+
   for (var i = 0; i < msg.length; i += 16) {
-    var chunk = msg.slice(i, i + 16);
-    while (chunk.length < 16) chunk.push(0);
-    var n = BigInt('0x' + chunk.slice().reverse().map(function(b: number) {
-      return (b & 0xff).toString(16).padStart(2, '0');
-    }).join('')) + (1n << BigInt(chunk.length * 8 <= 128 ? chunk.length * 8 : 128));
-    acc = ((acc + n) * r) % P;
+    // Add message block to h (little-endian 13-bit decomposition)
+    t0 = msg[i] | (msg[i+1] << 8);
+    t1 = msg[i+2] | (msg[i+3] << 8);
+    t2 = msg[i+4] | (msg[i+5] << 8);
+    t3 = msg[i+6] | (msg[i+7] << 8);
+    t4 = msg[i+8] | (msg[i+9] << 8);
+    t5 = msg[i+10] | (msg[i+11] << 8);
+    t6 = msg[i+12] | (msg[i+13] << 8);
+    t7 = msg[i+14] | (msg[i+15] << 8);
+
+    h0 += t0 & 0x1fff;
+    h1 += ((t0 >>> 13) | (t1 << 3)) & 0x1fff;
+    h2 += ((t1 >>> 10) | (t2 << 6)) & 0x1fff;
+    h3 += ((t2 >>> 7) | (t3 << 9)) & 0x1fff;
+    h4 += ((t3 >>> 4) | (t4 << 12)) & 0x1fff;
+    h5 += (t4 >>> 1) & 0x1fff;
+    h6 += ((t4 >>> 14) | (t5 << 2)) & 0x1fff;
+    h7 += ((t5 >>> 11) | (t6 << 5)) & 0x1fff;
+    h8 += ((t6 >>> 8) | (t7 << 8)) & 0x1fff;
+    h9 += (t7 >>> 5) | hibit;
+
+    // ── h = h * r (mod 2^130 - 5) ──
+    // Split each d[k] sum into two groups of 5 terms with mid-carry
+    // to keep each intermediate within JS double-precision (max ~2^33).
+    c = 0;
+    d0 = c + h0*r0 + h1*s9 + h2*s8 + h3*s7 + h4*s6;
+    c = (d0 >>> 13); d0 &= 0x1fff;
+    d0 += h5*s5 + h6*s4 + h7*s3 + h8*s2 + h9*s1;
+    c += (d0 >>> 13); d0 &= 0x1fff;
+
+    d1 = c + h0*r1 + h1*r0 + h2*s9 + h3*s8 + h4*s7;
+    c = (d1 >>> 13); d1 &= 0x1fff;
+    d1 += h5*s6 + h6*s5 + h7*s4 + h8*s3 + h9*s2;
+    c += (d1 >>> 13); d1 &= 0x1fff;
+
+    d2 = c + h0*r2 + h1*r1 + h2*r0 + h3*s9 + h4*s8;
+    c = (d2 >>> 13); d2 &= 0x1fff;
+    d2 += h5*s7 + h6*s6 + h7*s5 + h8*s4 + h9*s3;
+    c += (d2 >>> 13); d2 &= 0x1fff;
+
+    d3 = c + h0*r3 + h1*r2 + h2*r1 + h3*r0 + h4*s9;
+    c = (d3 >>> 13); d3 &= 0x1fff;
+    d3 += h5*s8 + h6*s7 + h7*s6 + h8*s5 + h9*s4;
+    c += (d3 >>> 13); d3 &= 0x1fff;
+
+    d4 = c + h0*r4 + h1*r3 + h2*r2 + h3*r1 + h4*r0;
+    c = (d4 >>> 13); d4 &= 0x1fff;
+    d4 += h5*s9 + h6*s8 + h7*s7 + h8*s6 + h9*s5;
+    c += (d4 >>> 13); d4 &= 0x1fff;
+
+    d5 = c + h0*r5 + h1*r4 + h2*r3 + h3*r2 + h4*r1;
+    c = (d5 >>> 13); d5 &= 0x1fff;
+    d5 += h5*r0 + h6*s9 + h7*s8 + h8*s7 + h9*s6;
+    c += (d5 >>> 13); d5 &= 0x1fff;
+
+    d6 = c + h0*r6 + h1*r5 + h2*r4 + h3*r3 + h4*r2;
+    c = (d6 >>> 13); d6 &= 0x1fff;
+    d6 += h5*r1 + h6*r0 + h7*s9 + h8*s8 + h9*s7;
+    c += (d6 >>> 13); d6 &= 0x1fff;
+
+    d7 = c + h0*r7 + h1*r6 + h2*r5 + h3*r4 + h4*r3;
+    c = (d7 >>> 13); d7 &= 0x1fff;
+    d7 += h5*r2 + h6*r1 + h7*r0 + h8*s9 + h9*s8;
+    c += (d7 >>> 13); d7 &= 0x1fff;
+
+    d8 = c + h0*r8 + h1*r7 + h2*r6 + h3*r5 + h4*r4;
+    c = (d8 >>> 13); d8 &= 0x1fff;
+    d8 += h5*r3 + h6*r2 + h7*r1 + h8*r0 + h9*s9;
+    c += (d8 >>> 13); d8 &= 0x1fff;
+
+    d9 = c + h0*r9 + h1*r8 + h2*r7 + h3*r6 + h4*r5;
+    c = (d9 >>> 13); d9 &= 0x1fff;
+    d9 += h5*r4 + h6*r3 + h7*r2 + h8*r1 + h9*r0;
+    c += (d9 >>> 13); d9 &= 0x1fff;
+
+    // Wrap carry: 2^130 ≡ 5 (mod 2^130-5)
+    c = ((c << 2) + c) | 0; // c * 5
+    c += d0; d0 = c & 0x1fff; c = c >>> 13;
+    d1 += c;
+
+    h0 = d0; h1 = d1; h2 = d2; h3 = d3; h4 = d4;
+    h5 = d5; h6 = d6; h7 = d7; h8 = d8; h9 = d9;
   }
-  acc = (acc + s) & ((1n << 128n) - 1n);
-  // Encode 16 bytes little-endian
-  var tag: number[] = [];
-  for (var i = 0; i < 16; i++) { tag.push(Number(acc & 0xffn)); acc >>= 8n; }
-  return tag;
+
+  // ── Final carry propagation (two passes) ──
+  c = h1 >>> 13; h1 &= 0x1fff;
+  h2 += c; c = h2 >>> 13; h2 &= 0x1fff;
+  h3 += c; c = h3 >>> 13; h3 &= 0x1fff;
+  h4 += c; c = h4 >>> 13; h4 &= 0x1fff;
+  h5 += c; c = h5 >>> 13; h5 &= 0x1fff;
+  h6 += c; c = h6 >>> 13; h6 &= 0x1fff;
+  h7 += c; c = h7 >>> 13; h7 &= 0x1fff;
+  h8 += c; c = h8 >>> 13; h8 &= 0x1fff;
+  h9 += c; c = h9 >>> 13; h9 &= 0x1fff;
+  h0 += c * 5; c = h0 >>> 13; h0 &= 0x1fff;
+  h1 += c; c = h1 >>> 13; h1 &= 0x1fff;
+  h2 += c;
+
+  // ── Full reduction: if h >= p, subtract p ──
+  var g0 = h0 + 5; c = g0 >>> 13; g0 &= 0x1fff;
+  var g1 = h1 + c; c = g1 >>> 13; g1 &= 0x1fff;
+  var g2 = h2 + c; c = g2 >>> 13; g2 &= 0x1fff;
+  var g3 = h3 + c; c = g3 >>> 13; g3 &= 0x1fff;
+  var g4 = h4 + c; c = g4 >>> 13; g4 &= 0x1fff;
+  var g5 = h5 + c; c = g5 >>> 13; g5 &= 0x1fff;
+  var g6 = h6 + c; c = g6 >>> 13; g6 &= 0x1fff;
+  var g7 = h7 + c; c = g7 >>> 13; g7 &= 0x1fff;
+  var g8 = h8 + c; c = g8 >>> 13; g8 &= 0x1fff;
+  var g9 = h9 + c - (1 << 13);
+
+  // If g9 >= 0, carry propagated through all limbs → h >= p → use g
+  if (g9 >= 0) {
+    h0 = g0; h1 = g1; h2 = g2; h3 = g3; h4 = g4;
+    h5 = g5; h6 = g6; h7 = g7; h8 = g8; h9 = g9;
+  }
+
+  // ── Convert 10×13-bit limbs → 8×16-bit limbs ──
+  h0 = ((h0) | (h1 << 13)) & 0xffff;
+  h1 = ((h1 >>> 3) | (h2 << 10)) & 0xffff;
+  h2 = ((h2 >>> 6) | (h3 << 7)) & 0xffff;
+  h3 = ((h3 >>> 9) | (h4 << 4)) & 0xffff;
+  h4 = ((h4 >>> 12) | (h5 << 1) | (h6 << 14)) & 0xffff;
+  h5 = ((h6 >>> 2) | (h7 << 11)) & 0xffff;
+  h6 = ((h7 >>> 5) | (h8 << 8)) & 0xffff;
+  h7 = ((h8 >>> 8) | (h9 << 5)) & 0xffff;
+
+  // ── Add pad (s = key[16..31]) mod 2^128 ──
+  var f: number;
+  f = h0 + p0; h0 = f & 0xffff;
+  f = h1 + p1 + (f >>> 16); h1 = f & 0xffff;
+  f = h2 + p2 + (f >>> 16); h2 = f & 0xffff;
+  f = h3 + p3 + (f >>> 16); h3 = f & 0xffff;
+  f = h4 + p4 + (f >>> 16); h4 = f & 0xffff;
+  f = h5 + p5 + (f >>> 16); h5 = f & 0xffff;
+  f = h6 + p6 + (f >>> 16); h6 = f & 0xffff;
+  f = h7 + p7 + (f >>> 16); h7 = f & 0xffff;
+
+  // ── Output 16 bytes little-endian ──
+  return [
+    h0 & 0xff, (h0 >>> 8) & 0xff, h1 & 0xff, (h1 >>> 8) & 0xff,
+    h2 & 0xff, (h2 >>> 8) & 0xff, h3 & 0xff, (h3 >>> 8) & 0xff,
+    h4 & 0xff, (h4 >>> 8) & 0xff, h5 & 0xff, (h5 >>> 8) & 0xff,
+    h6 & 0xff, (h6 >>> 8) & 0xff, h7 & 0xff, (h7 >>> 8) & 0xff,
+  ];
 }
 
 /**

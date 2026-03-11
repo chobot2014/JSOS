@@ -360,9 +360,42 @@ void platform_fb_blit(const uint32_t *src, int x, int y, int w, int h) {
 
     uint32_t pitch_words = _fb.pitch / 4; /* pitch in 32-bit words */
     size_t row_bytes = (size_t)w * sizeof(uint32_t);
+
+    /* Fast path: when source and dest rows are contiguous (full-width,
+       pitch == width), use a single bulk copy instead of per-row memcpy.
+       For a 1024×768 screen this replaces 768 memcpy calls with one. */
+    if (x == 0 && (uint32_t)w == _fb.width && pitch_words == (uint32_t)w) {
+        __builtin_memcpy(_fb.address + (uint32_t)y * pitch_words,
+                         src, (size_t)h * row_bytes);
+        return;
+    }
+
     for (int row = 0; row < h; row++) {
         uint32_t       *dst_row = _fb.address + (uint32_t)(y + row) * pitch_words + (uint32_t)x;
         const uint32_t *src_row = src + row * w;
+        __builtin_memcpy(dst_row, src_row, row_bytes);
+    }
+}
+
+/**
+ * Strided blit: copy a sub-rectangle from a larger source buffer to the
+ * framebuffer.  `srcStride` is the source row width in pixels (not bytes).
+ * This avoids the need to copy into a contiguous temp buffer on the JS side.
+ */
+void platform_fb_blit_strided(const uint32_t *src, int srcStride,
+                              int x, int y, int w, int h) {
+    if (!_fb.available || _fb.bpp != 32) return;
+    if (!_fb.address) return;
+    if (x < 0 || y < 0 || srcStride <= 0) return;
+    if ((uint32_t)x + (uint32_t)w > _fb.width)  w = (int)(_fb.width  - (uint32_t)x);
+    if ((uint32_t)y + (uint32_t)h > _fb.height) h = (int)(_fb.height - (uint32_t)y);
+    if (w <= 0 || h <= 0) return;
+
+    uint32_t pitch_words = _fb.pitch / 4;
+    size_t row_bytes = (size_t)w * sizeof(uint32_t);
+    for (int row = 0; row < h; row++) {
+        uint32_t       *dst_row = _fb.address + (uint32_t)(y + row) * pitch_words + (uint32_t)x;
+        const uint32_t *src_row = src + row * srcStride;
         __builtin_memcpy(dst_row, src_row, row_bytes);
     }
 }

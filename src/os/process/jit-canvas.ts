@@ -41,11 +41,7 @@ declare var kernel: any;
 /** Fill `n` consecutive pixels starting at physical address `fb` with `color`. */
 const _SRC_FILL_BUFFER = `
 function fillBuffer(fb, color, n) {
-  var i = 0;
-  while (i < n) {
-    mem32[fb + i * 4] = color;
-    i = i + 1;
-  }
+  memset32(fb, color, n);
   return 0;
 }
 `;
@@ -60,11 +56,7 @@ function fillRect(fb, color, x, y, w, h, stride) {
   var row = 0;
   while (row < h) {
     var rowBase = fb + (y + row) * stride + x * 4;
-    var col = 0;
-    while (col < w) {
-      mem32[rowBase + col * 4] = color;
-      col = col + 1;
-    }
+    memset32(rowBase, color, w);
     row = row + 1;
   }
   return 0;
@@ -77,11 +69,7 @@ function fillRect(fb, color, x, y, w, h, stride) {
  */
 const _SRC_BLIT_ROW = `
 function blitRow(dst, src, n) {
-  var i = 0;
-  while (i < n) {
-    mem32[dst + i * 4] = mem32[src + i * 4];
-    i = i + 1;
-  }
+  memcpy32(dst, src, n);
   return 0;
 }
 `;
@@ -202,11 +190,7 @@ function drawSpans(dest, spans, count) {
     var offset = mem32[spans + base * 4];
     var color  = mem32[spans + base * 4 + 4];
     var len    = mem32[spans + base * 4 + 8];
-    var j = 0;
-    while (j < len) {
-      mem32[dest + (offset + j) * 4] = color;
-      j = j + 1;
-    }
+    memset32(dest + offset * 4, color, len);
     i = i + 1;
   }
   return 0;

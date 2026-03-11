@@ -91,6 +91,8 @@ void platform_tss_set_esp0(uint32_t kernel_stack_top);
 /* Install the TSS into GDT slot 5 (0x28) and execute ltr.  [Phase 9] */
 void platform_gdt_install_tss(void);
 void platform_fb_blit(const uint32_t *src, int x, int y, int w, int h);
+void platform_fb_blit_strided(const uint32_t *src, int srcStride,
+                              int x, int y, int w, int h);
 
 /**
  * Kernel panic: print message to serial then halt permanently.

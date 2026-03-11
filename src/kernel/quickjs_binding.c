@@ -810,6 +810,42 @@ static JSValue js_fb_blit(JSContext *c, JSValueConst this_val, int argc, JSValue
     return JS_UNDEFINED;
 }
 
+/*
+ * kernel.fbBlitStrided(buffer, srcStride, srcX, srcY, dstX, dstY, w, h)
+ *
+ * Blit a sub-rectangle from a larger source buffer (stride != w) directly to
+ * the framebuffer.  Avoids the need to copy into a contiguous temp buffer.
+ * srcStride is the full width of the source buffer in pixels.
+ * srcX, srcY are the source offset within the buffer.
+ */
+static JSValue js_fb_blit_strided(JSContext *c, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 8) return JS_UNDEFINED;
+    int32_t srcStride = 0, srcX = 0, srcY = 0;
+    int32_t dstX = 0, dstY = 0, w = 0, h = 0;
+    size_t byte_len = 0;
+    uint8_t *ab_data = JS_GetArrayBuffer(c, &byte_len, argv[0]);
+    if (!ab_data) return JS_UNDEFINED;
+
+    JS_ToInt32(c, &srcStride, argv[1]);
+    JS_ToInt32(c, &srcX,      argv[2]);
+    JS_ToInt32(c, &srcY,      argv[3]);
+    JS_ToInt32(c, &dstX,      argv[4]);
+    JS_ToInt32(c, &dstY,      argv[5]);
+    JS_ToInt32(c, &w,         argv[6]);
+    JS_ToInt32(c, &h,         argv[7]);
+    if (w <= 0 || h <= 0 || srcStride <= 0) return JS_UNDEFINED;
+
+    /* Sanity: source region must fit in buffer */
+    size_t needed = ((size_t)(srcY + h - 1) * (size_t)srcStride + (size_t)(srcX + w)) * 4;
+    if (needed > byte_len) return JS_UNDEFINED;
+
+    const uint32_t *src = (const uint32_t *)ab_data + (size_t)srcY * (size_t)srcStride + srcX;
+    platform_fb_blit_strided(src, srcStride, dstX, dstY, w, h);
+    return JS_UNDEFINED;
+}
+
 /* ── Volatile ASM ────────────────────────────────────────────────────────── */
 
 /*
@@ -3680,7 +3716,8 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("ataWrite",       3, js_ata_write),
     /* Framebuffer (Phase 3) */
     JS_CFUNC_DEF("fbInfo",       0, js_fb_info),
-    JS_CFUNC_DEF("fbBlit",       5, js_fb_blit),
+    JS_CFUNC_DEF("fbBlit",         5, js_fb_blit),
+    JS_CFUNC_DEF("fbBlitStrided",  8, js_fb_blit_strided),
     /* Volatile ASM execution */
     JS_CFUNC_DEF("volatileAsm",  1, js_volatile_asm),
     /* Mouse (Phase 3) */

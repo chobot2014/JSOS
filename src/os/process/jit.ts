@@ -155,7 +155,9 @@ type Expr =
   | { k: 'callN';   addr: Expr; args: Expr[] }             // call(addr, a0..aN)
   | { k: 'imin';    a: Expr; b: Expr }                     // Math.min (signed)
   | { k: 'imax';    a: Expr; b: Expr }                     // Math.max (signed)
-  | { k: 'iclz';    x: Expr };                             // Math.clz32
+  | { k: 'iclz';    x: Expr }                             // Math.clz32
+  | { k: 'memcpy32'; dst: Expr; src: Expr; n: Expr }      // memcpy32(dst, src, n) → REP MOVSD
+  | { k: 'memset32'; dst: Expr; val: Expr; n: Expr };     // memset32(dst, val, n) → REP STOSD
 
 type Stmt =
   | { k: 'var';     name: string; init: Expr | null }
@@ -253,6 +255,22 @@ function _parse(toks: Tok[]): FnDecl {
         while (eatIf(',')) callArgs.push(parseAssign());
         expect(')');
         return { k: 'callN', addr: callAddr, args: callArgs };
+      }
+      // memcpy32(dst, src, n) — hardware-accelerated REP MOVSD
+      if (t.value === 'memcpy32' && peek().value === '(') {
+        eat();
+        var mcDst = parseAssign(); expect(',');
+        var mcSrc = parseAssign(); expect(',');
+        var mcN   = parseAssign(); expect(')');
+        return { k: 'memcpy32', dst: mcDst, src: mcSrc, n: mcN };
+      }
+      // memset32(dst, val, n) — hardware-accelerated REP STOSD
+      if (t.value === 'memset32' && peek().value === '(') {
+        eat();
+        var msDst = parseAssign(); expect(',');
+        var msVal = parseAssign(); expect(',');
+        var msN   = parseAssign(); expect(')');
+        return { k: 'memset32', dst: msDst, val: msVal, n: msN };
       }
       // plain identifier
       return { k: 'ident', name: t.value };
@@ -960,6 +978,27 @@ export class _Emit {
   setae(): void { this._w(0x0F); this._w(0x93); this._w(0xC0); }
   /** MOVZX EAX, AL — zero-extend AL into EAX (clears upper 24 bits without affecting flags). */
   movzxEaxAl(): void { this._w(0x0F); this._w(0xB6); this._w(0xC0); }
+
+  // ── REP string operations (hardware-accelerated bulk memory ops) ──────────
+
+  /** MOV ESI, EAX — set source for REP MOVSD. */
+  movEsiEax(): void { this._w(0x89); this._w(0xC6); }
+  /** MOV EDI, EAX — set destination for REP MOVSD/STOSD. */
+  movEdiEax(): void { this._w(0x89); this._w(0xC7); }
+  /** PUSH ESI — callee-save. */
+  pushEsi(): void { this._w(0x56); }
+  /** POP ESI — callee-restore. */
+  popEsi():  void { this._w(0x5E); }
+  /** PUSH EDI — callee-save. */
+  pushEdi(): void { this._w(0x57); }
+  /** POP EDI — callee-restore. */
+  popEdi():  void { this._w(0x5F); }
+  /** CLD — clear direction flag (forward REP direction). */
+  cld(): void { this._w(0xFC); }
+  /** REP MOVSD — copy ECX dwords from [ESI] to [EDI], incrementing both. Hardware-accelerated. */
+  repMovsd(): void { this._w(0xF3); this._w(0xA5); }
+  /** REP STOSD — fill ECX dwords at [EDI] with EAX, incrementing EDI. Hardware-accelerated. */
+  repStosd(): void { this._w(0xF3); this._w(0xAB); }
 }
 
 // ─── Code generator ───────────────────────────────────────────────────────────
@@ -1086,6 +1125,51 @@ function _codegen(fn: FnDecl): number[] {
           if (cleanup <= 127) e.addEspImm8(cleanup);
           else                e.addEspImm32(cleanup);
         }
+        break;
+      }
+
+      case 'memcpy32': {
+        // REP MOVSD: copy n dwords from src to dst (hardware-accelerated)
+        // Evaluate all three operands, push onto stack, then pop into registers.
+        e.pushEsi();              // save callee-saved ESI
+        e.pushEdi();              // save callee-saved EDI
+        genExpr(ex.dst);          // EAX = dst address
+        e.pushEax();              // [stack]: dst
+        genExpr(ex.src);          // EAX = src address
+        e.pushEax();              // [stack]: src, dst
+        genExpr(ex.n);            // EAX = count
+        e.movEcxEax();            // ECX = count (REP counter)
+        e.popEax();               // EAX = src
+        e.movEsiEax();            // ESI = src
+        e.popEax();               // EAX = dst
+        e.movEdiEax();            // EDI = dst
+        e.cld();                  // clear direction flag (forward)
+        e.repMovsd();             // REP MOVSD: [EDI++] ← [ESI++], ECX times
+        e.popEdi();               // restore EDI
+        e.popEsi();               // restore ESI
+        e.xorEaxEax();            // return 0
+        break;
+      }
+
+      case 'memset32': {
+        // REP STOSD: fill n dwords at dst with val (hardware-accelerated)
+        // EAX=val, EDI=dst, ECX=count, then REP STOSD
+        e.pushEdi();              // save callee-saved EDI
+        // Evaluate all 3 operands and push onto stack
+        genExpr(ex.n);            // EAX = count
+        e.pushEax();              // [stack]: count
+        genExpr(ex.val);          // EAX = fill value
+        e.pushEax();              // [stack]: val, count
+        genExpr(ex.dst);          // EAX = dst address
+        // Now pop in reverse to set up registers:
+        // EAX = dst, need: EDI=dst, EAX=val, ECX=count
+        e.movEdiEax();            // EDI = dst
+        e.popEax();               // EAX = fill value (for STOSD)
+        e.popEcx();               // ECX = count (REP counter)
+        e.cld();                  // clear direction flag (forward)
+        e.repStosd();             // REP STOSD: [EDI++] ← EAX, ECX times
+        e.popEdi();               // restore EDI
+        e.xorEaxEax();            // return 0
         break;
       }
 

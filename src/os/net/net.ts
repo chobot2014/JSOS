@@ -52,12 +52,13 @@ export function strToBytes(s: string): number[] {
   return b;
 }
 export function bytesToStr(b: number[]): string {
-  // Build string from byte array using explicit loop (avoids Function.apply
-  // stack overflow; .apply with 1460+ args crashes QuickJS 32-bit builds).
-  if (b.length === 0) return '';
-  var _bts = '';
-  for (var _btsi = 0; _btsi < b.length; _btsi++) _bts += String.fromCharCode(b[_btsi]!);
-  return _bts;
+  // Pre-allocate array + join: O(n) instead of O(n²) string concatenation.
+  // QuickJS caches single-byte char strings so fromCharCode is allocation-free.
+  var _len = b.length;
+  if (_len === 0) return '';
+  var _parts = new Array(_len);
+  for (var _btsi = 0; _btsi < _len; _btsi++) _parts[_btsi] = String.fromCharCode(b[_btsi]!);
+  return _parts.join('');
 }
 
 // ── Address helpers ──────────────────────────────────────────────────────────
@@ -65,8 +66,16 @@ export function bytesToStr(b: number[]): string {
 export type MACAddress  = string; // "aa:bb:cc:dd:ee:ff"
 export type IPv4Address = string; // "a.b.c.d"
 
+// ── Per-packet hot-path caches for string → byte conversions ─────────────
+var _macCache = new Map<string, number[]>();
+var _ipCache  = new Map<string, number[]>();
+
 function macToBytes(mac: MACAddress): number[] {
-  return mac.split(':').map(function(h) { return parseInt(h, 16); });
+  var cached = _macCache.get(mac);
+  if (cached) return cached;
+  var result = mac.split(':').map(function(h) { return parseInt(h, 16); });
+  _macCache.set(mac, result);
+  return result;
 }
 function bytesToMac(b: number[], off: number): MACAddress {
   var parts: string[] = [];
@@ -77,7 +86,11 @@ function bytesToMac(b: number[], off: number): MACAddress {
   return parts.join(':');
 }
 function ipToBytes(ip: IPv4Address): number[] {
-  return ip.split('.').map(Number);
+  var cached = _ipCache.get(ip);
+  if (cached) return cached;
+  var result = ip.split('.').map(Number);
+  _ipCache.set(ip, result);
+  return result;
 }
 function bytesToIp(b: number[], off: number): IPv4Address {
   return b[off] + '.' + b[off + 1] + '.' + b[off + 2] + '.' + b[off + 3];
@@ -668,14 +681,21 @@ function buildTCP(seg: TCPSegment, srcIP: IPv4Address, dstIP: IPv4Address,
   wu16be(h, 16, 0);
   wu16be(h, 18, seg.urgent);
   for (var oi = 0; oi < optBytes.length; oi++) h[20 + oi] = optBytes[oi];
-  var data = h.concat(seg.payload);
-  // TCP pseudo-header checksum
-  var pseudo = ipToBytes(srcIP).concat(
-    ipToBytes(dstIP), [0, PROTO_TCP],
-    fill(2)
-  );
-  wu16be(pseudo, 14, data.length);
-  wu16be(data, 16, checksum(pseudo.concat(data)));
+  // Pre-allocate data = header + payload (avoids .concat())
+  var dataLen = headerLen + seg.payload.length;
+  var data: number[] = new Array(dataLen);
+  for (var _di = 0; _di < headerLen; _di++) data[_di] = h[_di];
+  for (var _di = 0; _di < seg.payload.length; _di++) data[headerLen + _di] = seg.payload[_di];
+  // TCP pseudo-header checksum — pre-allocate pseudo+data in one buffer
+  var srcB = ipToBytes(srcIP);
+  var dstB = ipToBytes(dstIP);
+  var csumBuf: number[] = new Array(12 + dataLen);
+  csumBuf[0] = srcB[0]; csumBuf[1] = srcB[1]; csumBuf[2] = srcB[2]; csumBuf[3] = srcB[3];
+  csumBuf[4] = dstB[0]; csumBuf[5] = dstB[1]; csumBuf[6] = dstB[2]; csumBuf[7] = dstB[3];
+  csumBuf[8] = 0; csumBuf[9] = PROTO_TCP;
+  csumBuf[10] = (dataLen >>> 8) & 0xff; csumBuf[11] = dataLen & 0xff;
+  for (var _di = 0; _di < dataLen; _di++) csumBuf[12 + _di] = data[_di];
+  wu16be(data, 16, checksum(csumBuf));
   return data;
 }
 
@@ -1097,6 +1117,10 @@ export class NetworkStack {
   private connections = new Map<number, TCPConnection>();
   private sockets     = new Map<number, Socket>();
   private listeners   = new Map<number, Socket>(); // listening port → socket
+  // O(1) lookup indexes — maintained alongside connections/sockets maps
+  private _connIdx    = new Map<string, TCPConnection>(); // "remIP:remPort:locPort" → conn
+  private _sockIdx    = new Map<string, Socket>();         // "tcp:remIP:remPort:locPort" → sock
+  private _udpSockIdx = new Map<number, Socket>();         // localPort → UDP sock
   private rxQueue:  number[][] = [];
   /** Raw UDP inbox: port → queue of { from, fromPort, data } */
   private udpRxMap  = new Map<number, Array<{ from: IPv4Address; fromPort: number; data: number[] }>>();
@@ -1553,6 +1577,7 @@ export class NetworkStack {
     }
 
     this.connections.set(conn.id, conn);
+    this._indexConn(conn);
     this._sendTCPSegOpts(conn, TCP_SYN | TCP_ACK, [], synOpts);
     conn.sendSeq = (conn.sendSeq + 1) >>> 0;
     conn.sndUna  = conn.sendSeq;  // SYN consumed
@@ -1587,6 +1612,7 @@ export class NetworkStack {
     if (seg.flags & TCP_RST) {
       conn.state = 'CLOSED';
       this._tcpClearRetransmit(conn);
+      this._unindexConn(conn);
       this.connections.delete(conn.id);
       return;
     }
@@ -1740,6 +1766,7 @@ export class NetworkStack {
       case 'LAST_ACK':
         if (seg.flags & TCP_ACK) {
           conn.state = 'CLOSED';
+          this._unindexConn(conn);
           this.connections.delete(conn.id);
         }
         break;
@@ -1866,32 +1893,58 @@ export class NetworkStack {
 
   // ── Lookup helpers ────────────────────────────────────────────────────────
 
-  private _findConn(remoteIP: IPv4Address, remotePort: number, localPort: number): TCPConnection | null {
-    for (var [, c] of this.connections) {
-      if (c.remoteIP === remoteIP && c.remotePort === remotePort && c.localPort === localPort) return c;
+  private static _connKey(remoteIP: string, remotePort: number, localPort: number): string {
+    return remoteIP + ':' + remotePort + ':' + localPort;
+  }
+  private static _sockKey(remoteIP: string, remotePort: number, localPort: number): string {
+    return 'tcp:' + remoteIP + ':' + remotePort + ':' + localPort;
+  }
+
+  /** Index a connection in _connIdx (call after connections.set). */
+  private _indexConn(conn: TCPConnection): void {
+    this._connIdx.set(
+      NetworkStack._connKey(conn.remoteIP, conn.remotePort, conn.localPort), conn);
+  }
+  /** Remove a connection from _connIdx (call before/after connections.delete). */
+  private _unindexConn(conn: TCPConnection): void {
+    this._connIdx.delete(
+      NetworkStack._connKey(conn.remoteIP, conn.remotePort, conn.localPort));
+  }
+  /** Index a socket in _sockIdx / _udpSockIdx (call after sockets.set). */
+  private _indexSock(s: Socket): void {
+    if (s.type === 'tcp' && s.remoteIP && s.remotePort) {
+      this._sockIdx.set(
+        NetworkStack._sockKey(s.remoteIP, s.remotePort, s.localPort), s);
     }
-    return null;
+    if (s.type === 'udp' && s.localPort) {
+      this._udpSockIdx.set(s.localPort, s);
+    }
+  }
+  /** Remove a socket from _sockIdx / _udpSockIdx. */
+  private _unindexSock(s: Socket): void {
+    if (s.type === 'tcp' && s.remoteIP && s.remotePort) {
+      this._sockIdx.delete(
+        NetworkStack._sockKey(s.remoteIP, s.remotePort, s.localPort));
+    }
+    if (s.type === 'udp' && s.localPort) {
+      this._udpSockIdx.delete(s.localPort);
+    }
+  }
+
+  private _findConn(remoteIP: IPv4Address, remotePort: number, localPort: number): TCPConnection | null {
+    return this._connIdx.get(NetworkStack._connKey(remoteIP, remotePort, localPort)) || null;
   }
   private _findSockForConn(conn: TCPConnection): Socket | null {
-    for (var [, s] of this.sockets) {
-      if (s.type === 'tcp' && s.localPort === conn.localPort &&
-          s.remoteIP === conn.remoteIP && s.remotePort === conn.remotePort) return s;
-    }
-    return null;
+    return this._sockIdx.get(
+      NetworkStack._sockKey(conn.remoteIP, conn.remotePort, conn.localPort)) || null;
   }
   private _findUDPSock(port: number): Socket | null {
-    for (var [, s] of this.sockets) {
-      if (s.type === 'udp' && s.localPort === port) return s;
-    }
-    return null;
+    return this._udpSockIdx.get(port) || null;
   }
   private _connForSock(sock: Socket): TCPConnection | null {
-    for (var [, c] of this.connections) {
-      if (c.localPort === sock.localPort &&
-          c.remoteIP  === sock.remoteIP  &&
-          c.remotePort === sock.remotePort) return c;
-    }
-    return null;
+    if (!sock.remoteIP || !sock.remotePort) return null;
+    return this._connIdx.get(
+      NetworkStack._connKey(sock.remoteIP, sock.remotePort, sock.localPort)) || null;
   }
 
   // ── Egress ────────────────────────────────────────────────────────────────
@@ -2064,6 +2117,7 @@ export class NetworkStack {
       rcvBufSize: 0, sndBufSize: 0,
     };
     this.sockets.set(s.id, s);
+    // Note: _indexSock deferred to connect/connectAsync/connectTFO when remoteIP/Port known
     return s;
   }
 
@@ -2076,6 +2130,7 @@ export class NetworkStack {
     sock.localPort = port;
     if (ip) sock.localIP = ip;
     sock.state = 'bound';
+    this._indexSock(sock); // index UDP sockets by localPort after bind
     return true;
   }
 
@@ -2115,10 +2170,12 @@ export class NetworkStack {
     sock.remoteIP   = remoteIP;
     sock.remotePort = remotePort;
     if (!sock.localPort) sock.localPort = this.nextEph++;
+    this._indexSock(sock);
     if (sock.type === 'tcp') {
       var iss = this._randSeq();
       var conn = this._tcpMakeConn('SYN_SENT', sock.localPort, remoteIP, remotePort, iss, 0);
       this.connections.set(conn.id, conn);
+      this._indexConn(conn);
       // [Item 255-257] Advertise SACK, window scale, and timestamps in the SYN.
       // Options are only activated after the peer echoes them in SYN-ACK.
       conn.sendWscale = 7;
@@ -2242,9 +2299,11 @@ export class NetworkStack {
     sock.remoteIP   = remoteIP;
     sock.remotePort = remotePort;
     if (!sock.localPort) sock.localPort = this.nextEph++;
+    this._indexSock(sock);
     var iss  = this._randSeq();
     var conn = this._tcpMakeConn('SYN_SENT', sock.localPort, remoteIP, remotePort, iss, 0);
     this.connections.set(conn.id, conn);
+    this._indexConn(conn);
     this._sendTCPSeg(conn, TCP_SYN, []);
     conn.sendSeq = (conn.sendSeq + 1) >>> 0;
     // sock.state stays 'connecting' until connectPoll confirms ESTABLISHED
@@ -2356,10 +2415,12 @@ export class NetworkStack {
         this._sendTCPSeg(conn, TCP_FIN | TCP_ACK, []);
         conn.sendSeq = (conn.sendSeq + 1) >>> 0;
         conn.state = 'CLOSED';
+        this._unindexConn(conn);
         this.connections.delete(conn.id);
       }
     }
     if (sock.state === 'listening') this.listeners.delete(sock.localPort);
+    this._unindexSock(sock);
     this.sockets.delete(sock.id);
     sock.state = 'closed';
   }
@@ -2828,9 +2889,11 @@ export class NetworkStack {
     sock.remotePort = remotePort;
     if (!sock.localPort) sock.localPort = this.nextEph++;
     if (sock.type !== 'tcp') return false;
+    this._indexSock(sock);
     var iss  = this._randSeq();
     var conn = this._tcpMakeConn('SYN_SENT', sock.localPort, remoteIP, remotePort, iss, 0);
     this.connections.set(conn.id, conn);
+    this._indexConn(conn);
     conn.sendWscale = 7;
     // [Item 265] TFO option: kind=34, len=2 (empty cookie / cookie request)
     // We piggyback the data directly in the SYN payload (Linux TFO semantics).
@@ -2975,7 +3038,11 @@ export class NetworkStack {
       }
     });
 
-    toDelete.forEach(id => this.connections.delete(id));
+    toDelete.forEach(id => {
+      var c = this.connections.get(id);
+      if (c) this._unindexConn(c);
+      this.connections.delete(id);
+    });
   }
 
   // ── High-level async helpers (DoH / DoT / mDNS support) ─────────────────────
