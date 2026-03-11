@@ -14,7 +14,7 @@ export function getViewport(): { w: number; h: number } { return { w: _vpW, h: _
 var _cssVars: Record<string, string> = Object.create(null);
 
 /** Reset all CSS variables (call when navigating to a new page). */
-export function resetCSSVars(): void { _cssVars = Object.create(null); }
+export function resetCSSVars(): void { _cssVars = Object.create(null); _colorCache.clear(); }
 
 /** Bulk-register CSS variables (use for :root / html / body declarations). */
 export function setCSSVar(name: string, value: string): void { _cssVars[name] = value; }
@@ -124,10 +124,27 @@ export const CSS_CURRENT_COLOR = 0x01FEFCFC >>> 0;
  * Parse a CSS color string (named, #RGB, #RRGGBB, #RRGGBBAA, rgb(), rgba())
  * and return it as a 32-bit ARGB pixel value, or undefined if unrecognised.
  */
+// Cache frequently-seen color strings to avoid repeated regex parsing.
+// Google CSS has ~50 unique colors repeated across 800+ rules.
+var _colorCache = new Map<string, number | undefined>();
+export function resetColorCache(): void { _colorCache.clear(); }
+
 export function parseCSSColor(val: string): number | undefined {
   val = val.trim().toLowerCase();
   if (val === 'currentcolor') return CSS_CURRENT_COLOR;
   if (_CSS_NAMED[val] !== undefined) return _CSS_NAMED[val];
+
+  // Check cache before expensive regex parsing
+  var _cached = _colorCache.get(val);
+  if (_cached !== undefined) return _cached;
+  if (_colorCache.has(val)) return undefined;  // cached miss
+
+  var result = _parseCSSColorInner(val);
+  if (_colorCache.size < 2048) _colorCache.set(val, result);
+  return result;
+}
+
+function _parseCSSColorInner(val: string): number | undefined {
   if (val.startsWith('#')) {
     var hex = val.slice(1);
     if (hex.length === 3) {
