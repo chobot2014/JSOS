@@ -50,9 +50,10 @@ function parseColor(s: string, opacity = 1): number {
   }
 
   if (s.startsWith('rgb')) {
-    var m = s.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+    var m = s.match(/rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\s*\)/);
     if (m) {
-      return (a << 24 | parseInt(m[1]!) << 16 | parseInt(m[2]!) << 8 | parseInt(m[3]!)) >>> 0;
+      var ca = m[4] !== undefined ? Math.round(parseFloat(m[4]!) * a) : a;
+      return (ca << 24 | parseInt(m[1]!) << 16 | parseInt(m[2]!) << 8 | parseInt(m[3]!)) >>> 0;
     }
     return 0;
   }
@@ -69,6 +70,15 @@ function parseColor(s: string, opacity = 1): number {
   if (c !== undefined) return (a << 24 | c) >>> 0;
 
   return (a << 24 | 0x000000) >>> 0; // default black
+}
+
+/** Tokenize SVG number strings correctly: handles "10-5" → [10,-5], "10.5.3" → [10.5,0.3], etc. */
+function tokenizeSVGNums(s: string): number[] {
+  var r: number[] = [];
+  var re = /[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/g;
+  var nm: RegExpExecArray | null;
+  while ((nm = re.exec(s)) !== null) r.push(+nm[0]!);
+  return r;
 }
 
 // ── Transform matrix ──────────────────────────────────────────────────────────
@@ -198,6 +208,44 @@ class PixelBuf {
         var x1 = Math.floor(intersections[k + 1]!);
         for (var px = Math.max(0, x0); px <= Math.min(this.w - 1, x1); px++) {
           this.plot(px, scanY, color);
+        }
+      }
+    }
+  }
+
+  /** Fill multiple closed sub-paths with even-odd rule (no false connecting edges). */
+  fillMultiPoly(polys: Array<[number[], number[]]>, color: number): void {
+    if (polys.length === 0) return;
+    if (polys.length === 1) { this.fillPoly(polys[0]![0]!, polys[0]![1]!, color); return; }
+    var minY = Infinity, maxY = -Infinity;
+    for (var p0 = 0; p0 < polys.length; p0++) {
+      var pys0 = polys[p0]![1]!;
+      for (var i0 = 0; i0 < pys0.length; i0++) {
+        if (pys0[i0]! < minY) minY = pys0[i0]!;
+        if (pys0[i0]! > maxY) maxY = pys0[i0]!;
+      }
+    }
+    minY = Math.max(0, Math.floor(minY));
+    maxY = Math.min(this.h - 1, Math.ceil(maxY));
+    for (var scanY2 = minY; scanY2 <= maxY; scanY2++) {
+      var ints: number[] = [];
+      for (var p2 = 0; p2 < polys.length; p2++) {
+        var pxs2 = polys[p2]![0]!, pys2 = polys[p2]![1]!;
+        var n2 = pxs2.length;
+        for (var i2 = 0, j2 = n2 - 1; i2 < n2; j2 = i2++) {
+          var yi2 = pys2[i2]!, yj2 = pys2[j2]!;
+          if ((yi2 <= scanY2 && yj2 > scanY2) || (yj2 <= scanY2 && yi2 > scanY2)) {
+            var t2 = (scanY2 - yi2) / (yj2 - yi2);
+            ints.push(pxs2[i2]! + t2 * (pxs2[j2]! - pxs2[i2]!));
+          }
+        }
+      }
+      ints.sort((a, b) => a - b);
+      for (var k2 = 0; k2 + 1 < ints.length; k2 += 2) {
+        var x0 = Math.ceil(ints[k2]!);
+        var x1 = Math.floor(ints[k2 + 1]!);
+        for (var px = Math.max(0, x0); px <= Math.min(this.w - 1, x1); px++) {
+          this.plot(px, scanY2, color);
         }
       }
     }
@@ -355,27 +403,29 @@ function renderCircle(buf: PixelBuf, cx: number, cy: number, rx: number, ry: num
   }
 }
 
-/** Very simple d-attribute path parser: M/L/H/V/Z/C/Q/A approximated. */
+/** SVG path d-attribute parser: M/L/H/V/Z/C/S/Q/T/A with proper number tokenization. */
 function renderPath(buf: PixelBuf, d: string, ctx: PaintCtx, m: Matrix): void {
-  var re = /([MLHVZCSQTACB])\s*((?:[-\d.e+,\s]+)?)/gi;
+  var re = /([MLHVZCSQTAmlhvzcsqta])\s*((?:[^MLHVZCSQTAmlhvzcsqta])*)/g;
   var match: RegExpExecArray | null;
   var curX = 0, curY = 0;
   var startX = 0, startY = 0;
-  var allXs: number[] = [], allYs: number[] = [];
   var polylines: Array<[number[], number[]]> = [];
   var curPolyXs: number[] = [], curPolyYs: number[] = [];
+  var lastCp2x = 0, lastCp2y = 0; // for S/T smooth bezier reflection
+  var prevCmd = '';
 
   function flush(): void {
-    if (curPolyXs.length > 0) { polylines.push([[...curPolyXs], [...curPolyYs]]); for (var _pxi = 0; _pxi < curPolyXs.length; _pxi++) allXs.push(curPolyXs[_pxi]!); for (var _pyi = 0; _pyi < curPolyYs.length; _pyi++) allYs.push(curPolyYs[_pyi]!); }
+    if (curPolyXs.length > 0) polylines.push([[...curPolyXs], [...curPolyYs]]);
     curPolyXs = []; curPolyYs = [];
   }
 
   function addPt(x: number, y: number): void { curPolyXs.push(x); curPolyYs.push(y); }
 
   while ((match = re.exec(d)) !== null) {
-    var cmd = match[1]!.toUpperCase();
-    var nums = (match[2] ?? '').trim().split(/[\s,]+/).filter(Boolean).map(Number);
-    var rel = match[1] === match[1]!.toLowerCase() && match[1] !== 'Z';
+    var rawCmd = match[1]!;
+    var cmd = rawCmd.toUpperCase();
+    var nums = tokenizeSVGNums(match[2] ?? '');
+    var rel = rawCmd >= 'a' && rawCmd <= 'z';
 
     var i = 0;
     while (i <= nums.length - (cmd === 'Z' ? 0 : 1)) {
@@ -383,16 +433,19 @@ function renderPath(buf: PixelBuf, d: string, ctx: PaintCtx, m: Matrix): void {
         if (i >= nums.length - 1) break;
         var nx = (nums[i++] ?? 0) + (rel ? curX : 0);
         var ny = (nums[i++] ?? 0) + (rel ? curY : 0);
-        if (cmd === 'M') { flush(); startX = nx; startY = ny; }
+        if (cmd === 'M') { flush(); startX = nx; startY = ny; cmd = 'L'; }
         curX = nx; curY = ny;
+        lastCp2x = curX; lastCp2y = curY;
         addPt(curX, curY);
       } else if (cmd === 'H') {
         if (i >= nums.length) break;
         curX = (nums[i++] ?? 0) + (rel ? curX : 0);
+        lastCp2x = curX; lastCp2y = curY;
         addPt(curX, curY);
       } else if (cmd === 'V') {
         if (i >= nums.length) break;
         curY = (nums[i++] ?? 0) + (rel ? curY : 0);
+        lastCp2x = curX; lastCp2y = curY;
         addPt(curX, curY);
       } else if (cmd === 'Z') {
         addPt(startX, startY);
@@ -414,7 +467,23 @@ function renderPath(buf: PixelBuf, d: string, ctx: PaintCtx, m: Matrix): void {
           var by = mt*mt*mt*curY + 3*mt*mt*t*cp1y + 3*mt*t*t*cp2y + t*t*t*ey;
           addPt(bx, by);
         }
+        lastCp2x = cp2x; lastCp2y = cp2y;
         curX = ex; curY = ey;
+      } else if (cmd === 'S') {
+        if (i >= nums.length - 3) break;
+        var scp1x = (prevCmd === 'C' || prevCmd === 'S') ? 2 * curX - lastCp2x : curX;
+        var scp1y = (prevCmd === 'C' || prevCmd === 'S') ? 2 * curY - lastCp2y : curY;
+        var scp2x = (nums[i++] ?? 0) + (rel ? curX : 0);
+        var scp2y = (nums[i++] ?? 0) + (rel ? curY : 0);
+        var sex = (nums[i++] ?? 0) + (rel ? curX : 0);
+        var sey = (nums[i++] ?? 0) + (rel ? curY : 0);
+        for (var st = 0; st <= 1; st += 0.1) {
+          var smt = 1 - st;
+          addPt(smt*smt*smt*curX + 3*smt*smt*st*scp1x + 3*smt*st*st*scp2x + st*st*st*sex,
+                smt*smt*smt*curY + 3*smt*smt*st*scp1y + 3*smt*st*st*scp2y + st*st*st*sey);
+        }
+        lastCp2x = scp2x; lastCp2y = scp2y;
+        curX = sex; curY = sey;
       } else if (cmd === 'Q') {
         if (i >= nums.length - 3) break;
         var qcx = (nums[i++] ?? 0) + (rel ? curX : 0);
@@ -425,7 +494,21 @@ function renderPath(buf: PixelBuf, d: string, ctx: PaintCtx, m: Matrix): void {
           var qmt = 1 - qt;
           addPt(qmt*qmt*curX + 2*qmt*qt*qcx + qt*qt*qex, qmt*qmt*curY + 2*qmt*qt*qcy + qt*qt*qey);
         }
+        lastCp2x = qcx; lastCp2y = qcy;
         curX = qex; curY = qey;
+      } else if (cmd === 'T') {
+        if (i >= nums.length - 1) break;
+        var tcpx = (prevCmd === 'Q' || prevCmd === 'T') ? 2 * curX - lastCp2x : curX;
+        var tcpy = (prevCmd === 'Q' || prevCmd === 'T') ? 2 * curY - lastCp2y : curY;
+        var tex = (nums[i++] ?? 0) + (rel ? curX : 0);
+        var tey = (nums[i++] ?? 0) + (rel ? curY : 0);
+        for (var tt = 0; tt <= 1; tt += 0.1) {
+          var tmt = 1 - tt;
+          addPt(tmt*tmt*curX + 2*tmt*tt*tcpx + tt*tt*tex,
+                tmt*tmt*curY + 2*tmt*tt*tcpy + tt*tt*tey);
+        }
+        lastCp2x = tcpx; lastCp2y = tcpy;
+        curX = tex; curY = tey;
       } else if (cmd === 'A') {
         if (i >= nums.length - 6) break;
         var arx = nums[i++] ?? 0;
@@ -439,22 +522,29 @@ function renderPath(buf: PixelBuf, d: string, ctx: PaintCtx, m: Matrix): void {
         for (var at = 0; at <= 1; at += 0.1) {
           addPt(curX + (aex - curX) * at, curY + (aey - curY) * at);
         }
+        lastCp2x = curX; lastCp2y = curY;
         curX = aex; curY = aey;
       } else {
         break;
       }
     }
+    prevCmd = cmd;
   }
   flush();
 
-  // Fill (use all points as one polygon)
-  if (ctx.fill && allXs.length > 2) {
-    var txs: number[] = [], tys: number[] = [];
-    for (var pi2 = 0; pi2 < allXs.length; pi2++) {
-      var [px5, py5] = applyMatrix(m, allXs[pi2]!, allYs[pi2]!);
-      txs.push(px5); tys.push(py5);
+  // Fill each sub-path independently using even-odd rule
+  if (ctx.fill && polylines.length > 0) {
+    var tPolys: Array<[number[], number[]]> = [];
+    for (var pl2 = 0; pl2 < polylines.length; pl2++) {
+      var plXs2 = polylines[pl2]![0]!, plYs2 = polylines[pl2]![1]!;
+      var txs: number[] = [], tys: number[] = [];
+      for (var pi2 = 0; pi2 < plXs2.length; pi2++) {
+        var [px5, py5] = applyMatrix(m, plXs2[pi2]!, plYs2[pi2]!);
+        txs.push(px5); tys.push(py5);
+      }
+      if (txs.length >= 3) tPolys.push([txs, tys]);
     }
-    buf.fillPoly(txs, tys, ctx.fill);
+    if (tPolys.length > 0) buf.fillMultiPoly(tPolys, ctx.fill);
   }
 
   // Stroke
@@ -614,27 +704,56 @@ function _renderSVG(svgStr: string, maxW: number, maxH: number): DecodedImage | 
   if (!svgTok) return null;
 
   var attrs0 = svgTok.attrs;
-  var svgW = parseFloat(attrs0['width'] ?? '0') || maxW;
-  var svgH = parseFloat(attrs0['height'] ?? '0') || maxH;
-  svgW = Math.min(svgW, maxW);
-  svgH = Math.min(svgH, maxH);
+  var style0 = parseStyle(attrs0['style'] ?? '');
 
-  var scaleX = 1, scaleY = 1;
+  // Parse viewBox
   var vb = attrs0['viewbox'] ?? attrs0['viewBox'] ?? '';
+  var vbX = 0, vbY = 0, vbW = 0, vbH = 0;
   if (vb) {
     var vbParts = vb.trim().split(/[\s,]+/).map(Number);
-    var vbW = vbParts[2] ?? svgW;
-    var vbH = vbParts[3] ?? svgH;
-    if (vbW > 0 && vbH > 0) {
-      scaleX = svgW / vbW;
-      scaleY = svgH / vbH;
-    }
+    vbX = vbParts[0] ?? 0;
+    vbY = vbParts[1] ?? 0;
+    vbW = vbParts[2] ?? 0;
+    vbH = vbParts[3] ?? 0;
   }
 
-  var buf = new PixelBuf(Math.round(svgW), Math.round(svgH), 0); // transparent bg
+  // Parse explicit width/height (from attribute or inline style)
+  var explicitW = parseFloat(getAttr(attrs0, style0, 'width', '0')) || 0;
+  var explicitH = parseFloat(getAttr(attrs0, style0, 'height', '0')) || 0;
 
-  var rootCtx: PaintCtx = { fill: 0xFF000000, stroke: 0, sw: 1 };
-  var rootM: Matrix = [scaleX, 0, 0, scaleY, 0, 0];
+  // Determine output dimensions
+  var svgW: number, svgH: number;
+  if (explicitW > 0 && explicitH > 0) {
+    svgW = Math.min(explicitW, maxW);
+    svgH = Math.min(explicitH, maxH);
+  } else if (vbW > 0 && vbH > 0) {
+    // Use viewBox dimensions, fit within maxW/maxH preserving aspect ratio
+    var aspect = vbW / vbH;
+    svgW = Math.min(vbW, maxW);
+    svgH = Math.min(vbH, maxH);
+    if (svgW / svgH > aspect) svgW = svgH * aspect;
+    else svgH = svgW / aspect;
+  } else {
+    svgW = maxW;
+    svgH = maxH;
+  }
+
+  var scaleX = 1, scaleY = 1;
+  if (vbW > 0 && vbH > 0) {
+    scaleX = svgW / vbW;
+    scaleY = svgH / vbH;
+  }
+
+  var buf = new PixelBuf(Math.max(1, Math.round(svgW)), Math.max(1, Math.round(svgH)), 0); // transparent bg
+
+  // Root paint context: read fill from SVG element if specified
+  var rootFillStr = getAttr(attrs0, style0, 'fill', '');
+  var rootCtx: PaintCtx = {
+    fill: rootFillStr ? parseColor(rootFillStr) : 0xFF000000,
+    stroke: 0,
+    sw: 1,
+  };
+  var rootM: Matrix = [scaleX, 0, 0, scaleY, -vbX * scaleX, -vbY * scaleY];
 
   var svgIdx = tokens.indexOf(svgTok);
   var state: RenderState = {

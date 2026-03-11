@@ -836,8 +836,32 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       flushInline();
       inSVG     = true;
       svgDepth  = 1;
-      svgWidth  = parseInt(tok.attrs.get('width')  || '300', 10) || 300;
-      svgHeight = parseInt(tok.attrs.get('height') || '150', 10) || 150;
+      // Extract SVG dimensions: attribute > style > viewBox > default
+      var _svgRawW = tok.attrs.get('width') || '';
+      var _svgRawH = tok.attrs.get('height') || '';
+      svgWidth  = parseInt(_svgRawW, 10) || 0;
+      svgHeight = parseInt(_svgRawH, 10) || 0;
+      if (!svgWidth || !svgHeight) {
+        var _svgStyle = tok.attrs.get('style') || '';
+        if (_svgStyle) {
+          var _swm = _svgStyle.match(/width\s*:\s*(\d+)/);
+          var _shm = _svgStyle.match(/height\s*:\s*(\d+)/);
+          if (_swm && !svgWidth) svgWidth = parseInt(_swm[1]!, 10);
+          if (_shm && !svgHeight) svgHeight = parseInt(_shm[1]!, 10);
+        }
+      }
+      if (!svgWidth || !svgHeight) {
+        var _vb = tok.attrs.get('viewBox') || tok.attrs.get('viewbox') || '';
+        if (_vb) {
+          var _vbP = _vb.trim().split(/[\s,]+/).map(Number);
+          if (_vbP.length >= 4 && _vbP[2]! > 0 && _vbP[3]! > 0) {
+            if (!svgWidth) svgWidth = Math.round(_vbP[2]!);
+            if (!svgHeight) svgHeight = Math.round(_vbP[3]!);
+          }
+        }
+      }
+      svgWidth = svgWidth || 300;
+      svgHeight = svgHeight || 150;
       svgBuf    = '<svg';
       tok.attrs.forEach(function(v, k) { svgBuf += ' ' + k + '="' + v.replace(/"/g, '&quot;') + '"'; });
       svgBuf   += '>';
