@@ -118,19 +118,22 @@ interface ParsedSel {
  *  C  = # of type/element       (×0x1)
  */
 export function selectorSpecificity(sel: string): number {
-  // Parse all compound selector parts and compute specificity across ALL of them
-  var parsed = _parseSelectorParts(sel);
+  // Use pre-parsed selector data to compute specificity without regex.
+  // _parseSel caches via _parseSelectorParts + _parsedCompoundCache,
+  // so repeated calls for the same selector are free.
+  var ps = _parseSel(sel.trim());
   var a = 0, b = 0, c = 0;
-  for (var pi = 0; pi < parsed.parts.length; pi++) {
-    var part = parsed.parts[pi]!;
-    // Count ID selectors
-    var ids = part.match(/#[^.#[\s:]+/g);
-    if (ids) a += ids.length;
-    // Count class, attribute, pseudo-class selectors
-    var clss = part.match(/\.[^.#[\s:]+|\[[^\]]+\]|:(?!:)[^.#[\s:(]+/g);
-    if (clss) b += clss.length;
-    // Count type selectors (non-* identifiers at start)
-    if (part && part !== '*' && /^[a-zA-Z]/.test(part)) c++;
+  for (var ci = 0; ci < ps.compounds.length; ci++) {
+    var comp = ps.compounds[ci]!;
+    a += comp.ids.length;
+    b += comp.classes.length + comp.attrs.length;
+    for (var pi = 0; pi < comp.pseudos.length; pi++) {
+      var pn = comp.pseudos[pi]!.name;
+      // Pseudo-elements add to c, pseudo-classes add to b
+      if (pn === 'before' || pn === 'after' || pn === 'first-line' || pn === 'first-letter') c++;
+      else b++;
+    }
+    if (comp.tag !== null) c++;
   }
   return (a << 16) | (b << 8) | c;
 }
@@ -871,25 +874,33 @@ export function parseStylesheet(css: string): CSSRule[] {
 
   var i = 0;
 
-  function skipWs(): void { while (i < css.length && css[i] <= ' ') i++; }
+  // charCodeAt constants — avoids single-char string allocation per css[i] access
+  var CC_SPACE = 32, CC_AT = 64, CC_LBRACE = 123, CC_RBRACE = 125;
+  var CC_SEMI = 59, CC_LPAREN = 40, CC_RPAREN = 41;
+  var CC_DQUOTE = 34, CC_SQUOTE = 39, CC_BSLASH = 92;
 
-  // Read until {, }, @, or end
+  function skipWs(): void { while (i < css.length && css.charCodeAt(i) <= CC_SPACE) i++; }
+
+  // Read until one of stop chars, or end.  Uses charCodeAt to avoid allocations.
   function readUntil(stop: string): string {
     var start = i;
     var depth = 0;
+    // Pre-compute stop char codes for fast comparison
+    var s0 = stop.charCodeAt(0), s1 = stop.length > 1 ? stop.charCodeAt(1) : -1;
+    var s2 = stop.length > 2 ? stop.charCodeAt(2) : -1;
     while (i < css.length) {
-      var ch = css[i];
-      if (ch === '(') { depth++; i++; continue; }
-      if (ch === ')') { depth--; if (depth < 0) depth = 0; i++; continue; }
-      if (ch === '"' || ch === "'") {
-        var q = ch; i++;
-        while (i < css.length && css[i] !== q) {
-          if (css[i] === '\\') i++;
+      var cc = css.charCodeAt(i);
+      if (cc === CC_LPAREN) { depth++; i++; continue; }
+      if (cc === CC_RPAREN) { depth--; if (depth < 0) depth = 0; i++; continue; }
+      if (cc === CC_DQUOTE || cc === CC_SQUOTE) {
+        var q = cc; i++;
+        while (i < css.length && css.charCodeAt(i) !== q) {
+          if (css.charCodeAt(i) === CC_BSLASH) i++;
           i++;
         }
         i++; continue;
       }
-      if (depth === 0 && stop.includes(ch)) break;
+      if (depth === 0 && (cc === s0 || cc === s1 || cc === s2)) break;
       i++;
     }
     return css.slice(start, i).trim();
@@ -900,12 +911,12 @@ export function parseStylesheet(css: string): CSSRule[] {
     if (i >= css.length) break;
 
     // At-rule
-    if (css[i] === '@') {
+    if (css.charCodeAt(i) === CC_AT) {
       i++;
       var atKw = readUntil(' {;').replace(/\s+/g, '').toLowerCase();
       skipWs();
-      if (i < css.length && css[i] === ';') { i++; continue; } // @import etc
-      if (i < css.length && css[i] === '{') {
+      if (i < css.length && css.charCodeAt(i) === CC_SEMI) { i++; continue; } // @import etc
+      if (i < css.length && css.charCodeAt(i) === CC_LBRACE) {
         i++;
         // For @media — parse inner rules if query matches
         if (atKw.startsWith('media') || atKw.startsWith('supports') || atKw.startsWith('layer')) {
@@ -913,8 +924,9 @@ export function parseStylesheet(css: string): CSSRule[] {
           var depth2 = 1;
           var start2 = i;
           while (i < css.length && depth2 > 0) {
-            if (css[i] === '{') depth2++;
-            else if (css[i] === '}') depth2--;
+            var _cc2 = css.charCodeAt(i);
+            if (_cc2 === CC_LBRACE) depth2++;
+            else if (_cc2 === CC_RBRACE) depth2--;
             i++;
           }
           var inner = css.slice(start2, i - 1);
@@ -936,8 +948,9 @@ export function parseStylesheet(css: string): CSSRule[] {
           // Skip other at-rule blocks (@keyframes, @font-face, etc.)
           var d3 = 1;
           while (i < css.length && d3 > 0) {
-            if (css[i] === '{') d3++;
-            else if (css[i] === '}') d3--;
+            var _cc3 = css.charCodeAt(i);
+            if (_cc3 === CC_LBRACE) d3++;
+            else if (_cc3 === CC_RBRACE) d3--;
             i++;
           }
         }
@@ -947,20 +960,20 @@ export function parseStylesheet(css: string): CSSRule[] {
 
     // Regular rule: selector(s) { declarations (may contain nested rules) }
     var selText = readUntil('{};');
-    if (i >= css.length || css[i] !== '{') { i++; continue; }
+    if (i >= css.length || css.charCodeAt(i) !== CC_LBRACE) { i++; continue; }
     i++; // consume {
 
     // Read balanced block content (handles nested {})
     var blockStart = i;
     var blockDepth = 1;
     while (i < css.length && blockDepth > 0) {
-      var bch = css[i]!;
-      if (bch === '{') blockDepth++;
-      else if (bch === '}') blockDepth--;
+      var bcc = css.charCodeAt(i);
+      if (bcc === CC_LBRACE) blockDepth++;
+      else if (bcc === CC_RBRACE) blockDepth--;
       if (blockDepth > 0) i++;
     }
     var fullBlock = css.slice(blockStart, i);
-    if (i < css.length && css[i] === '}') i++; // consume }
+    if (i < css.length && css.charCodeAt(i) === CC_RBRACE) i++; // consume }
 
     selText = selText.trim();
     if (!selText || !fullBlock.trim()) continue;
@@ -972,7 +985,7 @@ export function parseStylesheet(css: string): CSSRule[] {
       var ni = 0;
       while (ni < fullBlock.length) {
         // Skip whitespace
-        while (ni < fullBlock.length && fullBlock[ni]! <= ' ') ni++;
+        while (ni < fullBlock.length && fullBlock.charCodeAt(ni) <= 32) ni++;
         if (ni >= fullBlock.length) break;
         // Check if this is a nested rule (contains { before ;)
         var nextBrace = fullBlock.indexOf('{', ni);
@@ -984,8 +997,9 @@ export function parseStylesheet(css: string): CSSRule[] {
           var nd2 = 1;
           var nBodyStart = ni;
           while (ni < fullBlock.length && nd2 > 0) {
-            if (fullBlock[ni] === '{') nd2++;
-            else if (fullBlock[ni] === '}') nd2--;
+            var _ncc = fullBlock.charCodeAt(ni);
+            if (_ncc === CC_LBRACE) nd2++;
+            else if (_ncc === CC_RBRACE) nd2--;
             if (nd2 > 0) ni++;
           }
           var nestedBody = fullBlock.slice(nBodyStart, ni);
