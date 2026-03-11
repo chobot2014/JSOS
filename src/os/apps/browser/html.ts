@@ -761,7 +761,9 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       else { cls = _clsRaw.split(/\s+/).filter(Boolean); if (_clsSplitCache.size < 2048) _clsSplitCache.set(_clsRaw, cls); }
     }
     var inl = attrs.get('style') || '';
-    var hasPseudo = sheets.length > 0;
+    var hasSheets = sheets.length > 0;
+    // Only call getPseudoContent when there are rules with `content` property
+    var hasPseudo = _ruleIndex ? _ruleIndex.contentRules.length > 0 : hasSheets;
     // Determine if this element has a JS click handler that needs hit-test dispatch.
     // data-jsos-el is auto-set by VElement.addEventListener(); inline onclick is a fallback.
     var jselId = attrs.get('data-jsos-el') ||
@@ -771,7 +773,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     var _sibIdx = childCountStack.length > 0 ? childCountStack[childCountStack.length - 1]! : 0;
     if (childCountStack.length > 0) childCountStack[childCountStack.length - 1]!++;
     childCountStack.push(0);
-    if (!inl && !hasPseudo) {
+    if (!inl && !hasSheets) {
       cssStack.push({ ...curCSS });
       ancestorStack.push({ tag, id, cls, attrs });
       if (jselId || id || curCSS._onclickElId) {

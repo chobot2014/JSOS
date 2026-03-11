@@ -283,6 +283,7 @@ export interface RuleIndex {
   classBuckets:   Map<string, CSSRule[]>;
   idBuckets:      Map<string, CSSRule[]>;
   universalRules: CSSRule[];
+  contentRules:   CSSRule[];   // rules with props.content set (for ::before/::after)
 }
 
 /** Build a RuleIndex from a list of CSSRule objects. */
@@ -352,7 +353,13 @@ export function buildRuleIndex(rules: CSSRule[]): RuleIndex {
     if (!placed) universalRules.push(rule);
   }
 
-  return { tagBuckets, classBuckets, idBuckets, universalRules };
+  // Collect rules that have content property (for getPseudoContent fast-skip)
+  var contentRules: CSSRule[] = [];
+  for (var ci = 0; ci < rules.length; ci++) {
+    if (rules[ci]!.props.content) contentRules.push(rules[ci]!);
+  }
+
+  return { tagBuckets, classBuckets, idBuckets, universalRules, contentRules };
 }
 
 /**

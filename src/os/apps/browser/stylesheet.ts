@@ -1302,11 +1302,15 @@ export function getPseudoContent(
   sibIdx?: number,
   sibCount?: number,
 ): { before: string; after: string } {
+  // Fast path: if we have an index and no rules have content, skip entirely
+  if (index && index.contentRules.length === 0) return { before: '', after: '' };
+
   var before = '';
   var after  = '';
   var beforeSpec = -1;
   var afterSpec  = -1;
-  var candidates = index ? candidateRules(index, tag, id, cls) : sheets;
+  // Use only content-bearing rules when index is available (much smaller set)
+  var candidates = index ? index.contentRules : sheets;
   for (var ri = 0; ri < candidates.length; ri++) {
     var rule = candidates[ri]!;
     if (!rule.props.content) continue;   // skip rules without content
