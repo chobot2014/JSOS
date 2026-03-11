@@ -185,7 +185,7 @@ export function tokenise(html: string): HtmlToken[] {
       i = _ctEnd >= 0 ? _ctEnd + 1 : n;
       return { kind: 'close', tag, text: '', attrs: _emptyAttrs };
     }
-    var attrs = new Map<string, string>();
+    var attrs = _emptyAttrs;  // lazy: share singleton until first attr found
     skipWS();
     while (i < n && html.charCodeAt(i) !== CC_GT && html.charCodeAt(i) !== CC_SLASH) {
       // Read attribute name: scan to boundary, then slice
@@ -199,7 +199,10 @@ export function tokenise(html: string): HtmlToken[] {
       skipWS();
       var vl = '';
       if (i < n && html.charCodeAt(i) === CC_EQ) { i++; skipWS(); vl = readAttrValue(); }
-      if (nm) attrs.set(nm, vl);
+      if (nm) {
+        if (attrs === _emptyAttrs) attrs = new Map<string, string>();
+        attrs.set(nm, vl);
+      }
       skipWS();
     }
     var self = false;
@@ -209,8 +212,28 @@ export function tokenise(html: string): HtmlToken[] {
     return { kind, tag, text: '', attrs };
   }
 
-  // Hoisted: compute once instead of once-per-script/style-tag (was O(n×tags))
-  var htmlLC = html.toLowerCase();
+  // Case-insensitive close-tag search — avoids allocating a lowercased copy
+  // of the entire HTML document (was html.toLowerCase() = ~183KB allocation).
+  // Scans char-by-char with charCodeAt, comparing case-insensitively.
+  function _findCloseTagCI(tag: string, from: number): number {
+    // tag is already lowercase (e.g. 'script', 'style')
+    // Search for '</' + tag case-insensitively
+    var tl = tag.length;
+    var end = n - tl - 2; // need at least </tag
+    for (var p = from; p <= end; p++) {
+      if (html.charCodeAt(p) !== CC_LT) continue;
+      if (html.charCodeAt(p + 1) !== CC_SLASH) continue;
+      var ok = true;
+      for (var k = 0; k < tl; k++) {
+        var c = html.charCodeAt(p + 2 + k);
+        // lowercase ASCII letter: if uppercase (65-90) → add 32
+        if (c >= 65 && c <= 90) c += 32;
+        if (c !== tag.charCodeAt(k)) { ok = false; break; }
+      }
+      if (ok) return p;
+    }
+    return -1;
+  }
   while (i < n) {
     if (html.charCodeAt(i) === CC_LT) {
       var tok = readTag();
@@ -222,8 +245,7 @@ export function tokenise(html: string): HtmlToken[] {
         // tag.  Without this, `rafId <= 0` would be parsed as a tag '<= 0…>'
         // and the script content would be silently corrupted.
         if (tok.kind === 'open' && (tok.tag === 'script' || tok.tag === 'style')) {
-          var closeTag = '</' + tok.tag;
-          var closeIdx = htmlLC.indexOf(closeTag, i);
+          var closeIdx = _findCloseTagCI(tok.tag, i);
           var rawEnd = closeIdx >= 0 ? closeIdx : n;
           var rawContent = html.slice(i, rawEnd);
           if (rawContent) {
