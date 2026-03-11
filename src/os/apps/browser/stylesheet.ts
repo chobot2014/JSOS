@@ -52,6 +52,7 @@ export function flushCSSMatchCache(): void {
   _cssMatchHits  = 0;
   _cssMatchTotal = 0;
   _parsedCompoundCache.clear();
+  _declBlockCache.clear();  // CSS vars change across pages, invalidates cached props
 }
 
 /** Return CSS match cache stats: [hits, total, cacheSize] */
@@ -666,11 +667,23 @@ function matchesCompound(
 
 // ── CSS property parser (superset of parseInlineStyle) ────────────────────────
 
+// Cache for parseDeclBlock — many CSS rules share identical declaration blocks.
+// Google's ~800 rules have significant duplication (same colors, font, display).
+// Bounded to 4096 entries; flushed on navigation via flushDeclBlockCache().
+var _declBlockCache = new Map<string, CSSProps>();
+
+export function flushDeclBlockCache(): void { _declBlockCache.clear(); }
+
 /**
  * Parse a CSS declaration block string (the part inside `{}`) into CSSProps.
+ * Results are cached by the raw block text.
  */
 export function parseDeclBlock(block: string): CSSProps {
-  return parseInlineStyle(block);
+  var _cached = _declBlockCache.get(block);
+  if (_cached) return _cached;
+  var result = parseInlineStyle(block);
+  if (_declBlockCache.size < 4096) _declBlockCache.set(block, result);
+  return result;
 }
 
 // ── Media query evaluator ─────────────────────────────────────────────────────
@@ -838,11 +851,23 @@ function _splitOutsideParens(s: string, delim: string): string[] {
 export function parseStylesheet(css: string): CSSRule[] {
   var rules: CSSRule[] = [];
 
-  // Remove comments
-  css = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  // Remove comments — indexOf scan instead of regex (avoids O(n) regex engine overhead)
+  if (css.indexOf('/*') >= 0) {
+    var _parts: string[] = [];
+    var _ci = 0;
+    while (_ci < css.length) {
+      var _cmtStart = css.indexOf('/*', _ci);
+      if (_cmtStart < 0) { _parts.push(css.slice(_ci)); break; }
+      if (_cmtStart > _ci) _parts.push(css.slice(_ci, _cmtStart));
+      var _cmtEnd = css.indexOf('*/', _cmtStart + 2);
+      if (_cmtEnd < 0) break; // unterminated comment — drop rest
+      _ci = _cmtEnd + 2;
+    }
+    css = _parts.join('');
+  }
 
-  // Remove @charset, @import, @namespace
-  css = css.replace(/@(?:charset|import|namespace)[^;]+;/gi, '');
+  // Note: @charset, @import, @namespace are already handled by the main parser
+  // loop (at-rule with `;` → skip), so no pre-processing needed.
 
   var i = 0;
 
@@ -1395,7 +1420,12 @@ export function computeElementStyle(
 
   // ── Inline style wins over normal sheet rules ──────────────────────────────
   if (inlineStyle) {
-    var inlineParsed = parseInlineStyle(inlineStyle);
+    // Use the same decl-block cache to avoid re-parsing identical inline styles
+    var inlineParsed = _declBlockCache.get(inlineStyle);
+    if (!inlineParsed) {
+      inlineParsed = parseInlineStyle(inlineStyle);
+      if (_declBlockCache.size < 4096) _declBlockCache.set(inlineStyle, inlineParsed);
+    }
     mergeProps(result, inlineParsed);
     _applyKeywords(result, inlineParsed, inherited);
     // Inline !important overrides even !important sheet rules
