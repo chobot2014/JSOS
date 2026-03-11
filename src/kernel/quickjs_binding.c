@@ -43,6 +43,15 @@ extern volatile int  _js_in_page_eval;
 #define unlikely(x)  __builtin_expect(!!(x), 0)
 #endif
 
+/* Forward-declare heap canary diagnostic counters (defined with allocator) */
+static volatile uint32_t _heap_head_violations;
+static volatile uint32_t _heap_tail_violations;
+static volatile uint32_t _heap_leaks_prevented;
+
+/* Forward-declare fallback allocator state (defined with --wrap wrappers) */
+static volatile int      _heap_broken;
+static volatile uint32_t _fallback_offset;
+
 /* Static ATA sector buffer: 8 sectors × 256 words = 4 KB on BSS, not stack */
 static uint16_t ata_sector_buf[256 * 8];
 
@@ -385,6 +394,17 @@ static JSValue js_mem_info(JSContext *c, JSValueConst this_val, int argc, JSValu
     return obj;
 }
 
+/* Heap guard diagnostic counters (canary violation stats) */
+static JSValue js_heap_stats(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JSValue obj = JS_NewObject(c);
+    JS_SetPropertyStr(c, obj, "headViolations", JS_NewInt32(c, (int32_t)_heap_head_violations));
+    JS_SetPropertyStr(c, obj, "tailViolations", JS_NewInt32(c, (int32_t)_heap_tail_violations));
+    JS_SetPropertyStr(c, obj, "leaksPrevented", JS_NewInt32(c, (int32_t)_heap_leaks_prevented));
+    JS_SetPropertyStr(c, obj, "heapBroken",     JS_NewBool(c, _heap_broken));
+    JS_SetPropertyStr(c, obj, "fallbackUsed",   JS_NewInt32(c, (int32_t)_fallback_offset));
+    return obj;
+}
+
 /*  Port I/O  */
 
 static JSValue js_inb(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -589,24 +609,54 @@ static JSValue js_eval(JSContext *c, JSValueConst this_val, int argc, JSValueCon
     return ret;
 }
 
-/* ── JSOS Custom Malloc Allocator ────────────────────────────────────────
+/* ── JSOS Guarded Heap Allocator ──────────────────────────────────────────
  *
- * Replaces QuickJS's default malloc functions (which depend on the
- * platform-specific `malloc_usable_size`) with an allocator that stores
- * the allocation size in an 8-byte header before the returned pointer.
+ * Replaces QuickJS's default malloc functions with an allocator that
+ * stores the allocation size in a header, plus HEAD and TAIL canaries
+ * for heap corruption detection.
+ *
+ * Layout:
+ *   [ 4 bytes: size ][ 4 bytes: HEAD canary 0xABCD1234 ]
+ *   [ user payload .............. (size bytes) ]
+ *   [ 4 bytes: TAIL canary 0xDEADBEEF ]
+ *
+ * On free/realloc both canaries are validated:
+ *   HEAD violation → header corruption, double-free, or wild write
+ *   TAIL violation → buffer overflow past the allocation boundary
+ *
+ * When a canary violation is detected, the block is intentionally LEAKED
+ * (never passed to free()) to prevent cascading heap corruption that
+ * crashes newlib's _free_r walking a corrupted freelist.
  *
  * Benefits:
- *   1. Eliminates implicit `malloc_usable_size` dependency (no header on
- *      i686-elf / newlib — worked by luck)
- *   2. Precise size tracking (malloc_usable_size may over-report, causing
- *      GC threshold accounting drift)
- *   3. Foundation for future heap corruption detection (canary bytes)
- *
- * Layout:  [ 8 bytes: size_t requested_size ] [ user payload ... ]
- *          ^                                   ^
- *          actual malloc ptr                   returned to caller
+ *   1. Eliminates implicit malloc_usable_size dependency
+ *   2. Precise size tracking for GC threshold accounting
+ *   3. Catches heap corruption BEFORE it causes #PF in free()
+ *   4. Intentional leak policy prevents cascading damage
  */
-#define JSOS_MALLOC_HDR_SIZE  8  /* keep 8-byte aligned */
+#define JSOS_MALLOC_HDR_SIZE   8          /* [size(4)][head_canary(4)] — 8-byte aligned */
+#define JSOS_MALLOC_TAIL_SIZE  4          /* tail canary after user payload             */
+#define JSOS_CANARY_HEAD       0xABCD1234u
+#define JSOS_CANARY_TAIL       0xDEADBEEFu
+
+/* ── Serial output helpers (no printf/snprintf dependency) ─────────── */
+static void _heap_puts_hex32(uint32_t v) {
+    static const char _h[] = "0123456789ABCDEF";
+    char b[11];
+    b[0] = '0'; b[1] = 'x';
+    for (int i = 0; i < 8; i++) b[2 + i] = _h[(v >> (28 - i * 4)) & 0xF];
+    b[10] = '\0';
+    platform_serial_puts(b);
+}
+
+static void _heap_puts_dec(uint32_t v) {
+    char b[12];
+    int i = 11;
+    b[i] = '\0';
+    if (!v) { b[--i] = '0'; }
+    else while (v) { b[--i] = '0' + (v % 10); v /= 10; }
+    platform_serial_puts(&b[i]);
+}
 
 static size_t jsos_malloc_usable_size(const void *ptr)
 {
@@ -620,7 +670,7 @@ static void *jsos_malloc(JSMallocState *s, size_t size)
     void *raw;
     size_t real;
     assert(size != 0);
-    real = size + JSOS_MALLOC_HDR_SIZE;
+    real = size + JSOS_MALLOC_HDR_SIZE + JSOS_MALLOC_TAIL_SIZE;
     /* Overflow-safe limit check: guard against both 32-bit wraparound
      * and the edge case where malloc_size already exceeds malloc_limit. */
     if (unlikely(s->malloc_size >= s->malloc_limit ||
@@ -629,7 +679,9 @@ static void *jsos_malloc(JSMallocState *s, size_t size)
     raw = malloc(real);
     if (!raw)
         return NULL;
-    *(size_t *)raw = size;  /* store requested size in header */
+    *(size_t *)raw = size;                                                         /* stored size   */
+    *((uint32_t *)raw + 1) = JSOS_CANARY_HEAD;                                    /* head canary   */
+    *(uint32_t *)((char *)raw + JSOS_MALLOC_HDR_SIZE + size) = JSOS_CANARY_TAIL;   /* tail canary   */
     s->malloc_count++;
     s->malloc_size += size + MALLOC_OVERHEAD;
     return (char *)raw + JSOS_MALLOC_HDR_SIZE;
@@ -638,34 +690,117 @@ static void *jsos_malloc(JSMallocState *s, size_t size)
 static void jsos_free(JSMallocState *s, void *ptr)
 {
     if (!ptr) return;
+
+    /* Quick range check: pointers outside the heap are obviously corrupted.
+     * Our heap lives between _heap_start (~0x0B..) and sbrk's current break.
+     * Anything above 0x80000000 (2 GB) is definitely not a valid heap ptr.
+     * Common bad values: 0xFFFFFFFC (-4 from NAN_BOXING integer miscast). */
+    uintptr_t p = (uintptr_t)ptr;
+    if (unlikely(p < 0x00100000u || p > 0x80000000u)) {
+        _heap_head_violations++;
+        _heap_leaks_prevented++;
+        return;  /* silently discard — no need to spam serial */
+    }
+
     size_t *hdr = (size_t *)((char *)ptr - JSOS_MALLOC_HDR_SIZE);
     size_t size = *hdr;
+    uint32_t hc = *((uint32_t *)hdr + 1);
+
+    /* HEAD canary — detects header corruption, double-free, wild write */
+    if (unlikely(hc != JSOS_CANARY_HEAD)) {
+        _heap_head_violations++;
+        _heap_leaks_prevented++;
+        platform_serial_puts("[HEAP] HEAD violation free ptr=");
+        _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
+        platform_serial_puts(" stored_size=");
+        _heap_puts_hex32((uint32_t)size);
+        platform_serial_puts(" canary=");
+        _heap_puts_hex32(hc);
+        platform_serial_puts(" — LEAK\n");
+        return;  /* intentional leak: don't pass corrupted block to free() */
+    }
+
+    /* TAIL canary — detects buffer overflow past allocation boundary */
+    uint32_t tc = *(uint32_t *)((char *)ptr + size);
+    if (unlikely(tc != JSOS_CANARY_TAIL)) {
+        _heap_tail_violations++;
+        _heap_leaks_prevented++;
+        platform_serial_puts("[HEAP] TAIL violation free ptr=");
+        _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
+        platform_serial_puts(" size=");
+        _heap_puts_dec((uint32_t)size);
+        platform_serial_puts(" tail=");
+        _heap_puts_hex32(tc);
+        platform_serial_puts(" — LEAK\n");
+        return;  /* intentional leak: don't free overflowed block */
+    }
+
+    /* Canaries OK — poison head canary (catches double-free) then free */
+    *((uint32_t *)hdr + 1) = 0x00000000u;
     s->malloc_count--;
     s->malloc_size -= size + MALLOC_OVERHEAD;
-    free(hdr);
+    free(hdr);                /* goes through our global fault-guarded free() */
 }
 
 static void *jsos_realloc(JSMallocState *s, void *ptr, size_t size)
 {
-    size_t old_size;
     if (!ptr) {
         if (size == 0) return NULL;
         return jsos_malloc(s, size);
     }
+
+    /* Range check: reject obviously-invalid pointers (same as jsos_free) */
+    uintptr_t p = (uintptr_t)ptr;
+    if (unlikely(p < 0x00100000u || p > 0x80000000u)) {
+        _heap_head_violations++;
+        if (size == 0) return NULL;
+        return jsos_malloc(s, size);  /* allocate fresh; can't realloc garbage */
+    }
+
     size_t *hdr = (size_t *)((char *)ptr - JSOS_MALLOC_HDR_SIZE);
-    old_size = *hdr;
+    size_t old_size = *hdr;
+
     if (size == 0) {
-        s->malloc_count--;
-        s->malloc_size -= old_size + MALLOC_OVERHEAD;
-        free(hdr);
+        jsos_free(s, ptr);   /* route through guarded free */
         return NULL;
     }
-    if (s->malloc_size + size - old_size > s->malloc_limit)
+
+    /* Validate canaries before realloc */
+    uint32_t hc = *((uint32_t *)hdr + 1);
+    if (unlikely(hc != JSOS_CANARY_HEAD)) {
+        _heap_head_violations++;
+        platform_serial_puts("[HEAP] HEAD violation realloc ptr=");
+        _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
+        platform_serial_puts(" — deny\n");
         return NULL;
-    hdr = realloc(hdr, size + JSOS_MALLOC_HDR_SIZE);
+    }
+    uint32_t tc = *(uint32_t *)((char *)ptr + old_size);
+    if (unlikely(tc != JSOS_CANARY_TAIL)) {
+        _heap_tail_violations++;
+        platform_serial_puts("[HEAP] TAIL violation realloc ptr=");
+        _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
+        platform_serial_puts(" size=");
+        _heap_puts_dec((uint32_t)old_size);
+        platform_serial_puts(" tail=");
+        _heap_puts_hex32(tc);
+        platform_serial_puts(" — deny\n");
+        return NULL;
+    }
+
+    /* Overflow-safe limit check (uses subtraction to avoid 32-bit wrap) */
+    if (size > old_size) {
+        size_t delta = size - old_size;
+        if (unlikely(s->malloc_size >= s->malloc_limit ||
+                     delta > s->malloc_limit - s->malloc_size))
+            return NULL;
+    }
+
+    hdr = realloc(hdr, size + JSOS_MALLOC_HDR_SIZE + JSOS_MALLOC_TAIL_SIZE);
     if (!hdr)
         return NULL;
-    *hdr = size;  /* update stored size */
+    *hdr = size;                                                                    /* update size   */
+    *((uint32_t *)hdr + 1) = JSOS_CANARY_HEAD;                                     /* refresh head  */
+    *(uint32_t *)((char *)hdr + JSOS_MALLOC_HDR_SIZE + size) = JSOS_CANARY_TAIL;    /* new tail      */
     s->malloc_size += size - old_size;
     return (char *)hdr + JSOS_MALLOC_HDR_SIZE;
 }
@@ -676,6 +811,171 @@ static const JSMallocFunctions jsos_malloc_funcs = {
     jsos_realloc,
     jsos_malloc_usable_size,
 };
+
+/* ── Linker-level fault-guarded heap wrappers (--wrap) ────────────────────
+ *
+ * The GNU linker --wrap=_malloc_r / --wrap=_free_r / --wrap=_realloc_r
+ * option redirects ALL callers of these newlib _r functions through our
+ * wrappers — including internal cross-object calls inside newlib itself
+ * (e.g. _realloc_r → _malloc_r, _calloc_r → _malloc_r, printf → _malloc_r).
+ *
+ * This is strictly stronger than overriding the plain malloc/free/realloc
+ * symbols, because those only intercept external C callers while newlib's
+ * own internal code still calls _malloc_r/_free_r/_realloc_r directly.
+ *
+ * Each wrapper has two layers of protection:
+ *   1. If the heap is marked broken (_heap_broken), use a simple bump
+ *      allocator on a separate 2 MB static arena.  free() becomes a no-op.
+ *      This prevents the "fault storm" that occurs when the dlmalloc
+ *      free-list is permanently corrupted — every subsequent alloc/free
+ *      would fault otherwise.
+ *   2. If the heap is NOT broken, call __real__malloc_r etc. under
+ *      setjmp/longjmp fault protection.  If a #PF fires while walking
+ *      the corrupted free list, we catch it, mark the heap broken, and
+ *      fall through to the bump allocator.
+ *
+ * The bump allocator is intentionally simple: allocations grow linearly,
+ * free() is a no-op (memory is never reclaimed).  This keeps the OS
+ * alive long enough for the page to finish loading or error gracefully
+ * rather than entering an infinite fault loop.
+ */
+
+/* Forward declarations — __real_* are provided by --wrap linker magic */
+extern void  *__real__malloc_r(struct _reent *, size_t);
+extern void   __real__free_r(struct _reent *, void *);
+extern void  *__real__realloc_r(struct _reent *, void *, size_t);
+
+/* Fallback bump allocator — used when the main heap is broken */
+#define FALLBACK_HEAP_SIZE   (2u * 1024u * 1024u)  /* 2 MB */
+static char  _fallback_arena[FALLBACK_HEAP_SIZE]
+    __attribute__((aligned(16)));
+static volatile uint32_t _fallback_offset = 0;
+static volatile int      _heap_broken     = 0;
+
+static void *_fallback_alloc(size_t size) {
+    /* 8-byte align all allocations */
+    size = (size + 7u) & ~7u;
+    if (size == 0) size = 8;
+    uint32_t off = _fallback_offset;
+    if (off + size > FALLBACK_HEAP_SIZE) return NULL;   /* OOM */
+    _fallback_offset = off + (uint32_t)size;
+    return _fallback_arena + off;
+}
+
+/* ── __wrap__malloc_r ──────────────────────────────────────────────────── */
+void *__wrap__malloc_r(struct _reent *r, size_t size)
+{
+    if (_heap_broken) return _fallback_alloc(size);
+
+    jmp_buf _saved;
+    int _act = _js_fault_active;
+    memcpy(_saved, _js_fault_buf, sizeof(jmp_buf));
+
+    if (setjmp(_js_fault_buf) != 0) {
+        /* _malloc_r faulted — heap is irreparably corrupted */
+        __asm__ volatile("sti");
+        _js_fault_active = _act;
+        memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
+        _heap_broken = 1;
+        _heap_leaks_prevented++;
+        platform_serial_puts("[HEAP] _malloc_r FAULTED — switching to fallback allocator\n");
+        return _fallback_alloc(size);
+    }
+
+    _js_fault_active = 1;
+    void *result = __real__malloc_r(r, size);
+    _js_fault_active = _act;
+    memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
+    return result;
+}
+
+/* ── __wrap__free_r ────────────────────────────────────────────────────── */
+void __wrap__free_r(struct _reent *r, void *ptr)
+{
+    if (!ptr) return;
+
+    /* If the pointer is inside our fallback arena, just ignore it */
+    uintptr_t p = (uintptr_t)ptr;
+    uintptr_t a = (uintptr_t)_fallback_arena;
+    if (p >= a && p < a + FALLBACK_HEAP_SIZE) return;
+
+    if (_heap_broken) return;  /* leak — can't return to broken dlmalloc */
+
+    jmp_buf _saved;
+    int _act = _js_fault_active;
+    memcpy(_saved, _js_fault_buf, sizeof(jmp_buf));
+
+    if (setjmp(_js_fault_buf) != 0) {
+        /* _free_r faulted — heap is irreparably corrupted */
+        __asm__ volatile("sti");
+        _js_fault_active = _act;
+        memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
+        _heap_broken = 1;
+        _heap_leaks_prevented++;
+        platform_serial_puts("[HEAP] _free_r FAULTED ptr=");
+        _heap_puts_hex32((uint32_t)p);
+        platform_serial_puts(" — switching to fallback allocator\n");
+        return;
+    }
+
+    _js_fault_active = 1;
+    __real__free_r(r, ptr);
+    _js_fault_active = _act;
+    memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
+}
+
+/* ── __wrap__realloc_r ─────────────────────────────────────────────────── */
+void *__wrap__realloc_r(struct _reent *r, void *ptr, size_t size)
+{
+    if (_heap_broken) {
+        /* Can't realloc from broken heap — allocate fresh from fallback */
+        void *n = _fallback_alloc(size);
+        /* Best effort: copy old data if ptr exists and is accessible */
+        if (n && ptr) {
+            /* We don't know the old size; copy up to the new size.
+             * If ptr is in the fallback arena we can safely copy;
+             * if it's on the (broken) main heap we try under the
+             * same setjmp umbrella below but since _heap_broken is
+             * set we skip that.  Just do a safe memcpy here. */
+            jmp_buf _saved2;
+            int _act2 = _js_fault_active;
+            memcpy(_saved2, _js_fault_buf, sizeof(jmp_buf));
+            if (setjmp(_js_fault_buf) != 0) {
+                __asm__ volatile("sti");
+                _js_fault_active = _act2;
+                memcpy(_js_fault_buf, _saved2, sizeof(jmp_buf));
+                /* Copy failed — return the uninitialised buffer */
+                return n;
+            }
+            _js_fault_active = 1;
+            memcpy(n, ptr, size);
+            _js_fault_active = _act2;
+            memcpy(_js_fault_buf, _saved2, sizeof(jmp_buf));
+        }
+        return n;
+    }
+
+    jmp_buf _saved;
+    int _act = _js_fault_active;
+    memcpy(_saved, _js_fault_buf, sizeof(jmp_buf));
+
+    if (setjmp(_js_fault_buf) != 0) {
+        /* _realloc_r faulted — heap is irreparably corrupted */
+        __asm__ volatile("sti");
+        _js_fault_active = _act;
+        memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
+        _heap_broken = 1;
+        _heap_leaks_prevented++;
+        platform_serial_puts("[HEAP] _realloc_r FAULTED — switching to fallback allocator\n");
+        return _fallback_alloc(size);
+    }
+
+    _js_fault_active = 1;
+    void *result = __real__realloc_r(r, ptr, size);
+    _js_fault_active = _act;
+    memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
+    return result;
+}
 
 /*
  * kernel.evalGuarded(code [, filename])
@@ -1717,6 +2017,7 @@ static const JSCFunctionListEntry js_child_kernel_funcs[] = {
     JS_CFUNC_DEF("getUptime",       0, js_get_uptime),
     JS_CFUNC_DEF("sleep",           1, js_sleep),
     JS_CFUNC_DEF("getMemoryInfo",   0, js_mem_info),
+    JS_CFUNC_DEF("heapStats",      0, js_heap_stats),
     JS_CFUNC_DEF("postMessage",     1, js_proc_post_msg),
     JS_CFUNC_DEF("pollMessage",     0, js_proc_poll_msg),
     /* Shared memory — same physical bytes as parent */
@@ -3835,6 +4136,7 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("sleep",     1, js_sleep),
     /* Memory */
     JS_CFUNC_DEF("getMemoryInfo", 0, js_mem_info),
+    JS_CFUNC_DEF("heapStats",    0, js_heap_stats),
     /* Port I/O */
     JS_CFUNC_DEF("inb",  1, js_inb),
     JS_CFUNC_DEF("outb", 2, js_outb),
