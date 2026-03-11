@@ -402,13 +402,15 @@ export function parseInlineStyle(style: string): CSSProps {
   var important: Set<string> | undefined;
 
   // Split on ; but respect nested parens (e.g. calc(), rgba())
+  // Uses charCodeAt to avoid 1-char string allocation per iteration.
   var decls: string[] = [];
   var depth = 0; var start = 0;
+  var CC_LP = 40, CC_RP = 41, CC_SEMI2 = 59;
   for (var ci = 0; ci <= style.length; ci++) {
-    var ch = style[ci];
-    if (ch === '(') depth++;
-    else if (ch === ')') depth--;
-    else if ((ch === ';' || ci === style.length) && depth === 0) {
+    var chc = ci < style.length ? style.charCodeAt(ci) : CC_SEMI2;
+    if (chc === CC_LP) depth++;
+    else if (chc === CC_RP) depth--;
+    else if (chc === CC_SEMI2 && depth === 0) {
       var piece = style.slice(start, ci).trim();
       if (piece) decls.push(piece);
       start = ci + 1;

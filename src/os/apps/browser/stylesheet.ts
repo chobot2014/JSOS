@@ -184,35 +184,46 @@ function _parseSelectorParts(sel: string): { parts: string[]; combinators: strin
   var parts: string[] = [];
   var combinators: string[] = [];
   var depth = 0;
+  var curStart = 0;  // track substring start instead of building char-by-char
   var cur = '';
   var i = 0;
+  // charCodeAt constants for combinator detection
+  var _GT = 62, _PLUS = 43, _TILDE = 126, _SP = 32, _LP2 = 40, _RP2 = 41;
   while (i < sel.length) {
-    var ch = sel[i]!;
-    if (ch === '(') { depth++; cur += ch; i++; continue; }
-    if (ch === ')') { depth--; cur += ch; i++; continue; }
-    if (depth > 0)  { cur += ch; i++; continue; }
-    if (ch === '>' || ch === '+' || ch === '~') {
-      if (cur.trim()) { parts.push(cur.trim()); combinators.push(ch); }
-      cur = ''; i++;
-      while (i < sel.length && sel[i] === ' ') i++;
+    var chc = sel.charCodeAt(i);
+    if (chc === _LP2) { depth++; i++; continue; }
+    if (chc === _RP2) { depth--; i++; continue; }
+    if (depth > 0) { i++; continue; }
+    if (chc === _GT || chc === _PLUS || chc === _TILDE) {
+      var flushed = (cur + sel.slice(curStart, i)).trim();
+      if (flushed) parts.push(flushed);
+      combinators.push(sel[i]!);
+      cur = ''; i++; curStart = i;
+      while (i < sel.length && sel.charCodeAt(i) === _SP) i++;
+      curStart = i;
       continue;
     }
-    if (ch === ' ') {
+    if (chc === _SP) {
       // peek past spaces — if next non-space is >, + or ~ that combinator wins
       var j = i + 1;
-      while (j < sel.length && sel[j] === ' ') j++;
-      if (j < sel.length && (sel[j] === '>' || sel[j] === '+' || sel[j] === '~')) {
-        // flush part, let the next char handle the explicit combinator
-        if (cur.trim()) parts.push(cur.trim());
-        cur = ''; i = j; continue;
+      while (j < sel.length && sel.charCodeAt(j) === _SP) j++;
+      if (j < sel.length) {
+        var nextC = sel.charCodeAt(j);
+        if (nextC === _GT || nextC === _PLUS || nextC === _TILDE) {
+          var flushed2 = (cur + sel.slice(curStart, i)).trim();
+          if (flushed2) parts.push(flushed2);
+          cur = ''; i = j; curStart = j; continue;
+        }
       }
       // Otherwise this is a descendant combinator ' '
-      if (cur.trim()) { parts.push(cur.trim()); combinators.push(' '); }
-      cur = ''; i = j; continue;
+      var flushed3 = (cur + sel.slice(curStart, i)).trim();
+      if (flushed3) { parts.push(flushed3); combinators.push(' '); }
+      cur = ''; i = j; curStart = j; continue;
     }
-    cur += ch; i++;
+    i++;
   }
-  if (cur.trim()) parts.push(cur.trim());
+  var finalPart = (cur + sel.slice(curStart, i)).trim();
+  if (finalPart) parts.push(finalPart);
   var result = { parts, combinators };
   if (_selectorPartsCache.size < 10000) _selectorPartsCache.set(sel, result);
   return result;
@@ -836,8 +847,9 @@ function _splitOutsideParens(s: string, delim: string): string[] {
   var start = 0;
   var dl = delim.length;
   for (var i = 0; i <= s.length - dl; i++) {
-    if (s[i] === '(') depth++;
-    else if (s[i] === ')') depth--;
+    var cc = s.charCodeAt(i);
+    if (cc === 40 /*()*/) depth++;
+    else if (cc === 41 /*))*/) depth--;
     else if (depth === 0 && s.slice(i, i + dl).toLowerCase() === delim.toLowerCase()) {
       parts.push(s.slice(start, i));
       start = i + dl;
@@ -1075,10 +1087,13 @@ function splitSelectors(sel: string): string[] {
   var parts: string[] = [];
   var depth = 0;
   var start = 0;
+  // charCodeAt avoids 1-char string allocation per sel[i] access
+  var _LP = 40, _RP = 41, _COMMA = 44;
   for (var i = 0; i < sel.length; i++) {
-    if (sel[i] === '(') depth++;
-    else if (sel[i] === ')') depth--;
-    else if (sel[i] === ',' && depth === 0) {
+    var cc = sel.charCodeAt(i);
+    if (cc === _LP) depth++;
+    else if (cc === _RP) depth--;
+    else if (cc === _COMMA && depth === 0) {
       var p = sel.slice(start, i).trim();
       if (p) parts.push(p);
       start = i + 1;
