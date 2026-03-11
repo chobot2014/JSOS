@@ -748,9 +748,18 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
 
   // Apply combined sheet + inline style for an element; push to CSS stack.
   // Also injects ::before generated content span if applicable.
+  // Class-split cache: elements sharing the same class="" string reuse the split result.
+  var _clsSplitCache = new Map<string, string[]>();
   function applyStyle(tag: string, attrs: Map<string, string>): boolean {
     var id  = attrs.get('id')    || '';
-    var cls = (attrs.get('class') || '').split(/\s+/).filter(Boolean);
+    var _clsRaw = attrs.get('class') || '';
+    var cls: string[];
+    if (!_clsRaw) { cls = []; }
+    else {
+      var _cc = _clsSplitCache.get(_clsRaw);
+      if (_cc) { cls = _cc; }
+      else { cls = _clsRaw.split(/\s+/).filter(Boolean); if (_clsSplitCache.size < 2048) _clsSplitCache.set(_clsRaw, cls); }
+    }
     var inl = attrs.get('style') || '';
     var hasPseudo = sheets.length > 0;
     // Determine if this element has a JS click handler that needs hit-test dispatch.
