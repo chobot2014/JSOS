@@ -1358,6 +1358,7 @@ export function computeElementStyle(
   ancestors?:  AncestorEl[],
   sibIdx?:     number,
   sibCount?:   number,
+  sortedClsKey?: string,
 ): CSSProps {
   // ── Inherited starting values (CSS-spec inheritable properties) ────────────
   var result: CSSProps = {
@@ -1392,7 +1393,9 @@ export function computeElementStyle(
   // excluded so that elements with unique inline styles (e.g. style="left: Npx")
   // still get cache hits for their sheet-matched rules.
   // Cache is flushed (via flushCSSMatchCache) whenever sheets change.
-  var _sortedCls = cls.length > 1 ? cls.slice().sort().join(' ') : (cls[0] || '');
+  // Pre-computed sortedClsKey avoids cls.slice().sort().join() on every call.
+  var _sortedCls = sortedClsKey !== undefined ? sortedClsKey
+    : cls.length > 1 ? cls.slice().sort().join(' ') : (cls[0] || '');
   var _cacheKey = tag + '\x00' + id + '\x00' + _sortedCls;
   _cssMatchTotal++;
   var _cachedMatch = _cssMatchCache.get(_cacheKey);

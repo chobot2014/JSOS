@@ -748,17 +748,23 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
 
   // Apply combined sheet + inline style for an element; push to CSS stack.
   // Also injects ::before generated content span if applicable.
-  // Class-split cache: elements sharing the same class="" string reuse the split result.
-  var _clsSplitCache = new Map<string, string[]>();
+  // Class-split + sorted-key cache: elements sharing the same class="" string
+  // reuse both the split result and pre-computed cache key for computeElementStyle.
+  var _clsSplitCache = new Map<string, { split: string[]; sortedKey: string }>();
   function applyStyle(tag: string, attrs: Map<string, string>): boolean {
     var id  = attrs.get('id')    || '';
     var _clsRaw = attrs.get('class') || '';
     var cls: string[];
-    if (!_clsRaw) { cls = []; }
+    var _sortedClsKey: string;
+    if (!_clsRaw) { cls = []; _sortedClsKey = ''; }
     else {
       var _cc = _clsSplitCache.get(_clsRaw);
-      if (_cc) { cls = _cc; }
-      else { cls = _clsRaw.split(/\s+/).filter(Boolean); if (_clsSplitCache.size < 2048) _clsSplitCache.set(_clsRaw, cls); }
+      if (_cc) { cls = _cc.split; _sortedClsKey = _cc.sortedKey; }
+      else {
+        cls = _clsRaw.split(/\s+/).filter(Boolean);
+        _sortedClsKey = cls.length > 1 ? cls.slice().sort().join(' ') : (cls[0] || '');
+        if (_clsSplitCache.size < 2048) _clsSplitCache.set(_clsRaw, { split: cls, sortedKey: _sortedClsKey });
+      }
     }
     var inl = attrs.get('style') || '';
     var hasSheets = sheets.length > 0;
@@ -784,7 +790,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       }
       return false;
     }
-    var ep = computeElementStyle(tag, id, cls, attrs, curCSS, sheets, inl, _ruleIndex ?? undefined, ancestorStack, _sibIdx);
+    var ep = computeElementStyle(tag, id, cls, attrs, curCSS, sheets, inl, _ruleIndex ?? undefined, ancestorStack, _sibIdx, undefined, _sortedClsKey);
     // Apply counter-reset / counter-increment from computed style (item 434)
     _applyCounters(ep);
     if (hasPseudo) {
