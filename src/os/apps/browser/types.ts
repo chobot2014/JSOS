@@ -251,6 +251,10 @@ export interface WidgetBlueprint {
   placeholder?: string;     // hint text shown when empty
   /** Pre-decoded image for SVG inline (item 371): bypasses network fetch. */
   preloadedImage?: DecodedImage | null;
+  /** CSS-specified width in pixels (overrides cols/size). */
+  cssWidth?:  number;
+  /** CSS-specified height in pixels (overrides rows). */
+  cssHeight?: number;
 }
 
 /** A widget after layout — knows its position in page space. */

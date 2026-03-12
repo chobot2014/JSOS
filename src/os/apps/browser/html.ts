@@ -786,9 +786,13 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
   function pushWidget(bp: WidgetBlueprint): void {
     flushInline();
     if (openBlock) { nodes.push(openBlock); openBlock = null; }
+    // Capture CSS width/height for widget sizing
+    if (curCSS.width && curCSS.width > 0) bp.cssWidth = curCSS.width;
+    if (curCSS.height && curCSS.height > 0) bp.cssHeight = curCSS.height;
     widgets.push(bp);
     var wNode: RenderNode = { type: 'widget', spans: [], widget: bp };
     if (curCSS.align) wNode.textAlign = curCSS.align;
+    if (curCSS.marginLeftAuto || curCSS.marginRightAuto) wNode.centerBlock = true;
     // Inside a flex/grid container, each widget should be its own child.
     // Wrap in a block with children so the flex layout recurses into _layoutNodesImpl
     // which handles widget type nodes for positioning.
@@ -1267,6 +1271,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
           flushInline();
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
           nodes.push({ type: 'p-break', spans: [] });
+          applyStyle(tok.tag, tok.attrs);
           var fAction  = tok.attrs.get('action') || '';
           var fMethod  = (tok.attrs.get('method') || 'get').toLowerCase() as 'get' | 'post';
           var fEnctype = tok.attrs.get('enctype') || 'application/x-www-form-urlencoded';
@@ -1707,7 +1712,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
           flushInline();
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
           nodes.push({ type: 'p-break', spans: [] });
-          curFormIdx = -1; break;
+          curFormIdx = -1; popCSS(); break;
 
         case 'button': break;
 

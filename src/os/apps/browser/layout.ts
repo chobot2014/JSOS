@@ -994,10 +994,17 @@ function _layoutNodesImpl(
           wh = WIDGET_SELECT_H;
           break;
         }
-        case 'textarea':
-          ww = Math.min((bp.cols || 40) * CHAR_W + 8, maxX - xLeft);
+        case 'textarea': {
+          var _taCols = bp.cols || 40;
+          ww = Math.min(_taCols * CHAR_W + 8, maxX - xLeft);
           wh = (bp.rows || 4) * LINE_H + 4;
+          // For single-row search-style textareas, widen to ~60% of available space
+          if ((bp.rows || 4) <= 2 && ww < (maxX - xLeft) * 0.6) {
+            ww = Math.floor((maxX - xLeft) * 0.6);
+            wh = Math.max(wh, LINE_H + 10);  // Ensure minimum height for search box
+          }
           break;
+        }
         case 'img':
           ww = bp.imgNatW || 200;
           wh = bp.imgNatH || 100;
@@ -1016,16 +1023,47 @@ function _layoutNodesImpl(
           wh = WIDGET_INPUT_H;
       }
 
+      // CSS width/height override (if specified via stylesheet/inline CSS)
+      if (bp.cssWidth && bp.cssWidth > 0) ww = Math.min(bp.cssWidth, maxX - xLeft);
+      if (bp.cssHeight && bp.cssHeight > 0) wh = bp.cssHeight;
+
       if (bp.kind !== 'checkbox' && bp.kind !== 'radio') {
         if (y > CONTENT_PAD) { blank(4); }
       }
 
-      // Widget centering: respect text-align from parent block
+      // Widget centering: respect text-align or margin:auto
       var _wpx = xLeft;
-      if (nd.textAlign === 'center' && ww < (maxX - xLeft)) {
+      if (nd.centerBlock && ww < (maxX - xLeft)) {
+        _wpx = xLeft + Math.floor((maxX - xLeft - ww) / 2);
+      } else if (nd.textAlign === 'center' && ww < (maxX - xLeft)) {
         _wpx = xLeft + Math.floor((maxX - xLeft - ww) / 2);
       } else if (nd.textAlign === 'right' && ww < (maxX - xLeft)) {
         _wpx = maxX - ww;
+      } else if (ww < (maxX - xLeft) * 0.8) {
+        // Heuristic: center widgets that are significantly narrower than container
+        _wpx = xLeft + Math.floor((maxX - xLeft - ww) / 2);
+      }
+
+      // ── Button grouping: place consecutive buttons side-by-side ──────────
+      if ((bp.kind === 'submit' || bp.kind === 'reset' || bp.kind === 'button') && widgets.length > 0) {
+        var prevW = widgets[widgets.length - 1];
+        if (prevW && (prevW.kind === 'submit' || prevW.kind === 'reset' || prevW.kind === 'button') && prevW.py === y - prevW.ph - 4 - 4) {
+          // Previous widget is a button on the row just above; merge into same row
+          var prevRight = prevW.px + prevW.pw;
+          var totalW    = prevW.pw + 8 + ww; // gap of 8px
+          if (totalW < (maxX - xLeft)) {
+            // Revert the vertical spacing that was added after the previous button
+            y = prevW.py;
+            // Center the whole button group
+            var groupX = xLeft + Math.floor((maxX - xLeft - totalW) / 2);
+            prevW.px = groupX;
+            _wpx = groupX + prevW.pw + 8;
+            // Remove the last line entry (from the previous button)
+            if (lines.length > 0 && lines[lines.length - 1].lineH === prevW.ph + 4) {
+              lines.pop();
+            }
+          }
+        }
       }
 
       var pw: PositionedWidget = {
