@@ -1128,13 +1128,15 @@ function _layoutNodesImpl(
       };
       widgets.push(pw);
 
-      lines.push({ y, nodes: [], lineH: wh + 4 });
-      y += wh + 4;
+      // Images use tighter spacing (fill covers full area)
+      var _wPad = bp.kind === 'img' ? 1 : 4;
+      lines.push({ y, nodes: [], lineH: wh + _wPad });
+      y += wh + _wPad;
       // Widgets are visible content — reset blank tracker, but only for non-hidden types
       if (bp.kind !== 'hidden') _consecBlank = 0;
 
       if (bp.kind !== 'checkbox' && bp.kind !== 'radio') {
-        blank(4);
+        blank(bp.kind === 'img' ? 1 : 4);
       }
       continue;
     }
