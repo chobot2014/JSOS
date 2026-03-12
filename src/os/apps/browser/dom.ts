@@ -2998,7 +2998,7 @@ function _decodeEntities(s: string): string {
 
 function _parseFragment(html: string, doc: VDocument | null): VNode[] {
   // HTML parser with raw-text element support (script/style/textarea/title)
-  var _RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'noscript', 'noembed']);
+  var _RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'noembed']);
   // Implicit self-closing: opening X closes current Y (item 359)
   var _IMPLICIT_CLOSE: Record<string, string[]> = {
     p:         ['p'],

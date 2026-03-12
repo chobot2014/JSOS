@@ -1277,6 +1277,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
         // ── <input> ──────────────────────────────────────────────────────────
         case 'input': {
           var iType     = (tok.attrs.get('type') || 'text').toLowerCase() as WidgetKind;
+          console.log('[input] type=' + iType + ' name=' + (tok.attrs.get('name') || '') + ' skipDepth=' + skipDepth + ' hidden=' + !!curCSS.hidden);
           var iName     = tok.attrs.get('name')     || '';
           var iValue    = tok.attrs.get('value')    || '';
           var iChecked  = tok.attrs.has('checked');

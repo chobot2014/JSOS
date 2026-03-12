@@ -2677,6 +2677,14 @@ export class BrowserApp implements App {
     this._contentVersion++;          // Phase 3: invalidate tile cache on new layout
     this._widgets   = lr.widgets;
 
+    // Temporary diagnostic: dump widget kinds
+    var _wSummary = '';
+    for (var _dwi2 = 0; _dwi2 < lr.widgets.length; _dwi2++) {
+      var _dw2 = lr.widgets[_dwi2];
+      _wSummary += _dw2.kind + '(' + (_dw2.pw || 0) + 'x' + (_dw2.ph || 0) + '@' + (_dw2.px || 0) + ',' + (_dw2.py || 0) + ') ';
+    }
+    os.debug.log('[browser] widgets: ' + _wSummary);
+
     var contentH = this._contentH();
     var last     = this._pageLines[this._pageLines.length - 1];
     var totalH   = last ? last.y + last.lineH + CONTENT_PAD : 0;

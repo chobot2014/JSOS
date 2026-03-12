@@ -326,7 +326,7 @@ function main(): void {
       // Launch the JSOS native TypeScript browser.  Written 100% in TypeScript
       // — no Chromium, no external runtimes.  Uses the JSOS DNS + HTTP/HTTPS
       // stack for real network requests and renders HTML on the WM canvas.
-      wmInst.createWindow({
+      var browserWin = wmInst.createWindow({
         title:     'Browser',
         x: 20, y: 20,
         width:  Math.min(screen.width  - 40, 1024),
@@ -357,6 +357,10 @@ function main(): void {
         app:       terminalApp,
         closeable: false,
       });
+
+      // Focus the browser window so it renders on top of the terminal
+      wmInst.focusWindow(browserWin.id);
+      wmInst.bringToFront(browserWin.id);
 
       kernel.serialPut('Window manager started\n');
       kernel.serialPut('Terminal app launched\n');
