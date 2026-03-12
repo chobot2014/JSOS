@@ -2384,6 +2384,7 @@ export class BrowserApp implements App {
     var r = parseHTMLFromTokens(_htmlTokens);
     pumpCursor();  // keep cursor alive after pass1 parse (~500-1500ms)
     var _shT1 = Date.now();
+    var _pass1NodeCount = r.nodes.length;
     os.debug.log('[browser] pass1:', r.nodes.length, 'nodes', r.scripts.length, 'scripts', r.styles.length, 'styles', r.styleLinks.length, 'cssLinks', 'in', (_shT1 - _shT0) + 'ms');
     // ── Pre-fetch external scripts ASAP — overlaps download with CSS parse + pass2 ──
     // deduplicatedFetch dedup (30s window) ensures loadExternalScript joins in-flight
@@ -2462,6 +2463,11 @@ export class BrowserApp implements App {
               _cachedIndex = buildSheetIndex(sheets);
               var r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex);  // reuses tokens — no re-tokenize
               pumpCursor();  // keep cursor alive after CSS re-parse
+              // Fallback: if external CSS hid most content, re-parse ignoring display:none
+              if (r3.nodes.length < 10 && _pass1NodeCount > 20) {
+                r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, true);
+                pumpCursor();
+              }
               _self_css._forms       = r3.forms;
               _self_css._pageBaseURL = r3.baseURL ? _self_css._resolveHref(r3.baseURL) : '';
               _self_css._layoutPage(r3.nodes as any, r3.widgets as any, r3.title || fallbackTitle || url, url);
@@ -2482,6 +2488,18 @@ export class BrowserApp implements App {
         r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex);  // reuses tokens — no re-tokenize
         pumpCursor();  // keep cursor alive after pass2 parse (~500-2000ms)
         os.debug.log('[browser] pass2 parseHTML:', r.nodes.length, 'nodes in', (Date.now() - _shT2b) + 'ms');
+
+        // Fallback: if CSS display:none hid nearly everything (JS-dependent page)
+        // and pass1 had substantially more content, re-parse ignoring display:none.
+        // This ensures JS-heavy pages like Google still show readable content.
+        if (r.nodes.length < 10 && _pass1NodeCount > 20) {
+          os.debug.log('[browser] pass2 too few nodes (' + r.nodes.length + ' vs pass1=' + _pass1NodeCount + ') — re-parsing without display:none');
+          var _shT2c = Date.now();
+          r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, true);  // ignoreDisplayNone=true
+          pumpCursor();
+          os.debug.log('[browser] pass2-fallback:', r.nodes.length, 'nodes', r.widgets.length, 'widgets in', (Date.now() - _shT2c) + 'ms');
+        }
+
         this._forms       = r.forms;
         this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
       } catch (_p2Err) {
@@ -2589,6 +2607,12 @@ export class BrowserApp implements App {
           pumpCursor();  // keep cursor alive after rerender parse
           var [_cacheHits, _cacheTotal, _cacheSize] = getCSSMatchCacheStats();
           os.debug.log('[browser] rerender CSS in', (Date.now() - _rrT0) + 'ms, rules:', sheets.length, 'idx:', _cachedIndex ? 'cached' : 'none', 'cacheHit:', _cacheHits + '/' + _cacheTotal + ' sz:' + _cacheSize);
+          // Fallback: if CSS hid nearly everything, re-parse ignoring display:none
+          if (r2.nodes.length < 10 && _pass1NodeCount > 20) {
+            os.debug.log('[browser] rerender: too few nodes (' + r2.nodes.length + ') — re-parsing without display:none');
+            r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex, true);
+            pumpCursor();
+          }
           os.debug.log('[browser] rerender: assigning forms nodes=' + r2.nodes.length + ' widgets=' + r2.widgets.length);
           self2._forms = r2.forms;
           os.debug.log('[browser] rerender: calling _layoutPage');

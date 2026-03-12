@@ -289,8 +289,8 @@ function _parseColorCSS(val: string): number | undefined {
 // ── HTML parser ───────────────────────────────────────────────────────────────
 
 /** Parse pre-tokenised input (skips tokenise() allocation — item 1.2). */
-export function parseHTMLFromTokens(tokens: HtmlToken[], sheets: CSSRule[] = [], ruleIndex?: RuleIndex | null): ParseResult {
-  return _parseTokens(tokens, sheets, false, ruleIndex);
+export function parseHTMLFromTokens(tokens: HtmlToken[], sheets: CSSRule[] = [], ruleIndex?: RuleIndex | null, ignoreDisplayNone?: boolean): ParseResult {
+  return _parseTokens(tokens, sheets, false, ruleIndex, ignoreDisplayNone);
 }
 
 export function parseHTML(html: string, sheets: CSSRule[] = [], ruleIndex?: RuleIndex | null): ParseResult {
@@ -300,7 +300,7 @@ export function parseHTML(html: string, sheets: CSSRule[] = [], ruleIndex?: Rule
   return _parseTokens(tokens, sheets, !_dtMatch, ruleIndex);
 }
 
-function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolean, prebuiltIndex?: RuleIndex | null): ParseResult {
+function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolean, prebuiltIndex?: RuleIndex | null, ignoreDisplayNone?: boolean): ParseResult {
   var nodes:   RenderNode[]      = [];
   var title    = '';
   var forms:   FormState[]       = [];
@@ -388,8 +388,78 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
   function pushCSS(p: CSSProps): void {
     cssStack.push({ ...curCSS });
     // Handle hidden visibility specially (tracks skipDepth counter)
-    if (p.hidden) { curCSS.hidden = true; skipDepth++; }
+    if (p.hidden && !ignoreDisplayNone) {
+      curCSS.hidden = true; skipDepth++;
+    }
     else if (p.hidden === false) { if (curCSS.hidden) skipDepth = Math.max(0, skipDepth - 1); curCSS.hidden = false; }
+    // When ignoring display:none, force hidden elements to display:block
+    // so they participate in layout instead of being invisible.
+    if (ignoreDisplayNone && p.hidden) {
+      p.display = 'block';
+      p.hidden = false;
+    }
+    // Reset non-inherited CSS properties before merging the new element's CSS.
+    // In CSS, position/top/right/bottom/left/z-index/float are NOT inherited —
+    // children must not carry forward a parent's position:fixed/absolute.
+    curCSS.position = undefined;
+    curCSS.top      = undefined;
+    curCSS.right    = undefined;
+    curCSS.bottom   = undefined;
+    curCSS.left     = undefined;
+    curCSS.zIndex   = undefined;
+    curCSS.float    = undefined;
+    // Box dimensions — NOT inherited
+    curCSS.width    = undefined;
+    curCSS.widthPct = undefined;
+    curCSS.maxWidth = undefined;
+    curCSS.minWidth = undefined;
+    curCSS.height   = undefined;
+    curCSS.maxHeight = undefined;
+    curCSS.minHeight = undefined;
+    // Box model — NOT inherited
+    curCSS.marginTop = undefined;
+    curCSS.marginRight = undefined;
+    curCSS.marginBottom = undefined;
+    curCSS.marginLeft = undefined;
+    curCSS.marginLeftAuto = undefined;
+    curCSS.marginRightAuto = undefined;
+    curCSS.paddingTop = undefined;
+    curCSS.paddingRight = undefined;
+    curCSS.paddingBottom = undefined;
+    curCSS.paddingLeft = undefined;
+    curCSS.indent = undefined;
+    // Border — NOT inherited
+    curCSS.borderWidth = undefined;
+    curCSS.borderStyle = undefined;
+    curCSS.borderColor = undefined;
+    curCSS.borderRadius = undefined;
+    // Overflow — NOT inherited
+    curCSS.overflow = undefined;
+    curCSS.overflowX = undefined;
+    curCSS.overflowY = undefined;
+    // Display — NOT inherited
+    curCSS.display = undefined;
+    // Flex — NOT inherited
+    curCSS.flexDirection = undefined;
+    curCSS.flexWrap = undefined;
+    curCSS.justifyContent = undefined;
+    curCSS.alignItems = undefined;
+    curCSS.alignContent = undefined;
+    curCSS.flexGrow = undefined;
+    curCSS.flexShrink = undefined;
+    curCSS.flexBasis = undefined;
+    curCSS.alignSelf = undefined;
+    curCSS.order = undefined;
+    curCSS.gap = undefined;
+    // Background — NOT inherited
+    curCSS.bgColor = undefined;
+    curCSS.bgGradient = undefined;
+    curCSS.backgroundImage = undefined;
+    // Visual — NOT inherited
+    curCSS.opacity = undefined;
+    curCSS.boxShadow = undefined;
+    curCSS.transform = undefined;
+    curCSS.aspectRatio = undefined;
     // Merge all defined properties from p into curCSS using fast _ks path
     mergeProps(curCSS, p);
   }
@@ -502,20 +572,33 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       }
       frame.children.push(child);
     } else if (nodes.length > 0) {
-      // Anonymous text content — wrap as single child
-      var anonChild: RenderNode = { type: 'block', spans: [] };
-      var _anonSpans: InlineSpan[] = [];
-      for (var _ani = 0; _ani < nodes.length; _ani++) {
-        for (var _anj = 0; _anj < nodes[_ani].spans.length; _anj++) {
-          _anonSpans.push(nodes[_ani].spans[_anj]);
-        }
+      // Anonymous content — preserve ALL nodes (including widgets) as children.
+      // Widget nodes have empty spans but contain widget blueprints used by layout.
+      var _hasWidgets = false;
+      for (var _chk = 0; _chk < nodes.length; _chk++) {
+        if (nodes[_chk].type === 'widget') { _hasWidgets = true; break; }
       }
-      anonChild.spans = _anonSpans;
-      if (_anonSpans.length > 0) frame.children.push(anonChild);
+      if (_hasWidgets) {
+        // Preserve node tree as children — widgets need their type/widget data
+        var anonChild2: RenderNode = { type: 'block', spans: [], children: nodes.slice() };
+        frame.children.push(anonChild2);
+      } else {
+        var anonChild: RenderNode = { type: 'block', spans: [] };
+        var _anonSpans: InlineSpan[] = [];
+        for (var _ani = 0; _ani < nodes.length; _ani++) {
+          for (var _anj = 0; _anj < nodes[_ani].spans.length; _anj++) {
+            _anonSpans.push(nodes[_ani].spans[_anj]);
+          }
+        }
+        anonChild.spans = _anonSpans;
+        if (_anonSpans.length > 0) frame.children.push(anonChild);
+      }
     }
-    // Restore outer context
+    // Restore outer context — merge container's widgets into outer list
+    var _localWidgets = widgets;
     nodes = frame.savedNodes;
     widgets = frame.savedWidgets;
+    for (var _lwi = 0; _lwi < _localWidgets.length; _lwi++) widgets.push(_localWidgets[_lwi]);
     // Build the container node
     var containerType: BlockType = frame.display === 'grid' ? 'grid' : 'flex-row';
     var containerNode: RenderNode = {
@@ -704,7 +787,27 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     flushInline();
     if (openBlock) { nodes.push(openBlock); openBlock = null; }
     widgets.push(bp);
-    nodes.push({ type: 'widget', spans: [], widget: bp });
+    var wNode: RenderNode = { type: 'widget', spans: [], widget: bp };
+    // Inside a flex/grid container, each widget should be its own child.
+    // Wrap in a block with children so the flex layout recurses into _layoutNodesImpl
+    // which handles widget type nodes for positioning.
+    if (inContainer()) {
+      var frame = containerStack[containerStack.length - 1]!;
+      // Close any open child first
+      if (frame.childStartIdx >= 0) {
+        var prevNodes = nodes.splice(frame.childStartIdx);
+        if (prevNodes.length > 0) {
+          var prevChild: RenderNode = { type: 'block', spans: [], ...(frame.childProps || {}), children: prevNodes };
+          frame.children.push(prevChild);
+        }
+        frame.childStartIdx = -1;
+        frame.childProps = null;
+      }
+      // Push widget wrapped in a block so flex layout recurses
+      frame.children.push({ type: 'block', spans: [], children: [wNode] });
+    } else {
+      nodes.push(wNode);
+    }
   }
 
   // Apply combined sheet + inline style for an element; push to CSS stack.
@@ -1001,6 +1104,13 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
           // Render noscript fallback content — our JS engine cannot fully
           // execute complex page scripts (e.g. Google), so the noscript
           // fallback provides essential visible content.
+          // Force noscript visible: call applyStyle but override display:none
+          applyStyle(tok.tag, tok.attrs);
+          // If CSS tried to hide it, force it back to visible
+          if (curCSS.hidden) {
+            curCSS.hidden = false;
+            skipDepth = Math.max(0, skipDepth - 1);
+          }
           break;
         }
         case 'object': case 'embed': case 'noembed': {
@@ -1264,6 +1374,18 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
         // ── <img> ────────────────────────────────────────────────────────────
         case 'img': {
           var iSrc  = tok.attrs.get('src')    || '';
+          // Fallback: try data-src, data-lazy-src, data-atf for lazy-loaded images
+          if (!iSrc) iSrc = tok.attrs.get('data-src') || '';
+          if (!iSrc) iSrc = tok.attrs.get('data-lazy-src') || '';
+          if (!iSrc) iSrc = tok.attrs.get('data-atf') || '';
+          // Fallback: try srcset (pick first URL)
+          if (!iSrc) {
+            var _srcset = tok.attrs.get('srcset') || '';
+            if (_srcset) {
+              var _firstSS = _srcset.split(',')[0].trim().split(/\s+/)[0];
+              if (_firstSS) iSrc = _firstSS;
+            }
+          }
           var iAlt  = tok.attrs.get('alt')    || '';
           var iWStr = tok.attrs.get('width')  || '0';
           var iHStr = tok.attrs.get('height') || '0';
@@ -1559,6 +1681,9 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
 
         case 'picture':
           inPicture = false; pictureSources = []; break;
+
+        case 'noscript':
+          popCSS(); break;
 
         case 'pre':
           inPre = false;

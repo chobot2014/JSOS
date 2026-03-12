@@ -436,25 +436,32 @@ function _layoutNodesImpl(
         var fcItems = fDir === 'column-reverse' ? fSorted.slice().reverse() : fSorted;
         var fcTotalH = 0;
         // Measure children to compute total height for justify-content
-        var fcChildData: { childLines: RenderedLine[]; childH: number }[] = [];
+        var fcChildData: { childLines: RenderedLine[]; childH: number; childWidgets: PositionedWidget[] }[] = [];
         var fcBaseH: number[] = [];
         for (var fcci = 0; fcci < fcItems.length; fcci++) {
           var fcc = fcItems[fcci];
           var fccW = fcc.boxWidth ? Math.min(fcc.boxWidth, fcColW) : fcColW;
           var fccLines: RenderedLine[];
+          var _fccWidgets: PositionedWidget[] = [];
           if (fcc.children && fcc.children.length > 0) {
             var _fccResult = _layoutNodesImpl(fcc.children, [], fccW);
             fccLines = _fccResult.lines;
-            for (var _fccwi = 0; _fccwi < _fccResult.widgets.length; _fccwi++) widgets.push(_fccResult.widgets[_fccwi]);
+            _fccWidgets = _fccResult.widgets;
           } else {
             fccLines = flowSpans(transformSpans(fcc.spans, fcc.textTransform), 0, fccW, nodeLineH(fcc), CLR_BODY,
               (fcc.bgColor !== undefined || fcc.bgGradient) ? { bgColor: fcc.bgColor, bgGradient: fcc.bgGradient } : undefined);
+            // flowSpans returns all lines with y=0 — assign sequential y positions
+            var _fccYPos = 0;
+            for (var _fccyk = 0; _fccyk < fccLines.length; _fccyk++) {
+              fccLines[_fccyk].y = _fccYPos;
+              _fccYPos += fccLines[_fccyk].lineH;
+            }
           }
           var fccH = fccLines.length > 0 ? (fccLines[fccLines.length - 1].y + (fccLines[fccLines.length - 1].lineH || LINE_H) - fccLines[0].y) : 0;
           // flex-basis overrides natural content height (0 = auto → use content height)
           var _fcb = fcc.flexBasis;
           var fccBaseH = (_fcb && _fcb > 0) ? _fcb : fccH;
-          fcChildData.push({ childLines: fccLines, childH: fccH });
+          fcChildData.push({ childLines: fccLines, childH: fccH, childWidgets: _fccWidgets });
           fcBaseH.push(fccBaseH);
           fcTotalH += fccBaseH + (fcci < fcItems.length - 1 ? gap : 0);
         }
@@ -507,12 +514,25 @@ function _layoutNodesImpl(
           if (fccAlignSelf === 'center') fccCrossX = fxLeft + Math.floor((fcColW - fccW2) / 2);
           else if (fccAlignSelf === 'flex-end' || fccAlignSelf === 'end') fccCrossX = fxLeft + fcColW - fccW2;
           if (fccCrossX + fccW2 > fcMaxX2) fcMaxX2 = fccCrossX + fccW2;
+          // Compute the position offset to stamp child lines from (CONTENT_PAD,CONTENT_PAD) into correct parent position
+          var _fccFirstY = fccD.childLines.length > 0 ? fccD.childLines[0].y : CONTENT_PAD;
           for (var fccl = 0; fccl < fccD.childLines.length; fccl++) {
             var fccLine = fccD.childLines[fccl];
+            var _clRelY2 = fccLine.y - _fccFirstY;
             var fccShifted = fccLine.nodes.map(function(n) { return { ...n, x: n.x + fccCrossX }; });
-            lines.push({ y: fcCurY, nodes: fccShifted, lineH: fccLine.lineH || LINE_H, bgColor: fccLine.bgColor, bgGradient: fccLine.bgGradient });
-            fcCurY += fccLine.lineH || LINE_H;
+            lines.push({ y: fcCurY + _clRelY2, nodes: fccShifted, lineH: fccLine.lineH || LINE_H, bgColor: fccLine.bgColor, bgGradient: fccLine.bgGradient });
           }
+          // Shift child widgets to parent position
+          var _fccDx = fccCrossX - CONTENT_PAD;
+          var _fccDy = fcCurY - _fccFirstY;
+          for (var _fccwi2 = 0; _fccwi2 < fccD.childWidgets.length; _fccwi2++) {
+            var _cw = fccD.childWidgets[_fccwi2];
+            _cw.px += _fccDx;
+            _cw.py += _fccDy;
+            widgets.push(_cw);
+          }
+          // Advance by child content height
+          fcCurY += fccD.childH;
           // Advance to the flex-allocated height (accounts for grow/shrink)
           var fccUsedH = fccD.childH;
           if (fcFinalH[fcci2] > fccUsedH) fcCurY += fcFinalH[fcci2] - fccUsedH;
@@ -620,23 +640,31 @@ function _layoutNodesImpl(
         }
         var fCurX = fxLeft + fJustStart;
         var lineMaxH = 0;
-        var fChildLines: { x: number; cw: number; cl: RenderedLine[]; alignSelf?: string }[] = [];
+        var fChildLines: { x: number; cw: number; cl: RenderedLine[]; alignSelf?: string; childWidgets: PositionedWidget[] }[] = [];
         for (var fci = 0; fci < fwItems.length; fci++) {
           var fIdx  = fwItems[fci];
           var fc    = fSorted[fIdx];
           var cw    = fFinalW[fIdx];
           // Recursive layout: if child has nested children (block structure), lay out recursively
           var cLines: RenderedLine[];
+          var _fcChildWidgets: PositionedWidget[] = [];
           if (fc.children && fc.children.length > 0) {
             var _fcResult = _layoutNodesImpl(fc.children, [], cw);
             cLines = _fcResult.lines;
-            for (var _fwi = 0; _fwi < _fcResult.widgets.length; _fwi++) widgets.push(_fcResult.widgets[_fwi]);
+            _fcChildWidgets = _fcResult.widgets;
           } else {
             cLines = flowSpans(transformSpans(fc.spans, fc.textTransform), 0, cw, nodeLineH(fc), CLR_BODY,
                                    (fc.bgColor !== undefined || fc.bgGradient) ? { bgColor: fc.bgColor, bgGradient: fc.bgGradient } : undefined);
+            // flowSpans returns all lines with y=0 — assign sequential y positions
+            // so the stamping pass can compute correct relative offsets
+            var _fyPos = 0;
+            for (var _fyk = 0; _fyk < cLines.length; _fyk++) {
+              cLines[_fyk].y = _fyPos;
+              _fyPos += cLines[_fyk].lineH;
+            }
           }
           var fcAlign = fc.alignSelf || containerAlignItems;
-          fChildLines.push({ x: fCurX, cw, cl: cLines, alignSelf: fcAlign });
+          fChildLines.push({ x: fCurX, cw, cl: cLines, alignSelf: fcAlign, childWidgets: _fcChildWidgets });
           var childH = cLines.length > 0 ? (cLines[cLines.length - 1].y + (cLines[cLines.length - 1].lineH || LINE_H) - cLines[0].y) : 0;
           if (childH > lineMaxH) lineMaxH = childH;
           fCurX += cw + gap + fJustGapExtra;
@@ -674,14 +702,24 @@ function _layoutNodesImpl(
           var fcAlignMode = fc2.alignSelf || 'stretch';
           if (fcAlignMode === 'center') { crossOffset = Math.floor((fml.lineMaxH - fcH2) / 2); }
           else if (fcAlignMode === 'flex-end' || fcAlignMode === 'end') { crossOffset = fml.lineMaxH - fcH2; }
+          var _fcFirstY2 = fc2.cl.length > 0 ? fc2.cl[0].y : CONTENT_PAD;
           for (var cli2 = 0; cli2 < fc2.cl.length; cli2++) {
             var cl2 = fc2.cl[cli2]!;
             // Remap: recursive layout produces absolute y; convert to relative offset
-            var _clRelY = fc2.cl.length > 0 ? (cl2.y - fc2.cl[0].y) : cli2 * (cl2.lineH || LINE_H);
+            var _clRelY = cl2.y - _fcFirstY2;
             var shifted = cl2.nodes.map(function(n) { return { ...n, x: n.x + fc2.x }; });
             lines.push({ y: fCurLineY + crossOffset + _clRelY, nodes: shifted,
                          lineH: cl2.lineH, bgColor: cl2.bgColor, bgGradient: cl2.bgGradient, preBg: cl2.preBg,
                          boxDeco: cl2.boxDeco });
+          }
+          // Shift child widgets to parent position
+          var _fcDx2 = fc2.x - CONTENT_PAD;
+          var _fcDy2 = (fCurLineY + crossOffset) - _fcFirstY2;
+          for (var _fwi2 = 0; _fwi2 < fc2.childWidgets.length; _fwi2++) {
+            var _cw2 = fc2.childWidgets[_fwi2];
+            _cw2.px += _fcDx2;
+            _cw2.py += _fcDy2;
+            widgets.push(_cw2);
           }
         }
         fCurLineY += fml.lineMaxH + gap + acGapExtra;
@@ -946,11 +984,15 @@ function _layoutNodesImpl(
         case 'img':
           ww = bp.imgNatW || 200;
           wh = bp.imgNatH || 100;
-          if (ww > maxX - xLeft) {
-            var scale = (maxX - xLeft) / ww;
+          var _imgMaxW = maxX - xLeft;
+          if (_imgMaxW < 16) _imgMaxW = 16;  // prevent negative/tiny sizes
+          if (ww > _imgMaxW) {
+            var scale = _imgMaxW / ww;
             ww = Math.floor(ww * scale);
             wh = Math.floor(wh * scale);
           }
+          if (ww < 1) ww = 1;
+          if (wh < 1) wh = 1;
           break;
         default:
           ww = (bp.cols || 20) * CHAR_W + 8;
@@ -997,7 +1039,7 @@ function _layoutNodesImpl(
     // bottom-anchor: position from bottom of current content (approximation)
     var oofY     = oof.posTop    !== undefined ? oof.posTop
                  : oof.posBottom !== undefined ? Math.max(0, y - (oof.height ?? nodeLineH(oof)) - oof.posBottom)
-                 : 0;
+                 : y;  // no top/bottom: use static position (current flow y)
     // Apply CSS transform translate offset (visual shift, does not affect layout flow)
     if (oof.transform) {
       var _tx = _parseCSSTranslate(oof.transform);
@@ -1007,19 +1049,40 @@ function _layoutNodesImpl(
     var oofMaxX  = Math.min(oofX + oofW, maxX);
     var oofLh    = nodeLineH(oof);
     var oofSpans = transformSpans(oof.spans, oof.textTransform);
-    var oofLines = flowSpans(oofSpans, oofX, oofMaxX, oofLh, CLR_BODY,
-                             oof.bgColor !== undefined ? { bgColor: oof.bgColor } : undefined);
+    // OOF elements may have children (e.g., a fixed-position footer with links)
+    var oofLines: RenderedLine[];
+    var oofWidgets: PositionedWidget[] = [];
+    if (oof.children && oof.children.length > 0) {
+      var _oofResult = _layoutNodesImpl(oof.children, [], oofW);
+      oofLines = _oofResult.lines;
+      oofWidgets = _oofResult.widgets;
+    } else {
+      oofLines = flowSpans(oofSpans, oofX, oofMaxX, oofLh, CLR_BODY,
+                           oof.bgColor !== undefined ? { bgColor: oof.bgColor } : undefined);
+    }
+    // Stamp OOF lines at the computed position
+    var _oofFirstY = oofLines.length > 0 ? oofLines[0].y : 0;
     for (var ol = 0; ol < oofLines.length; ol++) {
       var oofLine = oofLines[ol];
+      var _oofRelY = oofLine.y - _oofFirstY;
+      // For children-based layout, shift x positions to oofX
+      var oofNodes2 = (oof.children && oof.children.length > 0)
+        ? oofLine.nodes.map(function(n) { return { ...n, x: n.x + oofX - CONTENT_PAD }; })
+        : oofLine.nodes;
       var rendLine: { y: number; nodes: typeof oofLine.nodes; lineH: number; fixedViewportY?: number; fixedViewportX?: number } =
-        { y: oofY, nodes: oofLine.nodes, lineH: oofLine.lineH };
+        { y: oofY + _oofRelY, nodes: oofNodes2, lineH: oofLine.lineH };
       // position:fixed — mark lines so paint pass keeps them viewport-anchored regardless of scroll
       if (oof.position === 'fixed') {
         rendLine.fixedViewportY = oof.posTop  ?? 0;
         rendLine.fixedViewportX = oof.posLeft ?? 0;
       }
       lines.push(rendLine);
-      oofY += oofLine.lineH;
+    }
+    // Shift OOF child widgets to absolute position
+    for (var owi = 0; owi < oofWidgets.length; owi++) {
+      oofWidgets[owi].px += oofX - CONTENT_PAD;
+      oofWidgets[owi].py += oofY - _oofFirstY;
+      widgets.push(oofWidgets[owi]);
     }
   }
 
