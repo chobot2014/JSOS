@@ -490,6 +490,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
   var selectSel    = 0;
   var inTextarea   = false;
   var textareaWip: WidgetBlueprint | null = null;
+  var inButton     = false;
+  var buttonWip: WidgetBlueprint | null = null;
 
   // ── Table tracking ──────────────────────────────────────────────────────────
   var inTable       = false;
@@ -1028,6 +1030,20 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       continue;
     }
 
+    // Capture inner text of <button> elements as the button label
+    if (inButton) {
+      if (tok.kind === 'text' && buttonWip) {
+        var _btnTxt = tok.text.trim();
+        // Only capture first meaningful text as label (avoid nested HTML noise)
+        if (_btnTxt && buttonWip.value === 'Submit') {
+          buttonWip.value = _btnTxt.length > 20 ? _btnTxt.slice(0, 20) : _btnTxt;
+        }
+      } else if (tok.kind === 'close' && tok.tag === 'button') {
+        inButton = false; buttonWip = null;
+      }
+      continue;
+    }
+
     if (tok.kind === 'open' || tok.kind === 'self') {
       if (skipDepth > 0) {
         // Inside hidden subtree — skip CSS matching (pure waste) but maintain stacks
@@ -1291,6 +1307,10 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
           var iSizeStr  = tok.attrs.get('size') || '';
           var iSize     = iSizeStr ? parseInt(iSizeStr, 10) : 0;
           var iPlaceh   = tok.attrs.get('placeholder') || '';
+          // For submit/reset/button: prefer value > aria-label > placeholder
+          if (!iValue && (iType === 'submit' || iType === 'reset' || (iType as string) === 'button')) {
+            iValue = tok.attrs.get('aria-label') || '';
+          }
           if (!iValue && iPlaceh) iValue = iPlaceh;
 
           if (iType === 'hidden') {
@@ -1368,12 +1388,17 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
         case 'button': {
           var bType = (tok.attrs.get('type') || 'submit').toLowerCase();
           var bKind: WidgetKind = bType === 'reset' ? 'reset' : 'submit';
-          pushWidget({
+          // Prefer: value attr > aria-label attr > inner text > default "Submit"
+          var bVal = tok.attrs.get('value') || tok.attrs.get('aria-label') || '';
+          var bBp: WidgetBlueprint = {
             kind: bKind, name: tok.attrs.get('name') || '',
-            value: tok.attrs.get('value') || 'Submit',
+            value: bVal || 'Submit',
             checked: false, disabled: tok.attrs.has('disabled'),
             readonly: false, formIdx: curFormIdx,
-          });
+          };
+          pushWidget(bBp);
+          // Capture inner text as button label only if no explicit label
+          if (!bVal) { inButton = true; buttonWip = bBp; }
           break;
         }
 
@@ -1714,7 +1739,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
           nodes.push({ type: 'p-break', spans: [] });
           curFormIdx = -1; popCSS(); break;
 
-        case 'button': break;
+        case 'button': inButton = false; buttonWip = null; break;
 
         case 'fieldset':
           flushInline();
