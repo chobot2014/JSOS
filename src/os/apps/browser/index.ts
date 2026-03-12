@@ -2671,12 +2671,12 @@ export class BrowserApp implements App {
     var w  = this._win ? this._win.canvas.width : 800;
     var lr = layoutNodes(nodes, bps, w);
 
-    // ── Compress large vertical gaps using widget-only anchors ──────────────
+    // ── Compress large vertical gaps (widget-anchor based) ─────────────
     var _gapLines = lr.lines;
     var _gapWidgets = lr.widgets;
-    var _GAP_MAX = 13; // max gap between widget anchors (LINE_H=13)
-    if (_gapLines.length > 1 && _gapWidgets.length > 0) {
-      // Collect visible widget anchors
+    var _GAP_MAX = 8; // max gap between widget anchors (half LINE_H for tighter compression)
+    if (_gapLines.length > 1) {
+      // Collect anchors from visible widgets only (reliable visual indicators)
       var _gAnchors: { y: number; yEnd: number }[] = [];
       for (var _gwi = 0; _gwi < _gapWidgets.length; _gwi++) {
         if (_gapWidgets[_gwi].kind === 'hidden') continue;
@@ -2695,21 +2695,20 @@ export class BrowserApp implements App {
           _gMerged.push({ y: _gAnchors[_gmi].y, yEnd: _gAnchors[_gmi].yEnd });
         }
       }
-      _gAnchors = _gMerged;
 
-      // Build breakpoints: at each anchor gap > _GAP_MAX, record cumulative shift
+      // Build breakpoints: at each gap > _GAP_MAX, record cumulative shift
       var _gCumul = 0;
       var _breaks: { y: number; shift: number }[] = [];
-      for (var _bi = 0; _bi < _gAnchors.length; _bi++) {
-        var _bGap = _bi > 0 ? _gAnchors[_bi].y - _gAnchors[_bi - 1].yEnd : 0;
+      for (var _bi = 1; _bi < _gMerged.length; _bi++) {
+        var _bGap = _gMerged[_bi].y - _gMerged[_bi - 1].yEnd;
         if (_bGap > _GAP_MAX) {
           _gCumul += _bGap - _GAP_MAX;
-          _breaks.push({ y: _gAnchors[_bi].y, shift: _gCumul });
+          _breaks.push({ y: _gMerged[_bi].y, shift: _gCumul });
         }
       }
 
       if (_gCumul > 0) {
-        // Apply shifts inline
+        // Apply shifts to all lines and widgets
         for (var _gli = 0; _gli < _gapLines.length; _gli++) {
           var _origLY = _gapLines[_gli].y;
           var _shiftL = 0;
