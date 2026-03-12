@@ -1035,7 +1035,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       if (tok.kind === 'text' && buttonWip) {
         var _btnTxt = tok.text.trim();
         // Only capture first meaningful text as label (avoid nested HTML noise)
-        if (_btnTxt && buttonWip.value === 'Submit') {
+        // Skip CSS text (from <style> tags nested in buttons)
+        if (_btnTxt && _btnTxt.indexOf('{') < 0 && buttonWip.value === 'Submit') {
           buttonWip.value = _btnTxt.length > 20 ? _btnTxt.slice(0, 20) : _btnTxt;
         }
       } else if (tok.kind === 'close' && tok.tag === 'button') {

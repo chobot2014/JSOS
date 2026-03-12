@@ -39,6 +39,7 @@
     "@babel/preset-env": "^7.25.0",
     "@babel/preset-typescript": "^7.27.1",
     "esbuild": "^0.21.0",
+    "pngjs": "^7.0.0",
     "terser": "^5.31.0",
     "typescript": "^5.6.0"
   },
