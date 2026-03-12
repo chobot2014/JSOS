@@ -224,7 +224,21 @@ export class TextAtlas {
     charW: number,
     charH: number,
   ): void {
-    if (!this._ready || ch < 0x20 || ch >= 0xA0) return;
+    if (!this._ready) return;
+    // Map common Unicode characters to renderable ASCII equivalents
+    if (ch >= 0xA0) {
+      if (ch === 0x2022 || ch === 0x2023 || ch === 0x25CF || ch === 0x25CB || ch === 0x2219) ch = 0x2A; // bullets → *
+      else if (ch === 0x2013 || ch === 0x2014) ch = 0x2D; // en/em dash → -
+      else if (ch === 0x2018 || ch === 0x2019 || ch === 0x201A || ch === 0x2039 || ch === 0x203A) ch = 0x27; // smart quotes → '
+      else if (ch === 0x201C || ch === 0x201D || ch === 0x201E) ch = 0x22; // double smart quotes → "
+      else if (ch === 0x2026) ch = 0x2E; // ellipsis → .
+      else if (ch === 0x00A0) ch = 0x20; // non-breaking space → space
+      else if (ch === 0x00AB || ch === 0x00BB) ch = 0x22; // guillemets → "
+      else if (ch === 0x2192) ch = 0x3E; // → → >
+      else if (ch === 0x2190) ch = 0x3C; // ← → <
+      else return; // Unknown Unicode — skip
+    }
+    if (ch < 0x20) return;
     var idx  = ch - 0x20;
     var col  = idx % ATLAS_COLS;
     var row  = Math.floor(idx / ATLAS_COLS);
