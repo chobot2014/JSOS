@@ -1006,8 +1006,10 @@ function _layoutNodesImpl(
           break;
         }
         case 'img':
-          ww = bp.imgNatW || 200;
-          wh = bp.imgNatH || 100;
+          // Skip images with no source URL (invisible/tracking pixels)
+          if (!bp.imgSrc && !bp.imgAlt) { continue; }
+          ww = bp.imgNatW || (bp.imgSrc ? 120 : 40);
+          wh = bp.imgNatH || (bp.imgSrc ? 60 : 20);
           var _imgMaxW = maxX - xLeft;
           if (_imgMaxW < 16) _imgMaxW = 16;  // prevent negative/tiny sizes
           if (ww > _imgMaxW) {
