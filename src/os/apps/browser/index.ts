@@ -2492,7 +2492,7 @@ export class BrowserApp implements App {
         // Fallback: if CSS display:none hid nearly everything (JS-dependent page)
         // and pass1 had substantially more content, re-parse ignoring display:none.
         // This ensures JS-heavy pages like Google still show readable content.
-        if (r.nodes.length < 10 && _pass1NodeCount > 20) {
+        if ((r.nodes.length < 10 || r.nodes.length < _pass1NodeCount * 0.4) && _pass1NodeCount > 20) {
           os.debug.log('[browser] pass2 too few nodes (' + r.nodes.length + ' vs pass1=' + _pass1NodeCount + ') — re-parsing without display:none');
           var _shT2c = Date.now();
           r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, true);  // ignoreDisplayNone=true
@@ -2608,7 +2608,7 @@ export class BrowserApp implements App {
           var [_cacheHits, _cacheTotal, _cacheSize] = getCSSMatchCacheStats();
           os.debug.log('[browser] rerender CSS in', (Date.now() - _rrT0) + 'ms, rules:', sheets.length, 'idx:', _cachedIndex ? 'cached' : 'none', 'cacheHit:', _cacheHits + '/' + _cacheTotal + ' sz:' + _cacheSize);
           // Fallback: if CSS hid nearly everything, re-parse ignoring display:none
-          if (r2.nodes.length < 10 && _pass1NodeCount > 20) {
+          if ((r2.nodes.length < 10 || r2.nodes.length < _pass1NodeCount * 0.4) && _pass1NodeCount > 20) {
             os.debug.log('[browser] rerender: too few nodes (' + r2.nodes.length + ') — re-parsing without display:none');
             r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex, true);
             pumpCursor();
@@ -2676,14 +2676,6 @@ export class BrowserApp implements App {
     this._rebuildStickyIndex();
     this._contentVersion++;          // Phase 3: invalidate tile cache on new layout
     this._widgets   = lr.widgets;
-
-    // Temporary diagnostic: dump widget kinds
-    var _wSummary = '';
-    for (var _dwi2 = 0; _dwi2 < lr.widgets.length; _dwi2++) {
-      var _dw2 = lr.widgets[_dwi2];
-      _wSummary += _dw2.kind + '(' + (_dw2.pw || 0) + 'x' + (_dw2.ph || 0) + '@' + (_dw2.px || 0) + ',' + (_dw2.py || 0) + ') ';
-    }
-    os.debug.log('[browser] widgets: ' + _wSummary);
 
     var contentH = this._contentH();
     var last     = this._pageLines[this._pageLines.length - 1];

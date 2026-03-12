@@ -1449,11 +1449,13 @@ export function mergeProps(target: CSSProps, src: CSSProps, importantOnly?: Set<
       for (var i = 0; i < ks.length; i++) {
         var k = ks[i]!;
         if (!importantOnly.has(k)) continue;
-        t[k] = s[k];
+        var _iv = s[k];
+        if (_iv !== undefined) t[k] = _iv;
       }
     } else {
       for (var i = 0; i < ks.length; i++) {
-        t[ks[i]!] = s[ks[i]!];
+        var _fv = s[ks[i]!];
+        if (_fv !== undefined) t[ks[i]!] = _fv;
       }
     }
   } else {

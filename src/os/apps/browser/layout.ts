@@ -510,6 +510,23 @@ function _layoutNodesImpl(
           var fccW2 = fccItem.boxWidth ? Math.min(fccItem.boxWidth, fcColW) : fcColW;
           // Cross-axis (horizontal) alignment
           var fccAlignSelf = fccItem.alignSelf || containerAlignItems;
+          // For center/end alignment: compute actual content width if no explicit boxWidth
+          if (fccAlignSelf !== 'stretch' && !fccItem.boxWidth) {
+            var _fccMaxX = 0;
+            for (var _fccli = 0; _fccli < fccD.childLines.length; _fccli++) {
+              var _fccl2 = fccD.childLines[_fccli];
+              for (var _fccni = 0; _fccni < _fccl2.nodes.length; _fccni++) {
+                var _fccn = _fccl2.nodes[_fccni];
+                var _fccnEnd = _fccn.x + _fccn.text.length * CHAR_W * (_fccn.fontScale || 1);
+                if (_fccnEnd > _fccMaxX) _fccMaxX = _fccnEnd;
+              }
+            }
+            for (var _fccwi = 0; _fccwi < fccD.childWidgets.length; _fccwi++) {
+              var _fccwEnd = fccD.childWidgets[_fccwi].px + fccD.childWidgets[_fccwi].pw;
+              if (_fccwEnd > _fccMaxX) _fccMaxX = _fccwEnd;
+            }
+            if (_fccMaxX > CONTENT_PAD) fccW2 = _fccMaxX - CONTENT_PAD;
+          }
           var fccCrossX = fxLeft;
           if (fccAlignSelf === 'center') fccCrossX = fxLeft + Math.floor((fcColW - fccW2) / 2);
           else if (fccAlignSelf === 'flex-end' || fccAlignSelf === 'end') fccCrossX = fxLeft + fcColW - fccW2;
@@ -1003,10 +1020,18 @@ function _layoutNodesImpl(
         if (y > CONTENT_PAD) { blank(4); }
       }
 
+      // Widget centering: respect text-align from parent block
+      var _wpx = xLeft;
+      if (nd.textAlign === 'center' && ww < (maxX - xLeft)) {
+        _wpx = xLeft + Math.floor((maxX - xLeft - ww) / 2);
+      } else if (nd.textAlign === 'right' && ww < (maxX - xLeft)) {
+        _wpx = maxX - ww;
+      }
+
       var pw: PositionedWidget = {
         ...bp,
         id: ++_widgetCounter,
-        px: xLeft, py: y, pw: ww, ph: wh,
+        px: _wpx, py: y, pw: ww, ph: wh,
         curValue:   bp.value   || '',
         curChecked: bp.checked || false,
         curSelIdx:  bp.selIdx  || 0,

@@ -628,7 +628,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
 
   var BLOCK_TAGS = new Set([
     'p', 'div', 'section', 'article', 'main', 'header', 'footer', 'nav', 'aside',
-    'figure', 'figcaption', 'address', 'details', 'dd', 'dt', 'caption',
+    'figure', 'figcaption', 'address', 'details', 'dd', 'dt', 'caption', 'center',
   ]);
 
   function flushInline(): void {
@@ -788,6 +788,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (openBlock) { nodes.push(openBlock); openBlock = null; }
     widgets.push(bp);
     var wNode: RenderNode = { type: 'widget', spans: [], widget: bp };
+    if (curCSS.align) wNode.textAlign = curCSS.align;
     // Inside a flex/grid container, each widget should be its own child.
     // Wrap in a block with children so the flex layout recurses into _layoutNodesImpl
     // which handles widget type nodes for positioning.
@@ -1033,8 +1034,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       switch (tok.tag) {
         // ── Document structure ──────────────────────────────────────────────
         case 'head':   inHead   = true;  break;
-        case 'body':   inHead   = false; break;
-        case 'html':   break;
+        case 'body':   inHead   = false; applyStyle('body', tok.attrs); break;
+        case 'html':   applyStyle('html', tok.attrs); break;
         case 'title':  inTitle  = true;  break;
         case 'script': {
           inScriptType = tok.attrs.get('type') || 'text/javascript';
@@ -1277,7 +1278,6 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
         // ── <input> ──────────────────────────────────────────────────────────
         case 'input': {
           var iType     = (tok.attrs.get('type') || 'text').toLowerCase() as WidgetKind;
-          console.log('[input] type=' + iType + ' name=' + (tok.attrs.get('name') || '') + ' skipDepth=' + skipDepth + ' hidden=' + !!curCSS.hidden);
           var iName     = tok.attrs.get('name')     || '';
           var iValue    = tok.attrs.get('value')    || '';
           var iChecked  = tok.attrs.has('checked');
@@ -1514,6 +1514,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
             if (P_CLOSERS.has(tok.tag)) autoClosePIfOpen();
             applyStyle(tok.tag, tok.attrs);
             if (tok.tag === 'p') pOpen++;  // track for implicit close
+            // <center> tag sets text-align: center (UA default)
+            if (tok.tag === 'center') curCSS.align = 'center';
 
             // display:contents — element generates no box; children render
             // as if they were direct children of the parent container.
@@ -1625,7 +1627,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       switch (tok.tag) {
         case 'head':  inHead  = false; break;
         case 'title': inTitle = false; break;
-        case 'html': case 'body': break;
+        case 'html': case 'body': popCSS(); break;
 
         case 'strong': case 'b':  bold    = Math.max(0, bold    - 1); popCSS(); break;
         case 'em':     case 'i':  italic  = Math.max(0, italic  - 1); popCSS(); break;
