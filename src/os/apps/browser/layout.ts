@@ -1025,7 +1025,14 @@ function _layoutNodesImpl(
 
       // CSS width/height override (if specified via stylesheet/inline CSS)
       if (bp.cssWidth && bp.cssWidth > 0) ww = Math.min(bp.cssWidth, maxX - xLeft);
-      if (bp.cssHeight && bp.cssHeight > 0) wh = bp.cssHeight;
+      if (bp.cssHeight && bp.cssHeight > 0) {
+        // For buttons, cap CSS height to prevent oversized rendering
+        if (bp.kind === 'submit' || bp.kind === 'reset' || bp.kind === 'button') {
+          wh = Math.min(bp.cssHeight, WIDGET_BTN_H + 16);
+        } else {
+          wh = bp.cssHeight;
+        }
+      }
 
       if (bp.kind !== 'checkbox' && bp.kind !== 'radio') {
         if (y > CONTENT_PAD) { blank(4); }
@@ -1039,27 +1046,30 @@ function _layoutNodesImpl(
         _wpx = xLeft + Math.floor((maxX - xLeft - ww) / 2);
       } else if (nd.textAlign === 'right' && ww < (maxX - xLeft)) {
         _wpx = maxX - ww;
-      } else if (ww < (maxX - xLeft) * 0.8) {
-        // Heuristic: center widgets that are significantly narrower than container
+      } else if ((bp.kind === 'textarea' || bp.kind === 'submit' || bp.kind === 'reset' || bp.kind === 'button') && ww < (maxX - xLeft) * 0.8) {
+        // Heuristic: center form widgets (search boxes, buttons) that are
+        // significantly narrower than the container
         _wpx = xLeft + Math.floor((maxX - xLeft - ww) / 2);
       }
 
       // ── Button grouping: place consecutive buttons side-by-side ──────────
       if ((bp.kind === 'submit' || bp.kind === 'reset' || bp.kind === 'button') && widgets.length > 0) {
         var prevW = widgets[widgets.length - 1];
-        if (prevW && (prevW.kind === 'submit' || prevW.kind === 'reset' || prevW.kind === 'button') && prevW.py === y - prevW.ph - 4 - 4) {
-          // Previous widget is a button on the row just above; merge into same row
-          var prevRight = prevW.px + prevW.pw;
+        // After a button: y advances by ph+4 (line push), then blank(4) post-gap,
+        // then blank(4) pre-gap of current = total gap of ph+12.
+        var _btnGap = y - prevW.py - prevW.ph;
+        if (prevW && (prevW.kind === 'submit' || prevW.kind === 'reset' || prevW.kind === 'button') && _btnGap >= 4 && _btnGap <= 16) {
+          // Previous widget is a button placed recently; merge into same row
           var totalW    = prevW.pw + 8 + ww; // gap of 8px
           if (totalW < (maxX - xLeft)) {
-            // Revert the vertical spacing that was added after the previous button
+            // Revert y to the previous button's position
             y = prevW.py;
             // Center the whole button group
             var groupX = xLeft + Math.floor((maxX - xLeft - totalW) / 2);
             prevW.px = groupX;
             _wpx = groupX + prevW.pw + 8;
             // Remove the last line entry (from the previous button)
-            if (lines.length > 0 && lines[lines.length - 1].lineH === prevW.ph + 4) {
+            if (lines.length > 0) {
               lines.pop();
             }
           }
