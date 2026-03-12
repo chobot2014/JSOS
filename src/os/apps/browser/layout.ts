@@ -1067,6 +1067,8 @@ function _layoutNodesImpl(
           wh = bp.cssHeight;
         }
       }
+      // Cap tall narrow images (decorative icons) to reduce layout waste
+      if (bp.kind === 'img' && wh > 30 && ww < 40) wh = 30;
 
       if (bp.kind !== 'checkbox' && bp.kind !== 'radio') {
         if (y > CONTENT_PAD) { blank(4); }
@@ -1083,6 +1085,9 @@ function _layoutNodesImpl(
       } else if ((bp.kind === 'textarea' || bp.kind === 'submit' || bp.kind === 'reset' || bp.kind === 'button') && ww < (maxX - xLeft) * 0.8) {
         // Heuristic: center form widgets (search boxes, buttons) that are
         // significantly narrower than the container
+        _wpx = xLeft + Math.floor((maxX - xLeft - ww) / 2);
+      } else if (bp.kind === 'img' && ww < 100 && xLeft < 20 && ww < (maxX - xLeft) * 0.3) {
+        // Center small images that are at the outermost container level
         _wpx = xLeft + Math.floor((maxX - xLeft - ww) / 2);
       }
 

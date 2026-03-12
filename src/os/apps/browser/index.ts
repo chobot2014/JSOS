@@ -1407,6 +1407,8 @@ export class BrowserApp implements App {
       return;
     }
     if (wp.imgData) {
+      // Fill background so transparent/white images show visible placeholder
+      canvas.fillRect(wp.px, wy, wp.pw, wp.ph, CLR_IMG_PH_BG);
       // Alpha-compositing blit: SVGs may have transparent backgrounds
       canvas.blitPixelsAlpha(wp.imgData, wp.pw, wp.ph, wp.px, wy);
     } else {
