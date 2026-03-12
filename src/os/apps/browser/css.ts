@@ -655,13 +655,13 @@ export function parseInlineStyle(style: string): CSSProps {
         } break;
       }
       case 'height': {
-        if (vl !== 'auto') { var hv = parseLengthPx(vl); if (!isNaN(hv) && hv > 0) p.height = hv; } break;
+        if (vl !== 'auto') { var hv = parseLengthPx(vl); if (!isNaN(hv) && hv > 0) p.height = Math.min(hv, 200); } break;
       }
       case 'min-width': {
         var mnwv = parseLengthPx(vl); if (!isNaN(mnwv)) p.minWidth = mnwv; break;
       }
       case 'min-height': {
-        var mnhv = parseLengthPx(vl); if (!isNaN(mnhv)) p.minHeight = mnhv; break;
+        var mnhv = parseLengthPx(vl); if (!isNaN(mnhv)) p.minHeight = Math.min(mnhv, 30); break;
       }
       case 'max-width': {
         if (vl !== 'none') { var mxwv = parseLengthPx(vl); if (!isNaN(mxwv) && mxwv > 0) p.maxWidth = mxwv; } break;

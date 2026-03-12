@@ -2669,9 +2669,66 @@ export class BrowserApp implements App {
     this._scrollY   = 0;
 
     var w  = this._win ? this._win.canvas.width : 800;
-    os.debug.log('[browser] _layoutPage: calling layoutNodes nodes=' + nodes.length + ' w=' + w);
     var lr = layoutNodes(nodes, bps, w);
-    os.debug.log('[browser] _layoutPage: layoutNodes done lines=' + lr.lines.length);
+
+    // ── Compress large vertical gaps using widget-only anchors ──────────────
+    var _gapLines = lr.lines;
+    var _gapWidgets = lr.widgets;
+    var _GAP_MAX = 13; // max gap between widget anchors (LINE_H=13)
+    if (_gapLines.length > 1 && _gapWidgets.length > 0) {
+      // Collect visible widget anchors
+      var _gAnchors: { y: number; yEnd: number }[] = [];
+      for (var _gwi = 0; _gwi < _gapWidgets.length; _gwi++) {
+        if (_gapWidgets[_gwi].kind === 'hidden') continue;
+        if (_gapWidgets[_gwi].ph <= 0) continue;
+        _gAnchors.push({ y: _gapWidgets[_gwi].py, yEnd: _gapWidgets[_gwi].py + _gapWidgets[_gwi].ph });
+      }
+      _gAnchors.sort(function(a, b) { return a.y - b.y; });
+      // Merge overlapping/adjacent anchors
+      var _gMerged: { y: number; yEnd: number }[] = [];
+      for (var _gmi = 0; _gmi < _gAnchors.length; _gmi++) {
+        if (_gMerged.length > 0 && _gAnchors[_gmi].y <= _gMerged[_gMerged.length - 1].yEnd + 2) {
+          if (_gAnchors[_gmi].yEnd > _gMerged[_gMerged.length - 1].yEnd) {
+            _gMerged[_gMerged.length - 1].yEnd = _gAnchors[_gmi].yEnd;
+          }
+        } else {
+          _gMerged.push({ y: _gAnchors[_gmi].y, yEnd: _gAnchors[_gmi].yEnd });
+        }
+      }
+      _gAnchors = _gMerged;
+
+      // Build breakpoints: at each anchor gap > _GAP_MAX, record cumulative shift
+      var _gCumul = 0;
+      var _breaks: { y: number; shift: number }[] = [];
+      for (var _bi = 0; _bi < _gAnchors.length; _bi++) {
+        var _bGap = _bi > 0 ? _gAnchors[_bi].y - _gAnchors[_bi - 1].yEnd : 0;
+        if (_bGap > _GAP_MAX) {
+          _gCumul += _bGap - _GAP_MAX;
+          _breaks.push({ y: _gAnchors[_bi].y, shift: _gCumul });
+        }
+      }
+
+      if (_gCumul > 0) {
+        // Apply shifts inline
+        for (var _gli = 0; _gli < _gapLines.length; _gli++) {
+          var _origLY = _gapLines[_gli].y;
+          var _shiftL = 0;
+          for (var _ciL = _breaks.length - 1; _ciL >= 0; _ciL--) {
+            if (_origLY >= _breaks[_ciL].y) { _shiftL = _breaks[_ciL].shift; break; }
+          }
+          if (_shiftL > 0) _gapLines[_gli].y = _origLY - _shiftL;
+        }
+        for (var _gwi2 = 0; _gwi2 < _gapWidgets.length; _gwi2++) {
+          var _origWY = _gapWidgets[_gwi2].py;
+          var _shiftW = 0;
+          for (var _ciW = _breaks.length - 1; _ciW >= 0; _ciW--) {
+            if (_origWY >= _breaks[_ciW].y) { _shiftW = _breaks[_ciW].shift; break; }
+          }
+          if (_shiftW > 0) _gapWidgets[_gwi2].py = _origWY - _shiftW;
+        }
+      }
+    }
+
     this._pageLines = lr.lines;
     this._rebuildStickyIndex();
     this._contentVersion++;          // Phase 3: invalidate tile cache on new layout

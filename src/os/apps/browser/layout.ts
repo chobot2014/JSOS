@@ -226,12 +226,32 @@ function _layoutNodesImpl(
   // Absolutely/fixed-positioned elements collected separately (out-of-flow)
   var oofNodes: RenderNode[] = [];
 
+  // Track consecutive blank space to cap excessive gaps
+  var _consecBlank = 0;
+  var _maxConsecBlank = LINE_H; // Cap blank gaps at 1 line height (13px)
+
   function blank(h: number): void {
-    lines.push({ y, nodes: [], lineH: h }); y += h;
+    if (_consecBlank >= _maxConsecBlank) return; // Already at blank cap
+    var capped = Math.min(h, _maxConsecBlank - _consecBlank);
+    if (capped <= 0) return;
+    lines.push({ y, nodes: [], lineH: capped }); y += capped;
+    _consecBlank += capped;
   }
   function commit(newLines: RenderedLine[]): void {
     for (var k = 0; k < newLines.length; k++) {
       newLines[k].y = y; y += newLines[k].lineH; lines.push(newLines[k]);
+    }
+    // Reset blank tracker only if committed lines have visible text content
+    for (var _ck = 0; _ck < newLines.length; _ck++) {
+      if (newLines[_ck].nodes.length > 0) {
+        var _hasVisible = false;
+        for (var _cn = 0; _cn < newLines[_ck].nodes.length; _cn++) {
+          if (newLines[_ck].nodes[_cn].text && newLines[_ck].nodes[_cn].text.trim()) {
+            _hasVisible = true; break;
+          }
+        }
+        if (_hasVisible) { _consecBlank = 0; break; }
+      }
     }
   }
 
@@ -287,7 +307,7 @@ function _layoutNodesImpl(
 
     if (nd.type === 'hr') {
       lines.push({ y, nodes: [], lineH: 3, hrLine: true }); y += 8;
-      lastBottomMargin = 0; continue;
+      lastBottomMargin = 0; _consecBlank = 0; continue;
     }
 
     if (nd.type === 'pre') {
@@ -466,7 +486,7 @@ function _layoutNodesImpl(
           fcTotalH += fccBaseH + (fcci < fcItems.length - 1 ? gap : 0);
         }
         // Apply flex-grow / flex-shrink to column items
-        var fcContainerH = nd.height ?? 0;
+        var fcContainerH = Math.min(nd.height ?? 0, 200); // Cap height to prevent viewport-filling gaps
         var fcFreeH0 = fcContainerH > 0 ? fcContainerH - fcTotalH : 0;
         var fcFinalH: number[] = [];
         if (fcFreeH0 > 0) {
@@ -748,6 +768,18 @@ function _layoutNodesImpl(
     }
 
     if (nd.type === 'block' || nd.type === 'aside') {
+      // ── Skip empty blocks: no text, no visual properties, no height ─────────
+      var _hasText = false;
+      for (var _sti2 = 0; _sti2 < nd.spans.length; _sti2++) {
+        if (nd.spans[_sti2].text && nd.spans[_sti2].text.trim()) { _hasText = true; break; }
+      }
+      if (!_hasText && !nd.bgColor && !nd.bgGradient && !nd.bgImage
+          && !nd.borderWidth && !nd.boxShadow
+          && !nd.minHeight && !nd.height) {
+        // Empty block — collapse margins but produce no vertical space
+        lastBottomMargin = Math.max(lastBottomMargin, nd.marginBottom || 0);
+        continue;
+      }
       // ── Margin collapsing ────────────────────────────────────────────────────
       var preMarginRaw  = nd.marginTop  || 0;
       var postMarginRaw = nd.marginBottom || 0;
@@ -1093,6 +1125,8 @@ function _layoutNodesImpl(
 
       lines.push({ y, nodes: [], lineH: wh + 4 });
       y += wh + 4;
+      // Widgets are visible content — reset blank tracker, but only for non-hidden types
+      if (bp.kind !== 'hidden') _consecBlank = 0;
 
       if (bp.kind !== 'checkbox' && bp.kind !== 'radio') {
         blank(4);
@@ -1162,6 +1196,11 @@ function _layoutNodesImpl(
   }
 
   if (_lpId) layoutProfiler.endLayout(_lpId);
+
+  // Gap compression is done in _layoutPage (index.ts) on the final assembled result
+  // rather than here, because _layoutNodesImpl is called recursively for flex children
+  // and the top-level call may not see all widgets.
+
   return { lines, widgets };
 }
 
