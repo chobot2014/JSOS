@@ -48,7 +48,7 @@ export const CLR_FIND_BD    = 0xFFCCCC88;
 
 // ── Widget colors ─────────────────────────────────────────────────────────────
 
-export const CLR_INPUT_BG    = 0xFFFFFFFF;
+export const CLR_INPUT_BG    = 0xFFEEEEEE;
 export const CLR_INPUT_BD    = 0xFF888888;
 export const CLR_INPUT_FOCUS = 0xFF1A73E8;
 export const CLR_INPUT_TXT   = 0xFF111111;
