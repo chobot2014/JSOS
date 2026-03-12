@@ -1411,6 +1411,8 @@ export class BrowserApp implements App {
       canvas.fillRect(wp.px, wy, wp.pw, wp.ph, CLR_IMG_PH_BG);
       // Alpha-compositing blit: SVGs may have transparent backgrounds
       canvas.blitPixelsAlpha(wp.imgData, wp.pw, wp.ph, wp.px, wy);
+      // Border ensures white-content images have visible edges
+      canvas.drawRect(wp.px, wy, wp.pw, wp.ph, CLR_IMG_PH_BD);
     } else {
       canvas.fillRect(wp.px, wy, wp.pw, wp.ph, CLR_IMG_PH_BG);
       canvas.drawRect(wp.px, wy, wp.pw, wp.ph, 0xFFFF9999);
@@ -2676,7 +2678,7 @@ export class BrowserApp implements App {
     // ── Compress large vertical gaps (widget-anchor based) ─────────────
     var _gapLines = lr.lines;
     var _gapWidgets = lr.widgets;
-    var _GAP_MAX = 8; // max gap between widget anchors (half LINE_H for tighter compression)
+    var _GAP_MAX = 4; // max gap between widget anchors (tight compression)
     if (_gapLines.length > 1) {
       // Collect anchors from visible widgets only (reliable visual indicators)
       var _gAnchors: { y: number; yEnd: number }[] = [];

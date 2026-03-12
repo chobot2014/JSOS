@@ -328,9 +328,9 @@ function main(): void {
       // stack for real network requests and renders HTML on the WM canvas.
       var browserWin = wmInst.createWindow({
         title:     'Browser',
-        x: 20, y: 20,
+        x: 0, y: 20,
         width:  Math.min(screen.width  - 40, 1024),
-        height: Math.min(screen.height - 80, 700),
+        height: Math.min(screen.height - 178, 700),
         app:    browserApp,
         closeable: true,
       });

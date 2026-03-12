@@ -873,6 +873,23 @@ function _layoutNodesImpl(
         if (nd.paddingBottom && nd.paddingBottom > 0) blank(nd.paddingBottom);
         // text-align: shift committed line nodes for center / right / justify
         var _ta = nd.textAlign;
+        // Auto-center narrow root-level lines (same heuristic as widget centering)
+        if (!_ta && blkLeft < 20 && lines.length > _blockLineStart) {
+          var _acLineW = blkMaxX - blkLeft;
+          for (var _aci = _blockLineStart; _aci < lines.length; _aci++) {
+            var _acLine = lines[_aci];
+            if (!_acLine.nodes.length) continue;
+            var _acLast = _acLine.nodes[_acLine.nodes.length - 1]!;
+            var _acUsed = (_acLast.x - blkLeft) + _acLast.text.length * CHAR_W * (_acLast.fontScale || 1);
+            if (_acUsed < _acLineW * 0.3) {
+              var _acFree = Math.max(0, _acLineW - _acUsed);
+              var _acShift = Math.floor(_acFree / 2);
+              if (_acShift > 0) {
+                lines[_aci] = { ..._acLine, nodes: _acLine.nodes.map(function(n) { return { ...n, x: n.x + _acShift }; }) };
+              }
+            }
+          }
+        }
         if (_ta && _ta !== 'left' && lines.length > _blockLineStart) {
           var _lineW = blkMaxX - blkLeft;
           for (var _tai = _blockLineStart; _tai < lines.length; _tai++) {
