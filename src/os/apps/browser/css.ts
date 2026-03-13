@@ -549,9 +549,13 @@ export function parseInlineStyle(style: string): CSSProps {
         if (vl !== 'normal') {
           var lhv = parseFloat(vl);
           if (!isNaN(lhv)) {
-            // unitless: treat as multiplier of 16px
-            if (!vl.endsWith('px') && !vl.endsWith('em') && !vl.endsWith('rem') && lhv < 10)
-              lhv = lhv * 16;
+            // unitless: treat as multiplier of element's font-size
+            // Use p.fontScale if already set (font-size parsed before line-height),
+            // otherwise fall back to 16px default.
+            if (!vl.endsWith('px') && !vl.endsWith('em') && !vl.endsWith('rem') && lhv < 10) {
+              var _lhFontPx = (p.fontScale ?? 1) * 16;
+              lhv = lhv * _lhFontPx;
+            }
             else lhv = parseLengthPx(vl) || lhv;
             p.lineHeight = lhv;
           }
@@ -578,7 +582,19 @@ export function parseInlineStyle(style: string): CSSProps {
           if (!isNaN(fszv) && fszv > 0) p.fontScale = Math.max(0.5, Math.min(fszv / 16, 4));
           // Family is everything after the "size[/line-height]" part
           var afterSize = vl.slice(vl.indexOf(fpsz[1]) + fpsz[1].length);
-          // Skip /line-height if present
+          // Extract /line-height if present, THEN store it
+          var _lhMatch = afterSize.match(/^\s*\/\s*([\d.]+(?:px|em|rem|%|))/);
+          if (_lhMatch) {
+            var _lhStr = _lhMatch[1];
+            var _lhVal = parseFloat(_lhStr);
+            if (!isNaN(_lhVal)) {
+              // unitless: treat as multiplier of font-size (or 16px default)
+              if (!_lhStr.endsWith('px') && !_lhStr.endsWith('em') && !_lhStr.endsWith('rem') && _lhVal < 10)
+                p.lineHeight = _lhVal * (fszv || 16);
+              else
+                p.lineHeight = parseLengthPx(_lhStr) || _lhVal;
+            }
+          }
           afterSize = afterSize.replace(/^\s*\/\s*[\d.]+(?:px|em|rem|%|)\s*/, '').trim();
           if (afterSize.length > 0) p.fontFamily = afterSize;
         }
@@ -1264,8 +1280,15 @@ export function parseInlineStyle(style: string): CSSProps {
       case 'align-self':      { p.alignSelf      = vl; break; }
       case 'order':           { var ov = parseInt(vl); if (!isNaN(ov)) p.order = ov; break; }
       case 'gap': case 'grid-gap': {
-        var [gv,_gv2] = parseBox4(val);
-        p.gap = isNaN(gv) ? 0 : gv; break;
+        var _gapParts = val.trim().split(/\s+/);
+        var _gapRow = parseLengthPx(_gapParts[0] || '0');
+        var _gapCol = _gapParts.length > 1 ? parseLengthPx(_gapParts[1]) : _gapRow;
+        if (isNaN(_gapRow)) _gapRow = 0;
+        if (isNaN(_gapCol)) _gapCol = _gapRow;
+        p.gap = _gapRow;
+        p.rowGap = _gapRow;
+        p.columnGap = _gapCol;
+        break;
       }
       case 'row-gap':    case 'grid-row-gap':    { var rgv = parseLengthPx(vl); if (!isNaN(rgv)) p.rowGap    = rgv; break; }
       case 'column-gap': case 'grid-column-gap': { var cgv = parseLengthPx(vl); if (!isNaN(cgv)) p.columnGap = cgv; break; }

@@ -474,7 +474,8 @@ function _layoutNodesImpl(
         nd, tblContentW,
         function(spans: InlineSpan[], txLeft: number, txMax: number, txLineH: number) {
           return flowSpans(spans, txLeft, txMax, txLineH, CLR_BODY);
-        }
+        },
+        function(ch: RenderNode[], cw: number) { return _layoutNodesImpl(ch, [], cw); }
       );
       var tblMaxY = tblY;
       for (var tli = 0; tli < tblLines.length; tli++) {
@@ -1292,7 +1293,13 @@ function _layoutNodesImpl(
       if (bp.cssWidth && bp.cssWidth > 0) ww = Math.min(bp.cssWidth, maxX - xLeft);
       if (bp.cssHeight && bp.cssHeight > 0) {
         // For buttons, cap CSS height to prevent oversized rendering
-       
+        if (bp.kind === 'submit' || bp.kind === 'reset' || bp.kind === 'button') {
+          wh = Math.min(bp.cssHeight, WIDGET_BTN_H + 16);
+        } else {
+          wh = bp.cssHeight;
+        }
+      }
+
       // object-fit: adjust image dimensions when CSS constrains the container
       if (bp.kind === 'img' && bp.objectFit && bp.imgNatW && bp.imgNatH) {
         var _ofNatW = bp.imgNatW, _ofNatH = bp.imgNatH;
@@ -1313,11 +1320,6 @@ function _layoutNodesImpl(
           wh = Math.min(_ofNatH, wh);
         }
         // 'fill' = default stretch behavior (no adjustment needed)
-      } if (bp.kind === 'submit' || bp.kind === 'reset' || bp.kind === 'button') {
-          wh = Math.min(bp.cssHeight, WIDGET_BTN_H + 16);
-        } else {
-          wh = bp.cssHeight;
-        }
       }
       // Cap tall narrow images (decorative icons) to reduce layout waste
       if (bp.kind === 'img' && wh > 30 && ww < 40) wh = 30;

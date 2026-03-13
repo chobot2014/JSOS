@@ -308,7 +308,8 @@ export function layoutBFC(
 export function layoutTable(
   tableNode:    RenderNode,
   contentW:     number,
-  layoutRowFn:  (spans: InlineSpan[], xLeft: number, maxX: number, lineH: number) => RenderedLine[]
+  layoutRowFn:  (spans: InlineSpan[], xLeft: number, maxX: number, lineH: number) => RenderedLine[],
+  layoutBlockFn?: (children: RenderNode[], contentW: number) => LayoutResult
 ): RenderedLine[] {
   var rows     = (tableNode.children ?? []).filter(function(c) { return c.type === 'table-row'; });
   var layout   = tableNode.tableLayout ?? 'auto';
@@ -431,7 +432,20 @@ export function layoutTable(
       var cxLeft  = _colX(ci7) + cellPad;
       var cw      = _spannedW(ci7, gc3.cspan);
       var cmaxX   = _colX(ci7) + cw - cellPad;
-      var cellLines2 = layoutRowFn(gc3.cell.spans, cxLeft, cmaxX, LINE_H);
+      var cellLines2: RenderedLine[];
+      // Use block layout for cells with children (nested divs, lists, etc.),
+      // fall back to inline flowSpans for cells with only inline spans.
+      if (layoutBlockFn && gc3.cell.children && gc3.cell.children.length > 0) {
+        var cellResult = layoutBlockFn(gc3.cell.children, cw - cellPad * 2);
+        cellLines2 = cellResult.lines.map(function(ln) { return { ...ln, x: (ln.x ?? 0) + cxLeft }; });
+        // Also flow any inline spans in the cell (mixed content)
+        if (gc3.cell.spans.length > 0) {
+          var inlineLines = layoutRowFn(gc3.cell.spans, cxLeft, cmaxX, LINE_H);
+          cellLines2 = inlineLines.concat(cellLines2);
+        }
+      } else {
+        cellLines2 = layoutRowFn(gc3.cell.spans, cxLeft, cmaxX, LINE_H);
+      }
       var cellH2  = cellLines2.length * LINE_H + cellPad * 2;
       if (gc3.rspan === 1 && cellH2 > rowMaxH) rowMaxH = cellH2;
       rowCellLines.push({ x: _colX(ci7), w: cw, lines: cellLines2, vAlign: gc3.cell.verticalAlign || 'top', rspan: gc3.rspan });
