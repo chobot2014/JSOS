@@ -811,7 +811,9 @@ export function layoutGrid(
 
     var childResult = layoutFn([children[gi]], cellW);
     var childLines  = childResult.lines;
-    var childH      = childLines.length * LINE_H;
+    var childH      = childLines.length > 0
+      ? (childLines[childLines.length - 1].y + (childLines[childLines.length - 1].lineH || LINE_H) - childLines[0].y)
+      : 0;
 
     // Use explicit row size if given, otherwise content height
     var effRowH = rowSizes[rs2] > 0 ? Math.max(rowSizes[rs2], childH) : childH;
@@ -850,17 +852,20 @@ export function layoutGrid(
     if (justifyItems === 'center') jiOffset = Math.floor((cl2.cellW - jiChildW) / 2);
     else if (justifyItems === 'end' || justifyItems === 'flex-end') jiOffset = cl2.cellW - jiChildW;
 
-    // align-items: align child vertically within cell
-    var aiChildH = cl2.lines.length * LINE_H;
+    // align-items: align child vertically within cell (R17: use actual content height)
+    var aiChildH = cl2.lines.length > 0
+      ? (cl2.lines[cl2.lines.length - 1].y + (cl2.lines[cl2.lines.length - 1].lineH || LINE_H) - cl2.lines[0].y)
+      : 0;
     var aiCellH  = rowHeights[cl2.rs] || LINE_H;
     var aiOffset = 0;
     if (alignItems === 'center') aiOffset = Math.floor((aiCellH - aiChildH) / 2);
     else if (alignItems === 'end' || alignItems === 'flex-end') aiOffset = aiCellH - aiChildH;
 
+    var _gFirstY = cl2.lines.length > 0 ? cl2.lines[0].y : CONTENT_PAD;
     for (var li = 0; li < cl2.lines.length; li++) {
       var ln = cl2.lines[li];
       allLines.push({
-        y:      yOff + aiOffset + ln.y,
+        y:      yOff + aiOffset + (ln.y - _gFirstY),
         nodes:  ln.nodes.map(function(n) { return { ...n, x: n.x + xOff + jiOffset }; }),
         lineH:  ln.lineH,
         bgColor: ln.bgColor,

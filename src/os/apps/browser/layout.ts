@@ -354,10 +354,12 @@ function _layoutNodesImpl(
   // ── Margin collapsing: last bottom margin collapses with next top margin ─────
   var lastBottomMargin = 0;
   function collapseMargin(newTop: number): number {
-    // Collapsed margin = max of the two; only positive margins collapse
-    var collapsed = Math.max(lastBottomMargin, newTop);
+    // CSS2.1 §8.3.1: adjacent margin collapsing (R17)
+    var a = lastBottomMargin, b = newTop;
     lastBottomMargin = 0;
-    return collapsed;
+    if (a >= 0 && b >= 0) return Math.max(a, b);       // both positive → max
+    if (a < 0 && b < 0) return Math.min(a, b);         // both negative → most negative
+    return a + b;                                        // mixed → sum
   }
 
   // ── Active float state — narrows inline x for sibling wrap (item 4.8) ─────────
@@ -826,6 +828,21 @@ function _layoutNodesImpl(
               cLines[_fyk].y = _fyPos;
               _fyPos += cLines[_fyk].lineH;
             }
+            // text-align shifting for inline-only flex children (R17)
+            var _fcTA = fc.textAlign;
+            if (_fcTA && _fcTA !== 'left' && cLines.length > 0) {
+              for (var _fai = 0; _fai < cLines.length; _fai++) {
+                var _faLine = cLines[_fai];
+                if (!_faLine.nodes.length) continue;
+                var _faLast = _faLine.nodes[_faLine.nodes.length - 1];
+                var _faUsed = _faLast.x + _faLast.text.length * CHAR_W * (_faLast.fontScale || 1);
+                var _faFree = Math.max(0, cw - _faUsed);
+                var _faShift = _fcTA === 'center' ? Math.floor(_faFree / 2) : (_fcTA === 'right' ? _faFree : 0);
+                if (_faShift > 0) {
+                  cLines[_fai] = { ..._faLine, nodes: _faLine.nodes.map(function(n) { return { ...n, x: n.x + _faShift }; }) };
+                }
+              }
+            }
           }
           var fcAlign = fc.alignSelf || containerAlignItems;
           fChildLines.push({ x: fCurX, cw, cl: cLines, alignSelf: fcAlign, childWidgets: _fcChildWidgets });
@@ -861,7 +878,9 @@ function _layoutNodesImpl(
         var fml = fMeasuredLines[fwl2];
         for (var fci2 = 0; fci2 < fml.items.length; fci2++) {
           var fc2  = fml.items[fci2];
-          var fcH2 = fc2.cl.length > 0 ? fc2.cl.length * (fc2.cl[0]!.lineH || LINE_H) : 0;
+          var fcH2 = fc2.cl.length > 0
+            ? (fc2.cl[fc2.cl.length - 1].y + (fc2.cl[fc2.cl.length - 1].lineH || LINE_H) - fc2.cl[0].y)
+            : 0;
           var crossOffset = 0;
           var fcAlignMode = fc2.alignSelf || 'stretch';
           if (fcAlignMode === 'center') { crossOffset = Math.floor((fml.lineMaxH - fcH2) / 2); }
