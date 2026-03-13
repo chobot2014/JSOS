@@ -115,6 +115,26 @@ function _parseBoxShadow(css: string): _BoxShadowLayer[] {
   return out;
 }
 
+// ── Text-shadow parser ────────────────────────────────────────────────────────
+interface _TextShadowLayer {
+  offsetX: number; offsetY: number; blur: number;
+  color: number;   // ARGB
+}
+var _textShadowCache = new Map<string, _TextShadowLayer[]>();
+function _parseTextShadow(css: string): _TextShadowLayer[] {
+  var cached = _textShadowCache.get(css);
+  if (cached) return cached;
+  // Reuse box-shadow parser — text-shadow has no inset/spread
+  var bsLayers = _parseBoxShadow(css);
+  var out: _TextShadowLayer[] = [];
+  for (var j = 0; j < bsLayers.length; j++) {
+    out.push({ offsetX: bsLayers[j].offsetX, offsetY: bsLayers[j].offsetY,
+               blur: bsLayers[j].blur, color: bsLayers[j].color });
+  }
+  _textShadowCache.set(css, out);
+  return out;
+}
+
 // ── TabState — per-tab browseable snapshot ────────────────────────────────────
 
 interface TabState {
@@ -960,6 +980,7 @@ export class BrowserApp implements App {
       // ── Box decoration — border-radius, borders, box-shadow (Tier 3.7 / 4.2) ──
       // Track opacity for this element — affects bg + text alpha
       var _decoOpacity = 1;
+      var _decoTextShadow: _TextShadowLayer[] | null = null;
       if (line.boxDeco) {
         var deco   = line.boxDeco;
         if (deco.opacity !== undefined && deco.opacity < 1) _decoOpacity = deco.opacity;
@@ -1037,6 +1058,25 @@ export class BrowserApp implements App {
           canvas.setClipRect(decoX, decoY, decoW, decoH);
           _clipStack.push({ endY: decoY + decoH, saved: _savedClip });
         }
+        // text-shadow: parse and track for span rendering below
+        if (deco.textShadow) {
+          _decoTextShadow = _parseTextShadow(deco.textShadow);
+        }
+        // CSS outline: drawn outside the border box (after border, with optional offset)
+        if (deco.outlineWidth && deco.outlineWidth > 0) {
+          var _olClr = deco.outlineColor !== undefined ? deco.outlineColor : 0xFF000000;
+          var _olOfs = deco.outlineOffset || 0;
+          var _olW   = deco.outlineWidth;
+          for (var _oli = 0; _oli < _olW; _oli++) {
+            var _olp = _oli + 1 + _olOfs;
+            canvas.drawRoundRect(
+              decoX - _olp, decoY - _olp,
+              decoW + _olp * 2, decoH + _olp * 2,
+              Math.max(0, decoR + _olp),
+              _olClr,
+            );
+          }
+        }
       }
 
       if (line.bgColor) {
@@ -1100,6 +1140,20 @@ export class BrowserApp implements App {
         var sCW = CHAR_W * sc;
         var sCH = CHAR_H * sc;
         if (span.codeBg) canvas.fillRect(span.x - 1, absY - 1, span.text.length * sCW + 2, sCH + 2, CLR_CODE_BG);
+        // text-shadow: draw shadow layers behind the main text
+        if (_decoTextShadow) {
+          for (var _tsi = 0; _tsi < _decoTextShadow.length; _tsi++) {
+            var _ts = _decoTextShadow[_tsi];
+            var _tsx = span.x + Math.round(_ts.offsetX);
+            var _tsy = absY + Math.round(_ts.offsetY);
+            var _tsClr = _ts.color;
+            if (sc > 1) {
+              canvas.drawTextScaled(_tsx, _tsy, span.text, _tsClr, sc);
+            } else {
+              canvas.drawText(_tsx, _tsy, span.text, _tsClr);
+            }
+          }
+        }
         if (span.mark)   canvas.fillRect(span.x, absY - 1, span.text.length * sCW, sCH + 2, CLR_MARK_BG);
         if (span.searchHit) {
           var hc = span.hitIdx === this._findCur ? CLR_FIND_CUR : CLR_FIND_MATCH;

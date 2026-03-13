@@ -1127,7 +1127,8 @@ function _layoutNodesImpl(
         // border-radius, border, box-shadow, opacity — painted before text in _drawContent
         // Also emit a tracking-only record for elements with elId (enables getBoundingClientRect)
         var _hasBoxDeco = nd.borderRadius || nd.borderWidth || nd.borderColor !== undefined
-                       || nd.boxShadow || nd.opacity !== undefined;
+                       || nd.boxShadow || nd.opacity !== undefined || nd.textShadow
+                       || nd.outlineWidth;
         var _needsTracking = nd.elId && lines.length > _blockLineStart && !lines[_blockLineStart].boxDeco;
         if ((_hasBoxDeco || _needsTracking) && lines.length > _blockLineStart) {
           var _blkH = y - yBeforeBlock;
@@ -1141,6 +1142,12 @@ function _layoutNodesImpl(
           if (bgColor !== undefined) _deco.bgColor = bgColor;
           if (bgGradient)      _deco.bgGradient   = bgGradient;
           if (nd.opacity !== undefined) _deco.opacity = nd.opacity;
+          if (nd.textShadow) _deco.textShadow = nd.textShadow;
+          if (nd.outlineWidth) {
+            _deco.outlineWidth = nd.outlineWidth;
+            if (nd.outlineColor !== undefined) _deco.outlineColor = nd.outlineColor;
+            if (nd.outlineOffset !== undefined) _deco.outlineOffset = nd.outlineOffset;
+          }
           // overflow:hidden: pixel-clip children to this box in paint pass (item 3.10)
           if (nd.overflow === 'hidden' || nd.overflow === 'scroll' || nd.overflow === 'auto') {
             _deco.overflowHidden = true;
@@ -1253,7 +1260,28 @@ function _layoutNodesImpl(
       if (bp.cssWidth && bp.cssWidth > 0) ww = Math.min(bp.cssWidth, maxX - xLeft);
       if (bp.cssHeight && bp.cssHeight > 0) {
         // For buttons, cap CSS height to prevent oversized rendering
-        if (bp.kind === 'submit' || bp.kind === 'reset' || bp.kind === 'button') {
+       
+      // object-fit: adjust image dimensions when CSS constrains the container
+      if (bp.kind === 'img' && bp.objectFit && bp.imgNatW && bp.imgNatH) {
+        var _ofNatW = bp.imgNatW, _ofNatH = bp.imgNatH;
+        var _ofFit = bp.objectFit;
+        if (_ofFit === 'contain' || _ofFit === 'scale-down') {
+          // Scale to fit within ww×wh maintaining aspect ratio
+          var _ofScaleW = ww / _ofNatW, _ofScaleH = wh / _ofNatH;
+          var _ofScale = Math.min(_ofScaleW, _ofScaleH);
+          if (_ofFit === 'scale-down') _ofScale = Math.min(_ofScale, 1); // don't enlarge
+          ww = Math.floor(_ofNatW * _ofScale);
+          wh = Math.floor(_ofNatH * _ofScale);
+        } else if (_ofFit === 'cover') {
+          // Scale to cover ww×wh — crop overflow (layout uses the CSS dimensions)
+          // Image data will be cropped during blitting; layout just ensures container sizing
+        } else if (_ofFit === 'none') {
+          // Natural size, clipped to container
+          ww = Math.min(_ofNatW, ww);
+          wh = Math.min(_ofNatH, wh);
+        }
+        // 'fill' = default stretch behavior (no adjustment needed)
+      } if (bp.kind === 'submit' || bp.kind === 'reset' || bp.kind === 'button') {
           wh = Math.min(bp.cssHeight, WIDGET_BTN_H + 16);
         } else {
           wh = bp.cssHeight;

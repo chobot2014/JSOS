@@ -686,6 +686,10 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (curCSS.borderStyle  !== undefined) blk.borderStyle  = curCSS.borderStyle;
     if (curCSS.opacity  !== undefined) blk.opacity  = curCSS.opacity;
     if (curCSS.boxShadow)              blk.boxShadow  = curCSS.boxShadow;
+    if (curCSS.textShadow)             blk.textShadow = curCSS.textShadow;
+    if (curCSS.outlineWidth)           blk.outlineWidth  = curCSS.outlineWidth;
+    if (curCSS.outlineColor !== undefined) blk.outlineColor = curCSS.outlineColor;
+    if (curCSS.outlineOffset !== undefined) blk.outlineOffset = curCSS.outlineOffset;
     if (curCSS.contain)                { blk.contain   = curCSS.contain; if (blk.elId) markContainLayout(blk.elId); }
     if (curCSS.position && curCSS.position !== 'static') {
       blk.position = curCSS.position;
@@ -804,6 +808,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     // Capture CSS width/height for widget sizing
     if (curCSS.width && curCSS.width > 0) bp.cssWidth = curCSS.width;
     if (curCSS.height && curCSS.height > 0) bp.cssHeight = curCSS.height;
+    if (curCSS.objectFit) bp.objectFit = curCSS.objectFit;
     widgets.push(bp);
     var wNode: RenderNode = { type: 'widget', spans: [], widget: bp };
     if (curCSS.align) wNode.textAlign = curCSS.align;

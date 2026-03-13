@@ -78,6 +78,10 @@ export interface RenderNode {
   borderStyle?:  string;
   opacity?:      number;
   boxShadow?:    string;
+  textShadow?:   string;   // CSS text-shadow
+  outlineWidth?:  number;  // CSS outline-width
+  outlineColor?:  number;  // CSS outline-color
+  outlineOffset?: number;  // CSS outline-offset
   contain?:      string;   // CSS contain (layout / paint / strict / content)
   // Positioning
   position?:     'static' | 'relative' | 'absolute' | 'fixed' | 'sticky';
@@ -214,6 +218,10 @@ export interface BoxDecoration {
   bgColor?:      number;  // element background (overrides line.bgColor for rounding)
   bgGradient?:   string;  // CSS gradient string
   opacity?:      number;  // 0.0‒1.0
+  textShadow?:   string;  // CSS text-shadow for all text within this box
+  outlineWidth?:  number;  // px — CSS outline width
+  outlineColor?:  number;  // ARGB — CSS outline color
+  outlineOffset?: number;  // px — CSS outline-offset
   overflowHidden?: boolean; // overflow:hidden — pixel-clip children to this box (3.10)
 }
 
@@ -261,6 +269,8 @@ export interface WidgetBlueprint {
   cssWidth?:  number;
   /** CSS-specified height in pixels (overrides rows). */
   cssHeight?: number;
+  /** CSS object-fit for images. */
+  objectFit?: 'fill' | 'contain' | 'cover' | 'none' | 'scale-down';
 }
 
 /** A widget after layout — knows its position in page space. */
