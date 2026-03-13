@@ -724,8 +724,9 @@ export class VElement extends VNode {
     if (shouldOpen) this.showPopover(); else this.hidePopover();
     return shouldOpen;
   }
-  // ── HTMLDialogElement — dialog.showModal() / dialog.show() / dialog.close() ─
+  // ── HTMLDialogElement / HTMLDetailsElement — open property (R16: add setter) ─
   get open(): boolean { return this.hasAttribute('open'); }
+  set open(v: boolean) { if (v) this.setAttribute('open', ''); else this.removeAttribute('open'); }
   showModal(): void { this.setAttribute('open', ''); this.setAttribute('aria-modal', 'true'); }
   show(): void { this.setAttribute('open', ''); }
   close(returnValue?: string): void {
@@ -2534,12 +2535,48 @@ export function _matchSel(sel: string, el: VElement): boolean {
 }
 
 function _splitCombinators(sel: string): Array<{ comb: ' ' | '>' | '+' | '~' | ''; part: string }> {
-  // tokenise into [comb, part] pairs
+  // R16: proper tokeniser that respects brackets and quotes in attribute selectors
   var res: Array<{ comb: ' ' | '>' | '+' | '~' | ''; part: string }> = [];
-  var re = /\s*([>+~]?)\s*([#.\w\-\[\]:*][^>+~ ]*)/g; var m: RegExpExecArray | null;
-  while ((m = re.exec(sel)) !== null) {
-    var comb = (m[1] as ' ' | '>' | '+' | '~' | '') || (res.length ? ' ' : '') as ' ' | '>' | '+' | '~' | '';
-    res.push({ comb, part: m[2] });
+  var i = 0; var n = sel.length;
+  while (i < n) {
+    // Skip whitespace
+    while (i < n && sel[i] === ' ') i++;
+    if (i >= n) break;
+    // Check for combinator character
+    var comb: ' ' | '>' | '+' | '~' | '' = res.length ? ' ' : '';
+    if (sel[i] === '>' || sel[i] === '+' || sel[i] === '~') {
+      comb = sel[i] as '>' | '+' | '~';
+      i++;
+      while (i < n && sel[i] === ' ') i++;
+    }
+    if (i >= n) break;
+    // Read selector part — respect [] and () to handle quoted attribute values
+    var start = i;
+    while (i < n) {
+      if (sel[i] === '[') {
+        i++;
+        while (i < n && sel[i] !== ']') {
+          if (sel[i] === '"' || sel[i] === "'") {
+            var q = sel[i++];
+            while (i < n && sel[i] !== q) i++;
+            if (i < n) i++; // skip closing quote
+          } else { i++; }
+        }
+        if (i < n) i++; // skip ]
+      } else if (sel[i] === '(') {
+        var depth = 1; i++;
+        while (i < n && depth > 0) {
+          if (sel[i] === '(') depth++;
+          else if (sel[i] === ')') depth--;
+          if (depth > 0) i++;
+        }
+        if (i < n) i++; // skip )
+      } else if (sel[i] === ' ' || sel[i] === '>' || sel[i] === '+' || sel[i] === '~') {
+        break;
+      } else { i++; }
+    }
+    var part = sel.slice(start, i);
+    if (part) res.push({ comb, part });
   }
   return res;
 }

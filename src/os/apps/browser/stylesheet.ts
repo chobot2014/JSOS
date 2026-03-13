@@ -1430,6 +1430,15 @@ export function computeElementStyle(
     }
   }
 
+  // ── Inline !important beats sheet !important (CSS cascade level, R16) ─────
+  // Per CSS spec, inline !important has highest precedence after transitions.
+  if (inlineStyle && importantProps) {
+    var _inlImp = _declBlockCache.get(inlineStyle);
+    if (_inlImp && _inlImp.important && _inlImp.important.size > 0) {
+      mergeProps(result, _inlImp, _inlImp.important);
+    }
+  }
+
   return result;
 }
 

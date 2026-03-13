@@ -360,6 +360,9 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
   var inStyle      = false;
   var inStyleBuf   = '';
   var skipUntilClose = '';  // skip all content until this close tag (iframe, video, etc.)
+  // ── <details> closed-state tracking (R16) ────────────────────────────────
+  var _closedDetailsDepth = 0;      // nesting depth of <details> without `open`
+  var _inSummaryOfClosed  = false;  // true while rendering <summary> inside a closed <details>
   // ── SVG inline tracking (item 371) ───────────────────────────────────────
   var inSVG      = false;
   var svgDepth   = 0;
@@ -1093,6 +1096,23 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       continue;
     }
 
+    // ── <details> closed-children filter (R16) ──────────────────────────
+    // When inside a <details> that lacks the `open` attribute, skip all
+    // children except the first <summary> element.
+    if (_closedDetailsDepth > 0 && !_inSummaryOfClosed) {
+      if (tok.kind === 'open' && tok.tag === 'summary') {
+        _inSummaryOfClosed = true;
+        // Fall through to normal processing below
+      } else if (tok.kind === 'close' && tok.tag === 'details') {
+        // Fall through to normal close processing
+      } else {
+        // Skip: maintain CSS stack but produce no visible output
+        if (tok.kind === 'open' || tok.kind === 'self') applyStyle(tok.tag, tok.attrs, true);
+        else if (tok.kind === 'close') popCSS();
+        continue;
+      }
+    }
+
     if (tok.kind === 'open' || tok.kind === 'self') {
       if (skipDepth > 0) {
         // Inside hidden subtree — skip CSS matching (pure waste) but maintain stacks
@@ -1326,10 +1346,12 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
         }
 
         // ── <details> / <summary> ────────────────────────────────────────────
-        // Details are always treated as "open" — summary becomes a heading-like block.
+        // R16: respect `open` attribute — hide non-<summary> children when absent.
         case 'details':
           applyStyle(tok.tag, tok.attrs); flushInline();
-          nodes.push({ type: 'p-break', spans: [] }); break;
+          nodes.push({ type: 'p-break', spans: [] });
+          if (!tok.attrs.has('open')) { _closedDetailsDepth++; }
+          break;
         case 'summary': {
           flushInline();
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
@@ -1891,11 +1913,13 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
         case 'summary':
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
           nodes.push({ type: 'p-break', spans: [] });
+          if (_inSummaryOfClosed) _inSummaryOfClosed = false;
           popCSS(); break;
 
         case 'details':
           flushInline();
           nodes.push({ type: 'p-break', spans: [] });
+          if (_closedDetailsDepth > 0) _closedDetailsDepth--;
           popCSS(); break;
 
         case 'form':

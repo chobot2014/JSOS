@@ -427,12 +427,12 @@ export function parseLengthPx(val: string, containerPx?: number): number {
  * Parse a CSS margin/padding shorthand (1–4 values) into [top,right,bottom,left].
  * Values returned in px. Handles keywords (auto→0).
  */
-function parseBox4(val: string): [number, number, number, number] {
+function parseBox4(val: string, containerPx?: number): [number, number, number, number] {
   var parts = val.trim().split(/\s+/);
-  var t = parseLengthPx(parts[0] || '0');
-  var r = parseLengthPx(parts[1] || parts[0] || '0');
-  var b = parseLengthPx(parts[2] || parts[0] || '0');
-  var l = parseLengthPx(parts[3] || parts[1] || parts[0] || '0');
+  var t = parseLengthPx(parts[0] || '0', containerPx);
+  var r = parseLengthPx(parts[1] || parts[0] || '0', containerPx);
+  var b = parseLengthPx(parts[2] || parts[0] || '0', containerPx);
+  var l = parseLengthPx(parts[3] || parts[1] || parts[0] || '0', containerPx);
   return [isNaN(t)?0:t, isNaN(r)?0:r, isNaN(b)?0:b, isNaN(l)?0:l];
 }
 
@@ -762,21 +762,21 @@ export function parseInlineStyle(style: string): CSSProps {
         if (vl !== 'none') { var mxhv = parseLengthPx(vl); if (!isNaN(mxhv) && mxhv > 0) p.maxHeight = mxhv; } break;
       }
 
-      // ── Padding ───────────────────────────────────────────────────────────
+      // ── Padding (R16: pass viewport width as containerPx for % resolution) ─
       case 'padding': {
-        var [pt4,pr4,pb4,pl4] = parseBox4(val);
+        var [pt4,pr4,pb4,pl4] = parseBox4(val, _vpW);
         p.paddingTop = pt4; p.paddingRight = pr4; p.paddingBottom = pb4; p.paddingLeft = pl4; break;
       }
-      case 'padding-top':    case 'padding-block-start':  { var ptv = parseLengthPx(vl); if (!isNaN(ptv)) p.paddingTop    = ptv; break; }
-      case 'padding-right':  case 'padding-inline-end':   { var prv2 = parseLengthPx(vl); if (!isNaN(prv2)) p.paddingRight  = prv2; break; }
-      case 'padding-bottom': case 'padding-block-end':    { var pbv = parseLengthPx(vl); if (!isNaN(pbv)) p.paddingBottom = pbv; break; }
-      case 'padding-left':   case 'padding-inline-start': { var plv = parseLengthPx(vl); if (!isNaN(plv)) p.paddingLeft   = plv; break; }
-      case 'padding-block':  { var [ptb,_prb,pbb] = parseBox4(val); p.paddingTop = ptb; p.paddingBottom = pbb; break; }
-      case 'padding-inline': { var [_pti,pri,_pbi,pli] = parseBox4(val); p.paddingRight = pri; p.paddingLeft = pli; break; }
+      case 'padding-top':    case 'padding-block-start':  { var ptv = parseLengthPx(vl, _vpW); if (!isNaN(ptv)) p.paddingTop    = ptv; break; }
+      case 'padding-right':  case 'padding-inline-end':   { var prv2 = parseLengthPx(vl, _vpW); if (!isNaN(prv2)) p.paddingRight  = prv2; break; }
+      case 'padding-bottom': case 'padding-block-end':    { var pbv = parseLengthPx(vl, _vpW); if (!isNaN(pbv)) p.paddingBottom = pbv; break; }
+      case 'padding-left':   case 'padding-inline-start': { var plv = parseLengthPx(vl, _vpW); if (!isNaN(plv)) p.paddingLeft   = plv; break; }
+      case 'padding-block':  { var [ptb,_prb,pbb] = parseBox4(val, _vpW); p.paddingTop = ptb; p.paddingBottom = pbb; break; }
+      case 'padding-inline': { var [_pti,pri,_pbi,pli] = parseBox4(val, _vpW); p.paddingRight = pri; p.paddingLeft = pli; break; }
 
-      // ── Margin ────────────────────────────────────────────────────────────
+      // ── Margin (R16: pass viewport width as containerPx for % resolution) ─
       case 'margin': {
-        var [mt4,mr4,mb4,ml4] = parseBox4(val);
+        var [mt4,mr4,mb4,ml4] = parseBox4(val, _vpW);
         p.marginTop = mt4; p.marginRight = mr4; p.marginBottom = mb4; p.marginLeft = ml4;
         // Detect auto tokens for centering (margin: 0 auto, margin: auto, etc.)
         var _mparts = val.trim().split(/\s+/);
@@ -786,12 +786,12 @@ export function parseInlineStyle(style: string): CSSProps {
         if (_mR === 'auto') p.marginRightAuto = true;
         break;
       }
-      case 'margin-top':    case 'margin-block-start':  { var mtv = parseLengthPx(vl); if (!isNaN(mtv)) p.marginTop    = mtv; break; }
-      case 'margin-right':  case 'margin-inline-end':   { if (vl === 'auto') { p.marginRightAuto = true; p.marginRight = 0; } else { var mrv = parseLengthPx(vl); if (!isNaN(mrv)) p.marginRight  = mrv; } break; }
-      case 'margin-bottom': case 'margin-block-end':    { var mbv = parseLengthPx(vl); if (!isNaN(mbv)) p.marginBottom = mbv; break; }
-      case 'margin-left':   case 'margin-inline-start': { if (vl === 'auto') { p.marginLeftAuto = true; p.marginLeft = 0; } else { var mlv = parseLengthPx(vl); if (!isNaN(mlv)) p.marginLeft   = mlv; } break; }
-      case 'margin-block':  { var [mtb2,_mrb2,mbb2] = parseBox4(val); p.marginTop = mtb2; p.marginBottom = mbb2; break; }
-      case 'margin-inline': { var [_mti2,mri2,_mbi2,mli2] = parseBox4(val); p.marginRight = mri2; p.marginLeft = mli2; break; }
+      case 'margin-top':    case 'margin-block-start':  { var mtv = parseLengthPx(vl, _vpW); if (!isNaN(mtv)) p.marginTop    = mtv; break; }
+      case 'margin-right':  case 'margin-inline-end':   { if (vl === 'auto') { p.marginRightAuto = true; p.marginRight = 0; } else { var mrv = parseLengthPx(vl, _vpW); if (!isNaN(mrv)) p.marginRight  = mrv; } break; }
+      case 'margin-bottom': case 'margin-block-end':    { var mbv = parseLengthPx(vl, _vpW); if (!isNaN(mbv)) p.marginBottom = mbv; break; }
+      case 'margin-left':   case 'margin-inline-start': { if (vl === 'auto') { p.marginLeftAuto = true; p.marginLeft = 0; } else { var mlv = parseLengthPx(vl, _vpW); if (!isNaN(mlv)) p.marginLeft   = mlv; } break; }
+      case 'margin-block':  { var [mtb2,_mrb2,mbb2] = parseBox4(val, _vpW); p.marginTop = mtb2; p.marginBottom = mbb2; break; }
+      case 'margin-inline': { var [_mti2,mri2,_mbi2,mli2] = parseBox4(val, _vpW); p.marginRight = mri2; p.marginLeft = mli2; break; }
 
       // ── Border ────────────────────────────────────────────────────────────
       case 'border': {
