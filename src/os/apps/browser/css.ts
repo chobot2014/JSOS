@@ -653,7 +653,10 @@ export function parseInlineStyle(style: string): CSSProps {
 
       // ── Dimensions ────────────────────────────────────────────────────────
       case 'width': {
-        if (vl !== 'auto') {
+        if (vl === 'fit-content' || vl === '-webkit-fill-available' || vl === '-moz-fit-content') { p.widthKeyword = 'fit-content'; }
+        else if (vl === 'min-content' || vl === '-webkit-min-content') { p.widthKeyword = 'min-content'; }
+        else if (vl === 'max-content' || vl === '-webkit-max-content') { p.widthKeyword = 'max-content'; }
+        else if (vl !== 'auto') {
           if (vl.endsWith('%')) { p.widthPct = parseFloat(vl); }
           else { var wv = parseLengthPx(vl); if (!isNaN(wv) && wv > 0) p.width = wv; }
         } break;

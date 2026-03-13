@@ -236,6 +236,101 @@ export class TextAtlas {
       else if (ch === 0x00AB || ch === 0x00BB) ch = 0x22; // guillemets → "
       else if (ch === 0x2192) ch = 0x3E; // → → >
       else if (ch === 0x2190) ch = 0x3C; // ← → <
+      // Extended Latin / currency / symbols
+      else if (ch === 0x20AC) ch = 0x45; // € → E
+      else if (ch === 0x00A3) ch = 0x4C; // £ → L
+      else if (ch === 0x00A5) ch = 0x59; // ¥ → Y
+      else if (ch === 0x00A9) ch = 0x43; // © → C
+      else if (ch === 0x00AE) ch = 0x52; // ® → R
+      else if (ch === 0x2122) ch = 0x54; // ™ → T
+      else if (ch === 0x00B0) ch = 0x6F; // ° → o
+      else if (ch === 0x00B7) ch = 0x2E; // · → .
+      else if (ch === 0x00D7) ch = 0x78; // × → x
+      else if (ch === 0x00F7) ch = 0x2F; // ÷ → /
+      else if (ch === 0x2260) ch = 0x21; // ≠ → !
+      else if (ch === 0x2264) ch = 0x3C; // ≤ → <
+      else if (ch === 0x2265) ch = 0x3E; // ≥ → >
+      else if (ch === 0x221E) ch = 0x38; // ∞ → 8
+      else if (ch === 0x2191) ch = 0x5E; // ↑ → ^
+      else if (ch === 0x2193) ch = 0x76; // ↓ → v
+      else if (ch === 0x2194) ch = 0x2D; // ↔ → -
+      else if (ch === 0x25B6 || ch === 0x25BA) ch = 0x3E; // ▶/► → >
+      else if (ch === 0x25C0 || ch === 0x25C4) ch = 0x3C; // ◀/◄ → <
+      else if (ch === 0x2605 || ch === 0x2606) ch = 0x2A; // ★/☆ → *
+      else if (ch === 0x2713 || ch === 0x2714) ch = 0x56; // ✓/✔ → V
+      else if (ch === 0x2717 || ch === 0x2718) ch = 0x58; // ✗/✘ → X
+      else if (ch === 0x00C0 || ch === 0x00C1 || ch === 0x00C2 || ch === 0x00C3 || ch === 0x00C4 || ch === 0x00C5) ch = 0x41; // À-Å → A
+      else if (ch === 0x00C7) ch = 0x43; // Ç → C
+      else if (ch === 0x00C8 || ch === 0x00C9 || ch === 0x00CA || ch === 0x00CB) ch = 0x45; // È-Ë → E
+      else if (ch === 0x00CC || ch === 0x00CD || ch === 0x00CE || ch === 0x00CF) ch = 0x49; // Ì-Ï → I
+      else if (ch === 0x00D1) ch = 0x4E; // Ñ → N
+      else if (ch === 0x00D2 || ch === 0x00D3 || ch === 0x00D4 || ch === 0x00D5 || ch === 0x00D6 || ch === 0x00D8) ch = 0x4F; // Ò-Ö,Ø → O
+      else if (ch === 0x00D9 || ch === 0x00DA || ch === 0x00DB || ch === 0x00DC) ch = 0x55; // Ù-Ü → U
+      else if (ch === 0x00DD) ch = 0x59; // Ý → Y
+      else if (ch === 0x00E0 || ch === 0x00E1 || ch === 0x00E2 || ch === 0x00E3 || ch === 0x00E4 || ch === 0x00E5) ch = 0x61; // à-å → a
+      else if (ch === 0x00E7) ch = 0x63; // ç → c
+      else if (ch === 0x00E8 || ch === 0x00E9 || ch === 0x00EA || ch === 0x00EB) ch = 0x65; // è-ë → e
+      else if (ch === 0x00EC || ch === 0x00ED || ch === 0x00EE || ch === 0x00EF) ch = 0x69; // ì-ï → i
+      else if (ch === 0x00F1) ch = 0x6E; // ñ → n
+      else if (ch === 0x00F2 || ch === 0x00F3 || ch === 0x00F4 || ch === 0x00F5 || ch === 0x00F6 || ch === 0x00F8) ch = 0x6F; // ò-ö,ø → o
+      else if (ch === 0x00F9 || ch === 0x00FA || ch === 0x00FB || ch === 0x00FC) ch = 0x75; // ù-ü → u
+      else if (ch === 0x00FD || ch === 0x00FF) ch = 0x79; // ý,ÿ → y
+      else if (ch === 0x0100 || ch === 0x0102 || ch === 0x0104) ch = 0x41; // Ā,Ă,Ą → A
+      else if (ch === 0x0101 || ch === 0x0103 || ch === 0x0105) ch = 0x61; // ā,ă,ą → a
+      else if (ch === 0x0106 || ch === 0x0108 || ch === 0x010C) ch = 0x43; // Ć,Ĉ,Č → C
+      else if (ch === 0x0107 || ch === 0x0109 || ch === 0x010D) ch = 0x63; // ć,ĉ,č → c
+      else if (ch === 0x010E || ch === 0x0110) ch = 0x44; // Ď,Đ → D
+      else if (ch === 0x010F || ch === 0x0111) ch = 0x64; // ď,đ → d
+      else if (ch === 0x0112 || ch === 0x0116 || ch === 0x0118 || ch === 0x011A) ch = 0x45; // Ē,Ė,Ę,Ě → E
+      else if (ch === 0x0113 || ch === 0x0117 || ch === 0x0119 || ch === 0x011B) ch = 0x65; // ē,ė,ę,ě → e
+      else if (ch === 0x011E || ch === 0x0122) ch = 0x47; // Ğ,Ģ → G
+      else if (ch === 0x011F || ch === 0x0123) ch = 0x67; // ğ,ģ → g
+      else if (ch === 0x012A || ch === 0x012E || ch === 0x0130) ch = 0x49; // Ī,Į,İ → I
+      else if (ch === 0x012B || ch === 0x012F || ch === 0x0131) ch = 0x69; // ī,į,ı → i
+      else if (ch === 0x0136) ch = 0x4B; // Ķ → K
+      else if (ch === 0x0137) ch = 0x6B; // ķ → k
+      else if (ch === 0x0139 || ch === 0x013B || ch === 0x013D) ch = 0x4C; // Ĺ,Ļ,Ľ → L
+      else if (ch === 0x013A || ch === 0x013C || ch === 0x013E || ch === 0x0142) ch = 0x6C; // ĺ,ļ,ľ,ł → l
+      else if (ch === 0x0141) ch = 0x4C; // Ł → L
+      else if (ch === 0x0143 || ch === 0x0145 || ch === 0x0147) ch = 0x4E; // Ń,Ņ,Ň → N
+      else if (ch === 0x0144 || ch === 0x0146 || ch === 0x0148) ch = 0x6E; // ń,ņ,ň → n
+      else if (ch === 0x0150 || ch === 0x0152) ch = 0x4F; // Ő,Œ → O
+      else if (ch === 0x0151 || ch === 0x0153) ch = 0x6F; // ő,œ → o
+      else if (ch === 0x0154 || ch === 0x0158) ch = 0x52; // Ŕ,Ř → R
+      else if (ch === 0x0155 || ch === 0x0159) ch = 0x72; // ŕ,ř → r
+      else if (ch === 0x015A || ch === 0x015E || ch === 0x0160) ch = 0x53; // Ś,Ş,Š → S
+      else if (ch === 0x015B || ch === 0x015F || ch === 0x0161) ch = 0x73; // ś,ş,š → s
+      else if (ch === 0x0162 || ch === 0x0164) ch = 0x54; // Ţ,Ť → T
+      else if (ch === 0x0163 || ch === 0x0165) ch = 0x74; // ţ,ť → t
+      else if (ch === 0x016A || ch === 0x016E || ch === 0x0170 || ch === 0x0172) ch = 0x55; // Ū,Ů,Ű,Ų → U
+      else if (ch === 0x016B || ch === 0x016F || ch === 0x0171 || ch === 0x0173) ch = 0x75; // ū,ů,ű,ų → u
+      else if (ch === 0x0179 || ch === 0x017B || ch === 0x017D) ch = 0x5A; // Ź,Ż,Ž → Z
+      else if (ch === 0x017A || ch === 0x017C || ch === 0x017E) ch = 0x7A; // ź,ż,ž → z
+      else if (ch === 0x00DF) ch = 0x73; // ß → s
+      else if (ch === 0x00C6) ch = 0x41; // Æ → A
+      else if (ch === 0x00E6) ch = 0x61; // æ → a
+      else if (ch === 0x00DE) ch = 0x54; // Þ → T
+      else if (ch === 0x00FE) ch = 0x74; // þ → t
+      else if (ch === 0x00F0) ch = 0x64; // ð → d
+      else if (ch === 0x00D0) ch = 0x44; // Ð → D
+      else if (ch === 0x2010 || ch === 0x2011 || ch === 0x2012 || ch === 0x2015) ch = 0x2D; // hyphens → -
+      else if (ch === 0x2032) ch = 0x27; // ′ → '
+      else if (ch === 0x2033) ch = 0x22; // ″ → "
+      else if (ch === 0x00B1) ch = 0x2B; // ± → +
+      else if (ch === 0x00BC) ch = 0x25; // ¼ → %  (approximation)
+      else if (ch === 0x00BD) ch = 0x25; // ½ → %
+      else if (ch === 0x00BE) ch = 0x25; // ¾ → %
+      else if (ch === 0x00BF) ch = 0x3F; // ¿ → ?
+      else if (ch === 0x00A1) ch = 0x21; // ¡ → !
+      else if (ch === 0x00B6) ch = 0x50; // ¶ → P
+      else if (ch === 0x00A7) ch = 0x53; // § → S
+      else if (ch === 0x00B2) ch = 0x32; // ² → 2
+      else if (ch === 0x00B3) ch = 0x33; // ³ → 3
+      else if (ch === 0x00B9) ch = 0x31; // ¹ → 1
+      else if (ch === 0x00B5) ch = 0x75; // µ → u
+      else if (ch === 0x2116) ch = 0x4E; // № → N
+      else if (ch === 0x2212) ch = 0x2D; // − (minus sign) → -
+      else if (ch === 0x00AD) ch = 0x2D; // soft hyphen → -
       else return; // Unknown Unicode — skip
     }
     if (ch < 0x20) return;

@@ -621,7 +621,18 @@ function _layoutNodesImpl(
           if (fcFinalH[fcci2] > fccUsedH) fcCurY += fcFinalH[fcci2] - fccUsedH;
           if (fcci2 < fcChildData.length - 1) fcCurY += gap + fcGapExtra;
         }
-        y = fcCurY; or content width)
+        y = fcCurY;
+        lastBottomMargin = nd.marginBottom || 0;
+        continue;
+      }
+
+      // ── flex-direction: row / row-reverse (default) ─────────────────────────
+      if (fDir === 'row-reverse') fSorted.reverse();
+
+      var fxUsedGap  = gap * Math.max(0, fSorted.length - 1);
+      var fxFreeInit = fxAvail - fxUsedGap;
+      // Two-pass flex algorithm: compute hypothetical main sizes
+      // flex-basis overrides boxWidth for initial main size; 0 means auto (use boxWidth or content width)
       var fBaseW: number[] = [];
       for (var fi = 0; fi < fSorted.length; fi++) {
         var _fb = fSorted[fi].flexBasis;
@@ -634,18 +645,7 @@ function _layoutNodesImpl(
           }
           _bw = Math.ceil(_cw0);
         }
-        fBaseW.push(_bw
-      // ── flex-direction: row / row-reverse (default) ─────────────────────────
-      if (fDir === 'row-reverse') fSorted.reverse();
-
-      var fxUsedGap  = gap * Math.max(0, fSorted.length - 1);
-      var fxFreeInit = fxAvail - fxUsedGap;
-      // Two-pass flex algorithm: compute hypothetical main sizes
-      // flex-basis overrides boxWidth for initial main size; 0 means auto (use boxWidth)
-      var fBaseW: number[] = [];
-      for (var fi = 0; fi < fSorted.length; fi++) {
-        var _fb = fSorted[fi].flexBasis;
-        fBaseW.push((_fb && _fb > 0) ? _fb : (fSorted[fi].boxWidth ?? 0));
+        fBaseW.push(_bw);
       }
       var fFixedTotal = 0, flexibleCount = 0;
       for (var fi2 = 0; fi2 < fSorted.length; fi2++) {
@@ -853,7 +853,7 @@ function _layoutNodesImpl(
       y = fCurLineY;
       lastBottomMargin = nd.marginBottom || 0;
       continue;
-    } && !nd.heightPct
+    }
 
     if (nd.type === 'block' || nd.type === 'aside') {
       // ── Skip empty blocks: no text, no visual properties, no height ─────────
@@ -878,12 +878,36 @@ function _layoutNodesImpl(
       var bgGradient = nd.bgGradient;
       // Resolve percentage width against container (item 2.1)
       var _effectBoxW = nd.boxWidth || 0;
-      i
+      if (nd.widthPct && nd.widthPct > 0) {
+        _effectBoxW = Math.floor((contentW - CONTENT_PAD * 2) * nd.widthPct / 100);
+      }
+      // Intrinsic sizing keywords: fit-content / min-content / max-content
+      if (!_effectBoxW && nd.widthKeyword) {
+        var _intrW = 0;
+        for (var _iwi = 0; _iwi < nd.spans.length; _iwi++) {
+          _intrW += nd.spans[_iwi].text.length * CHAR_W * (nd.spans[_iwi].fontScale || 1);
+        }
+        _intrW = Math.ceil(_intrW) + (nd.paddingLeft || 0) + (nd.paddingRight || 0);
+        if (nd.widthKeyword === 'fit-content') {
+          _effectBoxW = Math.min(_intrW, contentW - CONTENT_PAD * 2);
+        } else if (nd.widthKeyword === 'max-content') {
+          _effectBoxW = _intrW;
+        } else if (nd.widthKeyword === 'min-content') {
+          // min-content: narrowest word
+          var _minW = CHAR_W;
+          for (var _mwi = 0; _mwi < nd.spans.length; _mwi++) {
+            var _words = nd.spans[_mwi].text.split(' ');
+            for (var _mwj = 0; _mwj < _words.length; _mwj++) {
+              var _ww = _words[_mwj].length * CHAR_W * (nd.spans[_mwi].fontScale || 1);
+              if (_ww > _minW) _minW = _ww;
+            }
+          }
+          _effectBoxW = Math.ceil(_minW) + (nd.paddingLeft || 0) + (nd.paddingRight || 0);
+        }
+      }
       // Resolve percentage height against viewport (containing block approximation)
       if (!nd.height && nd.heightPct && nd.heightPct > 0) {
         nd.height = Math.floor(getViewport().h * nd.heightPct / 100);
-      }f (nd.widthPct && nd.widthPct > 0) {
-        _effectBoxW = Math.floor((contentW - CONTENT_PAD * 2) * nd.widthPct / 100);
       }
       // Clamp to min-width / max-width
       if (nd.minWidth && nd.minWidth > 0 && _effectBoxW > 0 && _effectBoxW < nd.minWidth) {
@@ -963,7 +987,46 @@ function _layoutNodesImpl(
         }
         // Apply padding-top before block content
         if (nd.paddingTop && nd.paddingTop > 0) blank(nd.paddingTop);
-        commit(flowSpans(ndSpans, blkLeft, blkMaxX, lh, CLR_BODY, _combinedOpts));
+        // ── Multi-column layout (CSS column-count / column-width) ──────────
+        var _colCount = nd.columnCount || 0;
+        var _colWidth = nd.columnWidth || 0;
+        var _colGapPx = nd.columnGap ?? 16; // default 1em ≈ 16px
+        var _availW   = blkMaxX - blkLeft;
+        if (!_colCount && _colWidth > 0) {
+          // Derive column count from column-width hint
+          _colCount = Math.max(1, Math.floor((_availW + _colGapPx) / (_colWidth + _colGapPx)));
+        }
+        if (_colCount > 1) {
+          // Lay out into N columns
+          var _colW = Math.floor((_availW - (_colCount - 1) * _colGapPx) / _colCount);
+          // Flow all spans in full width first to get total lines
+          var _mcAllLines = flowSpans(ndSpans, 0, _colW, lh, CLR_BODY, _baseFlowOpts);
+          // Distribute lines across columns
+          var _linesPerCol = Math.ceil(_mcAllLines.length / _colCount);
+          if (_linesPerCol < 1) _linesPerCol = 1;
+          var _mcY0 = y;
+          var _mcMaxH = 0;
+          for (var _mci = 0; _mci < _colCount; _mci++) {
+            var _mcStart = _mci * _linesPerCol;
+            var _mcEnd   = Math.min(_mcStart + _linesPerCol, _mcAllLines.length);
+            if (_mcStart >= _mcAllLines.length) break;
+            var _mcXOff  = blkLeft + _mci * (_colW + _colGapPx);
+            var _mcColY  = _mcY0;
+            for (var _mcj = _mcStart; _mcj < _mcEnd; _mcj++) {
+              var _mcLine = _mcAllLines[_mcj];
+              var _mcShifted = _mcLine.nodes.map(function(n) { return { ...n, x: n.x + _mcXOff }; });
+              lines.push({ y: _mcColY, nodes: _mcShifted, lineH: _mcLine.lineH,
+                           bgColor: _mcLine.bgColor, bgGradient: _mcLine.bgGradient,
+                           preBg: _mcLine.preBg, boxDeco: _mcLine.boxDeco });
+              _mcColY += _mcLine.lineH || lh;
+            }
+            var _mcColH = _mcColY - _mcY0;
+            if (_mcColH > _mcMaxH) _mcMaxH = _mcColH;
+          }
+          y = _mcY0 + _mcMaxH;
+        } else {
+          commit(flowSpans(ndSpans, blkLeft, blkMaxX, lh, CLR_BODY, _combinedOpts));
+        }
         // Apply padding-bottom after block content
         if (nd.paddingBottom && nd.paddingBottom > 0) blank(nd.paddingBottom);
         // text-align: shift committed line nodes for center / right / justify

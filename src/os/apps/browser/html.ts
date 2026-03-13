@@ -671,6 +671,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (curCSS.align)                   blk.textAlign    = curCSS.align;
     if (curCSS.width  && curCSS.width > 0) blk.boxWidth  = curCSS.width;
     if (curCSS.widthPct && curCSS.widthPct > 0) blk.widthPct = curCSS.widthPct;
+    if (curCSS.widthKeyword) blk.widthKeyword = curCSS.widthKeyword;
     if (curCSS.minWidth !== undefined) blk.minWidth  = curCSS.minWidth;
     if (curCSS.maxWidth !== undefined) blk.maxWidth  = curCSS.maxWidth;
     if (curCSS.marginLeftAuto || curCSS.marginRightAuto) blk.centerBlock = true;
@@ -727,6 +728,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (curCSS.gridAutoFlow)        blk.gridAutoFlow        = curCSS.gridAutoFlow;
     if (curCSS.rowGap    !== undefined) blk.rowGap    = curCSS.rowGap;
     if (curCSS.columnGap !== undefined) blk.columnGap = curCSS.columnGap;
+    if (curCSS.columnCount !== undefined && curCSS.columnCount !== 'auto') blk.columnCount = curCSS.columnCount as number;
+    if (curCSS.columnWidth !== undefined && curCSS.columnWidth !== 'auto') blk.columnWidth = curCSS.columnWidth as number;
     if (curCSS.justifyItems) blk.justifyItems = curCSS.justifyItems;
     // Grid item placement
     if (curCSS.gridColumn)      blk.gridColumn      = curCSS.gridColumn;

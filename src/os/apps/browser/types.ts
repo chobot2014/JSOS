@@ -62,6 +62,7 @@ export interface RenderNode {
   paddingBottom?: number;
   boxWidth?:    number;    // px — constrained column width (0=full)
   widthPct?:    number;    // % — width as percentage of container (0-100)
+  widthKeyword?: 'fit-content' | 'min-content' | 'max-content';  // intrinsic sizing
   heightPct?:   number;    // % — height as percentage of container (0-100)
   minWidth?:    number;    // px — minimum width clamp
   maxWidth?:    number;    // px — maximum width clamp
@@ -134,6 +135,8 @@ export interface RenderNode {
   gridAutoFlow?:        string;
   rowGap?:              number;
   columnGap?:           number;
+  columnCount?:         number;    // multi-column: number of columns
+  columnWidth?:         number;    // multi-column: preferred column width (px)
   justifyItems?:        string;
   // Grid item placement
   gridColumn?:          string;   // shorthand 'start / end'
@@ -356,6 +359,7 @@ export interface CSSProps {
   boxSizing?:     'content-box' | 'border-box';
   width?:         number;    // px (0 = auto)
   widthPct?:      number;    // % value for percentage widths (1-100)
+  widthKeyword?:  'fit-content' | 'min-content' | 'max-content';  // intrinsic sizing
   height?:        number;    // px (0 = auto)
   heightPct?:     number;    // % value for percentage heights (1-100)
   minWidth?:      number;
