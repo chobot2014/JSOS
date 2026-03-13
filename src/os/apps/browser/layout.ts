@@ -51,7 +51,7 @@ export function flowSpans(
   baseClr:  PixelColor,
   opts?: { preBg?: boolean; quoteBg?: boolean; quoteBar?: boolean; bgColor?: number; bgGradient?: string;
            bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean;
-           letterSpacing?: number; wordSpacing?: number;
+           letterSpacing?: number; wordSpacing?: number; whiteSpace?: string; textIndent?: number;
            /** Float text wrapping (item 4.8): narrow x for the first N lines of this flow */
            floatFirstLines?: number; floatXLeft?: number; floatMaxX?: number; }
 ): RenderedLine[] {
@@ -62,6 +62,10 @@ export function flowSpans(
   var curXLeft  = (_floatFL > 0 && opts?.floatXLeft !== undefined) ? opts.floatXLeft : xLeft;
   var curMaxX   = (_floatFL > 0 && opts?.floatMaxX  !== undefined) ? opts.floatMaxX  : maxX;
   var curX = curXLeft;
+  // text-indent: offset the first line
+  if (opts?.textIndent) curX += opts.textIndent;
+  // white-space: nowrap prevents word wrapping (all content on one line)
+  var _nowrap = opts?.whiteSpace === 'nowrap';
   // word-break: break-all splits at every character boundary (item 421)
   var _breakAll = opts?.wordBreak === 'break-all';
   // Letter/word spacing: add extra px per char/space
@@ -101,12 +105,12 @@ export function flowSpans(
     var clr  = spanColor(sp);
     var nspc = curX > curXLeft;
     var spcW = nspc ? (cw + _wspc) : 0;  // space width includes word-spacing
-    if (curX + spcW + word.length * cw > curMaxX && curX > curXLeft) {
+    if (!_nowrap && curX + spcW + word.length * cw > curMaxX && curX > curXLeft) {
       commitLine(); nspc = false; spcW = 0;
     }
     while (word.length > 0) {
-      var avail = Math.max(1, Math.floor((curMaxX - curX - spcW) / cw));
-      if (avail <= 0 && curX > curXLeft) {
+      var avail = _nowrap ? word.length : Math.max(1, Math.floor((curMaxX - curX - spcW) / cw));
+      if (!_nowrap && avail <= 0 && curX > curXLeft) {
         commitLine(); nspc = false; spcW = 0;
         avail = Math.max(1, Math.floor((curMaxX - curXLeft) / cw));
       }
@@ -715,8 +719,16 @@ function _layoutNodesImpl(
             cLines = _fcResult.lines;
             _fcChildWidgets = _fcResult.widgets;
           } else {
-            cLines = flowSpans(transformSpans(fc.spans, fc.textTransform), 0, cw, nodeLineH(fc), CLR_BODY,
-                                   (fc.bgColor !== undefined || fc.bgGradient) ? { bgColor: fc.bgColor, bgGradient: fc.bgGradient } : undefined);
+            var _fcFlowOpts: any = undefined;
+            if (fc.bgColor !== undefined || fc.bgGradient || fc.whiteSpace === 'nowrap' || fc.wordBreak || fc.textOverflow === 'ellipsis') {
+              _fcFlowOpts = {};
+              if (fc.bgColor !== undefined) _fcFlowOpts.bgColor = fc.bgColor;
+              if (fc.bgGradient) _fcFlowOpts.bgGradient = fc.bgGradient;
+              if (fc.whiteSpace === 'nowrap') _fcFlowOpts.whiteSpace = 'nowrap';
+              if (fc.wordBreak) _fcFlowOpts.wordBreak = fc.wordBreak;
+              if (fc.textOverflow === 'ellipsis') _fcFlowOpts.ellipsis = true;
+            }
+            cLines = flowSpans(transformSpans(fc.spans, fc.textTransform), 0, cw, nodeLineH(fc), CLR_BODY, _fcFlowOpts);
             // flowSpans returns all lines with y=0 — assign sequential y positions
             // so the stamping pass can compute correct relative offsets
             var _fyPos = 0;
@@ -841,8 +853,8 @@ function _layoutNodesImpl(
       var ndSpans   = transformSpans(nd.spans, nd.textTransform);
 
       // Build flow opts including bgImage (item 386) and word-break (item 421)
-      function makeFlowOpts(): typeof undefined | { bgColor?: number; bgGradient?: string; bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean; letterSpacing?: number; wordSpacing?: number } {
-        var o: { bgColor?: number; bgGradient?: string; bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean; letterSpacing?: number; wordSpacing?: number } = {};
+      function makeFlowOpts(): typeof undefined | { bgColor?: number; bgGradient?: string; bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean; letterSpacing?: number; wordSpacing?: number; whiteSpace?: string; textIndent?: number } {
+        var o: { bgColor?: number; bgGradient?: string; bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean; letterSpacing?: number; wordSpacing?: number; whiteSpace?: string; textIndent?: number } = {};
         var any = false;
         if (bgColor !== undefined)  { o.bgColor = bgColor; any = true; }
         if (bgGradient)             { o.bgGradient = bgGradient; any = true; }
@@ -852,6 +864,8 @@ function _layoutNodesImpl(
         if (nd.textOverflow === 'ellipsis') { o.ellipsis = true; any = true; }  // item 465
         if (nd.letterSpacing)       { o.letterSpacing = nd.letterSpacing; any = true; }
         if (nd.wordSpacing)         { o.wordSpacing = nd.wordSpacing; any = true; }
+        if (nd.whiteSpace === 'nowrap') { o.whiteSpace = 'nowrap'; any = true; }
+        if (nd.textIndent)          { o.textIndent = nd.textIndent; any = true; }
         return any ? o : undefined;
       }
 
@@ -927,6 +941,23 @@ function _layoutNodesImpl(
             var _taShift = 0;
             if (_ta === 'center') _taShift = Math.floor(_taFree / 2);
             else if (_ta === 'right') _taShift = _taFree;
+            else if (_ta === 'justify' && _tai < lines.length - 1 && _taFree > 0) {
+              // Justify: distribute free space across word gaps (skip last line)
+              var _jNodes = _taLine.nodes;
+              var _jGaps = 0;
+              for (var _ji = 0; _ji < _jNodes.length; _ji++) {
+                var _jt = _jNodes[_ji].text;
+                if (_jt.length > 0 && _jt[0] === ' ') _jGaps++;
+              }
+              if (_jGaps > 0) {
+                var _jExtra = _taFree / _jGaps;
+                var _jAccum = 0;
+                lines[_tai] = { ..._taLine, nodes: _jNodes.map(function(n) {
+                  if (n.text.length > 0 && n.text[0] === ' ') _jAccum += _jExtra;
+                  return { ...n, x: n.x + Math.floor(_jAccum) };
+                }) };
+              }
+            }
             if (_taShift > 0) {
               lines[_tai] = { ..._taLine, nodes: _taLine.nodes.map(function(n) { return { ...n, x: n.x + _taShift }; }) };
             }

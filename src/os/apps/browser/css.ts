@@ -1,8 +1,8 @@
 import type { CSSProps } from './types.js';
 
 // ── Viewport dimensions (updated before each page parse) ──────────────────────
-var _vpW = 1920;
-var _vpH = 1080;
+var _vpW = 1024;
+var _vpH = 768;
 /** Call before parsing a page so vw/vh units resolve correctly. */
 export function setViewport(w: number, h: number): void { _vpW = w; _vpH = h; }
 /** Get current viewport dimensions (used by media query evaluator). */
@@ -1219,9 +1219,24 @@ export function parseInlineStyle(style: string): CSSProps {
       case 'grid-template': case 'grid': break;  // complex shorthand — no-op silencer
       case 'justify-items':  { p.justifyItems  = vl; break; }
       case 'justify-self':   { p.justifySelf   = vl; break; }
-      case 'place-items':    { p.placeItems    = val; break; }
-      case 'place-content':  { p.placeContent  = val; break; }
-      case 'place-self':     { p.placeSelf     = val; break; }
+      case 'place-items':    {
+        var _piP = val.trim().split(/\s+/);
+        p.alignItems = _piP[0];
+        p.justifyItems = _piP.length > 1 ? _piP[1] : _piP[0];
+        break;
+      }
+      case 'place-content':  {
+        var _pcP = val.trim().split(/\s+/);
+        p.alignContent = _pcP[0] as any;
+        p.justifyContent = _pcP.length > 1 ? _pcP[1] : _pcP[0];
+        break;
+      }
+      case 'place-self':     {
+        var _psP = val.trim().split(/\s+/);
+        p.alignSelf = _psP[0];
+        p.justifySelf = _psP.length > 1 ? _psP[1] : _psP[0];
+        break;
+      }
 
       // ── Vendor prefixes → standard property aliases ───────────────────────
       case '-webkit-flex-direction': case '-moz-flex-direction':

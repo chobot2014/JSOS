@@ -631,6 +631,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
   var BLOCK_TAGS = new Set([
     'p', 'div', 'section', 'article', 'main', 'header', 'footer', 'nav', 'aside',
     'figure', 'figcaption', 'address', 'details', 'dd', 'dt', 'caption', 'center',
+    'dialog',
   ]);
 
   function flushInline(): void {
@@ -700,6 +701,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (curCSS.lineHeight !== undefined) blk.lineHeight = curCSS.lineHeight;
     if (curCSS.letterSpacing !== undefined) blk.letterSpacing = curCSS.letterSpacing;
     if (curCSS.wordSpacing !== undefined) blk.wordSpacing = curCSS.wordSpacing;
+    if (curCSS.textIndent !== undefined) blk.textIndent = curCSS.textIndent;
     if (curCSS.flexDirection)  blk.flexDirection  = curCSS.flexDirection;
     if (curCSS.flexWrap)       blk.flexWrap       = curCSS.flexWrap;
     if (curCSS.justifyContent) blk.justifyContent = curCSS.justifyContent;
@@ -1159,6 +1161,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
         case 'sup':  applyStyle(tok.tag, tok.attrs); pushSpan('^');  break;
         case 'sub':  applyStyle(tok.tag, tok.attrs); break;
         case 'abbr': applyStyle(tok.tag, tok.attrs); break;
+        case 'time': applyStyle(tok.tag, tok.attrs); break;
         case 'bdi':  applyStyle(tok.tag, tok.attrs); break;
         case 'bdo':  applyStyle(tok.tag, tok.attrs); break;
         case 'cite': applyStyle(tok.tag, tok.attrs); italic++; break;
@@ -1272,7 +1275,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
         }
 
         // ── <details> / <summary> ────────────────────────────────────────────
-        // Details are always "open" (no JS toggle). Summary becomes a heading.
+        // Details are always treated as "open" — summary becomes a heading-like block.
         case 'details':
           applyStyle(tok.tag, tok.attrs); flushInline();
           nodes.push({ type: 'p-break', spans: [] }); break;
@@ -1673,6 +1676,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
         case 'sup':  popCSS(); break;
         case 'sub':  popCSS(); break;
         case 'abbr': popCSS(); break;
+        case 'time': popCSS(); break;
         case 'bdi':  popCSS(); break;
         case 'bdo':  popCSS(); break;
         case 'cite': italic = Math.max(0, italic - 1); popCSS(); break;
@@ -1799,6 +1803,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
 
         default:
           if (BLOCK_TAGS.has(tok.tag)) {
+            // display:contents — no box generated, just pop CSS
+            if (curCSS.display === 'contents') { popCSS(); break; }
             // Check if closing a container (flex/grid) scope
             if (containerStack.length > 0 && containerStack[containerStack.length - 1]!.tag === tok.tag) {
               var _cNode = popContainer();

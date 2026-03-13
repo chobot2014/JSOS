@@ -95,6 +95,7 @@ export interface RenderNode {
   lineHeight?:   number;
   letterSpacing?: number;  // px — extra space between characters
   wordSpacing?:   number;  // px — extra space between words
+  textIndent?:    number;  // px — first-line indent
   // Flex container
   flexDirection?:  'row' | 'row-reverse' | 'column' | 'column-reverse';
   flexWrap?:       'nowrap' | 'wrap' | 'wrap-reverse';
