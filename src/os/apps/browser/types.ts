@@ -26,6 +26,7 @@ export interface InlineSpan {
   del?:       boolean;
   mark?:      boolean;
   underline?: boolean;
+  underlineColor?: number; // text-decoration-color override (ARGB)
   color?:     number;   // explicit CSS color (ARGB)
   fontScale?: number;  // pixel-scale factor (1=8px, 2=16px, 3=24px)
 }
@@ -76,6 +77,15 @@ export interface RenderNode {
   borderWidth?:  number;
   borderColor?:  number;
   borderStyle?:  string;
+  // Per-side borders (override uniform border when set)
+  borderTopWidth?:    number;
+  borderRightWidth?:  number;
+  borderBottomWidth?: number;
+  borderLeftWidth?:   number;
+  borderTopColor?:    number;
+  borderRightColor?:  number;
+  borderBottomColor?: number;
+  borderLeftColor?:   number;
   opacity?:      number;
   boxShadow?:    string;
   textShadow?:   string;   // CSS text-shadow
@@ -175,6 +185,7 @@ export interface RenderedSpan {
   mark?:      boolean;
   codeBg?:    boolean;
   underline?: boolean;
+  underlineColor?: number; // text-decoration-color override (ARGB)
   searchHit?: boolean;
   hitIdx?:    number;
   fontScale?: number;  // pixel-scale factor for scaled text rendering
@@ -214,6 +225,15 @@ export interface BoxDecoration {
   borderWidth?:  number;  // px
   borderColor?:  number;  // ARGB
   borderStyle?:  string;  // 'solid' | 'dashed' | 'dotted' etc.
+  // Per-side borders (override uniform border when set)
+  borderTopWidth?:    number;
+  borderRightWidth?:  number;
+  borderBottomWidth?: number;
+  borderLeftWidth?:   number;
+  borderTopColor?:    number;
+  borderRightColor?:  number;
+  borderBottomColor?: number;
+  borderLeftColor?:   number;
   boxShadow?:    string;  // raw CSS box-shadow string
   bgColor?:      number;  // element background (overrides line.bgColor for rounding)
   bgGradient?:   string;  // CSS gradient string
@@ -360,6 +380,7 @@ export interface CSSProps {
   wordSpacing?:   number;    // px
   textTransform?: 'none' | 'uppercase' | 'lowercase' | 'capitalize';
   textDecoration?: string;   // 'none' | 'underline' | 'line-through' | 'overline'
+  textDecorationColor?: number; // ARGB color for text decoration
   textOverflow?:  'clip' | 'ellipsis';
   whiteSpace?:    'normal' | 'nowrap' | 'pre' | 'pre-wrap' | 'pre-line';
   verticalAlign?: string;
@@ -396,6 +417,19 @@ export interface CSSProps {
   borderTopRightRadius?:    number;
   borderBottomLeftRadius?:  number;
   borderBottomRightRadius?: number;
+  // Per-side borders
+  borderTopWidth?:    number;
+  borderRightWidth?:  number;
+  borderBottomWidth?: number;
+  borderLeftWidth?:   number;
+  borderTopColor?:    number;
+  borderRightColor?:  number;
+  borderBottomColor?: number;
+  borderLeftColor?:   number;
+  borderTopStyle?:    string;
+  borderRightStyle?:  string;
+  borderBottomStyle?: string;
+  borderLeftStyle?:   string;
   outlineWidth?:  number;
   outlineColor?:  number;
   // ── Visual ────────────────────────────────────────────────────────────────

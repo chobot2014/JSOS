@@ -1052,6 +1052,31 @@ export class BrowserApp implements App {
             );
           }
         }
+        // 3b. Per-side borders (override uniform border when set)
+        var _hasSideBorder = deco.borderTopWidth || deco.borderRightWidth || deco.borderBottomWidth || deco.borderLeftWidth;
+        if (_hasSideBorder) {
+          var _fallbackClr = deco.borderColor !== undefined ? deco.borderColor : 0xFF000000;
+          // Top border
+          if (deco.borderTopWidth && deco.borderTopWidth > 0) {
+            var _btClr = deco.borderTopColor !== undefined ? deco.borderTopColor : _fallbackClr;
+            canvas.fillRect(decoX, decoY, decoW, deco.borderTopWidth, _btClr);
+          }
+          // Bottom border
+          if (deco.borderBottomWidth && deco.borderBottomWidth > 0) {
+            var _bbClr = deco.borderBottomColor !== undefined ? deco.borderBottomColor : _fallbackClr;
+            canvas.fillRect(decoX, decoY + decoH - deco.borderBottomWidth, decoW, deco.borderBottomWidth, _bbClr);
+          }
+          // Left border
+          if (deco.borderLeftWidth && deco.borderLeftWidth > 0) {
+            var _blClr = deco.borderLeftColor !== undefined ? deco.borderLeftColor : _fallbackClr;
+            canvas.fillRect(decoX, decoY, deco.borderLeftWidth, decoH, _blClr);
+          }
+          // Right border
+          if (deco.borderRightWidth && deco.borderRightWidth > 0) {
+            var _brClr = deco.borderRightColor !== undefined ? deco.borderRightColor : _fallbackClr;
+            canvas.fillRect(decoX + decoW - deco.borderRightWidth, decoY, deco.borderRightWidth, decoH, _brClr);
+          }
+        }
         // overflow:hidden: push canvas clip rect so children are clipped to this box (item 3.10)
         if (deco.overflowHidden) {
           var _savedClip = canvas.saveClipRect();
@@ -1174,8 +1199,8 @@ export class BrowserApp implements App {
           }
           if (span.bold) canvas.drawText(span.x + 1, absY, span.text, clr);
         }
-        if (span.href)      canvas.drawLine(span.x, absY + sCH, span.x + span.text.length * sCW, absY + sCH, clr);
-        if (span.underline) canvas.drawLine(span.x, absY + sCH, span.x + span.text.length * sCW, absY + sCH, clr);
+        if (span.href)      canvas.drawLine(span.x, absY + sCH, span.x + span.text.length * sCW, absY + sCH, span.underlineColor !== undefined ? span.underlineColor : clr);
+        if (span.underline) canvas.drawLine(span.x, absY + sCH, span.x + span.text.length * sCW, absY + sCH, span.underlineColor !== undefined ? span.underlineColor : clr);
         if (span.del) {
           var mY = absY + Math.floor(sCH / 2);
           canvas.drawLine(span.x, mY, span.x + span.text.length * sCW, mY, CLR_DEL);
@@ -1230,8 +1255,9 @@ export class BrowserApp implements App {
           if (_stpSp.bold) canvas.drawText(_stpSp.x + 1, _stpAbsY, _stpSp.text, _stpClr);
         }
         if (_stpSp.underline || _stpSp.href) {
+          var _stpUlClr = _stpSp.underlineColor !== undefined ? _stpSp.underlineColor : _stpClr;
           canvas.drawLine(_stpSp.x, _stpAbsY + _stpCH,
-                          _stpSp.x + _stpSp.text.length * _stpCW, _stpAbsY + _stpCH, _stpClr);
+                          _stpSp.x + _stpSp.text.length * _stpCW, _stpAbsY + _stpCH, _stpUlClr);
         }
       }
     }
@@ -1277,8 +1303,9 @@ export class BrowserApp implements App {
           if (_fxSp.bold) canvas.drawText(_fxSp.x + 1, _fxAbsY, _fxSp.text, _fxClr);
         }
         if (_fxSp.underline || _fxSp.href) {
+          var _fxUlClr = _fxSp.underlineColor !== undefined ? _fxSp.underlineColor : _fxClr;
           canvas.drawLine(_fxSp.x, _fxAbsY + _fxCH,
-                          _fxSp.x + _fxSp.text.length * _fxCW, _fxAbsY + _fxCH, _fxClr);
+                          _fxSp.x + _fxSp.text.length * _fxCW, _fxAbsY + _fxCH, _fxUlClr);
         }
       }
     }

@@ -434,6 +434,13 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     curCSS.borderStyle = undefined;
     curCSS.borderColor = undefined;
     curCSS.borderRadius = undefined;
+    // Per-side border — NOT inherited
+    curCSS.borderTopWidth = undefined; curCSS.borderRightWidth = undefined;
+    curCSS.borderBottomWidth = undefined; curCSS.borderLeftWidth = undefined;
+    curCSS.borderTopColor = undefined; curCSS.borderRightColor = undefined;
+    curCSS.borderBottomColor = undefined; curCSS.borderLeftColor = undefined;
+    curCSS.borderTopStyle = undefined; curCSS.borderRightStyle = undefined;
+    curCSS.borderBottomStyle = undefined; curCSS.borderLeftStyle = undefined;
     // Overflow — NOT inherited
     curCSS.overflow = undefined;
     curCSS.overflowX = undefined;
@@ -645,7 +652,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
           prev.bold      === sp.bold      && prev.italic    === sp.italic    &&
           prev.code      === sp.code      && prev.del       === sp.del       &&
           prev.mark      === sp.mark      && prev.underline === sp.underline &&
-          prev.color     === sp.color     && prev.elId      === sp.elId) {
+          prev.color     === sp.color     && prev.elId      === sp.elId &&
+          prev.underlineColor === sp.underlineColor) {
         prev.text += sp.text;
       } else {
         merged.push({ ...sp });
@@ -684,6 +692,15 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (curCSS.borderWidth  !== undefined) blk.borderWidth  = curCSS.borderWidth;
     if (curCSS.borderColor  !== undefined) blk.borderColor  = curCSS.borderColor;
     if (curCSS.borderStyle  !== undefined) blk.borderStyle  = curCSS.borderStyle;
+    // Per-side border propagation
+    if (curCSS.borderTopWidth    !== undefined) blk.borderTopWidth    = curCSS.borderTopWidth;
+    if (curCSS.borderRightWidth  !== undefined) blk.borderRightWidth  = curCSS.borderRightWidth;
+    if (curCSS.borderBottomWidth !== undefined) blk.borderBottomWidth = curCSS.borderBottomWidth;
+    if (curCSS.borderLeftWidth   !== undefined) blk.borderLeftWidth   = curCSS.borderLeftWidth;
+    if (curCSS.borderTopColor    !== undefined) blk.borderTopColor    = curCSS.borderTopColor;
+    if (curCSS.borderRightColor  !== undefined) blk.borderRightColor  = curCSS.borderRightColor;
+    if (curCSS.borderBottomColor !== undefined) blk.borderBottomColor = curCSS.borderBottomColor;
+    if (curCSS.borderLeftColor   !== undefined) blk.borderLeftColor   = curCSS.borderLeftColor;
     if (curCSS.opacity  !== undefined) blk.opacity  = curCSS.opacity;
     if (curCSS.boxShadow)              blk.boxShadow  = curCSS.boxShadow;
     if (curCSS.textShadow)             blk.textShadow = curCSS.textShadow;
@@ -772,6 +789,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       if (del > 0       || curCSS.strike)    tsp.del       = true;
       if (mark > 0)                          tsp.mark      = true;
       if (underline > 0 || curCSS.underline) tsp.underline = true;
+      if (curCSS.textDecorationColor !== undefined) tsp.underlineColor = curCSS.textDecorationColor;
       if (curCSS.color !== undefined && !linkHref) tsp.color = curCSS.color;
       if (curCSS.pointerEvents === 'none') tsp.noClick = true;
       tableCellSpans.push(tsp);
@@ -795,6 +813,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (del > 0       || curCSS.strike)    sp.del       = true;
     if (mark > 0)                          sp.mark      = true;
     if (underline > 0 || curCSS.underline) sp.underline = true;
+    if (curCSS.textDecorationColor !== undefined) sp.underlineColor = curCSS.textDecorationColor;
     if (curCSS.color !== undefined && !linkHref) sp.color = curCSS.color;
     if (curCSS._onclickElId && !linkHref) sp.elId = curCSS._onclickElId;
     if (curCSS.pointerEvents === 'none') sp.noClick = true;
@@ -1659,6 +1678,9 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
               _ibDepth++;
               flushInline();
               if (openBlock) { nodes.push(openBlock); openBlock = null; }
+            } else if (_disp === 'inline') {
+              // Block tag with display:inline — treat as inline, no line breaks
+              break;
             } else {
               flushInline();
               if (openBlock) { nodes.push(openBlock); openBlock = null; }
@@ -1818,8 +1840,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
 
         default:
           if (BLOCK_TAGS.has(tok.tag)) {
-            // display:contents — no box generated, just pop CSS
-            if (curCSS.display === 'contents') { popCSS(); break; }
+            // display:contents or display:inline — no box generated, just pop CSS
+            if (curCSS.display === 'contents' || curCSS.display === 'inline') { popCSS(); break; }
             // Check if closing a container (flex/grid) scope
             if (containerStack.length > 0 && containerStack[containerStack.length - 1]!.tag === tok.tag) {
               var _cNode = popContainer();

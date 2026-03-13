@@ -5,7 +5,7 @@ import {
   WIDGET_INPUT_H, WIDGET_BTN_H, WIDGET_CHECK_SZ, WIDGET_SELECT_H,
   CLR_BODY, CLR_LINK, CLR_BOLD, CLR_ITALIC, CLR_CODE, CLR_CODE_BG,
   CLR_DEL, CLR_MARK_TXT, CLR_PRE_TXT, CLR_H1, CLR_H2, CLR_H3,
-  CLR_QUOTE_TXT,
+  CLR_QUOTE_TXT, CLR_HR,
 } from './constants.js';
 import { getLayoutCache, setLayoutCache, layoutFingerprint, getBlockLayoutCache, setBlockLayoutCache, blockFingerprint, type BlockLayoutCache } from './cache.js';
 import { getViewport } from './css.js';
@@ -129,6 +129,7 @@ export function flowSpans(
       if (sp.mark)      rsp.mark      = true;
       if (sp.code)      rsp.codeBg    = true;
       if (sp.underline) rsp.underline = true;
+      if (sp.underlineColor !== undefined) rsp.underlineColor = sp.underlineColor;
       if (sp.fontScale) rsp.fontScale = sp.fontScale;
       curLine.push(rsp);
       curX  += display.length * cw;
@@ -1128,7 +1129,8 @@ function _layoutNodesImpl(
         // Also emit a tracking-only record for elements with elId (enables getBoundingClientRect)
         var _hasBoxDeco = nd.borderRadius || nd.borderWidth || nd.borderColor !== undefined
                        || nd.boxShadow || nd.opacity !== undefined || nd.textShadow
-                       || nd.outlineWidth;
+                       || nd.outlineWidth
+                       || nd.borderTopWidth || nd.borderRightWidth || nd.borderBottomWidth || nd.borderLeftWidth;
         var _needsTracking = nd.elId && lines.length > _blockLineStart && !lines[_blockLineStart].boxDeco;
         if ((_hasBoxDeco || _needsTracking) && lines.length > _blockLineStart) {
           var _blkH = y - yBeforeBlock;
@@ -1138,6 +1140,15 @@ function _layoutNodesImpl(
           if (nd.borderWidth)  _deco.borderWidth  = nd.borderWidth;
           if (nd.borderColor !== undefined) _deco.borderColor = nd.borderColor;
           if (nd.borderStyle)  _deco.borderStyle  = nd.borderStyle;
+          // Per-side border
+          if (nd.borderTopWidth)    _deco.borderTopWidth    = nd.borderTopWidth;
+          if (nd.borderRightWidth)  _deco.borderRightWidth  = nd.borderRightWidth;
+          if (nd.borderBottomWidth) _deco.borderBottomWidth = nd.borderBottomWidth;
+          if (nd.borderLeftWidth)   _deco.borderLeftWidth   = nd.borderLeftWidth;
+          if (nd.borderTopColor    !== undefined) _deco.borderTopColor    = nd.borderTopColor;
+          if (nd.borderRightColor  !== undefined) _deco.borderRightColor  = nd.borderRightColor;
+          if (nd.borderBottomColor !== undefined) _deco.borderBottomColor = nd.borderBottomColor;
+          if (nd.borderLeftColor   !== undefined) _deco.borderLeftColor   = nd.borderLeftColor;
           if (nd.boxShadow)    _deco.boxShadow    = nd.boxShadow;
           if (bgColor !== undefined) _deco.bgColor = bgColor;
           if (bgGradient)      _deco.bgGradient   = bgGradient;

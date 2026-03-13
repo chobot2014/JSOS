@@ -588,6 +588,12 @@ export function parseInlineStyle(style: string): CSSProps {
         if (vl === 'none') { p.underline = false; p.strike = false; }
         if (vl.includes('underline'))    p.underline = true;
         if (vl.includes('line-through')) p.strike    = true;
+        // Extract color from text-decoration shorthand (e.g. "underline red")
+        var _tdParts = val.trim().split(/\s+/);
+        for (var _tdi = 0; _tdi < _tdParts.length; _tdi++) {
+          var _tdClr = parseCSSColor(_tdParts[_tdi]);
+          if (_tdClr !== undefined) { p.textDecorationColor = _tdClr; break; }
+        }
         p.textDecoration = val; break;
       }
       case 'text-decoration-line': {
@@ -595,6 +601,10 @@ export function parseInlineStyle(style: string): CSSProps {
         if (vl.includes('line-through')) p.strike    = true;
         break;
       }
+      case 'text-decoration-color': {
+        var _tdcv = parseCSSColor(vl); if (_tdcv !== undefined) p.textDecorationColor = _tdcv; break;
+      }
+      case 'text-decoration-style': break; // solid/dotted/dashed/wavy — no visual effect yet
       case 'text-align': {
         if (vl === 'center' || vl === 'right' || vl === 'left' || vl === 'justify')
           p.align = vl as 'left' | 'center' | 'right' | 'justify';
@@ -726,7 +736,15 @@ export function parseInlineStyle(style: string): CSSProps {
       }
       case 'border-width': case 'border-top-width': case 'border-right-width':
       case 'border-bottom-width': case 'border-left-width': {
-        var bwv2 = parseLengthPx(vl); if (!isNaN(bwv2)) p.borderWidth = bwv2; break;
+        var bwv2 = parseLengthPx(vl);
+        if (!isNaN(bwv2)) {
+          p.borderWidth = bwv2;
+          if (kl === 'border-top-width') p.borderTopWidth = bwv2;
+          else if (kl === 'border-right-width') p.borderRightWidth = bwv2;
+          else if (kl === 'border-bottom-width') p.borderBottomWidth = bwv2;
+          else if (kl === 'border-left-width') p.borderLeftWidth = bwv2;
+        }
+        break;
       }
       case 'border-style': { p.borderStyle = vl; break; }
       case 'border-color': { var bcv = parseCSSColor(vl); if (bcv !== undefined) p.borderColor = bcv; break; }
@@ -1023,21 +1041,45 @@ export function parseInlineStyle(style: string): CSSProps {
       case 'speak-as': break; // aural extended
       case 'nav-up': case 'nav-down': case 'nav-left': case 'nav-right': break; // D-pad nav
 
-      // border-[side] shorthands: map to unified border props (renderer uses single border)
+      // border-[side] shorthands: map to unified border props AND store per-side
       case 'border-top': case 'border-right': case 'border-bottom': case 'border-left': {
+        var bsSide = kl.slice(7); // 'top', 'right', 'bottom', 'left'
         var bsparts = val.trim().split(/\s+/);
         for (var bspi = 0; bspi < bsparts.length; bspi++) {
           var bsp = bsparts[bspi].toLowerCase();
           if (bsp === 'none' || bsp === 'hidden') { p.borderWidth = 0; p.borderStyle = bsp; continue; }
           var bswv = parseLengthPx(bsp);
-          if (!isNaN(bswv)) { p.borderWidth = bswv; continue; }
-          var bscc = parseCSSColor(bsp); if (bscc !== undefined) { p.borderColor = bscc; continue; }
+          if (!isNaN(bswv)) {
+            p.borderWidth = bswv;
+            if (bsSide === 'top') p.borderTopWidth = bswv;
+            else if (bsSide === 'right') p.borderRightWidth = bswv;
+            else if (bsSide === 'bottom') p.borderBottomWidth = bswv;
+            else p.borderLeftWidth = bswv;
+            continue;
+          }
+          var bscc = parseCSSColor(bsp);
+          if (bscc !== undefined) {
+            p.borderColor = bscc;
+            if (bsSide === 'top') p.borderTopColor = bscc;
+            else if (bsSide === 'right') p.borderRightColor = bscc;
+            else if (bsSide === 'bottom') p.borderBottomColor = bscc;
+            else p.borderLeftColor = bscc;
+            continue;
+          }
           if (bsp === 'solid' || bsp === 'dashed' || bsp === 'dotted' || bsp === 'double') p.borderStyle = bsp;
         }
         break;
       }
       case 'border-top-color': case 'border-right-color': case 'border-bottom-color': case 'border-left-color': {
-        var bscv = parseCSSColor(vl); if (bscv !== undefined) p.borderColor = bscv; break;
+        var bscv = parseCSSColor(vl);
+        if (bscv !== undefined) {
+          p.borderColor = bscv;
+          if (kl === 'border-top-color') p.borderTopColor = bscv;
+          else if (kl === 'border-right-color') p.borderRightColor = bscv;
+          else if (kl === 'border-bottom-color') p.borderBottomColor = bscv;
+          else p.borderLeftColor = bscv;
+        }
+        break;
       }
       case 'border-top-style': case 'border-right-style': case 'border-bottom-style': case 'border-left-style': {
         if (vl === 'none' || vl === 'hidden') { p.borderWidth = 0; p.borderStyle = vl; }
@@ -1101,7 +1143,26 @@ export function parseInlineStyle(style: string): CSSProps {
       case 'box-shadow':  { p.boxShadow  = vl === 'none' ? undefined : val; break; }
       case 'text-shadow': { p.textShadow = vl === 'none' ? undefined : val; break; }
       case 'filter': case '-webkit-filter': {
-        p.filter = vl === 'none' ? undefined : val; break;
+        p.filter = vl === 'none' ? undefined : val;
+        // Extract opacity() from filter for rendering support
+        if (val) {
+          var _fOpM = val.match(/opacity\(\s*([\d.]+)(%?)\s*\)/i);
+          if (_fOpM) {
+            var _fOpV = parseFloat(_fOpM[1]);
+            if (_fOpM[2] === '%') _fOpV /= 100;
+            if (!isNaN(_fOpV) && _fOpV >= 0 && _fOpV <= 1) p.opacity = _fOpV;
+          }
+          // Extract grayscale() — map to desaturated colors (approximate via opacity reduction)
+          // Extract brightness() — approximated via opacity for now
+          var _fBrM = val.match(/brightness\(\s*([\d.]+)(%?)\s*\)/i);
+          if (_fBrM) {
+            var _fBrV = parseFloat(_fBrM[1]);
+            if (_fBrM[2] === '%') _fBrV /= 100;
+            // brightness > 1 would lighten (can't do), brightness < 1 darkens (approximate via opacity)
+            if (!isNaN(_fBrV) && _fBrV >= 0 && _fBrV < 1 && p.opacity === undefined) p.opacity = _fBrV;
+          }
+        }
+        break;
       }
       case 'clip-path': case '-webkit-clip-path': {
         p.clipPath = vl === 'none' ? undefined : val; break;
