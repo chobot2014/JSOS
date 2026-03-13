@@ -673,6 +673,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (curCSS.maxWidth !== undefined) blk.maxWidth  = curCSS.maxWidth;
     if (curCSS.marginLeftAuto || curCSS.marginRightAuto) blk.centerBlock = true;
     if (curCSS.height && curCSS.height > 0) blk.height   = curCSS.height;
+    if (curCSS.heightPct && curCSS.heightPct > 0) blk.heightPct = curCSS.heightPct;
     if (curCSS.minHeight !== undefined) blk.minHeight  = curCSS.minHeight;
     if (curCSS.maxHeight !== undefined) blk.maxHeight  = curCSS.maxHeight;
     if (curCSS.aspectRatio !== undefined) blk.aspectRatio = curCSS.aspectRatio;
@@ -767,8 +768,13 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     }
     if (skipDepth > 0) return;
     // visibility:hidden — element is invisible but its space is reserved;
-    // children can override with visibility:visible so we don't skip subtree
-    if (curCSS.visibility === 'hidden' || curCSS.visibility === 'collapse') return;
+    // Push a transparent span so layout reserves the correct width
+    if (curCSS.visibility === 'hidden' || curCSS.visibility === 'collapse') {
+      var hsp: InlineSpan = { text, color: 0x00000000 };  // transparent = invisible but occupies space
+      if (openBlock) { openBlock.spans.push(hsp); }
+      else inlineSpans.push(hsp);
+      return;
+    }
     var sp: InlineSpan = { text };
     if (linkHref)                          sp.href      = linkHref;
     if (linkDownload)                      sp.download  = linkDownload;   // item 636
@@ -1123,16 +1129,11 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
           break;
         }
         case 'noscript': {
-          // Render noscript fallback content — our JS engine cannot fully
-          // execute complex page scripts (e.g. Google), so the noscript
-          // fallback provides essential visible content.
-          // Force noscript visible: call applyStyle but override display:none
+          // Since JSOS executes JavaScript, skip <noscript> fallback content
+          // to avoid duplicate/conflicting UI with JS-rendered content.
           applyStyle(tok.tag, tok.attrs);
-          // If CSS tried to hide it, force it back to visible
-          if (curCSS.hidden) {
-            curCSS.hidden = false;
-            skipDepth = Math.max(0, skipDepth - 1);
-          }
+          curCSS.hidden = true;
+          skipDepth++;
           break;
         }
         case 'object': case 'embed': case 'noembed': {
@@ -1564,6 +1565,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
               if (curCSS.width && curCSS.width > 0) _fp.boxWidth = curCSS.width;
               if (curCSS.widthPct && curCSS.widthPct > 0) _fp.widthPct = curCSS.widthPct;
               if (curCSS.height && curCSS.height > 0) _fp.height = curCSS.height;
+              if (curCSS.heightPct && curCSS.heightPct > 0) _fp.heightPct = curCSS.heightPct;
               if (curCSS.minWidth !== undefined) _fp.minWidth = curCSS.minWidth;
               if (curCSS.maxWidth !== undefined) _fp.maxWidth = curCSS.maxWidth;
               if (curCSS.minHeight !== undefined) _fp.minHeight = curCSS.minHeight;
@@ -1604,6 +1606,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
               if (curCSS.width && curCSS.width > 0) _cp.boxWidth = curCSS.width;
               if (curCSS.widthPct && curCSS.widthPct > 0) _cp.widthPct = curCSS.widthPct;
               if (curCSS.height && curCSS.height > 0) _cp.height = curCSS.height;
+              if (curCSS.heightPct && curCSS.heightPct > 0) _cp.heightPct = curCSS.heightPct;
               if (curCSS.minWidth !== undefined) _cp.minWidth = curCSS.minWidth;
               if (curCSS.maxWidth !== undefined) _cp.maxWidth = curCSS.maxWidth;
               if (curCSS.bgColor !== undefined) _cp.bgColor = curCSS.bgColor;

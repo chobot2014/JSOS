@@ -1437,7 +1437,8 @@ export function createPageJS(
     '    json:function(){return new Promise(function(res,rej){try{res(JSON.parse(_bd));}catch(e){rej(e);}});},',
     '    arrayBuffer:function(){var b=new Uint8Array(_bd.length);for(var i=0;i<_bd.length;i++)b[i]=_bd.charCodeAt(i);return Promise.resolve(b.buffer);},',
     '    blob:function(){return Promise.resolve(new Blob([_bd],{type:mime||"application/octet-stream"}));},',
-    '    clone:function(){return this;},body:null',
+    '    clone:function(){return this;},',
+    '    get body(){var _t=_bd;var _done=false;return{locked:false,getReader:function(){return{read:function(){if(_done)return Promise.resolve({done:true,value:undefined});_done=true;var enc=new TextEncoder();return Promise.resolve({done:false,value:enc.encode(_t)});},releaseLock:function(){},cancel:function(){_done=true;return Promise.resolve();}};}};}',
     '  });',
     '}',
     'function _rejectRequest(id,msg){ var r=_fetchResolvers[id]; if(!r)return; delete _fetchResolvers[id]; r.reject(new TypeError(String(msg))); }',
@@ -2079,8 +2080,8 @@ export function createPageJS(
   var _rerenderCount = 0;
   var _rerenderBusy  = false;     // re-entrancy guard
   var _lastRerenderMs = 0;        // last rerender wall-clock ms (Date.now())
-  var _MIN_RERENDER_INTERVAL = 500;  // minimum ms between rerenders to avoid JIT stack overflow
-  var _FULL_RERENDER_COOLDOWN = 10000; // after first full rerender, suppress re-renders for 10s
+  var _MIN_RERENDER_INTERVAL = 150;  // minimum ms between rerenders
+  var _FULL_RERENDER_COOLDOWN = 3000; // after first full rerender, suppress re-renders for 3s
   function doRerender(): void {
     needsRerender = false;
     if (_rerenderBusy) return;  // prevent re-entrant rerender

@@ -696,6 +696,7 @@ export class TileRenderer {
       var x    = span.x;
       var text = span.text;
       var clr  = span.color as number;
+      if (clr === 0 || clr === 0x00000000) continue;  // visibility:hidden — skip rendering but layout reserved space
       var fontScale = (span as any).fontScale || 1;
       var cw   = Math.round(CHAR_W * fontScale);
       var ch   = Math.round(CHAR_H * fontScale);

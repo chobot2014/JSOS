@@ -62,6 +62,7 @@ export interface RenderNode {
   paddingBottom?: number;
   boxWidth?:    number;    // px — constrained column width (0=full)
   widthPct?:    number;    // % — width as percentage of container (0-100)
+  heightPct?:   number;    // % — height as percentage of container (0-100)
   minWidth?:    number;    // px — minimum width clamp
   maxWidth?:    number;    // px — maximum width clamp
   centerBlock?: boolean;   // true when margin: auto centering should apply
@@ -354,6 +355,7 @@ export interface CSSProps {
   width?:         number;    // px (0 = auto)
   widthPct?:      number;    // % value for percentage widths (1-100)
   height?:        number;    // px (0 = auto)
+  heightPct?:     number;    // % value for percentage heights (1-100)
   minWidth?:      number;
   minHeight?:     number;
   maxWidth?:      number;

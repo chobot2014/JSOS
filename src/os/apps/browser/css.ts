@@ -527,17 +527,21 @@ export function parseInlineStyle(style: string): CSSProps {
       }
       case 'font-family': { p.fontFamily = val; break; }
       case 'font-size': {
-        // Map to fontScale buckets: <12=0.75, 12-15=1, 16-23=2, >=24=3
+        // Continuous font-size scaling: fontScale = px / 16 (CSS default 16px = 1.0)
         var fsv = parseLengthPx(vl);
         if (!isNaN(fsv) && fsv > 0) {
-          p.fontScale = fsv < 12 ? 0.75 : fsv < 16 ? 1 : fsv < 24 ? 2 : 3;
+          p.fontScale = Math.max(0.5, Math.min(fsv / 16, 4));
         } else {
-          if (vl === 'small' || vl === 'x-small' || vl === 'xs') p.fontScale = 0.75;
-          else if (vl === 'medium' || vl === 'normal') p.fontScale = 1;
-          else if (vl === 'large' || vl === 'x-large') p.fontScale = 2;
-          else if (vl === 'xx-large' || vl === 'xxx-large') p.fontScale = 3;
-          else if (vl === 'smaller') p.fontScale = 0.75;
-          else if (vl === 'larger')  p.fontScale = 2;
+          if (vl === 'xx-small') p.fontScale = 0.5625;       // 9px
+          else if (vl === 'x-small' || vl === 'xs') p.fontScale = 0.625;  // 10px
+          else if (vl === 'small') p.fontScale = 0.8125;      // 13px
+          else if (vl === 'medium' || vl === 'normal') p.fontScale = 1;   // 16px
+          else if (vl === 'large') p.fontScale = 1.125;       // 18px
+          else if (vl === 'x-large') p.fontScale = 1.5;       // 24px
+          else if (vl === 'xx-large') p.fontScale = 2;         // 32px
+          else if (vl === 'xxx-large') p.fontScale = 3;        // 48px
+          else if (vl === 'smaller') p.fontScale = 0.833;
+          else if (vl === 'larger')  p.fontScale = 1.2;
         }
         break;
       }
@@ -571,7 +575,7 @@ export function parseInlineStyle(style: string): CSSProps {
         var fpsz = vl.match(/\b(\d+(?:\.\d+)?(?:px|pt|em|rem|%))\b/);
         if (fpsz) {
           var fszv = parseLengthPx(fpsz[1]);
-          if (!isNaN(fszv)) p.fontScale = fszv < 12 ? 0.75 : fszv < 16 ? 1 : fszv < 24 ? 2 : 3;
+          if (!isNaN(fszv) && fszv > 0) p.fontScale = Math.max(0.5, Math.min(fszv / 16, 4));
           // Family is everything after the "size[/line-height]" part
           var afterSize = vl.slice(vl.indexOf(fpsz[1]) + fpsz[1].length);
           // Skip /line-height if present
@@ -655,13 +659,16 @@ export function parseInlineStyle(style: string): CSSProps {
         } break;
       }
       case 'height': {
-        if (vl !== 'auto') { var hv = parseLengthPx(vl); if (!isNaN(hv) && hv > 0) p.height = Math.min(hv, 200); } break;
+        if (vl !== 'auto') {
+          if (vl.endsWith('%')) { p.heightPct = parseFloat(vl); }
+          else { var hv = parseLengthPx(vl); if (!isNaN(hv) && hv > 0) p.height = hv; }
+        } break;
       }
       case 'min-width': {
         var mnwv = parseLengthPx(vl); if (!isNaN(mnwv)) p.minWidth = mnwv; break;
       }
       case 'min-height': {
-        var mnhv = parseLengthPx(vl); if (!isNaN(mnhv)) p.minHeight = Math.min(mnhv, 30); break;
+        var mnhv = parseLengthPx(vl); if (!isNaN(mnhv)) p.minHeight = mnhv; break;
       }
       case 'max-width': {
         if (vl !== 'none') { var mxwv = parseLengthPx(vl); if (!isNaN(mxwv) && mxwv > 0) p.maxWidth = mxwv; } break;

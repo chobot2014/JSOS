@@ -486,7 +486,7 @@ function _layoutNodesImpl(
           fcTotalH += fccBaseH + (fcci < fcItems.length - 1 ? gap : 0);
         }
         // Apply flex-grow / flex-shrink to column items
-        var fcContainerH = Math.min(nd.height ?? 0, 200); // Cap height to prevent viewport-filling gaps
+        var fcContainerH = nd.height ?? 0; // Use explicit height if set
         var fcFreeH0 = fcContainerH > 0 ? fcContainerH - fcTotalH : 0;
         var fcFinalH: number[] = [];
         if (fcFreeH0 > 0) {
@@ -678,10 +678,35 @@ function _layoutNodesImpl(
         var fCurX = fxLeft + fJustStart;
         var lineMaxH = 0;
         var fChildLines: { x: number; cw: number; cl: RenderedLine[]; alignSelf?: string; childWidgets: PositionedWidget[] }[] = [];
+        // Per-line flex-grow/shrink recalculation (CSS Flexbox spec compliance)
+        var fwLineWidths: number[] = [];
+        if (fDoWrap && fwItems.length > 0) {
+          var fwUsedGap = gap * Math.max(0, fwItems.length - 1);
+          var fwBaseTotal = 0;
+          for (var fwbi = 0; fwbi < fwItems.length; fwbi++) fwBaseTotal += fHypoW[fwItems[fwbi]];
+          var fwLineFree = fxAvail - fwUsedGap - fwBaseTotal;
+          if (fwLineFree >= 0) {
+            var fwTotalGrow = 0;
+            for (var fwgi = 0; fwgi < fwItems.length; fwgi++) fwTotalGrow += (fSorted[fwItems[fwgi]].flexGrow ?? 0);
+            for (var fwgi2 = 0; fwgi2 < fwItems.length; fwgi2++) {
+              var fwGrow2 = fSorted[fwItems[fwgi2]].flexGrow ?? 0;
+              var fwExtra = fwTotalGrow > 0 ? fwLineFree * fwGrow2 / fwTotalGrow : 0;
+              fwLineWidths.push(Math.max(0, Math.floor(fHypoW[fwItems[fwgi2]] + fwExtra)));
+            }
+          } else {
+            var fwTotalSF2 = 0;
+            for (var fwsi = 0; fwsi < fwItems.length; fwsi++) fwTotalSF2 += (fSorted[fwItems[fwsi]].flexShrink ?? 1) * fHypoW[fwItems[fwsi]];
+            for (var fwsi2 = 0; fwsi2 < fwItems.length; fwsi2++) {
+              var fwSF = (fSorted[fwItems[fwsi2]].flexShrink ?? 1) * fHypoW[fwItems[fwsi2]];
+              var fwRed = fwTotalSF2 > 0 ? (-fwLineFree) * fwSF / fwTotalSF2 : 0;
+              fwLineWidths.push(Math.max(0, Math.floor(fHypoW[fwItems[fwsi2]] - fwRed)));
+            }
+          }
+        }
         for (var fci = 0; fci < fwItems.length; fci++) {
           var fIdx  = fwItems[fci];
           var fc    = fSorted[fIdx];
-          var cw    = fFinalW[fIdx];
+          var cw    = (fDoWrap && fwLineWidths.length > 0) ? fwLineWidths[fci] : fFinalW[fIdx];
           // Recursive layout: if child has nested children (block structure), lay out recursively
           var cLines: RenderedLine[];
           var _fcChildWidgets: PositionedWidget[] = [];

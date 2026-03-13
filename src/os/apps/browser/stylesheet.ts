@@ -600,7 +600,7 @@ function evalMediaQuery(condition: string): boolean {
     if (feature === 'min-height') return vp.h >= px;
     if (feature === 'max-height') return vp.h <= px;
     if (feature === 'orientation') return value === 'landscape' ? vp.w >= vp.h : vp.w < vp.h;
-    if (feature === 'prefers-color-scheme') return value === 'dark';  // JSOS uses dark theme
+    if (feature === 'prefers-color-scheme') return value === 'light';  // JSOS browser has light background
     if (feature === 'prefers-reduced-motion') return value === 'no-preference';
     if (feature === '-webkit-min-device-pixel-ratio' || feature === 'min-resolution') return true;
   }
