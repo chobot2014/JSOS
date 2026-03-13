@@ -958,8 +958,11 @@ export class BrowserApp implements App {
       }
 
       // ── Box decoration — border-radius, borders, box-shadow (Tier 3.7 / 4.2) ──
+      // Track opacity for this element — affects bg + text alpha
+      var _decoOpacity = 1;
       if (line.boxDeco) {
         var deco   = line.boxDeco;
+        if (deco.opacity !== undefined && deco.opacity < 1) _decoOpacity = deco.opacity;
         var decoX  = deco.x;
         var decoY  = absY - 1;
         var decoW  = deco.w;
@@ -1002,7 +1005,12 @@ export class BrowserApp implements App {
         // 2. Background fill with border-radius (skip the plain fillRect below for this line)
         if (decoR > 0) {
           if (deco.bgColor !== undefined) {
-            canvas.fillRoundRect(decoX, decoY, decoW, decoH, decoR, deco.bgColor);
+            var _dbgc = deco.bgColor;
+            if (_decoOpacity < 1) {
+              var _da = ((_dbgc >>> 24) & 0xFF) * _decoOpacity;
+              _dbgc = (_dbgc & 0x00FFFFFF) | (Math.round(_da) << 24);
+            }
+            canvas.fillRoundRect(decoX, decoY, decoW, decoH, decoR, _dbgc);
           }
           // gradient background handled below via line.bgGradient (which is already set on the line)
         } else {
@@ -1034,7 +1042,9 @@ export class BrowserApp implements App {
       if (line.bgColor) {
         // Skip full-width fill when boxDeco already painted a rounded background
         if (!(line.boxDeco && (line.boxDeco.borderRadius || 0) > 0)) {
-          canvas.fillRect(0, absY - 1, w, line.lineH + 1, line.bgColor);
+          var _lbgc = line.bgColor;
+          if (_decoOpacity < 1) { var _la = ((_lbgc >>> 24) & 0xFF) * _decoOpacity; _lbgc = (_lbgc & 0x00FFFFFF) | (Math.round(_la) << 24); }
+          canvas.fillRect(0, absY - 1, w, line.lineH + 1, _lbgc);
         }
       }
       if (line.bgGradient) {
@@ -1078,7 +1088,12 @@ export class BrowserApp implements App {
         if (!span.text) continue;
         var clr = span.color;
         if (span.href) {
-          clr = this._visited.has(span.href) ? CLR_VISITED
+         
+        // Apply opacity alpha blending to text color
+        if (_decoOpacity < 1) {
+          var _ta = ((clr >>> 24) & 0xFF) * _decoOpacity;
+          clr = (clr & 0x00FFFFFF) | (Math.round(_ta) << 24);
+        } clr = this._visited.has(span.href) ? CLR_VISITED
               : span.href === this._hoverHref ? CLR_LINK_HOV : CLR_LINK;
         }
         var sc  = span.fontScale || 1;

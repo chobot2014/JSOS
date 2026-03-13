@@ -373,6 +373,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
   var mark      = 0;
   var underline = 0;
   var listDepth = 0;
+  var listItemCount: number[] = [];  // stack of per-list item counters
   var skipDepth = 0;   // CSS display:none depth
   var _ibDepth  = 0;   // nesting depth of display:inline-block elements
 
@@ -702,6 +703,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (curCSS.letterSpacing !== undefined) blk.letterSpacing = curCSS.letterSpacing;
     if (curCSS.wordSpacing !== undefined) blk.wordSpacing = curCSS.wordSpacing;
     if (curCSS.textIndent !== undefined) blk.textIndent = curCSS.textIndent;
+    if (curCSS.lineClamp !== undefined) blk.lineClamp = curCSS.lineClamp;
     if (curCSS.flexDirection)  blk.flexDirection  = curCSS.flexDirection;
     if (curCSS.flexWrap)       blk.flexWrap       = curCSS.flexWrap;
     if (curCSS.justifyContent) blk.justifyContent = curCSS.justifyContent;
@@ -1254,13 +1256,17 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
 
         // ── Lists ────────────────────────────────────────────────────────────
         case 'ul': case 'ol':
-          applyStyle(tok.tag, tok.attrs); flushInline(); listDepth++; break;
+          applyStyle(tok.tag, tok.attrs); flushInline(); listDepth++; listItemCount.push(0); break;
         case 'li': {
           flushInline();
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
           applyStyle(tok.tag, tok.attrs);
+          if (listItemCount.length > 0) listItemCount[listItemCount.length - 1]++;
           var liAlign = curCSS.align;
-          openBlock = { type: 'li', spans: [], indent: Math.max(0, listDepth - 1), textAlign: liAlign };
+          var liBlock: any = { type: 'li', spans: [], indent: Math.max(0, listDepth - 1), textAlign: liAlign };
+          if (curCSS.listStyleType) liBlock.listStyleType = curCSS.listStyleType;
+          if (listItemCount.length > 0) liBlock.listItemIndex = listItemCount[listItemCount.length - 1];
+          openBlock = liBlock;
           break;
         }
 
@@ -1716,6 +1722,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
           popCSS(); break;
 
         case 'ul': case 'ol':
+          if (listItemCount.length > 0) listItemCount.pop();
           listDepth = Math.max(0, listDepth - 1);
           nodes.push({ type: 'p-break', spans: [] });
           popCSS(); break;

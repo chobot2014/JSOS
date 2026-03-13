@@ -8,6 +8,7 @@ import {
   CLR_QUOTE_TXT,
 } from './constants.js';
 import { getLayoutCache, setLayoutCache, layoutFingerprint, getBlockLayoutCache, setBlockLayoutCache, blockFingerprint, type BlockLayoutCache } from './cache.js';
+import { getViewport } from './css.js';
 import { layoutGrid, layoutTable } from './layout-ext.js';
 
 // ── CSS transform translate parser ───────────────────────────────────────────
@@ -52,6 +53,7 @@ export function flowSpans(
   opts?: { preBg?: boolean; quoteBg?: boolean; quoteBar?: boolean; bgColor?: number; bgGradient?: string;
            bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean;
            letterSpacing?: number; wordSpacing?: number; whiteSpace?: string; textIndent?: number;
+           lineClamp?: number;
            /** Float text wrapping (item 4.8): narrow x for the first N lines of this flow */
            floatFirstLines?: number; floatXLeft?: number; floatMaxX?: number; }
 ): RenderedLine[] {
@@ -188,7 +190,41 @@ export function flowSpans(
     lines = [{ ...firstLine, nodes: clippedNodes }];
   }
 
+  // -webkit-line-clamp: truncate to N lines, append "..." on the last visible line
+  if (opts?.lineClamp && opts.lineClamp > 0 && lines.length > opts.lineClamp) {
+    lines = lines.slice(0, opts.lineClamp);
+    var _clLast = lines[lines.length - 1]!;
+    var _clMaxC = Math.max(1, Math.floor((maxX - xLeft) / CHAR_W));
+    var _clTotal = 0;
+    var _clNodes: RenderedSpan[] = [];
+    for (var _cli = 0; _cli < _clLast.nodes.length; _cli++) {
+      var _cln = _clLast.nodes[_cli]!;
+      var _clRem = _clMaxC - 3 - _clTotal;
+      if (_clRem <= 0) break;
+      var _clTrim = _cln.text.slice(0, _clRem);
+      _clNodes.push({ ..._cln, text: _clTrim });
+      _clTotal += _clTrim.length;
+    }
+    if (_clNodes.length > 0) {
+      var _clLastN = _clNodes[_clNodes.length - 1]!;
+      var _clDotX  = _clLastN.x + _clLastN.text.length * CHAR_W;
+      _clNodes.push({ x: _clDotX, text: '...', color: _clLastN.color });
+    }
+    lines[lines.length - 1] = { ..._clLast, nodes: _clNodes };
+  }
+
   return lines;
+}
+
+// ── Roman numeral helper ──────────────────────────────────────────────────────
+function _toRomanLower(n: number): string {
+  if (n <= 0 || n > 3999) return String(n);
+  var _rv = [['', 'i','ii','iii','iv','v','vi','vii','viii','ix'],
+             ['', 'x','xx','xxx','xl','l','lx','lxx','lxxx','xc'],
+             ['', 'c','cc','ccc','cd','d','dc','dcc','dccc','cm'],
+             ['', 'm','mm','mmm']];
+  return (_rv[3][Math.floor(n/1000)] || '') + (_rv[2][Math.floor(n%1000/100)] || '') +
+         (_rv[1][Math.floor(n%100/10)] || '') + (_rv[0][n%10] || '');
 }
 
 // ── Block layout engine ───────────────────────────────────────────────────────
@@ -359,10 +395,16 @@ function _layoutNodesImpl(
       var txLeft   = bxLeft + CHAR_W * 3;
       // List style type from CSS
       var lstType  = (nd as RenderNode & { listStyleType?: string }).listStyleType;
+      var liIdx    = (nd as RenderNode & { listItemIndex?: number }).listItemIndex || 1;
       var bullets  = ['\u2022', '\u25E6', '\u25AA'];
-      var bullet   = lstType === 'decimal' ? (String(i) + '. ') :
-                     lstType === 'none' ? '' :
-                     (bullets[Math.min(depth - 1, 2)] || '\u2022') + ' ';
+      var bullet   = '';
+      if (lstType === 'decimal') { bullet = String(liIdx) + '. '; }
+      else if (lstType === 'lower-alpha') { bullet = String.fromCharCode(96 + ((liIdx - 1) % 26) + 1) + '. '; }
+      else if (lstType === 'upper-alpha') { bullet = String.fromCharCode(64 + ((liIdx - 1) % 26) + 1) + '. '; }
+      else if (lstType === 'lower-roman') { bullet = _toRomanLower(liIdx) + '. '; }
+      else if (lstType === 'upper-roman') { bullet = _toRomanLower(liIdx).toUpperCase() + '. '; }
+      else if (lstType === 'none') { bullet = ''; }
+      else { bullet = (bullets[Math.min(depth - 1, 2)] || '\u2022') + ' '; }
       var liSpans  = transformSpans(nd.spans, nd.textTransform);
       var lineHere = nodeLineH(nd);
       if (bullet) {
@@ -579,11 +621,20 @@ function _layoutNodesImpl(
           if (fcFinalH[fcci2] > fccUsedH) fcCurY += fcFinalH[fcci2] - fccUsedH;
           if (fcci2 < fcChildData.length - 1) fcCurY += gap + fcGapExtra;
         }
-        y = fcCurY;
-        lastBottomMargin = nd.marginBottom || 0;
-        continue;
-      }
-
+        y = fcCurY; or content width)
+      var fBaseW: number[] = [];
+      for (var fi = 0; fi < fSorted.length; fi++) {
+        var _fb = fSorted[fi].flexBasis;
+        var _bw = (_fb && _fb > 0) ? _fb : (fSorted[fi].boxWidth ?? 0);
+        // flex-basis: auto — when no explicit basis or width, measure content intrinsic width
+        if (_bw === 0 && fSorted[fi].spans && fSorted[fi].spans.length > 0) {
+          var _cw0 = 0;
+          for (var _cwi = 0; _cwi < fSorted[fi].spans.length; _cwi++) {
+            _cw0 += fSorted[fi].spans[_cwi].text.length * CHAR_W * (fSorted[fi].spans[_cwi].fontScale || 1);
+          }
+          _bw = Math.ceil(_cw0);
+        }
+        fBaseW.push(_bw
       // ── flex-direction: row / row-reverse (default) ─────────────────────────
       if (fDir === 'row-reverse') fSorted.reverse();
 
@@ -802,7 +853,7 @@ function _layoutNodesImpl(
       y = fCurLineY;
       lastBottomMargin = nd.marginBottom || 0;
       continue;
-    }
+    } && !nd.heightPct
 
     if (nd.type === 'block' || nd.type === 'aside') {
       // ── Skip empty blocks: no text, no visual properties, no height ─────────
@@ -827,7 +878,11 @@ function _layoutNodesImpl(
       var bgGradient = nd.bgGradient;
       // Resolve percentage width against container (item 2.1)
       var _effectBoxW = nd.boxWidth || 0;
-      if (nd.widthPct && nd.widthPct > 0) {
+      i
+      // Resolve percentage height against viewport (containing block approximation)
+      if (!nd.height && nd.heightPct && nd.heightPct > 0) {
+        nd.height = Math.floor(getViewport().h * nd.heightPct / 100);
+      }f (nd.widthPct && nd.widthPct > 0) {
         _effectBoxW = Math.floor((contentW - CONTENT_PAD * 2) * nd.widthPct / 100);
       }
       // Clamp to min-width / max-width
@@ -853,8 +908,8 @@ function _layoutNodesImpl(
       var ndSpans   = transformSpans(nd.spans, nd.textTransform);
 
       // Build flow opts including bgImage (item 386) and word-break (item 421)
-      function makeFlowOpts(): typeof undefined | { bgColor?: number; bgGradient?: string; bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean; letterSpacing?: number; wordSpacing?: number; whiteSpace?: string; textIndent?: number } {
-        var o: { bgColor?: number; bgGradient?: string; bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean; letterSpacing?: number; wordSpacing?: number; whiteSpace?: string; textIndent?: number } = {};
+      function makeFlowOpts(): typeof undefined | { bgColor?: number; bgGradient?: string; bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean; letterSpacing?: number; wordSpacing?: number; whiteSpace?: string; textIndent?: number; lineClamp?: number } {
+        var o: { bgColor?: number; bgGradient?: string; bgImageUrl?: string; wordBreak?: string; overflowWrap?: string; ellipsis?: boolean; letterSpacing?: number; wordSpacing?: number; whiteSpace?: string; textIndent?: number; lineClamp?: number } = {};
         var any = false;
         if (bgColor !== undefined)  { o.bgColor = bgColor; any = true; }
         if (bgGradient)             { o.bgGradient = bgGradient; any = true; }
@@ -866,6 +921,7 @@ function _layoutNodesImpl(
         if (nd.wordSpacing)         { o.wordSpacing = nd.wordSpacing; any = true; }
         if (nd.whiteSpace === 'nowrap') { o.whiteSpace = 'nowrap'; any = true; }
         if (nd.textIndent)          { o.textIndent = nd.textIndent; any = true; }
+        if (nd.lineClamp)           { o.lineClamp = nd.lineClamp; any = true; }
         return any ? o : undefined;
       }
 
