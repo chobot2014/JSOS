@@ -511,6 +511,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
   var tableCellNode: RenderNode | null = null; // current <td>/<th>
   var tableCellSpans: InlineSpan[] = [];       // spans collected inside current cell
   var inTableCell   = false;
+  var inTableCaption = false;                  // inside <caption>
+  var tableCaptionSpans: InlineSpan[] = [];    // spans collected inside <caption>
 
   // ── Container nesting stack for flex/grid — items rendered as children ──────
   interface ContainerFrame {
@@ -790,6 +792,16 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
 
   function pushSpan(text: string): void {
     if (!text) return;
+    if (inTableCaption) {
+      // Collect caption content for rendering above the table
+      var csp: InlineSpan = { text };
+      if (bold > 0 || curCSS.bold) csp.bold = true;
+      if (italic > 0 || curCSS.italic) csp.italic = true;
+      if (curCSS.color !== undefined) csp.color = curCSS.color;
+      if (curCSS.fontScale && curCSS.fontScale !== 1) csp.fontScale = curCSS.fontScale;
+      tableCaptionSpans.push(csp);
+      return;
+    }
     if (inTableCell) {
       // Collect full InlineSpan (preserving links, formatting, etc.)
       var tsp: InlineSpan = { text };
@@ -1613,7 +1625,31 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
           } else { pushSpan('| '); }
           break;
         }
-        case 'colgroup': case 'col': break;
+        case 'caption': {
+          // <caption> — table caption, renders as centered text above table
+          if (inTable) {
+            inTableCaption = true;
+            tableCaptionSpans = [];
+          }
+          applyStyle(tok.tag, tok.attrs);
+          break;
+        }
+        case 'colgroup': break;
+        case 'col': {
+          // Capture <col width="N"> / <col style="width:Npx"> for table column sizing
+          if (inTable && tableNode) {
+            var _colW = tok.attrs.get('width');
+            var _colSpan = parseInt(tok.attrs.get('span') || '1', 10) || 1;
+            var _colPx = _colW ? parseInt(_colW, 10) || 0 : 0;
+            if (_colPx > 0) {
+              if (!(tableNode as any)._colWidths) (tableNode as any)._colWidths = [];
+              for (var _ci = 0; _ci < _colSpan; _ci++) {
+                (tableNode as any)._colWidths.push(_colPx);
+              }
+            }
+          }
+          break;
+        }
 
         // ── Default block ─────────────────────────────────────────────────────
         default: {
@@ -1939,6 +1975,15 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
           popCSS(); break;
         case 'output': popCSS(); break;
+        case 'caption': {
+          // Close caption: emit collected spans as a centered paragraph before the table
+          inTableCaption = false;
+          if (tableCaptionSpans.length > 0) {
+            (tableNode as any)._captionSpans = tableCaptionSpans.slice();
+          }
+          tableCaptionSpans = [];
+          popCSS(); break;
+        }
         case 'progress': case 'meter': break;
 
         case 'th':

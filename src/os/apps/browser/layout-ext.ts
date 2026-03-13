@@ -360,9 +360,20 @@ export function layoutTable(
   // ── Column widths ──────────────────────────────────────────────────────────
   var colWidths: number[] = new Array(colCount).fill(0);
 
+  // Apply <col width="N"> hints if available (item R18: col width propagation)
+  var _htmlColW = (tableNode as any)._colWidths as number[] | undefined;
+  if (_htmlColW && _htmlColW.length > 0) {
+    for (var _cwi = 0; _cwi < Math.min(_htmlColW.length, colCount); _cwi++) {
+      if (_htmlColW[_cwi] > 0) colWidths[_cwi] = _htmlColW[_cwi];
+    }
+  }
+
   if (layout === 'fixed') {
     var equalW = Math.floor((tableW - borderW * (colCount + 1)) / colCount);
-    for (var ci3 = 0; ci3 < colCount; ci3++) colWidths[ci3] = Math.max(equalW, 20);
+    for (var ci3 = 0; ci3 < colCount; ci3++) {
+      // Prefer <col> hint if present, otherwise equal distribution
+      if (colWidths[ci3] <= 0) colWidths[ci3] = Math.max(equalW, 20);
+    }
   } else {
     // Auto: measure max-content of non-spanning cells first
     for (var ri2 = 0; ri2 < rows.length; ri2++) {
@@ -413,6 +424,27 @@ export function layoutTable(
   // ── Render rows + cells ────────────────────────────────────────────────────
   var allLines: RenderedLine[] = [];
   var tableY   = 0;
+
+  // Render <caption> spans as centered text above the table (item R18)
+  var _capSpans = (tableNode as any)._captionSpans as import('./types.js').InlineSpan[] | undefined;
+  if (_capSpans && _capSpans.length > 0) {
+    var capLines = layoutRowFn(_capSpans, 0, tableW, LINE_H);
+    for (var _cli = 0; _cli < capLines.length; _cli++) {
+      // Center caption text within table width
+      var _capLn = capLines[_cli];
+      var _capContentW = 0;
+      for (var _cni = 0; _cni < _capLn.nodes.length; _cni++) {
+        var _cn = _capLn.nodes[_cni];
+        _capContentW = Math.max(_capContentW, _cn.x + _cn.text.length * CHAR_W);
+      }
+      var _capOff = Math.max(0, Math.floor((tableW - _capContentW) / 2));
+      if (_capOff > 0) {
+        _capLn = { ..._capLn, nodes: _capLn.nodes.map(function(n) { return { ...n, x: n.x + _capOff }; }) };
+      }
+      allLines.push({ ..._capLn, y: tableY + _cli * LINE_H });
+    }
+    tableY += capLines.length * LINE_H;
+  }
 
   // rowspan cells that continue beyond their start row
   // rowspanPool[ri] = array of cells that span into row ri

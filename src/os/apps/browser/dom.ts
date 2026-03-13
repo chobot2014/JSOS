@@ -287,6 +287,44 @@ export class VNode extends VEventTarget {
     return newNode;
   }
   replaceChild(newNode: VNode, oldNode: VNode): VNode {
+    // DocumentFragment: replace oldNode with all fragment children (WHATWG spec)
+    if (newNode.nodeType === 11) {
+      var _fragNodes = newNode.childNodes.slice();
+      newNode.childNodes = [];
+      if (_fragNodes.length === 0) {
+        // Empty fragment: just remove oldNode
+        this.removeChild(oldNode);
+        return oldNode;
+      }
+      // Insert first fragment child in place of oldNode
+      var first = _fragNodes[0];
+      if (first.parentNode) first.parentNode.removeChild(first);
+      var i = this.childNodes.indexOf(oldNode);
+      if (i < 0) return oldNode;
+      oldNode.parentNode = null;
+      first.parentNode = this;
+      _setOwnerDocRecursive(first, this.ownerDocument);
+      this.childNodes[i] = first;
+      // Sibling pointers for first replacement
+      var _rcPrev = this.childNodes[i - 1] ?? null;
+      var _rcNext = this.childNodes[i + 1] ?? null;
+      first._prevSib = _rcPrev;
+      first._nextSib = _rcNext;
+      if (_rcPrev) _rcPrev._nextSib = first;
+      if (_rcNext) _rcNext._prevSib = first;
+      oldNode._prevSib = null; oldNode._nextSib = null;
+      // Insert remaining fragment children after the first
+      var ref: VNode | null = first._nextSib;
+      for (var _fi = 1; _fi < _fragNodes.length; _fi++) {
+        this.insertBefore(_fragNodes[_fi], ref);
+      }
+      if (this.ownerDocument) {
+        this.ownerDocument._dirty = true;
+        if (this.ownerDocument._idIndex) this.ownerDocument._idIndex = null;
+        this.ownerDocument._queueMutation({ type: 'childList', target: this, addedNodes: _fragNodes, removedNodes: [oldNode], previousSibling: _rcPrev, nextSibling: ref });
+      }
+      return oldNode;
+    }
     var i = this.childNodes.indexOf(oldNode);
     if (i < 0) return oldNode;
     if (newNode.parentNode) newNode.parentNode.removeChild(newNode);
@@ -466,7 +504,16 @@ export class VText extends VNode {
     this.data = before;
     var newNode = new VText(after); newNode.ownerDocument = this.ownerDocument; newNode.parentNode = this.parentNode;
     if (this.parentNode) {
-      var idx = this.parentNode.childNodes.indexOf(this); if (idx >= 0) this.parentNode.childNodes.splice(idx + 1, 0, newNode as any);
+      var idx = this.parentNode.childNodes.indexOf(this);
+      if (idx >= 0) {
+        this.parentNode.childNodes.splice(idx + 1, 0, newNode as any);
+        // Maintain O(1) sibling linked list
+        var _oldNext = this._nextSib;
+        this._nextSib = newNode;
+        newNode._prevSib = this;
+        newNode._nextSib = _oldNext;
+        if (_oldNext) _oldNext._prevSib = newNode;
+      }
     }
     if (this.ownerDocument) this.ownerDocument._dirty = true;
     return newNode;
