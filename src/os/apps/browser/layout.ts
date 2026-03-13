@@ -187,8 +187,20 @@ export function flowSpans(
   }
   if (curLine.length > 0) commitLine();
 
-  // text-overflow: ellipsis (item 465) — keep only first line, append "..."
-  if (opts?.ellipsis && lines.length > 1) {
+  // text-overflow: ellipsis (item 465) — truncate to fit + "..." (R14: also handle single-line)
+  if (opts?.ellipsis) {
+    var _ellMaxW = maxX - xLeft;
+    var _needEllipsis = lines.length > 1;
+    // Single line overflow: check if content exceeds available width
+    if (!_needEllipsis && lines.length === 1) {
+      var _lineW = 0;
+      for (var _ewi = 0; _ewi < lines[0].nodes.length; _ewi++) {
+        var _en2 = lines[0].nodes[_ewi];
+        _lineW = Math.max(_lineW, _en2.x + _en2.text.length * CHAR_W);
+      }
+      if (_lineW > xLeft + _ellMaxW) _needEllipsis = true;
+    }
+    if (_needEllipsis) {
     var firstLine = lines[0]!;
     var maxChars  = Math.max(1, Math.floor((maxX - xLeft) / CHAR_W));
     // Truncate all spans on the first line to fit + "..."
@@ -209,6 +221,7 @@ export function flowSpans(
       clippedNodes.push({ x: dotX, text: '...', color: lastNode.color });
     }
     lines = [{ ...firstLine, nodes: clippedNodes }];
+    }
   }
 
   // -webkit-line-clamp: truncate to N lines, append "..." on the last visible line
@@ -1165,14 +1178,16 @@ function _layoutNodesImpl(
           }
           if (y > yMaxEnd) y = yMaxEnd;
         }
-        // Enforce overflow:hidden / scroll / auto — clip when explicit height set
-        if (nd.height && nd.height > 0
-            && (nd.overflow === 'hidden' || nd.overflow === 'scroll' || nd.overflow === 'auto')) {
-          var yOvEnd = yBeforeBlock + nd.height;
-          while (lines.length > 0 && lines[lines.length - 1].y >= yOvEnd) {
-            lines.pop();
+        // Enforce overflow:hidden / scroll / auto — clip when explicit height or max-height set (R14)
+        if ((nd.overflow === 'hidden' || nd.overflow === 'scroll' || nd.overflow === 'auto')) {
+          var _ovH = nd.height && nd.height > 0 ? nd.height : (nd.maxHeight && nd.maxHeight > 0 ? nd.maxHeight : 0);
+          if (_ovH > 0) {
+            var yOvEnd = yBeforeBlock + _ovH;
+            while (lines.length > 0 && lines[lines.length - 1].y >= yOvEnd) {
+              lines.pop();
+            }
+            if (y > yOvEnd) y = yOvEnd;
           }
-          if (y > yOvEnd) y = yOvEnd;
         }
         // Annotate first generated line with box decoration (items 3.7, 4.2)
         // border-radius, border, box-shadow, opacity — painted before text in _drawContent
@@ -1180,7 +1195,8 @@ function _layoutNodesImpl(
         var _hasBoxDeco = nd.borderRadius || nd.borderWidth || nd.borderColor !== undefined
                        || nd.boxShadow || nd.opacity !== undefined || nd.textShadow
                        || nd.outlineWidth
-                       || nd.borderTopWidth || nd.borderRightWidth || nd.borderBottomWidth || nd.borderLeftWidth;
+                       || nd.borderTopWidth || nd.borderRightWidth || nd.borderBottomWidth || nd.borderLeftWidth
+                       || nd.overflow === 'hidden' || nd.overflow === 'scroll' || nd.overflow === 'auto';
         var _needsTracking = nd.elId && lines.length > _blockLineStart && !lines[_blockLineStart].boxDeco;
         if ((_hasBoxDeco || _needsTracking) && lines.length > _blockLineStart) {
           var _blkH = y - yBeforeBlock;

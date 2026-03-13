@@ -54,12 +54,40 @@ export function resolveCSSVars(value: string): string {
       return fallback !== undefined ? fallback.trim() : '0';
     });
   if (step1.indexOf('var(') < 0) return step1;
-  return step1.replace(/var\(\s*(--[^,)]+)\s*(?:,\s*([^)]+))?\s*\)/g,
-    (_: string, name: string, fallback: string | undefined) => {
-      var resolved = _cssVars[name.trim()];
-      if (resolved !== undefined) return resolveCSSVars(resolved.trim());  // recursive
-      return fallback !== undefined ? resolveCSSVars(fallback.trim()) : '';
-    });
+  // Balanced-parenthesis var() scanner to handle nested parens in fallbacks (R14)
+  var result = '';
+  var i = 0;
+  while (i < step1.length) {
+    var varIdx = step1.indexOf('var(', i);
+    if (varIdx < 0) { result += step1.slice(i); break; }
+    result += step1.slice(i, varIdx);
+    // Walk from the opening '(' counting depth
+    var start = varIdx + 4; // after 'var('
+    var depth = 1;
+    var j = start;
+    while (j < step1.length && depth > 0) {
+      if (step1[j] === '(') depth++;
+      else if (step1[j] === ')') depth--;
+      if (depth > 0) j++;
+    }
+    var inner = step1.slice(start, j).trim(); // content between var( and matching )
+    i = j + 1; // skip closing )
+    // Split into name and fallback at the first comma (outside nested parens)
+    var commaIdx = -1;
+    var cd = 0;
+    for (var ci = 0; ci < inner.length; ci++) {
+      if (inner[ci] === '(') cd++;
+      else if (inner[ci] === ')') cd--;
+      else if (inner[ci] === ',' && cd === 0) { commaIdx = ci; break; }
+    }
+    var vname = commaIdx >= 0 ? inner.slice(0, commaIdx).trim() : inner.trim();
+    var vfallback = commaIdx >= 0 ? inner.slice(commaIdx + 1).trim() : undefined;
+    var resolved = _cssVars[vname];
+    if (resolved !== undefined) { result += resolveCSSVars(resolved.trim()); }
+    else if (vfallback !== undefined) { result += resolveCSSVars(vfallback); }
+    else { result += ''; }
+  }
+  return result;
 }
 
 // ── Named CSS colors ──────────────────────────────────────────────────────────
@@ -793,14 +821,22 @@ export function parseInlineStyle(style: string): CSSProps {
       case 'border-style': { p.borderStyle = vl; break; }
       case 'border-color': { var bcv = parseCSSColor(vl); if (bcv !== undefined) p.borderColor = bcv; break; }
       case 'border-radius': {
-        // 1–4 values supported; store as single for now, expand corners if multiple
+        // 1–4 values supported; resolve % using a fallback size or store raw string (R14)
         var brParts = val.trim().split(/\s+/);
-        var br1 = parseLengthPx(brParts[0] || '0');
-        p.borderRadius = isNaN(br1) ? 0 : br1;
-        p.borderTopLeftRadius     = isNaN(parseLengthPx(brParts[0] || '0')) ? 0 : parseLengthPx(brParts[0] || '0');
-        p.borderTopRightRadius    = isNaN(parseLengthPx(brParts[1] || brParts[0] || '0')) ? 0 : parseLengthPx(brParts[1] || brParts[0] || '0');
-        p.borderBottomRightRadius = isNaN(parseLengthPx(brParts[2] || brParts[0] || '0')) ? 0 : parseLengthPx(brParts[2] || brParts[0] || '0');
-        p.borderBottomLeftRadius  = isNaN(parseLengthPx(brParts[3] || brParts[1] || brParts[0] || '0')) ? 0 : parseLengthPx(brParts[3] || brParts[1] || brParts[0] || '0');
+        function _brPx(s: string): number {
+          if (s.endsWith('%')) {
+            // For %, approximate using half viewport width as reference (pills, avatars)
+            return parseFloat(s) * _vpW / 200;
+          }
+          var v = parseLengthPx(s);
+          return isNaN(v) ? 0 : v;
+        }
+        var br1 = _brPx(brParts[0] || '0');
+        p.borderRadius = br1;
+        p.borderTopLeftRadius     = _brPx(brParts[0] || '0');
+        p.borderTopRightRadius    = _brPx(brParts[1] || brParts[0] || '0');
+        p.borderBottomRightRadius = _brPx(brParts[2] || brParts[0] || '0');
+        p.borderBottomLeftRadius  = _brPx(brParts[3] || brParts[1] || brParts[0] || '0');
         break;
       }
       case 'border-top-left-radius':     { var br2 = parseLengthPx(vl); if (!isNaN(br2)) { p.borderTopLeftRadius    = br2; p.borderRadius = br2; } break; }
