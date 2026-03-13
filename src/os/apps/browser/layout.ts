@@ -565,9 +565,9 @@ function _layoutNodesImpl(
             }
           }
           var fccH = fccLines.length > 0 ? (fccLines[fccLines.length - 1].y + (fccLines[fccLines.length - 1].lineH || LINE_H) - fccLines[0].y) : 0;
-          // flex-basis overrides natural content height (0 = auto → use content height)
+          // flex-basis: >= 0 means explicit value; < 0 or undefined means auto (use content height)
           var _fcb = fcc.flexBasis;
-          var fccBaseH = (_fcb && _fcb > 0) ? _fcb : fccH;
+          var fccBaseH = (_fcb !== undefined && _fcb >= 0) ? _fcb : fccH;
           fcChildData.push({ childLines: fccLines, childH: fccH, childWidgets: _fccWidgets });
           fcBaseH.push(fccBaseH);
           fcTotalH += fccBaseH + (fcci < fcItems.length - 1 ? gap : 0);
@@ -673,13 +673,14 @@ function _layoutNodesImpl(
       var fxUsedGap  = gap * Math.max(0, fSorted.length - 1);
       var fxFreeInit = fxAvail - fxUsedGap;
       // Two-pass flex algorithm: compute hypothetical main sizes
-      // flex-basis overrides boxWidth for initial main size; 0 means auto (use boxWidth or content width)
+      // flex-basis: >= 0 means explicit value; < 0 or undefined means auto (use boxWidth or content width)
       var fBaseW: number[] = [];
       for (var fi = 0; fi < fSorted.length; fi++) {
         var _fb = fSorted[fi].flexBasis;
-        var _bw = (_fb && _fb > 0) ? _fb : (fSorted[fi].boxWidth ?? 0);
+        var _fbExplicit = _fb !== undefined && _fb >= 0;
+        var _bw = _fbExplicit ? _fb : (fSorted[fi].boxWidth ?? 0);
         // flex-basis: auto — when no explicit basis or width, measure content intrinsic width
-        if (_bw === 0 && fSorted[fi].spans && fSorted[fi].spans.length > 0) {
+        if (!_fbExplicit && _bw === 0 && fSorted[fi].spans && fSorted[fi].spans.length > 0) {
           var _cw0 = 0;
           for (var _cwi = 0; _cwi < fSorted[fi].spans.length; _cwi++) {
             _cw0 += fSorted[fi].spans[_cwi].text.length * CHAR_W * (fSorted[fi].spans[_cwi].fontScale || 1);
@@ -1355,14 +1356,21 @@ function _layoutNodesImpl(
       }
 
       // CSS width/height override (if specified via stylesheet/inline CSS)
-      if (bp.cssWidth && bp.cssWidth > 0) ww = Math.min(bp.cssWidth, maxX - xLeft);
-      if (bp.cssHeight && bp.cssHeight > 0) {
+      var _cssWSet = !!(bp.cssWidth && bp.cssWidth > 0);
+      var _cssHSet = !!(bp.cssHeight && bp.cssHeight > 0);
+      if (_cssWSet) ww = Math.min(bp.cssWidth!, maxX - xLeft);
+      if (_cssHSet) {
         // For buttons, cap CSS height to prevent oversized rendering
         if (bp.kind === 'submit' || bp.kind === 'reset' || bp.kind === 'button') {
-          wh = Math.min(bp.cssHeight, WIDGET_BTN_H + 16);
+          wh = Math.min(bp.cssHeight!, WIDGET_BTN_H + 16);
         } else {
-          wh = bp.cssHeight;
+          wh = bp.cssHeight!;
         }
+      }
+      // R20: Maintain image aspect ratio when CSS sets only one dimension
+      if (bp.kind === 'img' && bp.imgNatW && bp.imgNatH && bp.imgNatW > 0 && bp.imgNatH > 0) {
+        if (_cssWSet && !_cssHSet) wh = Math.round(ww * bp.imgNatH / bp.imgNatW);
+        else if (_cssHSet && !_cssWSet) ww = Math.min(Math.round(wh * bp.imgNatW / bp.imgNatH), maxX - xLeft);
       }
 
       // object-fit: adjust image dimensions when CSS constrains the container

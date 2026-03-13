@@ -592,8 +592,9 @@ export function parseInlineStyle(style: string): CSSProps {
       case 'font-size': {
         // Continuous font-size scaling: fontScale = px / 16 (CSS default 16px = 1.0)
         var fsv = parseLengthPx(vl);
-        if (!isNaN(fsv) && fsv > 0) {
-          p.fontScale = Math.max(0.5, Math.min(fsv / 16, 4));
+        if (!isNaN(fsv) && fsv >= 0) {
+          // font-size: 0 — used to hide text / eliminate inline-block whitespace (R20)
+          p.fontScale = fsv === 0 ? 0.01 : Math.max(0.5, Math.min(fsv / 16, 4));
         } else {
           if (vl === 'xx-small') p.fontScale = 0.5625;       // 9px
           else if (vl === 'x-small' || vl === 'xs') p.fontScale = 0.625;  // 10px
@@ -615,7 +616,12 @@ export function parseInlineStyle(style: string): CSSProps {
             // unitless: treat as multiplier of element's font-size
             // Use p.fontScale if already set (font-size parsed before line-height),
             // otherwise fall back to 16px default.
-            if (!vl.endsWith('px') && !vl.endsWith('em') && !vl.endsWith('rem') && lhv < 10) {
+            if (vl.endsWith('%')) {
+              // line-height: 150% = 1.5 × font-size (R20)
+              var _lhPct = lhv / 100;
+              var _lhFontPx2 = (p.fontScale ?? 1) * 16;
+              lhv = _lhPct * _lhFontPx2;
+            } else if (!vl.endsWith('px') && !vl.endsWith('em') && !vl.endsWith('rem') && lhv < 10) {
               var _lhFontPx = (p.fontScale ?? 1) * 16;
               lhv = lhv * _lhFontPx;
             }
@@ -1224,8 +1230,10 @@ export function parseInlineStyle(style: string): CSSProps {
 
       // ── Overflow ──────────────────────────────────────────────────────────
       case 'overflow': {
-        if (vl === 'visible' || vl === 'hidden' || vl === 'scroll' || vl === 'auto')
-          p.overflow = vl; break;
+        if (vl === 'visible' || vl === 'hidden' || vl === 'scroll' || vl === 'auto') {
+          p.overflow = vl; p.overflowX = vl; p.overflowY = vl;
+        }
+        break;
       }
       case 'overflow-x': {
         if (vl === 'visible' || vl === 'hidden' || vl === 'scroll' || vl === 'auto')
@@ -1319,8 +1327,8 @@ export function parseInlineStyle(style: string): CSSProps {
       // ── Flexbox ───────────────────────────────────────────────────────────
       case 'flex': {
         // flex: [flex-grow] [flex-shrink] [flex-basis]  OR  flex: none/auto
-        if (vl === 'none') { p.flexGrow = 0; p.flexShrink = 0; p.flexBasis = 0; }
-        else if (vl === 'auto') { p.flexGrow = 1; p.flexShrink = 1; p.flexBasis = 0; }
+        if (vl === 'none') { p.flexGrow = 0; p.flexShrink = 0; p.flexBasis = -1; }
+        else if (vl === 'auto') { p.flexGrow = 1; p.flexShrink = 1; p.flexBasis = -1; }
         else {
           var fparts = vl.split(/\s+/);
           var fg = parseFloat(fparts[0] || '0'); if (!isNaN(fg)) p.flexGrow = fg;

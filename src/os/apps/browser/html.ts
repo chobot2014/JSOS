@@ -730,6 +730,13 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       if (curCSS.zIndex !== undefined) blk.zIndex    = curCSS.zIndex;
     }
     if (curCSS.overflow !== undefined) blk.overflow  = curCSS.overflow;
+    // R20: Promote overflow-x/overflow-y to overflow when shorthand not set
+    if (!blk.overflow) {
+      if (curCSS.overflowX === 'hidden' || curCSS.overflowX === 'scroll' || curCSS.overflowX === 'auto')
+        blk.overflow = curCSS.overflowX;
+      else if (curCSS.overflowY === 'hidden' || curCSS.overflowY === 'scroll' || curCSS.overflowY === 'auto')
+        blk.overflow = curCSS.overflowY;
+    }
     if (curCSS.boxSizing) blk.boxSizing = curCSS.boxSizing;
     if (curCSS.textOverflow !== undefined) blk.textOverflow = curCSS.textOverflow; // item 465
     if (curCSS.whiteSpace !== undefined) blk.whiteSpace = curCSS.whiteSpace;
@@ -1699,6 +1706,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
                 if (curCSS.left !== undefined) _fp.posLeft = curCSS.left;
               }
               if (curCSS.overflow) _fp.overflow = curCSS.overflow;
+              else if (curCSS.overflowX === 'hidden' || curCSS.overflowX === 'scroll' || curCSS.overflowX === 'auto') _fp.overflow = curCSS.overflowX;
+              else if (curCSS.overflowY === 'hidden' || curCSS.overflowY === 'scroll' || curCSS.overflowY === 'auto') _fp.overflow = curCSS.overflowY;
               if (curCSS.borderRadius !== undefined) _fp.borderRadius = curCSS.borderRadius;
               if (curCSS.borderWidth !== undefined) _fp.borderWidth = curCSS.borderWidth;
               if (curCSS.borderColor !== undefined) _fp.borderColor = curCSS.borderColor;
@@ -1759,6 +1768,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
               if (curCSS.boxShadow) _gp.boxShadow = curCSS.boxShadow;
               if (curCSS.opacity !== undefined) _gp.opacity = curCSS.opacity;
               if (curCSS.overflow) _gp.overflow = curCSS.overflow;
+              else if (curCSS.overflowX === 'hidden' || curCSS.overflowX === 'scroll' || curCSS.overflowX === 'auto') _gp.overflow = curCSS.overflowX;
+              else if (curCSS.overflowY === 'hidden' || curCSS.overflowY === 'scroll' || curCSS.overflowY === 'auto') _gp.overflow = curCSS.overflowY;
               if (curCSS.boxSizing) _gp.boxSizing = curCSS.boxSizing;
               if (curCSS._onclickElId) _gp.elId = curCSS._onclickElId;
               pushContainer(tok.tag, 'grid', _gp);
@@ -1789,6 +1800,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
               if (curCSS.marginBottom) _cp.marginBottom = curCSS.marginBottom;
               if (curCSS.align) _cp.textAlign = curCSS.align;
               if (curCSS.overflow) _cp.overflow = curCSS.overflow;
+              else if (curCSS.overflowX === 'hidden' || curCSS.overflowX === 'scroll' || curCSS.overflowX === 'auto') _cp.overflow = curCSS.overflowX;
+              else if (curCSS.overflowY === 'hidden' || curCSS.overflowY === 'scroll' || curCSS.overflowY === 'auto') _cp.overflow = curCSS.overflowY;
               if (curCSS.borderRadius !== undefined) _cp.borderRadius = curCSS.borderRadius;
               if (curCSS.borderWidth !== undefined) _cp.borderWidth = curCSS.borderWidth;
               if (curCSS.borderColor !== undefined) _cp.borderColor = curCSS.borderColor;
