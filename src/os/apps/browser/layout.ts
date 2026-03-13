@@ -928,12 +928,18 @@ function _layoutNodesImpl(
         nd.height = Math.floor(getViewport().h * nd.heightPct / 100);
       }
       // Clamp to min-width / max-width
-      if (nd.minWidth && nd.minWidth > 0 && _effectBoxW > 0 && _effectBoxW < nd.minWidth) {
-        _effectBoxW = nd.minWidth;
+      // min-width applies even to auto-width blocks: compute auto width from container
+      if (nd.minWidth && nd.minWidth > 0) {
+        var _autoW = _effectBoxW > 0 ? _effectBoxW : (maxX - xLeft);
+        if (_autoW < nd.minWidth) _effectBoxW = nd.minWidth;
       }
       if (nd.maxWidth && nd.maxWidth > 0) {
         if (_effectBoxW > 0) { _effectBoxW = Math.min(_effectBoxW, nd.maxWidth); }
-        else { _effectBoxW = nd.maxWidth; }
+        else {
+          // auto width: only constrain if max-width is narrower than available space
+          var _avail = maxX - xLeft;
+          if (nd.maxWidth < _avail) _effectBoxW = nd.maxWidth;
+        }
       }
       // box-sizing: border-box — specified width includes padding + border
       if (nd.boxSizing === 'border-box' && _effectBoxW > 0) {

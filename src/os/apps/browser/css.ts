@@ -151,8 +151,23 @@ function _parseCSSColorInner(val: string): number | undefined {
       return 0xFF000000 | (parseInt(hex[0]+hex[0], 16) << 16) |
              (parseInt(hex[1]+hex[1], 16) << 8) | parseInt(hex[2]+hex[2], 16);
     }
+    // #RGBA — 4-digit hex shorthand (CSS Color Level 4)
+    if (hex.length === 4) {
+      var r4 = parseInt(hex[0]+hex[0], 16);
+      var g4 = parseInt(hex[1]+hex[1], 16);
+      var b4 = parseInt(hex[2]+hex[2], 16);
+      var a4 = parseInt(hex[3]+hex[3], 16);
+      return ((a4 & 0xFF) << 24 | (r4 & 0xFF) << 16 | (g4 & 0xFF) << 8 | (b4 & 0xFF)) >>> 0;
+    }
     if (hex.length === 6) return 0xFF000000 | (parseInt(hex, 16) & 0xFFFFFF);
-    if (hex.length === 8) return parseInt(hex, 16) >>> 0;
+    // #RRGGBBAA — 8-digit hex: CSS stores alpha last, internal format is ARGB
+    if (hex.length === 8) {
+      var r8 = parseInt(hex.slice(0, 2), 16);
+      var g8 = parseInt(hex.slice(2, 4), 16);
+      var b8 = parseInt(hex.slice(4, 6), 16);
+      var a8 = parseInt(hex.slice(6, 8), 16);
+      return ((a8 & 0xFF) << 24 | (r8 & 0xFF) << 16 | (g8 & 0xFF) << 8 | (b8 & 0xFF)) >>> 0;
+    }
   }
   var m = val.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)/);
   if (m) {
@@ -493,11 +508,20 @@ export function parseInlineStyle(style: string): CSSProps {
           var pctM = posBefore.match(/(\d+(?:\.\d+)?%)\s+(\d+(?:\.\d+)?%)/);
           if (pctM) p.backgroundPosition = pctM[1] + ' ' + pctM[2];
         }
-        // 6. Find color (last non-url/position/repeat token, try each token)
-        var bgParts = bgNoUrl.replace(/\b(no-repeat|repeat[^\s]*|fixed|scroll|local)\b/gi, '').split(/\s+/);
-        for (var bpi = 0; bpi < bgParts.length; bpi++) {
-          var bgCol = parseCSSColor(bgParts[bpi].toLowerCase());
-          if (bgCol !== undefined) { p.bgColor = bgCol; break; }
+        // 6. Find color — first try to extract function-based colors (rgb/hsl/etc.)
+        var bgCleanStr = bgNoUrl.replace(/\b(no-repeat|repeat[^\s]*|fixed|scroll|local)\b/gi, '').trim();
+        // Try function-based color: rgba(...), rgb(...), hsl(...), hsla(...), etc.
+        var bgFuncM = bgCleanStr.match(/((?:rgba?|hsla?|hwb|oklch|lab|lch|color|color-mix)\s*\([^)]*(?:\([^)]*\)[^)]*)*\))/i);
+        if (bgFuncM) {
+          var bgCol = parseCSSColor(bgFuncM[1].toLowerCase());
+          if (bgCol !== undefined) { p.bgColor = bgCol; }
+        } else {
+          // Fallback: try each whitespace-separated token (hex, named colors)
+          var bgParts = bgCleanStr.split(/\s+/);
+          for (var bpi = 0; bpi < bgParts.length; bpi++) {
+            var bgCol2 = parseCSSColor(bgParts[bpi].toLowerCase());
+            if (bgCol2 !== undefined) { p.bgColor = bgCol2; break; }
+          }
         }
         break;
       }

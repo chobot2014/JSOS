@@ -990,13 +990,15 @@ export class BrowserApp implements App {
         var decoH  = deco.h;
         var decoR  = deco.borderRadius || 0;
 
-        // 1. Box-shadow (behind element)
+        // 1. Box-shadow (behind element — outer shadows; then inset shadows after bg)
         if (deco.boxShadow) {
           var _shLayers = _parseBoxShadow(deco.boxShadow);
           for (var _sli = 0; _sli < _shLayers.length; _sli++) {
             var _sl = _shLayers[_sli];
-            if (_sl.inset) continue; // inset shadows unsupported for now
+            if (_sl.inset) continue; // inset drawn after background fill
             var _slA = (_sl.color >>> 24) & 0xFF;
+            // Spread expands shadow size in all directions
+            var _spd = _sl.spread;
             if (_sl.blur > 0 && _slA > 0) {
               // Approximate blur by drawing 3 progressively-larger translucent rects
               for (var _bk = 3; _bk >= 1; _bk--) {
@@ -1004,19 +1006,20 @@ export class BrowserApp implements App {
                 var _bAlph = Math.round(_slA * (1 - _bk / 4)) >>> 0;
                 var _bClr  = (_sl.color & 0x00FFFFFF) | (_bAlph << 24);
                 canvas.fillRect(
-                  Math.round(decoX + _sl.offsetX - _bSpr + _sl.spread),
-                  Math.round(decoY + _sl.offsetY - _bSpr + _sl.spread),
-                  Math.round(decoW + _bSpr * 2),
-                  Math.round(decoH + _bSpr * 2),
+                  Math.round(decoX + _sl.offsetX - _spd - _bSpr),
+                  Math.round(decoY + _sl.offsetY - _spd - _bSpr),
+                  Math.round(decoW + _spd * 2 + _bSpr * 2),
+                  Math.round(decoH + _spd * 2 + _bSpr * 2),
                   _bClr,
                 );
               }
             } else {
-              // No blur — solid shadow rect
+              // No blur — solid shadow rect (spread expands size, offsets position)
               canvas.fillRect(
-                Math.round(decoX + _sl.offsetX + _sl.spread),
-                Math.round(decoY + _sl.offsetY + _sl.spread),
-                decoW, decoH,
+                Math.round(decoX + _sl.offsetX - _spd),
+                Math.round(decoY + _sl.offsetY - _spd),
+                Math.round(decoW + _spd * 2),
+                Math.round(decoH + _spd * 2),
                 _sl.color,
               );
             }
@@ -1043,6 +1046,44 @@ export class BrowserApp implements App {
         } else {
           // No rounding — let the existing bgColor/bgGradient handling below paint normally
           // (boxDeco still enables border + shadow without forcing rounded corners)
+        }
+
+        // 2b. Inset box-shadows — drawn inside the box, on top of the background
+        if (deco.boxShadow) {
+          var _inLayers = _parseBoxShadow(deco.boxShadow);
+          for (var _ili = 0; _ili < _inLayers.length; _ili++) {
+            var _il = _inLayers[_ili];
+            if (!_il.inset) continue;
+            var _ilA = (_il.color >>> 24) & 0xFF;
+            if (_ilA === 0) continue;
+            var _iSpd = _il.spread;
+            // Inset shadow: drawn inward from box edges. Spread shrinks the lit area.
+            // Approximate with 3 progressively-smaller translucent rects from each edge.
+            if (_il.blur > 0) {
+              for (var _ibk = 3; _ibk >= 1; _ibk--) {
+                var _ibSpr  = _il.blur * _ibk / 3;
+                var _ibAlph = Math.round(_ilA * (1 - _ibk / 4)) >>> 0;
+                var _ibClr  = (_il.color & 0x00FFFFFF) | (_ibAlph << 24);
+                var _ibW = Math.round(_ibSpr + _iSpd);
+                if (_ibW <= 0) continue;
+                // Top edge
+                canvas.fillRect(decoX, decoY + Math.round(_il.offsetY), decoW, _ibW, _ibClr);
+                // Bottom edge
+                canvas.fillRect(decoX, decoY + decoH - _ibW + Math.round(_il.offsetY), decoW, _ibW, _ibClr);
+                // Left edge
+                canvas.fillRect(decoX + Math.round(_il.offsetX), decoY, _ibW, decoH, _ibClr);
+                // Right edge
+                canvas.fillRect(decoX + decoW - _ibW + Math.round(_il.offsetX), decoY, _ibW, decoH, _ibClr);
+              }
+            } else {
+              // No blur — solid inset band
+              var _isW = Math.max(1, Math.round(_iSpd));
+              canvas.fillRect(decoX, decoY + Math.round(_il.offsetY), decoW, _isW, _il.color);
+              canvas.fillRect(decoX, decoY + decoH - _isW + Math.round(_il.offsetY), decoW, _isW, _il.color);
+              canvas.fillRect(decoX + Math.round(_il.offsetX), decoY, _isW, decoH, _il.color);
+              canvas.fillRect(decoX + decoW - _isW + Math.round(_il.offsetX), decoY, _isW, decoH, _il.color);
+            }
+          }
         }
 
         // 3. Border outline (skip if border-style is none/hidden)
