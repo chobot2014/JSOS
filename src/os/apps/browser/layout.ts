@@ -879,6 +879,18 @@ function _layoutNodesImpl(
       var preM  = collapseMargin(preMarginRaw);
       if (preM  > 0) blank(preM);
 
+      // CSS clear — advance past active floats on the cleared side(s) (R9)
+      if (nd.clear) {
+        if ((nd.clear === 'left' || nd.clear === 'both') && _activeLeftFloatLines > 0) {
+          blank(_activeLeftFloatLines * LINE_H);
+          _activeLeftFloatLines = 0; _activeLeftFloatIndent = 0;
+        }
+        if ((nd.clear === 'right' || nd.clear === 'both') && _activeRightFloatLines > 0) {
+          blank(_activeRightFloatLines * LINE_H);
+          _activeRightFloatLines = 0; _activeRightFloatIndent = 0;
+        }
+      }
+
       var bgColor   = nd.bgColor;
       var bgGradient = nd.bgGradient;
       // Resolve percentage width against container (item 2.1)

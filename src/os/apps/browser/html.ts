@@ -653,7 +653,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
           prev.code      === sp.code      && prev.del       === sp.del       &&
           prev.mark      === sp.mark      && prev.underline === sp.underline &&
           prev.color     === sp.color     && prev.elId      === sp.elId &&
-          prev.underlineColor === sp.underlineColor) {
+          prev.underlineColor === sp.underlineColor &&
+          prev.fontScale  === sp.fontScale) {
         prev.text += sp.text;
       } else {
         merged.push({ ...sp });
@@ -668,6 +669,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       if (_bgUrlM && _bgUrlM[1]) blk.bgImage = _bgUrlM[1];
     }
     if (curCSS.float && curCSS.float !== 'none') blk.float = curCSS.float;
+    if (curCSS.clear && curCSS.clear !== 'none') blk.clear = curCSS.clear;
     if (curCSS.marginTop)               blk.marginTop   = curCSS.marginTop;
     if (curCSS.marginBottom)            blk.marginBottom = curCSS.marginBottom;
     if (curCSS.marginLeft)              blk.marginLeft   = curCSS.marginLeft;
@@ -793,6 +795,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       if (curCSS.textDecorationColor !== undefined) tsp.underlineColor = curCSS.textDecorationColor;
       if (curCSS.color !== undefined && !linkHref) tsp.color = curCSS.color;
       if (curCSS.pointerEvents === 'none') tsp.noClick = true;
+      if (curCSS.fontScale && curCSS.fontScale !== 1) tsp.fontScale = curCSS.fontScale;
       tableCellSpans.push(tsp);
       return;
     }
@@ -818,6 +821,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (curCSS.color !== undefined && !linkHref) sp.color = curCSS.color;
     if (curCSS._onclickElId && !linkHref) sp.elId = curCSS._onclickElId;
     if (curCSS.pointerEvents === 'none') sp.noClick = true;
+    if (curCSS.fontScale && curCSS.fontScale !== 1) sp.fontScale = curCSS.fontScale;
     if (openBlock) { openBlock.spans.push(sp); }
     else           { inlineSpans.push(sp); }
   }
@@ -1634,8 +1638,66 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
               if (curCSS.borderRadius !== undefined) _fp.borderRadius = curCSS.borderRadius;
               if (curCSS.borderWidth !== undefined) _fp.borderWidth = curCSS.borderWidth;
               if (curCSS.borderColor !== undefined) _fp.borderColor = curCSS.borderColor;
+              if (curCSS.boxShadow) _fp.boxShadow = curCSS.boxShadow;
+              if (curCSS.opacity !== undefined) _fp.opacity = curCSS.opacity;
+              if (curCSS.textShadow) _fp.textShadow = curCSS.textShadow;
+              if (curCSS.borderStyle) _fp.borderStyle = curCSS.borderStyle;
+              if (curCSS.borderTopWidth !== undefined) _fp.borderTopWidth = curCSS.borderTopWidth;
+              if (curCSS.borderRightWidth !== undefined) _fp.borderRightWidth = curCSS.borderRightWidth;
+              if (curCSS.borderBottomWidth !== undefined) _fp.borderBottomWidth = curCSS.borderBottomWidth;
+              if (curCSS.borderLeftWidth !== undefined) _fp.borderLeftWidth = curCSS.borderLeftWidth;
+              if (curCSS.borderTopColor !== undefined) _fp.borderTopColor = curCSS.borderTopColor;
+              if (curCSS.borderRightColor !== undefined) _fp.borderRightColor = curCSS.borderRightColor;
+              if (curCSS.borderBottomColor !== undefined) _fp.borderBottomColor = curCSS.borderBottomColor;
+              if (curCSS.borderLeftColor !== undefined) _fp.borderLeftColor = curCSS.borderLeftColor;
+              if (curCSS.boxSizing) _fp.boxSizing = curCSS.boxSizing;
+              if (curCSS.transform && curCSS.transform !== 'none') _fp.transform = curCSS.transform;
               if (curCSS._onclickElId) _fp.elId = curCSS._onclickElId;
               pushContainer(tok.tag, 'flex', _fp);
+              break;
+            }
+            if (_disp === 'grid' || _disp === 'inline-grid') {
+              // Build grid container props from curCSS (R9)
+              var _gp: Partial<RenderNode> = { type: 'grid' };
+              if (curCSS.gridTemplateColumns) _gp.gridTemplateColumns = curCSS.gridTemplateColumns;
+              if (curCSS.gridTemplateRows) _gp.gridTemplateRows = curCSS.gridTemplateRows;
+              if (curCSS.gridTemplateAreas) _gp.gridTemplateAreas = curCSS.gridTemplateAreas;
+              if (curCSS.gridAutoColumns) _gp.gridAutoColumns = curCSS.gridAutoColumns;
+              if (curCSS.gridAutoRows) _gp.gridAutoRows = curCSS.gridAutoRows;
+              if (curCSS.gridAutoFlow) _gp.gridAutoFlow = curCSS.gridAutoFlow;
+              if (curCSS.gap !== undefined) _gp.gap = curCSS.gap;
+              if (curCSS.rowGap !== undefined) _gp.rowGap = curCSS.rowGap;
+              if (curCSS.columnGap !== undefined) _gp.columnGap = curCSS.columnGap;
+              if (curCSS.justifyItems) _gp.justifyItems = curCSS.justifyItems;
+              if (curCSS.alignItems) _gp.alignItems = curCSS.alignItems;
+              if (curCSS.justifyContent) _gp.justifyContent = curCSS.justifyContent;
+              if (curCSS.alignContent) _gp.alignContent = curCSS.alignContent;
+              if (curCSS.width && curCSS.width > 0) _gp.boxWidth = curCSS.width;
+              if (curCSS.widthPct && curCSS.widthPct > 0) _gp.widthPct = curCSS.widthPct;
+              if (curCSS.height && curCSS.height > 0) _gp.height = curCSS.height;
+              if (curCSS.heightPct && curCSS.heightPct > 0) _gp.heightPct = curCSS.heightPct;
+              if (curCSS.minWidth !== undefined) _gp.minWidth = curCSS.minWidth;
+              if (curCSS.maxWidth !== undefined) _gp.maxWidth = curCSS.maxWidth;
+              if (curCSS.minHeight !== undefined) _gp.minHeight = curCSS.minHeight;
+              if (curCSS.maxHeight !== undefined) _gp.maxHeight = curCSS.maxHeight;
+              if (curCSS.bgColor !== undefined) _gp.bgColor = curCSS.bgColor;
+              if (curCSS.bgGradient) _gp.bgGradient = curCSS.bgGradient;
+              if (curCSS.paddingLeft) _gp.paddingLeft = curCSS.paddingLeft;
+              if (curCSS.paddingRight) _gp.paddingRight = curCSS.paddingRight;
+              if (curCSS.paddingTop) _gp.paddingTop = curCSS.paddingTop;
+              if (curCSS.paddingBottom) _gp.paddingBottom = curCSS.paddingBottom;
+              if (curCSS.marginTop) _gp.marginTop = curCSS.marginTop;
+              if (curCSS.marginBottom) _gp.marginBottom = curCSS.marginBottom;
+              if (curCSS.borderRadius !== undefined) _gp.borderRadius = curCSS.borderRadius;
+              if (curCSS.borderWidth !== undefined) _gp.borderWidth = curCSS.borderWidth;
+              if (curCSS.borderColor !== undefined) _gp.borderColor = curCSS.borderColor;
+              if (curCSS.borderStyle) _gp.borderStyle = curCSS.borderStyle;
+              if (curCSS.boxShadow) _gp.boxShadow = curCSS.boxShadow;
+              if (curCSS.opacity !== undefined) _gp.opacity = curCSS.opacity;
+              if (curCSS.overflow) _gp.overflow = curCSS.overflow;
+              if (curCSS.boxSizing) _gp.boxSizing = curCSS.boxSizing;
+              if (curCSS._onclickElId) _gp.elId = curCSS._onclickElId;
+              pushContainer(tok.tag, 'grid', _gp);
               break;
             }
 
@@ -1666,6 +1728,37 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
               if (curCSS.borderRadius !== undefined) _cp.borderRadius = curCSS.borderRadius;
               if (curCSS.borderWidth !== undefined) _cp.borderWidth = curCSS.borderWidth;
               if (curCSS.borderColor !== undefined) _cp.borderColor = curCSS.borderColor;
+              if (curCSS.borderStyle) _cp.borderStyle = curCSS.borderStyle;
+              if (curCSS.borderTopWidth !== undefined) _cp.borderTopWidth = curCSS.borderTopWidth;
+              if (curCSS.borderRightWidth !== undefined) _cp.borderRightWidth = curCSS.borderRightWidth;
+              if (curCSS.borderBottomWidth !== undefined) _cp.borderBottomWidth = curCSS.borderBottomWidth;
+              if (curCSS.borderLeftWidth !== undefined) _cp.borderLeftWidth = curCSS.borderLeftWidth;
+              if (curCSS.borderTopColor !== undefined) _cp.borderTopColor = curCSS.borderTopColor;
+              if (curCSS.borderRightColor !== undefined) _cp.borderRightColor = curCSS.borderRightColor;
+              if (curCSS.borderBottomColor !== undefined) _cp.borderBottomColor = curCSS.borderBottomColor;
+              if (curCSS.borderLeftColor !== undefined) _cp.borderLeftColor = curCSS.borderLeftColor;
+              if (curCSS.boxShadow) _cp.boxShadow = curCSS.boxShadow;
+              if (curCSS.opacity !== undefined) _cp.opacity = curCSS.opacity;
+              if (curCSS.textShadow) _cp.textShadow = curCSS.textShadow;
+              if (curCSS.boxSizing) _cp.boxSizing = curCSS.boxSizing;
+              if (curCSS.transform && curCSS.transform !== 'none') _cp.transform = curCSS.transform;
+              if (curCSS.textTransform !== undefined) _cp.textTransform = curCSS.textTransform;
+              if (curCSS.lineHeight !== undefined) _cp.lineHeight = curCSS.lineHeight;
+              if (curCSS.letterSpacing !== undefined) _cp.letterSpacing = curCSS.letterSpacing;
+              if (curCSS.wordSpacing !== undefined) _cp.wordSpacing = curCSS.wordSpacing;
+              if (curCSS.lineClamp !== undefined) _cp.lineClamp = curCSS.lineClamp;
+              if (curCSS.textOverflow !== undefined) _cp.textOverflow = curCSS.textOverflow;
+              if (curCSS.whiteSpace !== undefined) _cp.whiteSpace = curCSS.whiteSpace;
+              if (curCSS.wordBreak !== undefined) _cp.wordBreak = curCSS.wordBreak;
+              if (curCSS.overflowWrap !== undefined) _cp.overflowWrap = curCSS.overflowWrap;
+              // Grid item placement properties (R9)
+              if (curCSS.gridColumn) _cp.gridColumn = curCSS.gridColumn;
+              if (curCSS.gridRow) _cp.gridRow = curCSS.gridRow;
+              if (curCSS.gridColumnStart) _cp.gridColumnStart = curCSS.gridColumnStart;
+              if (curCSS.gridColumnEnd) _cp.gridColumnEnd = curCSS.gridColumnEnd;
+              if (curCSS.gridRowStart) _cp.gridRowStart = curCSS.gridRowStart;
+              if (curCSS.gridRowEnd) _cp.gridRowEnd = curCSS.gridRowEnd;
+              if (curCSS.gridArea) _cp.gridArea = curCSS.gridArea;
               if (curCSS._onclickElId) _cp.elId = curCSS._onclickElId;
               // If this child is also flex, push another container
               if (_disp === 'flex' || _disp === 'inline-flex') {
@@ -1675,6 +1768,19 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
                 if (curCSS.alignItems) _cp.alignItems = curCSS.alignItems;
                 if (curCSS.gap !== undefined) _cp.gap = curCSS.gap;
                 pushContainer(tok.tag, 'flex', _cp);
+                break;
+              }
+              // If this child is also a grid container, push nested grid (R9)
+              if (_disp === 'grid' || _disp === 'inline-grid') {
+                _cp.type = 'grid';
+                if (curCSS.gridTemplateColumns) _cp.gridTemplateColumns = curCSS.gridTemplateColumns;
+                if (curCSS.gridTemplateRows) _cp.gridTemplateRows = curCSS.gridTemplateRows;
+                if (curCSS.gridTemplateAreas) _cp.gridTemplateAreas = curCSS.gridTemplateAreas;
+                if (curCSS.gridAutoColumns) _cp.gridAutoColumns = curCSS.gridAutoColumns;
+                if (curCSS.gridAutoRows) _cp.gridAutoRows = curCSS.gridAutoRows;
+                if (curCSS.gridAutoFlow) _cp.gridAutoFlow = curCSS.gridAutoFlow;
+                if (curCSS.justifyItems) _cp.justifyItems = curCSS.justifyItems;
+                pushContainer(tok.tag, 'grid', _cp);
                 break;
               }
               startContainerChild(_cp);
