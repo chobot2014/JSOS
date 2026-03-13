@@ -369,6 +369,9 @@ export class VNode extends VEventTarget {
   }
   _fireList(ev: VEvent): void {
     ev.currentTarget = this;
+    // Invoke IDL event handler (on${type} property) before listener list
+    var idlFn = (this as any)['on' + ev.type];
+    if (typeof idlFn === 'function') { try { idlFn.call(this, ev); } catch(_) {} }
     var arr = this._handlers.get(ev.type);
     if (arr) { for (var fn of [...arr]) { try { fn(ev); } catch(_) {} if (ev._stopImmediate) break; } }
   }
@@ -2547,11 +2550,11 @@ function _matchCombinator(parts: Array<{ comb: string; part: string }>, el: VEle
   if (parts.length === 1) return true;
   var comb = last.comb;
   var rest  = parts.slice(0, -1);
-  if (comb === '>' || comb === '') {
+  if (comb === '>' || comb === '' || comb === ' ') {
     var parent = el.parentNode;
     if (!(parent instanceof VElement)) return false;
     if (comb === '>') return _matchCombinator(rest, parent);
-    // descendant
+    // descendant (both '' and ' ' are descendant combinators)
     var anc: VElement | null = parent;
     while (anc) { if (_matchCombinator(rest, anc)) return true; anc = anc.parentNode instanceof VElement ? anc.parentNode as VElement : null; }
     return false;

@@ -1269,7 +1269,8 @@ export class BrowserApp implements App {
         if (span.underline) canvas.drawLine(span.x, absY + sCH, span.x + span.text.length * sCW, absY + sCH, span.underlineColor !== undefined ? span.underlineColor : clr);
         if (span.del) {
           var mY = absY + Math.floor(sCH / 2);
-          canvas.drawLine(span.x, mY, span.x + span.text.length * sCW, mY, CLR_DEL);
+          var delClr = span.underlineColor !== undefined ? span.underlineColor : (span.color || CLR_DEL);
+          canvas.drawLine(span.x, mY, span.x + span.text.length * sCW, mY, delClr);
         }
       }
     }
@@ -1325,6 +1326,11 @@ export class BrowserApp implements App {
           canvas.drawLine(_stpSp.x, _stpAbsY + _stpCH,
                           _stpSp.x + _stpSp.text.length * _stpCW, _stpAbsY + _stpCH, _stpUlClr);
         }
+        if (_stpSp.del) {
+          var _stpMY = _stpAbsY + Math.floor(_stpCH / 2);
+          var _stpDelClr = _stpSp.underlineColor !== undefined ? _stpSp.underlineColor : (_stpSp.color || CLR_DEL);
+          canvas.drawLine(_stpSp.x, _stpMY, _stpSp.x + _stpSp.text.length * _stpCW, _stpMY, _stpDelClr);
+        }
       }
     }
 
@@ -1372,6 +1378,11 @@ export class BrowserApp implements App {
           var _fxUlClr = _fxSp.underlineColor !== undefined ? _fxSp.underlineColor : _fxClr;
           canvas.drawLine(_fxSp.x, _fxAbsY + _fxCH,
                           _fxSp.x + _fxSp.text.length * _fxCW, _fxAbsY + _fxCH, _fxUlClr);
+        }
+        if (_fxSp.del) {
+          var _fxMY = _fxAbsY + Math.floor(_fxCH / 2);
+          var _fxDelClr = _fxSp.underlineColor !== undefined ? _fxSp.underlineColor : (_fxSp.color || CLR_DEL);
+          canvas.drawLine(_fxSp.x, _fxMY, _fxSp.x + _fxSp.text.length * _fxCW, _fxMY, _fxDelClr);
         }
       }
     }

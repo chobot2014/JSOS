@@ -139,10 +139,25 @@ function _specFromParsed(ps: ParsedSel): number {
     a += comp.ids.length;
     b += comp.classes.length + comp.attrs.length;
     for (var pi = 0; pi < comp.pseudos.length; pi++) {
-      var pn = comp.pseudos[pi]!.name;
+      var ps2 = comp.pseudos[pi]!;
+      var pn = ps2.name;
       // Pseudo-elements add to c, pseudo-classes add to b
-      if (pn === 'before' || pn === 'after' || pn === 'first-line' || pn === 'first-letter') c++;
-      else b++;
+      if (pn === 'before' || pn === 'after' || pn === 'first-line' || pn === 'first-letter') { c++; }
+      // :where() contributes ZERO specificity (CSS Selectors Level 4)
+      else if (pn === 'where') { /* no specificity contribution */ }
+      // :not(), :is(), :has() — specificity = max of their arguments, not +1
+      else if ((pn === 'not' || pn === 'is' || pn === 'has') && ps2.argParsed && ps2.argParsed.length > 0) {
+        var maxArgSpec = 0;
+        for (var ai = 0; ai < ps2.argParsed.length; ai++) {
+          var argSel: ParsedSel = { compounds: [ps2.argParsed[ai]!], combinators: [] };
+          var argS = _specFromParsed(argSel);
+          if (argS > maxArgSpec) maxArgSpec = argS;
+        }
+        a += (maxArgSpec >> 16) & 0xFF;
+        b += (maxArgSpec >> 8) & 0xFF;
+        c += maxArgSpec & 0xFF;
+      }
+      else { b++; }
     }
     if (comp.tag !== null) c++;
   }
