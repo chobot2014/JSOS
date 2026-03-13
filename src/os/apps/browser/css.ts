@@ -642,8 +642,8 @@ export function parseInlineStyle(style: string): CSSProps {
         if (vl === 'none') p.hidden = true;
         else {
           p.hidden = false;
-          if (vl === 'flex' || vl === 'inline-flex' || vl === 'grid' ||
-              vl === 'inline-block' || vl === 'inline' || vl === 'block' ||
+          if (vl === 'flex' || vl === 'inline-flex' || vl === 'grid' || vl === 'inline-grid' ||
+              vl === 'inline-block' || vl === 'inline' || vl === 'block' || vl === 'contents' ||
               vl === 'table' || vl === 'table-row' || vl === 'table-cell')
             p.display = vl as CSSProps['display'];
         }
@@ -743,10 +743,10 @@ export function parseInlineStyle(style: string): CSSProps {
         var bwv2 = parseLengthPx(vl);
         if (!isNaN(bwv2)) {
           p.borderWidth = bwv2;
-          if (kl === 'border-top-width') p.borderTopWidth = bwv2;
-          else if (kl === 'border-right-width') p.borderRightWidth = bwv2;
-          else if (kl === 'border-bottom-width') p.borderBottomWidth = bwv2;
-          else if (kl === 'border-left-width') p.borderLeftWidth = bwv2;
+          if (prop === 'border-top-width') p.borderTopWidth = bwv2;
+          else if (prop === 'border-right-width') p.borderRightWidth = bwv2;
+          else if (prop === 'border-bottom-width') p.borderBottomWidth = bwv2;
+          else if (prop === 'border-left-width') p.borderLeftWidth = bwv2;
         }
         break;
       }
@@ -1047,7 +1047,7 @@ export function parseInlineStyle(style: string): CSSProps {
 
       // border-[side] shorthands: map to unified border props AND store per-side
       case 'border-top': case 'border-right': case 'border-bottom': case 'border-left': {
-        var bsSide = kl.slice(7); // 'top', 'right', 'bottom', 'left'
+        var bsSide = prop.slice(7); // 'top', 'right', 'bottom', 'left'
         var bsparts = val.trim().split(/\s+/);
         for (var bspi = 0; bspi < bsparts.length; bspi++) {
           var bsp = bsparts[bspi].toLowerCase();
@@ -1078,9 +1078,9 @@ export function parseInlineStyle(style: string): CSSProps {
         var bscv = parseCSSColor(vl);
         if (bscv !== undefined) {
           p.borderColor = bscv;
-          if (kl === 'border-top-color') p.borderTopColor = bscv;
-          else if (kl === 'border-right-color') p.borderRightColor = bscv;
-          else if (kl === 'border-bottom-color') p.borderBottomColor = bscv;
+          if (prop === 'border-top-color') p.borderTopColor = bscv;
+          else if (prop === 'border-right-color') p.borderRightColor = bscv;
+          else if (prop === 'border-bottom-color') p.borderBottomColor = bscv;
           else p.borderLeftColor = bscv;
         }
         break;

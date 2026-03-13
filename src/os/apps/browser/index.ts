@@ -1045,41 +1045,57 @@ export class BrowserApp implements App {
           // (boxDeco still enables border + shadow without forcing rounded corners)
         }
 
-        // 3. Border outline
-        if (deco.borderWidth && deco.borderWidth > 0 && deco.borderColor !== undefined) {
+        // 3. Border outline (skip if border-style is none/hidden)
+        var _bsNone = deco.borderStyle === 'none' || deco.borderStyle === 'hidden';
+        if (!_bsNone && deco.borderWidth && deco.borderWidth > 0 && deco.borderColor !== undefined) {
           var _brd = deco.borderWidth;
-          canvas.drawRoundRect(decoX, decoY, decoW, decoH, decoR, deco.borderColor);
+          var _brdClr = deco.borderColor;
+          // Apply opacity to border color
+          if (_decoOpacity < 1) {
+            var _ba2 = ((_brdClr >>> 24) & 0xFF) * _decoOpacity;
+            _brdClr = (_brdClr & 0x00FFFFFF) | (Math.round(_ba2) << 24);
+          }
+          canvas.drawRoundRect(decoX, decoY, decoW, decoH, decoR, _brdClr);
           for (var _bi = 1; _bi < _brd; _bi++) {
             canvas.drawRoundRect(
               decoX + _bi, decoY + _bi,
               decoW - _bi * 2, decoH - _bi * 2,
               Math.max(0, decoR - _bi),
-              deco.borderColor,
+              _brdClr,
             );
           }
         }
         // 3b. Per-side borders (override uniform border when set)
-        var _hasSideBorder = deco.borderTopWidth || deco.borderRightWidth || deco.borderBottomWidth || deco.borderLeftWidth;
+        var _hasSideBorder = !_bsNone && (deco.borderTopWidth || deco.borderRightWidth || deco.borderBottomWidth || deco.borderLeftWidth);
         if (_hasSideBorder) {
           var _fallbackClr = deco.borderColor !== undefined ? deco.borderColor : 0xFF000000;
+          // Apply opacity to fallback border color
+          if (_decoOpacity < 1) {
+            var _fba = ((_fallbackClr >>> 24) & 0xFF) * _decoOpacity;
+            _fallbackClr = (_fallbackClr & 0x00FFFFFF) | (Math.round(_fba) << 24);
+          }
           // Top border
           if (deco.borderTopWidth && deco.borderTopWidth > 0) {
             var _btClr = deco.borderTopColor !== undefined ? deco.borderTopColor : _fallbackClr;
+            if (_decoOpacity < 1 && deco.borderTopColor !== undefined) { var _bta = ((_btClr >>> 24) & 0xFF) * _decoOpacity; _btClr = (_btClr & 0x00FFFFFF) | (Math.round(_bta) << 24); }
             canvas.fillRect(decoX, decoY, decoW, deco.borderTopWidth, _btClr);
           }
           // Bottom border
           if (deco.borderBottomWidth && deco.borderBottomWidth > 0) {
             var _bbClr = deco.borderBottomColor !== undefined ? deco.borderBottomColor : _fallbackClr;
+            if (_decoOpacity < 1 && deco.borderBottomColor !== undefined) { var _bba = ((_bbClr >>> 24) & 0xFF) * _decoOpacity; _bbClr = (_bbClr & 0x00FFFFFF) | (Math.round(_bba) << 24); }
             canvas.fillRect(decoX, decoY + decoH - deco.borderBottomWidth, decoW, deco.borderBottomWidth, _bbClr);
           }
           // Left border
           if (deco.borderLeftWidth && deco.borderLeftWidth > 0) {
             var _blClr = deco.borderLeftColor !== undefined ? deco.borderLeftColor : _fallbackClr;
+            if (_decoOpacity < 1 && deco.borderLeftColor !== undefined) { var _bla = ((_blClr >>> 24) & 0xFF) * _decoOpacity; _blClr = (_blClr & 0x00FFFFFF) | (Math.round(_bla) << 24); }
             canvas.fillRect(decoX, decoY, deco.borderLeftWidth, decoH, _blClr);
           }
           // Right border
           if (deco.borderRightWidth && deco.borderRightWidth > 0) {
             var _brClr = deco.borderRightColor !== undefined ? deco.borderRightColor : _fallbackClr;
+            if (_decoOpacity < 1 && deco.borderRightColor !== undefined) { var _bra = ((_brClr >>> 24) & 0xFF) * _decoOpacity; _brClr = (_brClr & 0x00FFFFFF) | (Math.round(_bra) << 24); }
             canvas.fillRect(decoX + decoW - deco.borderRightWidth, decoY, deco.borderRightWidth, decoH, _brClr);
           }
         }
@@ -1162,13 +1178,13 @@ export class BrowserApp implements App {
         if (!span.text) continue;
         var clr = span.color;
         if (span.href) {
-         
-        // Apply opacity alpha blending to text color
+          clr = this._visited.has(span.href) ? CLR_VISITED
+              : span.href === this._hoverHref ? CLR_LINK_HOV : CLR_LINK;
+        }
+        // Apply opacity alpha blending to text color (must be AFTER link color assignment)
         if (_decoOpacity < 1) {
           var _ta = ((clr >>> 24) & 0xFF) * _decoOpacity;
           clr = (clr & 0x00FFFFFF) | (Math.round(_ta) << 24);
-        } clr = this._visited.has(span.href) ? CLR_VISITED
-              : span.href === this._hoverHref ? CLR_LINK_HOV : CLR_LINK;
         }
         var sc  = span.fontScale || 1;
         var sCW = CHAR_W * sc;

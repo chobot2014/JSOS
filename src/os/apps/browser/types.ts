@@ -386,7 +386,7 @@ export interface CSSProps {
   verticalAlign?: string;
   listStyleType?: string;
   // ── Box model ─────────────────────────────────────────────────────────────
-  display?:       'flex' | 'inline-flex' | 'grid' | 'inline-grid' | 'inline-block' | 'inline' | 'block' | 'none' | 'table' | 'table-row' | 'table-cell';
+  display?:       'flex' | 'inline-flex' | 'grid' | 'inline-grid' | 'inline-block' | 'inline' | 'block' | 'contents' | 'none' | 'table' | 'table-row' | 'table-cell';
   boxSizing?:     'content-box' | 'border-box';
   width?:         number;    // px (0 = auto)
   widthPct?:      number;    // % value for percentage widths (1-100)
