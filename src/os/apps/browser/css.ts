@@ -1094,7 +1094,7 @@ export function parseInlineStyle(style: string): CSSProps {
           if (bsp === 'none' || bsp === 'hidden') { p.borderWidth = 0; p.borderStyle = bsp; continue; }
           var bswv = parseLengthPx(bsp);
           if (!isNaN(bswv)) {
-            p.borderWidth = bswv;
+            // Per-side shorthand: only set the specific side, NOT the global borderWidth
             if (bsSide === 'top') p.borderTopWidth = bswv;
             else if (bsSide === 'right') p.borderRightWidth = bswv;
             else if (bsSide === 'bottom') p.borderBottomWidth = bswv;
@@ -1103,7 +1103,7 @@ export function parseInlineStyle(style: string): CSSProps {
           }
           var bscc = parseCSSColor(bsp);
           if (bscc !== undefined) {
-            p.borderColor = bscc;
+            // Per-side shorthand: only set the specific side, NOT the global borderColor
             if (bsSide === 'top') p.borderTopColor = bscc;
             else if (bsSide === 'right') p.borderRightColor = bscc;
             else if (bsSide === 'bottom') p.borderBottomColor = bscc;
@@ -1117,7 +1117,7 @@ export function parseInlineStyle(style: string): CSSProps {
       case 'border-top-color': case 'border-right-color': case 'border-bottom-color': case 'border-left-color': {
         var bscv = parseCSSColor(vl);
         if (bscv !== undefined) {
-          p.borderColor = bscv;
+          // Per-side property: only set the specific side, NOT the global borderColor
           if (prop === 'border-top-color') p.borderTopColor = bscv;
           else if (prop === 'border-right-color') p.borderRightColor = bscv;
           else if (prop === 'border-bottom-color') p.borderBottomColor = bscv;

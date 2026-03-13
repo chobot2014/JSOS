@@ -66,8 +66,11 @@ export function flowSpans(
   var curX = curXLeft;
   // text-indent: offset the first line
   if (opts?.textIndent) curX += opts.textIndent;
-  // white-space: nowrap prevents word wrapping (all content on one line)
-  var _nowrap = opts?.whiteSpace === 'nowrap';
+  // white-space: nowrap / pre prevents word wrapping (all content on one line)
+  var _wsMode2 = opts?.whiteSpace || 'normal';
+  var _nowrap = _wsMode2 === 'nowrap' || _wsMode2 === 'pre';
+  // white-space: pre / pre-wrap — preserve consecutive spaces (don't collapse to single space)
+  var _preserveSpaces = _wsMode2 === 'pre' || _wsMode2 === 'pre-wrap';
   // word-break: break-all splits at every character boundary (item 421)
   var _breakAll = opts?.wordBreak === 'break-all';
   // Letter/word spacing: add extra px per char/space
@@ -156,11 +159,28 @@ export function flowSpans(
           }
         }
       } else {
-        var words = part.split(' ');
-        for (var wi = 0; wi < words.length; wi++) {
-          var word = words[wi];
-          if (!word) { if (curX > xLeft) curX += CHAR_W + _wspc; continue; }
-          addWord(word, sp);
+        if (_preserveSpaces) {
+          // pre / pre-wrap: preserve all spaces literally
+          for (var _pci = 0; _pci < part.length; ) {
+            // Collect runs of non-space characters as words
+            if (part[_pci] === ' ') {
+              // Emit each space as a visible character
+              addWord(' ', sp);
+              _pci++;
+            } else {
+              var _wEnd = _pci;
+              while (_wEnd < part.length && part[_wEnd] !== ' ') _wEnd++;
+              addWord(part.slice(_pci, _wEnd), sp);
+              _pci = _wEnd;
+            }
+          }
+        } else {
+          var words = part.split(' ');
+          for (var wi = 0; wi < words.length; wi++) {
+            var word = words[wi];
+            if (!word) { if (curX > xLeft) curX += CHAR_W + _wspc; continue; }
+            addWord(word, sp);
+          }
         }
       }
     }
@@ -879,6 +899,8 @@ function _layoutNodesImpl(
       var postMarginRaw = nd.marginBottom || 0;
       var preM  = collapseMargin(preMarginRaw);
       if (preM  > 0) blank(preM);
+      // Negative margin: pull content upward (overlap previous content)
+      else if (preMarginRaw < 0) { y += preMarginRaw; }
 
       // CSS clear — advance past active floats on the cleared side(s) (R9)
       if (nd.clear) {
@@ -972,7 +994,7 @@ function _layoutNodesImpl(
         if (nd.textOverflow === 'ellipsis') { o.ellipsis = true; any = true; }  // item 465
         if (nd.letterSpacing)       { o.letterSpacing = nd.letterSpacing; any = true; }
         if (nd.wordSpacing)         { o.wordSpacing = nd.wordSpacing; any = true; }
-        if (nd.whiteSpace === 'nowrap') { o.whiteSpace = 'nowrap'; any = true; }
+        if (nd.whiteSpace && nd.whiteSpace !== 'normal') { o.whiteSpace = nd.whiteSpace; any = true; }
         if (nd.textIndent)          { o.textIndent = nd.textIndent; any = true; }
         if (nd.lineClamp)           { o.lineClamp = nd.lineClamp; any = true; }
         return any ? o : undefined;
@@ -1408,6 +1430,10 @@ function _layoutNodesImpl(
   for (var oi = 0; oi < oofNodes.length; oi++) {
     var oof      = oofNodes[oi];
     var oofW     = oof.boxWidth ?? (maxX - xLeft);
+    // When both left AND right are specified (no explicit width), derive width from container
+    if (!oof.boxWidth && oof.posLeft !== undefined && oof.posRight !== undefined) {
+      oofW = Math.max(0, (maxX - xLeft) - oof.posLeft - oof.posRight);
+    }
     // right-anchor: position from right edge of containing block
     var oofX     = oof.posLeft   !== undefined ? (xLeft + oof.posLeft)
                  : oof.posRight  !== undefined ? Math.max(xLeft, maxX - oofW - oof.posRight)

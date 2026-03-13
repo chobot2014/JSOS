@@ -2,7 +2,7 @@ import type {
   HtmlToken, ParseResult, RenderNode, InlineSpan, BlockType,
   WidgetBlueprint, WidgetKind, FormState, CSSProps, ScriptRecord, DecodedImage,
 } from './types.js';
-import { parseInlineStyle, parseCSSColor } from './css.js';
+import { parseInlineStyle, parseCSSColor, CSS_CURRENT_COLOR } from './css.js';
 import { isGradient } from './gradient.js';
 import { type CSSRule, type AncestorEl, computeElementStyle, getPseudoContent, mergeProps } from './stylesheet.js';
 import { buildRuleIndex, type RuleIndex, markContainLayout } from './cache.js';
@@ -642,6 +642,12 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     'dialog',
   ]);
 
+  /** Resolve CSS `currentColor` sentinel: substitute the element's own `color` (or fallback black). */
+  function _resolveCurrentColor(c: number | undefined): number | undefined {
+    if (c === CSS_CURRENT_COLOR) return curCSS.color !== undefined && curCSS.color !== CSS_CURRENT_COLOR ? curCSS.color : 0xFF000000;
+    return c;
+  }
+
   function flushInline(): void {
     if (!inlineSpans.length) return;
     var merged: InlineSpan[] = [];
@@ -692,22 +698,22 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (curCSS.aspectRatio !== undefined) blk.aspectRatio = curCSS.aspectRatio;
     if (curCSS.borderRadius !== undefined) blk.borderRadius = curCSS.borderRadius;
     if (curCSS.borderWidth  !== undefined) blk.borderWidth  = curCSS.borderWidth;
-    if (curCSS.borderColor  !== undefined) blk.borderColor  = curCSS.borderColor;
+    if (curCSS.borderColor  !== undefined) blk.borderColor  = _resolveCurrentColor(curCSS.borderColor);
     if (curCSS.borderStyle  !== undefined) blk.borderStyle  = curCSS.borderStyle;
     // Per-side border propagation
     if (curCSS.borderTopWidth    !== undefined) blk.borderTopWidth    = curCSS.borderTopWidth;
     if (curCSS.borderRightWidth  !== undefined) blk.borderRightWidth  = curCSS.borderRightWidth;
     if (curCSS.borderBottomWidth !== undefined) blk.borderBottomWidth = curCSS.borderBottomWidth;
     if (curCSS.borderLeftWidth   !== undefined) blk.borderLeftWidth   = curCSS.borderLeftWidth;
-    if (curCSS.borderTopColor    !== undefined) blk.borderTopColor    = curCSS.borderTopColor;
-    if (curCSS.borderRightColor  !== undefined) blk.borderRightColor  = curCSS.borderRightColor;
-    if (curCSS.borderBottomColor !== undefined) blk.borderBottomColor = curCSS.borderBottomColor;
-    if (curCSS.borderLeftColor   !== undefined) blk.borderLeftColor   = curCSS.borderLeftColor;
+    if (curCSS.borderTopColor    !== undefined) blk.borderTopColor    = _resolveCurrentColor(curCSS.borderTopColor);
+    if (curCSS.borderRightColor  !== undefined) blk.borderRightColor  = _resolveCurrentColor(curCSS.borderRightColor);
+    if (curCSS.borderBottomColor !== undefined) blk.borderBottomColor = _resolveCurrentColor(curCSS.borderBottomColor);
+    if (curCSS.borderLeftColor   !== undefined) blk.borderLeftColor   = _resolveCurrentColor(curCSS.borderLeftColor);
     if (curCSS.opacity  !== undefined) blk.opacity  = curCSS.opacity;
     if (curCSS.boxShadow)              blk.boxShadow  = curCSS.boxShadow;
     if (curCSS.textShadow)             blk.textShadow = curCSS.textShadow;
     if (curCSS.outlineWidth)           blk.outlineWidth  = curCSS.outlineWidth;
-    if (curCSS.outlineColor !== undefined) blk.outlineColor = curCSS.outlineColor;
+    if (curCSS.outlineColor !== undefined) blk.outlineColor = _resolveCurrentColor(curCSS.outlineColor);
     if (curCSS.outlineOffset !== undefined) blk.outlineOffset = curCSS.outlineOffset;
     if (curCSS.contain)                { blk.contain   = curCSS.contain; if (blk.elId) markContainLayout(blk.elId); }
     if (curCSS.position && curCSS.position !== 'static') {
@@ -792,7 +798,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       if (del > 0       || curCSS.strike)    tsp.del       = true;
       if (mark > 0)                          tsp.mark      = true;
       if (underline > 0 || curCSS.underline) tsp.underline = true;
-      if (curCSS.textDecorationColor !== undefined) tsp.underlineColor = curCSS.textDecorationColor;
+      if (curCSS.textDecorationColor !== undefined) tsp.underlineColor = _resolveCurrentColor(curCSS.textDecorationColor);
       if (curCSS.color !== undefined && !linkHref) tsp.color = curCSS.color;
       if (curCSS.pointerEvents === 'none') tsp.noClick = true;
       if (curCSS.fontScale && curCSS.fontScale !== 1) tsp.fontScale = curCSS.fontScale;
@@ -817,7 +823,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (del > 0       || curCSS.strike)    sp.del       = true;
     if (mark > 0)                          sp.mark      = true;
     if (underline > 0 || curCSS.underline) sp.underline = true;
-    if (curCSS.textDecorationColor !== undefined) sp.underlineColor = curCSS.textDecorationColor;
+    if (curCSS.textDecorationColor !== undefined) sp.underlineColor = _resolveCurrentColor(curCSS.textDecorationColor);
     if (curCSS.color !== undefined && !linkHref) sp.color = curCSS.color;
     if (curCSS._onclickElId && !linkHref) sp.elId = curCSS._onclickElId;
     if (curCSS.pointerEvents === 'none') sp.noClick = true;
@@ -2000,7 +2006,18 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
         continue;
       }
 
-      txt = txt.replace(/[\r\n\t]+/g, ' ');
+      // white-space: pre / pre-wrap / pre-line — preserve newlines;
+      // normal / nowrap — collapse all whitespace
+      var _wsMode = curCSS.whiteSpace;
+      if (_wsMode === 'pre' || _wsMode === 'pre-wrap') {
+        // Preserve all whitespace including newlines — only collapse \r
+        txt = txt.replace(/\r/g, '');
+      } else if (_wsMode === 'pre-line') {
+        // Collapse spaces/tabs but preserve newlines
+        txt = txt.replace(/\r/g, '').replace(/[\t ]+/g, ' ');
+      } else {
+        txt = txt.replace(/[\r\n\t]+/g, ' ');
+      }
       if (!txt.trim() && !inTableCell) continue;
       pushSpan(txt);
     }
