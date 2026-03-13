@@ -643,8 +643,9 @@ export function createPageJS(
     '_StubElement.prototype.getElementsByClassName = function(cn){ return _stubQSA(this,"."+cn.split(/\\s+/).join("."),false); };',
     '_StubElement.prototype.getElementsByTagName = function(tag){ if(tag==="*")return _stubQSA(this,"*",false);return _stubQSA(this,tag,false); };',
     '_StubElement.prototype.getElementsByTagNameNS = function(_ns,tag){ return this.getElementsByTagName(tag); };',
-    // getBoundingClientRect — heuristic dimensions instead of zeros
+    // getBoundingClientRect — uses real layout rect when available, heuristic fallback otherwise
     '_StubElement.prototype.getBoundingClientRect = function(){',
+    '  if(this._layoutRect){var r=this._layoutRect;return{x:r.x,y:r.y,width:r.w,height:r.h,top:r.y,left:r.x,right:r.x+r.w,bottom:r.y+r.h,toJSON:function(){return this;}};}',
     '  var w=0,h=0;',
     '  var dn=this.style&&this.style.display==="none";',
     '  if(!dn){',
@@ -691,8 +692,8 @@ export function createPageJS(
     'Object.defineProperty(_StubElement.prototype,"offsetHeight",{get:function(){return this.getBoundingClientRect().height;},configurable:true});',
     'Object.defineProperty(_StubElement.prototype,"scrollWidth",{get:function(){return this.getBoundingClientRect().width;},configurable:true});',
     'Object.defineProperty(_StubElement.prototype,"scrollHeight",{get:function(){return this.getBoundingClientRect().height;},configurable:true});',
-    '_StubElement.prototype.offsetTop = 0;',
-    '_StubElement.prototype.offsetLeft = 0;',
+    'Object.defineProperty(_StubElement.prototype,"offsetTop",{get:function(){return this._layoutRect?this._layoutRect.y:0;},configurable:true});',
+    'Object.defineProperty(_StubElement.prototype,"offsetLeft",{get:function(){return this._layoutRect?this._layoutRect.x:0;},configurable:true});',
     '_StubElement.prototype.scrollTop = 0;',
     '_StubElement.prototype.scrollLeft = 0;',
     '_StubElement.prototype.clientTop = 0;',
@@ -1053,6 +1054,9 @@ export function createPageJS(
     '  var s = (el && el.style) ? el.style : {};',
     '  var tag = el && el.tagName || "";',
     '  var defDisp = _defaultDisplayMap[tag] || "block";',
+    '  var lr = el && el._layoutRect;',
+    '  var lrW = lr ? (lr.w + "px") : (s.width || "auto");',
+    '  var lrH = lr ? (lr.h + "px") : (s.height || "auto");',
     '  var computed = {',
     '    getPropertyValue: function(k) { var v=s[k]; if(v)return v; if(s.getPropertyValue)v=s.getPropertyValue(k); if(v)return v; return computed[k]||""; },',
     '    setProperty: function(){},',
@@ -1062,7 +1066,7 @@ export function createPageJS(
     '    opacity: s.opacity!==undefined?s.opacity:"1",',
     '    position: s.position||"static",',
     '    top: s.top||"auto", left: s.left||"auto", right: s.right||"auto", bottom: s.bottom||"auto",',
-    '    width: s.width||"auto", height: s.height||"auto",',
+    '    width: lrW, height: lrH,',
     '    margin: s.margin||"0px", marginTop: s.marginTop||"0px", marginRight: s.marginRight||"0px", marginBottom: s.marginBottom||"0px", marginLeft: s.marginLeft||"0px",',
     '    padding: s.padding||"0px", paddingTop: s.paddingTop||"0px", paddingRight: s.paddingRight||"0px", paddingBottom: s.paddingBottom||"0px", paddingLeft: s.paddingLeft||"0px",',
     '    fontSize: s.fontSize||"16px",',
@@ -10807,6 +10811,16 @@ export function createPageJS(
           (el as VElement)._layoutRect = rect;
         }
       });
+      // Also dispatch layout rects into the child runtime's _StubElement instances
+      if (_pageChildId >= 0 && rects.size > 0) {
+        var js = '';
+        rects.forEach(function(rect, elId) {
+          var sel = 'document.querySelector(\'[data-jsos-el="' + elId + '"]\')';
+          js += 'var _e=' + sel + ';if(!_e)_e=document.getElementById(' + JSON.stringify(elId) + ');';
+          js += 'if(_e)_e._layoutRect={x:' + rect.x + ',y:' + rect.y + ',w:' + rect.w + ',h:' + rect.h + '};';
+        });
+        _childDispatch(js);
+      }
     },
     getCanvasBuffers(): Array<{ elId: string; width: number; height: number; rgba: Uint8Array }> {
       var result: Array<{ elId: string; width: number; height: number; rgba: Uint8Array }> = [];
