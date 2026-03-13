@@ -1033,7 +1033,13 @@ export class BrowserApp implements App {
             }
             canvas.fillRoundRect(decoX, decoY, decoW, decoH, decoR, _dbgc);
           }
-          // gradient background handled below via line.bgGradient (which is already set on the line)
+          // Gradient on rounded box — render at full box dimensions
+          if (deco.bgGradient) {
+            renderGradientCSS(canvas, decoX, decoY, decoW, decoH, deco.bgGradient);
+          }
+        } else if (deco.bgGradient) {
+          // Flat box gradient — render once at full block dimensions
+          renderGradientCSS(canvas, decoX, decoY, decoW, decoH, deco.bgGradient);
         } else {
           // No rounding — let the existing bgColor/bgGradient handling below paint normally
           // (boxDeco still enables border + shadow without forcing rounded corners)
@@ -1113,9 +1119,12 @@ export class BrowserApp implements App {
         }
       }
       if (line.bgGradient) {
-        var _gx  = line.boxDeco ? line.boxDeco.x : 0;
-        var _gw  = line.boxDeco ? line.boxDeco.w : w;
-        renderGradientCSS(canvas, _gx, absY - 1, _gw, line.lineH + 1, line.bgGradient);
+        // Skip per-line gradient when boxDeco already rendered the gradient at full block height
+        if (!(line.boxDeco && line.boxDeco.bgGradient)) {
+          var _gx  = line.boxDeco ? line.boxDeco.x : 0;
+          var _gw  = line.boxDeco ? line.boxDeco.w : w;
+          renderGradientCSS(canvas, _gx, absY - 1, _gw, line.lineH + 1, line.bgGradient);
+        }
       }
       // CSS background-image url() tile (item 386)
       if (line.bgImageUrl) {

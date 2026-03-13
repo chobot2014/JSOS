@@ -627,9 +627,13 @@ export function parseInlineStyle(style: string): CSSProps {
       case 'vertical-align': { p.verticalAlign = vl; break; }
       case 'list-style-type': { p.listStyleType = vl; break; }
       case 'list-style': {
-        if (vl.includes('none')) p.listStyleType = 'none';
-        else if (vl.includes('disc')) p.listStyleType = 'disc';
-        else if (vl.includes('decimal')) p.listStyleType = 'decimal';
+        var _lstTypes = ['none','disc','circle','square','decimal','lower-alpha','lower-latin',
+          'upper-alpha','upper-latin','lower-roman','upper-roman','lower-greek'];
+        for (var _lsi = 0; _lsi < _lstTypes.length; _lsi++) {
+          if (vl.includes(_lstTypes[_lsi])) { p.listStyleType = _lstTypes[_lsi]; break; }
+        }
+        if (vl.includes('inside'))  p.listStylePosition = 'inside';
+        if (vl.includes('outside')) p.listStylePosition = 'outside';
         break;
       }
 

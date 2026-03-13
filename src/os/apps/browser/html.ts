@@ -717,6 +717,7 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       if (curCSS.zIndex !== undefined) blk.zIndex    = curCSS.zIndex;
     }
     if (curCSS.overflow !== undefined) blk.overflow  = curCSS.overflow;
+    if (curCSS.boxSizing) blk.boxSizing = curCSS.boxSizing;
     if (curCSS.textOverflow !== undefined) blk.textOverflow = curCSS.textOverflow; // item 465
     if (curCSS.whiteSpace !== undefined) blk.whiteSpace = curCSS.whiteSpace;
     if (curCSS.textTransform !== undefined) blk.textTransform = curCSS.textTransform;
@@ -1282,12 +1283,19 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
         }
 
         // ── Lists ────────────────────────────────────────────────────────────
-        case 'ul': case 'ol':
-          applyStyle(tok.tag, tok.attrs); flushInline(); listDepth++; listItemCount.push(0); break;
+        case 'ul': case 'ol': {
+          applyStyle(tok.tag, tok.attrs); flushInline(); listDepth++;
+          var _olStart = parseInt(tok.attrs?.get('start') || '', 10);
+          listItemCount.push(isNaN(_olStart) ? 0 : _olStart - 1);
+          break;
+        }
         case 'li': {
           flushInline();
           if (openBlock) { nodes.push(openBlock); openBlock = null; }
           applyStyle(tok.tag, tok.attrs);
+          // Support <li value="N"> to override the counter
+          var _liVal = parseInt(tok.attrs?.get('value') || '', 10);
+          if (!isNaN(_liVal) && listItemCount.length > 0) listItemCount[listItemCount.length - 1] = _liVal - 1;
           if (listItemCount.length > 0) listItemCount[listItemCount.length - 1]++;
           var liAlign = curCSS.align;
           var liBlock: any = { type: 'li', spans: [], indent: Math.max(0, listDepth - 1), textAlign: liAlign };

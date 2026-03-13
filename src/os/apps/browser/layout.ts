@@ -400,10 +400,14 @@ function _layoutNodesImpl(
       var bullets  = ['\u2022', '\u25E6', '\u25AA'];
       var bullet   = '';
       if (lstType === 'decimal') { bullet = String(liIdx) + '. '; }
-      else if (lstType === 'lower-alpha') { bullet = String.fromCharCode(96 + ((liIdx - 1) % 26) + 1) + '. '; }
-      else if (lstType === 'upper-alpha') { bullet = String.fromCharCode(64 + ((liIdx - 1) % 26) + 1) + '. '; }
+      else if (lstType === 'lower-alpha' || lstType === 'lower-latin') { bullet = String.fromCharCode(96 + ((liIdx - 1) % 26) + 1) + '. '; }
+      else if (lstType === 'upper-alpha' || lstType === 'upper-latin') { bullet = String.fromCharCode(64 + ((liIdx - 1) % 26) + 1) + '. '; }
       else if (lstType === 'lower-roman') { bullet = _toRomanLower(liIdx) + '. '; }
       else if (lstType === 'upper-roman') { bullet = _toRomanLower(liIdx).toUpperCase() + '. '; }
+      else if (lstType === 'lower-greek') { bullet = String.fromCharCode(0x03B1 + ((liIdx - 1) % 24)) + '. '; }
+      else if (lstType === 'disc') { bullet = '\u2022 '; }
+      else if (lstType === 'circle') { bullet = '\u25E6 '; }
+      else if (lstType === 'square') { bullet = '\u25AA '; }
       else if (lstType === 'none') { bullet = ''; }
       else { bullet = (bullets[Math.min(depth - 1, 2)] || '\u2022') + ' '; }
       var liSpans  = transformSpans(nd.spans, nd.textTransform);
@@ -917,6 +921,11 @@ function _layoutNodesImpl(
       if (nd.maxWidth && nd.maxWidth > 0) {
         if (_effectBoxW > 0) { _effectBoxW = Math.min(_effectBoxW, nd.maxWidth); }
         else { _effectBoxW = nd.maxWidth; }
+      }
+      // box-sizing: border-box — specified width includes padding + border
+      if (nd.boxSizing === 'border-box' && _effectBoxW > 0) {
+        var _bbPad = (nd.paddingLeft || 0) + (nd.paddingRight || 0) + (nd.borderWidth || 0) * 2;
+        _effectBoxW = Math.max(0, _effectBoxW - _bbPad);
       }
       var blkLeft   = xLeft + (nd.paddingLeft ? Math.round(nd.paddingLeft / CHAR_W) * CHAR_W : 0);
       var blkRight  = nd.paddingRight ? Math.round(nd.paddingRight / CHAR_W) * CHAR_W : 0;
