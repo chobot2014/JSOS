@@ -1004,9 +1004,11 @@ function _layoutNodesImpl(
       var blkRight  = nd.paddingRight ? Math.round(nd.paddingRight / CHAR_W) * CHAR_W : 0;
       var blkMaxX   = (_effectBoxW ? Math.min(maxX, xLeft + _effectBoxW) : maxX) - blkRight;
       // margin: auto centering — shift block inward when explicit width set (item 2.2)
+      // R19: use available width (maxX - xLeft) instead of contentW to avoid CONTENT_PAD offset error
       if (nd.centerBlock && _effectBoxW > 0) {
-        var _centerOff = Math.max(0, Math.floor((contentW - _effectBoxW) / 2));
-        blkLeft += _centerOff;
+        var _availCenter = maxX - xLeft;
+        var _centerOff = Math.max(0, Math.floor((_availCenter - _effectBoxW) / 2));
+        blkLeft = xLeft + _centerOff;
         blkMaxX  = blkLeft + _effectBoxW - blkRight;
       }
       // Track lines start for position:relative offset (item 2.3), position:sticky (item 2.4), and CSS transform (item 2.5)

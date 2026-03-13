@@ -420,6 +420,8 @@ function _matchParsedCompound(
     else if  (a.op === '^=') { if (!elVal.startsWith(a.val)) return false; }
     else if  (a.op === '$=') { if (!elVal.endsWith(a.val))   return false; }
     else if  (a.op === '*=') { if (!elVal.includes(a.val))   return false; }
+    // R19: [attr|="val"] — matches exact value or value followed by '-' (CSS lang selector)
+    else if  (a.op === '|=') { if (elVal !== a.val && !elVal.startsWith(a.val + '-')) return false; }
   }
   for (var i = 0; i < pc.pseudos.length; i++) {
     var ps = pc.pseudos[i]!;

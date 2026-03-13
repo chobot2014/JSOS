@@ -103,6 +103,24 @@ function _parseBoxShadow(css: string): _BoxShadowLayer[] {
       }
       return '';
     });
+    // R19: Strip named CSS colors that the regex above missed (e.g. "gray", "red").
+    // Without this, named colors end up in the length-values array causing
+    // parseFloat("gray") = NaN → shadow dimensions become NaN → invisible shadow.
+    var _namedColors: Record<string, number> = {
+      black:0xFF000000, white:0xFFFFFFFF, red:0xFFFF0000, green:0xFF008000,
+      blue:0xFF0000FF, yellow:0xFFFFFF00, orange:0xFFFFA500, purple:0xFF800080,
+      pink:0xFFFFC0CB, cyan:0xFF00FFFF, magenta:0xFFFF00FF, gray:0xFF808080,
+      grey:0xFF808080, silver:0xFFC0C0C0, maroon:0xFF800000, navy:0xFF000080,
+      teal:0xFF008080, olive:0xFF808000, lime:0xFF00FF00, aqua:0xFF00FFFF,
+      brown:0xFFA52A2A, coral:0xFFFF7F50, crimson:0xFFDC143C, gold:0xFFFFD700,
+      indigo:0xFF4B0082, khaki:0xFFF0E68C, plum:0xFFDDA0DD, salmon:0xFFFA8072,
+      tan:0xFFD2B48C, tomato:0xFFFF6347, violet:0xFFEE82EE, wheat:0xFFF5DEB3,
+    };
+    p = p.replace(/\b([a-z]+)\b/gi, function(_m2: string, word: string) {
+      var lw = word.toLowerCase();
+      if (_namedColors[lw] !== undefined) { colorVal = _namedColors[lw]; return ''; }
+      return word;
+    });
     // Remaining tokens should be length values
     var lens = p.trim().split(/\s+/).filter(s => s.length > 0);
     var offsetX = parseFloat(lens[0] || '0');

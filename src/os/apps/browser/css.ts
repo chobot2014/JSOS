@@ -511,6 +511,17 @@ export function parseInlineStyle(style: string): CSSProps {
       }
       case 'background': {
         // background shorthand — color, url, position [/ size], repeat, attachment
+        // R19: "background: none" must clear all background sub-properties
+        if (vl === 'none' || vl === 'transparent' || vl === 'initial') {
+          p.bgColor = vl === 'transparent' ? 0x00000000 : undefined;
+          p.backgroundImage = undefined;
+          p.bgGradient = undefined;
+          p.backgroundSize = undefined;
+          p.backgroundPosition = undefined;
+          p.backgroundRepeat = undefined;
+          p.backgroundAttachment = undefined;
+          break;
+        }
         // 0. Detect gradient functions (item 487): linear/radial/conic-gradient(...)
         var gradM = val.match(/((?:repeating-)?(?:linear|radial|conic)-gradient\s*\([^)]*(?:\([^)]*\)[^)]*)*\))/i);
         if (gradM) { p.backgroundImage = gradM[1]; }
@@ -796,13 +807,19 @@ export function parseInlineStyle(style: string): CSSProps {
       // ── Border ────────────────────────────────────────────────────────────
       case 'border': {
         // border: [width] [style] [color]
+        // R19: Check style keywords FIRST — 'none'/'hidden' must set borderStyle,
+        // not be parsed as borderWidth=0 by parseLengthPx('none')→0.
         var bparts2 = val.trim().split(/\s+/);
         for (var bpi2 = 0; bpi2 < bparts2.length; bpi2++) {
           var bp2 = bparts2[bpi2].toLowerCase();
+          if (bp2 === 'solid' || bp2 === 'dashed' || bp2 === 'dotted' || bp2 === 'double' || bp2 === 'none' || bp2 === 'hidden') {
+            p.borderStyle = bp2;
+            if (bp2 === 'none' || bp2 === 'hidden') p.borderWidth = 0;
+            continue;
+          }
           var bwv = parseLengthPx(bp2);
           if (!isNaN(bwv)) { p.borderWidth = bwv; continue; }
           var bcc = parseCSSColor(bp2); if (bcc !== undefined) { p.borderColor = bcc; continue; }
-          if (bp2 === 'solid' || bp2 === 'dashed' || bp2 === 'dotted' || bp2 === 'double' || bp2 === 'none' || bp2 === 'hidden') p.borderStyle = bp2;
         }
         break;
       }
