@@ -302,7 +302,7 @@ function _layoutNodesImpl(
 
   // Track consecutive blank space to cap excessive gaps
   var _consecBlank = 0;
-  var _maxConsecBlank = LINE_H; // Cap blank gaps at 1 line height (13px)
+  var _maxConsecBlank = 4; // R23: Cap blank gaps at 4px for balanced layout
 
   function blank(h: number): void {
     if (_consecBlank >= _maxConsecBlank) return; // Already at blank cap
@@ -650,7 +650,7 @@ function _layoutNodesImpl(
             var fccLine = fccD.childLines[fccl];
             var _clRelY2 = fccLine.y - _fccFirstY;
             var fccShifted = fccLine.nodes.map(function(n) { return { ...n, x: n.x + fccCrossX }; });
-            lines.push({ y: fcCurY + _clRelY2, nodes: fccShifted, lineH: fccLine.lineH || LINE_H, bgColor: fccLine.bgColor, bgGradient: fccLine.bgGradient });
+            lines.push({ y: fcCurY + _clRelY2, nodes: fccShifted, lineH: fccLine.lineH || LINE_H, bgColor: fccLine.bgColor, bgGradient: fccLine.bgGradient, preBg: fccLine.preBg, boxDeco: fccLine.boxDeco });
           }
           // Shift child widgets to parent position
           var _fccDx = fccCrossX - CONTENT_PAD;
@@ -1561,10 +1561,18 @@ function _layoutNodesImpl(
   oofNodes.sort(function(a, b) { return (a.zIndex ?? 0) - (b.zIndex ?? 0); });
   for (var oi = 0; oi < oofNodes.length; oi++) {
     var oof      = oofNodes[oi];
-    var oofW     = oof.boxWidth ?? (maxX - xLeft);
+    // R23: Resolve percentage width/height for absolute/fixed elements against containing block
+    var _oofContW = maxX - xLeft;
+    var oofW     = oof.boxWidth ?? _oofContW;
+    if (!oof.boxWidth && oof.widthPct && oof.widthPct > 0) {
+      oofW = Math.floor(_oofContW * oof.widthPct / 100);
+    }
+    if (!oof.height && oof.heightPct && oof.heightPct > 0) {
+      oof.height = Math.floor(getViewport().h * oof.heightPct / 100);
+    }
     // When both left AND right are specified (no explicit width), derive width from container
-    if (!oof.boxWidth && oof.posLeft !== undefined && oof.posRight !== undefined) {
-      oofW = Math.max(0, (maxX - xLeft) - oof.posLeft - oof.posRight);
+    if (!oof.boxWidth && !oof.widthPct && oof.posLeft !== undefined && oof.posRight !== undefined) {
+      oofW = Math.max(0, _oofContW - oof.posLeft - oof.posRight);
     }
     // right-anchor: position from right edge of containing block
     var oofX     = oof.posLeft   !== undefined ? (xLeft + oof.posLeft)
@@ -1603,14 +1611,48 @@ function _layoutNodesImpl(
       var oofNodes2 = (oof.children && oof.children.length > 0)
         ? oofLine.nodes.map(function(n) { return { ...n, x: n.x + oofX - CONTENT_PAD }; })
         : oofLine.nodes;
-      var rendLine: { y: number; nodes: typeof oofLine.nodes; lineH: number; fixedViewportY?: number; fixedViewportX?: number } =
+      var rendLine: { y: number; nodes: typeof oofLine.nodes; lineH: number; fixedViewportY?: number; fixedViewportX?: number; bgColor?: number; bgGradient?: string; boxDeco?: BoxDecoration } =
         { y: oofY + _oofRelY, nodes: oofNodes2, lineH: oofLine.lineH };
+      // Carry through bgColor/bgGradient/boxDeco from child layout
+      if (oofLine.bgColor !== undefined) rendLine.bgColor = oofLine.bgColor;
+      if (oofLine.bgGradient) rendLine.bgGradient = oofLine.bgGradient;
+      if (oofLine.boxDeco) rendLine.boxDeco = oofLine.boxDeco;
       // position:fixed — mark lines so paint pass keeps them viewport-anchored regardless of scroll
       if (oof.position === 'fixed') {
         rendLine.fixedViewportY = oof.posTop  ?? 0;
         rendLine.fixedViewportX = oof.posLeft ?? 0;
       }
       lines.push(rendLine);
+    }
+    // R23: boxDeco for OOF element itself (border, border-radius, box-shadow, background)
+    var _oofTotalH = oofLines.length > 0
+      ? (oofLines[oofLines.length - 1].y + (oofLines[oofLines.length - 1].lineH || LINE_H) - (oofLines[0].y))
+      : (oof.height || LINE_H);
+    if (oof.height && oof.height > _oofTotalH) _oofTotalH = oof.height;
+    var _hasOofDeco = oof.borderRadius !== undefined || oof.borderWidth || oof.boxShadow
+      || oof.borderTopWidth || oof.borderBottomWidth || oof.borderLeftWidth || oof.borderRightWidth
+      || oof.bgColor !== undefined || oof.bgGradient || oof.opacity !== undefined;
+    if (_hasOofDeco && oofLines.length > 0) {
+      var _oofDecoIdx = lines.length - oofLines.length; // first OOF line in the output
+      var _oofDeco: BoxDecoration = { x: oofX, w: oofW, h: _oofTotalH };
+      if (oof.borderRadius !== undefined) _oofDeco.borderRadius = oof.borderRadius;
+      if (oof.borderWidth) _oofDeco.borderWidth = oof.borderWidth;
+      if (oof.borderColor !== undefined) _oofDeco.borderColor = oof.borderColor;
+      if (oof.borderStyle) _oofDeco.borderStyle = oof.borderStyle;
+      if (oof.borderTopWidth) _oofDeco.borderTopWidth = oof.borderTopWidth;
+      if (oof.borderRightWidth) _oofDeco.borderRightWidth = oof.borderRightWidth;
+      if (oof.borderBottomWidth) _oofDeco.borderBottomWidth = oof.borderBottomWidth;
+      if (oof.borderLeftWidth) _oofDeco.borderLeftWidth = oof.borderLeftWidth;
+      if (oof.borderTopColor !== undefined) _oofDeco.borderTopColor = oof.borderTopColor;
+      if (oof.borderRightColor !== undefined) _oofDeco.borderRightColor = oof.borderRightColor;
+      if (oof.borderBottomColor !== undefined) _oofDeco.borderBottomColor = oof.borderBottomColor;
+      if (oof.borderLeftColor !== undefined) _oofDeco.borderLeftColor = oof.borderLeftColor;
+      if (oof.boxShadow) _oofDeco.boxShadow = oof.boxShadow;
+      if (oof.bgColor !== undefined) _oofDeco.bgColor = oof.bgColor;
+      if (oof.bgGradient) _oofDeco.bgGradient = oof.bgGradient;
+      if (oof.opacity !== undefined) _oofDeco.opacity = oof.opacity;
+      if (oof.overflow === 'hidden' || oof.overflow === 'scroll' || oof.overflow === 'auto') _oofDeco.overflowHidden = true;
+      lines[_oofDecoIdx].boxDeco = _oofDeco;
     }
     // Shift OOF child widgets to absolute position
     for (var owi = 0; owi < oofWidgets.length; owi++) {
@@ -1621,6 +1663,32 @@ function _layoutNodesImpl(
   }
 
   if (_lpId) layoutProfiler.endLayout(_lpId);
+
+  // ── Post-layout fixup: propagate bgColor into blank lines between same-bg blocks ──
+  // In real browsers, parent container backgrounds fill gaps between children.
+  // Since our layout flattens the tree, blank lines between blocks lose the parent's bg.
+  // Fix: if a blank line sits between two lines with the same bgColor, inherit it.
+  if (lines.length > 2) {
+    // Sort indices by y for proximity check (lines should already be mostly sorted)
+    for (var _bgfi = 1; _bgfi < lines.length - 1; _bgfi++) {
+      var _bgLine = lines[_bgfi];
+      if (_bgLine.nodes.length > 0) continue; // Not a blank line
+      if (_bgLine.bgColor !== undefined) continue; // Already has bgColor
+      // Look for previous and next non-blank lines with bgColor
+      var _prevBg: number | undefined;
+      for (var _bgp = _bgfi - 1; _bgp >= 0 && _bgp >= _bgfi - 10; _bgp--) {
+        if (lines[_bgp].bgColor !== undefined) { _prevBg = lines[_bgp].bgColor; break; }
+      }
+      if (_prevBg === undefined) continue;
+      var _nextBg: number | undefined;
+      for (var _bgn = _bgfi + 1; _bgn < lines.length && _bgn <= _bgfi + 10; _bgn++) {
+        if (lines[_bgn].bgColor !== undefined) { _nextBg = lines[_bgn].bgColor; break; }
+      }
+      if (_nextBg !== undefined && _nextBg === _prevBg) {
+        _bgLine.bgColor = _prevBg;
+      }
+    }
+  }
 
   // Gap compression is done in _layoutPage (index.ts) on the final assembled result
   // rather than here, because _layoutNodesImpl is called recursively for flex children

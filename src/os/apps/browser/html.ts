@@ -1794,6 +1794,16 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
               if (curCSS.heightPct && curCSS.heightPct > 0) _cp.heightPct = curCSS.heightPct;
               if (curCSS.minWidth !== undefined) _cp.minWidth = curCSS.minWidth;
               if (curCSS.maxWidth !== undefined) _cp.maxWidth = curCSS.maxWidth;
+              if (curCSS.minHeight !== undefined) _cp.minHeight = curCSS.minHeight;
+              if (curCSS.maxHeight !== undefined) _cp.maxHeight = curCSS.maxHeight;
+              if (curCSS.aspectRatio !== undefined) _cp.aspectRatio = curCSS.aspectRatio;
+              if (curCSS.position && curCSS.position !== 'static') {
+                _cp.position = curCSS.position;
+                if (curCSS.top !== undefined) _cp.posTop = curCSS.top;
+                if (curCSS.right !== undefined) _cp.posRight = curCSS.right;
+                if (curCSS.bottom !== undefined) _cp.posBottom = curCSS.bottom;
+                if (curCSS.left !== undefined) _cp.posLeft = curCSS.left;
+              }
               if (curCSS.bgColor !== undefined) _cp.bgColor = curCSS.bgColor;
               if (curCSS.bgGradient) _cp.bgGradient = curCSS.bgGradient;
               if (curCSS.paddingLeft) _cp.paddingLeft = curCSS.paddingLeft;

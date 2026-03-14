@@ -7,7 +7,7 @@ export const FINDBAR_H   = 22;
 export const CHAR_W      = 8;
 export const CHAR_H      = 8;
 export const LINE_H      = 13;
-export const CONTENT_PAD = 8;
+export const CONTENT_PAD = 4;
 
 // ── Color palette ─────────────────────────────────────────────────────────────
 

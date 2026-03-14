@@ -1195,9 +1195,9 @@ export class BrowserApp implements App {
           canvas.fillRect(0, absY - 1, w, line.lineH + 1, _lbgc);
         }
       }
-      if (line.bgGradient) {
-        // Skip per-line gradient when boxDeco already rendered the gradient at full block height
-        if (!(line.boxDeco && line.boxDeco.bgGradient)) {
+
+      // R23: Fill gaps between lines with matching bgColor (paint container bg into inter-child gaps)
+      v if (!(line.boxDeco && line.boxDeco.bgGradient)) {
           var _gx  = line.boxDeco ? line.boxDeco.x : 0;
           var _gw  = line.boxDeco ? line.boxDeco.w : w;
           renderGradientCSS(canvas, _gx, absY - 1, _gw, line.lineH + 1, line.bgGradient);
@@ -1361,14 +1361,59 @@ export class BrowserApp implements App {
       if (_fxLine.fixedViewportY === undefined) continue;
       var _fxAbsY = y0 + _fxLine.fixedViewportY;
       if (_fxAbsY + (_fxLine.lineH || CHAR_H) < y0 || _fxAbsY >= y0 + ch) continue;
-      // Paint background to cover scrolled content beneath
-      if (_fxLine.bgColor !== undefined) {
-        canvas.fillRect(0, _fxAbsY - 1, w, (_fxLine.lineH || LINE_H) + 1, _fxLine.bgColor);
+      // R23: render boxDeco for fixed elements (borders, rounded corners, box-shadow)
+      if (_fxLine.boxDeco) {
+        var _fxDeco = _fxLine.boxDeco;
+        var _fxDecoX = _fxDeco.x;
+        var _fxDecoY = _fxAbsY - 1;
+        var _fxDecoW = _fxDeco.w;
+        var _fxDecoH = _fxDeco.h;
+        var _fxDecoR = _fxDeco.borderRadius || 0;
+        // Background fill
+        if (_fxDecoR > 0 && _fxDeco.bgColor !== undefined) {
+          canvas.fillRoundRect(_fxDecoX, _fxDecoY, _fxDecoW, _fxDecoH, _fxDecoR, _fxDeco.bgColor);
+        } else if (_fxDeco.bgColor !== undefined) {
+          canvas.fillRect(_fxDecoX, _fxDecoY, _fxDecoW, _fxDecoH, _fxDeco.bgColor);
+        } else {
+          canvas.fillRect(_fxDecoX, _fxDecoY, _fxDecoW, _fxDecoH, CLR_BG);
+        }
+        if (_fxDeco.bgGradient) {
+          renderGradientCSS(canvas, _fxDecoX, _fxDecoY, _fxDecoW, _fxDecoH, _fxDeco.bgGradient);
+        }
+        // Box-shadow
+        if (_fxDeco.boxShadow) {
+          var _fxShLayers = _parseBoxShadow(_fxDeco.boxShadow);
+          for (var _fxSli = 0; _fxSli < _fxShLayers.length; _fxSli++) {
+            var _fxSl = _fxShLayers[_fxSli];
+            if (_fxSl.inset) continue;
+            var _fxSlA = (_fxSl.color >>> 24) & 0xFF;
+            if (_fxSlA === 0) continue;
+            canvas.fillRect(
+              Math.round(_fxDecoX + _fxSl.offsetX - _fxSl.spread),
+              Math.round(_fxDecoY + _fxSl.offsetY - _fxSl.spread),
+              Math.round(_fxDecoW + _fxSl.spread * 2),
+              Math.round(_fxDecoH + _fxSl.spread * 2),
+              _fxSl.color);
+          }
+        }
+        // Border
+        var _fxBsNone = _fxDeco.borderStyle === 'none' || _fxDeco.borderStyle === 'hidden';
+        if (!_fxBsNone && _fxDeco.borderWidth && _fxDeco.borderWidth > 0 && _fxDeco.borderColor !== undefined) {
+          canvas.drawRoundRect(_fxDecoX, _fxDecoY, _fxDecoW, _fxDecoH, _fxDecoR, _fxDeco.borderColor);
+          for (var _fxBi = 1; _fxBi < _fxDeco.borderWidth; _fxBi++) {
+            canvas.drawRoundRect(_fxDecoX + _fxBi, _fxDecoY + _fxBi, _fxDecoW - _fxBi * 2, _fxDecoH - _fxBi * 2, Math.max(0, _fxDecoR - _fxBi), _fxDeco.borderColor);
+          }
+        }
       } else {
-        canvas.fillRect(0, _fxAbsY - 1, w, (_fxLine.lineH || LINE_H) + 1, CLR_BG);
-      }
-      if (_fxLine.bgGradient) {
-        renderGradientCSS(canvas, 0, _fxAbsY - 1, w, (_fxLine.lineH || LINE_H) + 1, _fxLine.bgGradient);
+        // Paint background to cover scrolled content beneath
+        if (_fxLine.bgColor !== undefined) {
+          canvas.fillRect(0, _fxAbsY - 1, w, (_fxLine.lineH || LINE_H) + 1, _fxLine.bgColor);
+        } else {
+          canvas.fillRect(0, _fxAbsY - 1, w, (_fxLine.lineH || LINE_H) + 1, CLR_BG);
+        }
+        if (_fxLine.bgGradient) {
+          renderGradientCSS(canvas, 0, _fxAbsY - 1, w, (_fxLine.lineH || LINE_H) + 1, _fxLine.bgGradient);
+        }
       }
       // Paint text spans
       for (var _fxJ = 0; _fxJ < _fxLine.nodes.length; _fxJ++) {
@@ -2871,7 +2916,7 @@ export class BrowserApp implements App {
     // ── Compress large vertical gaps (widget-anchor based) ─────────────
     var _gapLines = lr.lines;
     var _gapWidgets = lr.widgets;
-    var _GAP_MAX = 4; // max gap between widget anchors (tight compression)
+    var _GAP_MAX = 1; // R23: minimum gap between widget anchors (tight but no overlap)
     if (_gapLines.length > 1) {
       // Collect anchors from visible widgets only (reliable visual indicators)
       var _gAnchors: { y: number; yEnd: number }[] = [];

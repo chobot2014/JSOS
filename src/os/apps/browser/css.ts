@@ -1235,7 +1235,17 @@ export function parseInlineStyle(style: string): CSSProps {
 
       // ── Overflow ──────────────────────────────────────────────────────────
       case 'overflow': {
-        if (vl === 'visible' || vl === 'hidden' || vl === 'scroll' || vl === 'auto') {
+        // R23: Support two-value syntax: overflow: <x> <y>
+        var _ovParts = vl.split(/\s+/);
+        if (_ovParts.length === 2) {
+          var _ovX = _ovParts[0], _ovY = _ovParts[1];
+          if (_ovX === 'visible' || _ovX === 'hidden' || _ovX === 'scroll' || _ovX === 'auto') p.overflowX = _ovX;
+          if (_ovY === 'visible' || _ovY === 'hidden' || _ovY === 'scroll' || _ovY === 'auto') p.overflowY = _ovY;
+          // Set shorthand overflow to the more restrictive value for layout
+          if (_ovX === 'hidden' || _ovY === 'hidden') p.overflow = 'hidden';
+          else if (_ovX === 'scroll' || _ovY === 'scroll') p.overflow = 'scroll';
+          else if (_ovX === 'auto' || _ovY === 'auto') p.overflow = 'auto';
+        } else if (vl === 'visible' || vl === 'hidden' || vl === 'scroll' || vl === 'auto') {
           p.overflow = vl; p.overflowX = vl; p.overflowY = vl;
         }
         break;
