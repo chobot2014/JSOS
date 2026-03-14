@@ -528,7 +528,13 @@ function _layoutNodesImpl(
     if (nd.type === 'flex-row' && nd.children) {
       var fDir = nd.flexDirection || 'row';
       var fChildren = nd.children;
-      var gap       = nd.gap ?? 8;
+      var gap       = nd.gap ?? 0;
+      var _fxYBeforeBox = y; // R21: track flex container start for boxDeco
+      var _fxLinesStart = lines.length; // R21: first line index for boxDeco
+      // R21: padding-top for flex containers
+      if (nd.paddingTop && nd.paddingTop > 0) {
+        lines.push({ y, nodes: [], lineH: nd.paddingTop }); y += nd.paddingTop;
+      }
       var fRowY0    = y;
       var fxLeft    = xLeft + (nd.paddingLeft || 0);
       var fxAvail   = (nd.boxWidth ? Math.min(maxX, xLeft + nd.boxWidth) : maxX) - fxLeft - (nd.paddingRight || 0);
@@ -663,6 +669,41 @@ function _layoutNodesImpl(
           if (fcci2 < fcChildData.length - 1) fcCurY += gap + fcGapExtra;
         }
         y = fcCurY;
+        // R21: padding-bottom for flex container (column)
+        if (nd.paddingBottom && nd.paddingBottom > 0) {
+          lines.push({ y, nodes: [], lineH: nd.paddingBottom }); y += nd.paddingBottom;
+        }
+        // R21: min-height enforcement for flex container
+        if (nd.minHeight && nd.minHeight > 0 && (y - _fxYBeforeBox) < nd.minHeight) {
+          var _fxMinPad = nd.minHeight - (y - _fxYBeforeBox);
+          lines.push({ y, nodes: [], lineH: _fxMinPad }); y += _fxMinPad;
+        }
+        // R21: boxDeco — render background, border, shadow, opacity on flex containers
+        if (lines.length > _fxLinesStart) {
+          var _fxH2 = y - _fxYBeforeBox;
+          var _fxW2 = (nd.boxWidth ? nd.boxWidth : (maxX - xLeft));
+          var _fxDeco2: BoxDecoration = { x: xLeft, w: _fxW2, h: _fxH2 };
+          if (nd.borderRadius !== undefined) _fxDeco2.borderRadius = nd.borderRadius;
+          if (nd.borderWidth) _fxDeco2.borderWidth = nd.borderWidth;
+          if (nd.borderColor !== undefined) _fxDeco2.borderColor = nd.borderColor;
+          if (nd.borderStyle) _fxDeco2.borderStyle = nd.borderStyle;
+          if (nd.borderTopWidth) _fxDeco2.borderTopWidth = nd.borderTopWidth;
+          if (nd.borderRightWidth) _fxDeco2.borderRightWidth = nd.borderRightWidth;
+          if (nd.borderBottomWidth) _fxDeco2.borderBottomWidth = nd.borderBottomWidth;
+          if (nd.borderLeftWidth) _fxDeco2.borderLeftWidth = nd.borderLeftWidth;
+          if (nd.borderTopColor !== undefined) _fxDeco2.borderTopColor = nd.borderTopColor;
+          if (nd.borderRightColor !== undefined) _fxDeco2.borderRightColor = nd.borderRightColor;
+          if (nd.borderBottomColor !== undefined) _fxDeco2.borderBottomColor = nd.borderBottomColor;
+          if (nd.borderLeftColor !== undefined) _fxDeco2.borderLeftColor = nd.borderLeftColor;
+          if (nd.boxShadow) _fxDeco2.boxShadow = nd.boxShadow;
+          if (nd.bgColor !== undefined) _fxDeco2.bgColor = nd.bgColor;
+          if (nd.bgGradient) _fxDeco2.bgGradient = nd.bgGradient;
+          if (nd.opacity !== undefined) _fxDeco2.opacity = nd.opacity;
+          if (nd.textShadow) _fxDeco2.textShadow = nd.textShadow;
+          if (nd.overflow === 'hidden' || nd.overflow === 'scroll' || nd.overflow === 'auto') _fxDeco2.overflowHidden = true;
+          if (nd.elId) (lines[_fxLinesStart] as any)._decoElId = nd.elId;
+          lines[_fxLinesStart].boxDeco = _fxDeco2;
+        }
         lastBottomMargin = nd.marginBottom || 0;
         continue;
       }
@@ -910,6 +951,41 @@ function _layoutNodesImpl(
         if (fml.lineMaxH > fMaxH) fMaxH = fml.lineMaxH;
       }
       y = fCurLineY;
+      // R21: padding-bottom for flex container (row)
+      if (nd.paddingBottom && nd.paddingBottom > 0) {
+        lines.push({ y, nodes: [], lineH: nd.paddingBottom }); y += nd.paddingBottom;
+      }
+      // R21: min-height enforcement for flex container
+      if (nd.minHeight && nd.minHeight > 0 && (y - _fxYBeforeBox) < nd.minHeight) {
+        var _fxMinPad3 = nd.minHeight - (y - _fxYBeforeBox);
+        lines.push({ y, nodes: [], lineH: _fxMinPad3 }); y += _fxMinPad3;
+      }
+      // R21: boxDeco — render background, border, shadow, opacity on flex containers
+      if (lines.length > _fxLinesStart) {
+        var _fxH3 = y - _fxYBeforeBox;
+        var _fxW3 = (nd.boxWidth ? nd.boxWidth : (maxX - xLeft));
+        var _fxDeco3: BoxDecoration = { x: xLeft, w: _fxW3, h: _fxH3 };
+        if (nd.borderRadius !== undefined) _fxDeco3.borderRadius = nd.borderRadius;
+        if (nd.borderWidth) _fxDeco3.borderWidth = nd.borderWidth;
+        if (nd.borderColor !== undefined) _fxDeco3.borderColor = nd.borderColor;
+        if (nd.borderStyle) _fxDeco3.borderStyle = nd.borderStyle;
+        if (nd.borderTopWidth) _fxDeco3.borderTopWidth = nd.borderTopWidth;
+        if (nd.borderRightWidth) _fxDeco3.borderRightWidth = nd.borderRightWidth;
+        if (nd.borderBottomWidth) _fxDeco3.borderBottomWidth = nd.borderBottomWidth;
+        if (nd.borderLeftWidth) _fxDeco3.borderLeftWidth = nd.borderLeftWidth;
+        if (nd.borderTopColor !== undefined) _fxDeco3.borderTopColor = nd.borderTopColor;
+        if (nd.borderRightColor !== undefined) _fxDeco3.borderRightColor = nd.borderRightColor;
+        if (nd.borderBottomColor !== undefined) _fxDeco3.borderBottomColor = nd.borderBottomColor;
+        if (nd.borderLeftColor !== undefined) _fxDeco3.borderLeftColor = nd.borderLeftColor;
+        if (nd.boxShadow) _fxDeco3.boxShadow = nd.boxShadow;
+        if (nd.bgColor !== undefined) _fxDeco3.bgColor = nd.bgColor;
+        if (nd.bgGradient) _fxDeco3.bgGradient = nd.bgGradient;
+        if (nd.opacity !== undefined) _fxDeco3.opacity = nd.opacity;
+        if (nd.textShadow) _fxDeco3.textShadow = nd.textShadow;
+        if (nd.overflow === 'hidden' || nd.overflow === 'scroll' || nd.overflow === 'auto') _fxDeco3.overflowHidden = true;
+        if (nd.elId) (lines[_fxLinesStart] as any)._decoElId = nd.elId;
+        lines[_fxLinesStart].boxDeco = _fxDeco3;
+      }
       lastBottomMargin = nd.marginBottom || 0;
       continue;
     }
@@ -922,6 +998,7 @@ function _layoutNodesImpl(
       }
       if (!_hasText && !nd.bgColor && !nd.bgGradient && !nd.bgImage
           && !nd.borderWidth && !nd.boxShadow
+          && !nd.borderTopWidth && !nd.borderBottomWidth && !nd.borderLeftWidth && !nd.borderRightWidth
           && !nd.minHeight && !nd.height) {
         // Empty block — collapse margins but produce no vertical space
         lastBottomMargin = Math.max(lastBottomMargin, nd.marginBottom || 0);
@@ -1218,7 +1295,8 @@ function _layoutNodesImpl(
                        || nd.boxShadow || nd.opacity !== undefined || nd.textShadow
                        || nd.outlineWidth
                        || nd.borderTopWidth || nd.borderRightWidth || nd.borderBottomWidth || nd.borderLeftWidth
-                       || nd.overflow === 'hidden' || nd.overflow === 'scroll' || nd.overflow === 'auto';
+                       || nd.overflow === 'hidden' || nd.overflow === 'scroll' || nd.overflow === 'auto'
+                       || (bgColor !== undefined && bgColor !== 0xFFFFFFFF);
         var _needsTracking = nd.elId && lines.length > _blockLineStart && !lines[_blockLineStart].boxDeco;
         if ((_hasBoxDeco || _needsTracking) && lines.length > _blockLineStart) {
           var _blkH = y - yBeforeBlock;

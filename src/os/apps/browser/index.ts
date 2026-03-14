@@ -1061,9 +1061,11 @@ export class BrowserApp implements App {
         } else if (deco.bgGradient) {
           // Flat box gradient — render once at full block dimensions
           renderGradientCSS(canvas, decoX, decoY, decoW, decoH, deco.bgGradient);
-        } else {
-          // No rounding — let the existing bgColor/bgGradient handling below paint normally
-          // (boxDeco still enables border + shadow without forcing rounded corners)
+        } else if (deco.bgColor !== undefined) {
+          // R21: Flat box bgColor — render at exact box dimensions instead of relying on line.bgColor
+          var _dbgcFlat = deco.bgColor;
+          if (_decoOpacity < 1) { var _dfA = ((_dbgcFlat >>> 24) & 0xFF) * _decoOpacity; _dbgcFlat = (_dbgcFlat & 0x00FFFFFF) | (Math.round(_dfA) << 24); }
+          canvas.fillRect(decoX, decoY, decoW, decoH, _dbgcFlat);
         }
 
         // 2b. Inset box-shadows — drawn inside the box, on top of the background
