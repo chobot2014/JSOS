@@ -287,6 +287,8 @@ export interface WidgetBlueprint {
   preloadedImage?: DecodedImage | null;
   /** CSS-specified width in pixels (overrides cols/size). */
   cssWidth?:  number;
+  /** CSS-specified width as percentage (0-100) — resolved against container in layout (R22). */
+  cssWidthPct?: number;
   /** CSS-specified height in pixels (overrides rows). */
   cssHeight?: number;
   /** CSS object-fit for images. */

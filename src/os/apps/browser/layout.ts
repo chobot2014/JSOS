@@ -1255,6 +1255,10 @@ function _layoutNodesImpl(
         if (nd.minHeight && nd.minHeight > 0 && (y - yBeforeBlock) < nd.minHeight) {
           blank(nd.minHeight - (y - yBeforeBlock));
         }
+        // Enforce explicit CSS height: pad with blank space if content is shorter (R22)
+        if (nd.height && nd.height > 0 && (y - yBeforeBlock) < nd.height) {
+          blank(nd.height - (y - yBeforeBlock));
+        }
         // Enforce aspect-ratio: derive height from block width when height is not explicit
         if (nd.aspectRatio && !nd.height) {
           var _arStr = nd.aspectRatio.replace('auto', '').trim();
@@ -1296,7 +1300,8 @@ function _layoutNodesImpl(
                        || nd.outlineWidth
                        || nd.borderTopWidth || nd.borderRightWidth || nd.borderBottomWidth || nd.borderLeftWidth
                        || nd.overflow === 'hidden' || nd.overflow === 'scroll' || nd.overflow === 'auto'
-                       || (bgColor !== undefined && bgColor !== 0xFFFFFFFF);
+                       || (bgColor !== undefined && bgColor !== 0xFFFFFFFF)
+                       || !!bgGradient;
         var _needsTracking = nd.elId && lines.length > _blockLineStart && !lines[_blockLineStart].boxDeco;
         if ((_hasBoxDeco || _needsTracking) && lines.length > _blockLineStart) {
           var _blkH = y - yBeforeBlock;
@@ -1434,6 +1439,10 @@ function _layoutNodesImpl(
       }
 
       // CSS width/height override (if specified via stylesheet/inline CSS)
+      // R22: Resolve percentage width against available container
+      if (!bp.cssWidth && bp.cssWidthPct && bp.cssWidthPct > 0) {
+        bp.cssWidth = Math.floor((maxX - xLeft) * bp.cssWidthPct / 100);
+      }
       var _cssWSet = !!(bp.cssWidth && bp.cssWidth > 0);
       var _cssHSet = !!(bp.cssHeight && bp.cssHeight > 0);
       if (_cssWSet) ww = Math.min(bp.cssWidth!, maxX - xLeft);
@@ -1472,8 +1481,8 @@ function _layoutNodesImpl(
         }
         // 'fill' = default stretch behavior (no adjustment needed)
       }
-      // Cap tall narrow images (decorative icons) to reduce layout waste
-      if (bp.kind === 'img' && wh > 30 && ww < 40) wh = 30;
+      // Cap extremely tall narrow images (decorative icons) to reduce layout waste (R22: relaxed threshold)
+      if (bp.kind === 'img' && wh > 200 && ww < 20 && !_cssHSet) wh = 200;
 
       if (bp.kind !== 'checkbox' && bp.kind !== 'radio') {
         if (y > CONTENT_PAD) { blank(4); }

@@ -859,6 +859,10 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     if (openBlock) { nodes.push(openBlock); openBlock = null; }
     // Capture CSS width/height for widget sizing
     if (curCSS.width && curCSS.width > 0) bp.cssWidth = curCSS.width;
+    // Store percentage width for resolution against container in layout (R22)
+    if (!bp.cssWidth && curCSS.widthPct && curCSS.widthPct > 0) {
+      bp.cssWidthPct = curCSS.widthPct;
+    }
     if (curCSS.height && curCSS.height > 0) bp.cssHeight = curCSS.height;
     if (curCSS.objectFit) bp.objectFit = curCSS.objectFit;
     widgets.push(bp);

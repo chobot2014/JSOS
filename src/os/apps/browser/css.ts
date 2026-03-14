@@ -855,7 +855,12 @@ export function parseInlineStyle(style: string): CSSProps {
           return isNaN(v) ? 0 : v;
         }
         var br1 = _brPx(brParts[0] || '0');
-        p.borderRadius = br1;
+        var _brTL = _brPx(brParts[0] || '0');
+        var _brTR = _brPx(brParts[1] || brParts[0] || '0');
+        var _brBR = _brPx(brParts[2] || brParts[0] || '0');
+        var _brBL = _brPx(brParts[3] || brParts[1] || brParts[0] || '0');
+        // Use max of all corners so rounded rendering approximates the largest radius (R22)
+        p.borderRadius = Math.max(_brTL, _brTR, _brBR, _brBL);
         p.borderTopLeftRadius     = _brPx(brParts[0] || '0');
         p.borderTopRightRadius    = _brPx(brParts[1] || brParts[0] || '0');
         p.borderBottomRightRadius = _brPx(brParts[2] || brParts[0] || '0');
