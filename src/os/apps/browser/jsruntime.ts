@@ -338,7 +338,7 @@ export function createPageJS(
   // DOM mutations in the child are relayed back via postMessage.
   var _pageChildId: number = -1;              // child proc slot (-1 = not created)
   var _pageChildCreatedMs: number = 0;        // wall-clock ms when child was created
-  var _CHILD_MAX_LIFETIME_MS = 30000;         // recycle child before 15s timers can corrupt JIT
+  var _CHILD_MAX_LIFETIME_MS = 300000;        // 5 min — must survive 60s script downloads before recycling
   var _useChildRuntime = false;               // activate after coordinator fault
   var _childTickBusy = false;                 // re-entrancy guard for _childTick()
 
@@ -714,6 +714,17 @@ export function createPageJS(
     '_StubElement.prototype.animate = function(){ return {play:_noop,pause:_noop,cancel:_noop,finish:_noop,finished:Promise.resolve(),currentTime:0,playState:"idle",effect:null,onfinish:null,oncancel:null,addEventListener:_noop,removeEventListener:_noop}; };',
     '_StubElement.prototype.requestFullscreen = _noopPromise;',
     '_StubElement.prototype.requestPointerLock = _noop;',
+    // checkVisibility (Chrome 105+) — report as visible since we show all content
+    '_StubElement.prototype.checkVisibility = function(opts){ return true; };',
+    // setHTMLUnsafe / getHTML (Chrome 124+) — Declarative Shadow DOM
+    '_StubElement.prototype.setHTMLUnsafe = function(html){ this.innerHTML=html; };',
+    '_StubElement.prototype.getHTML = function(opts){ return this.innerHTML; };',
+    // moveBefore (Chrome 133+) — like insertBefore but preserves element state
+    '_StubElement.prototype.moveBefore = function(node,ref){ return this.insertBefore(node,ref); };',
+    // attachInternals (ElementInternals, Chrome 77+)
+    '_StubElement.prototype.attachInternals = function(){ return {setFormValue:_noop,setValidity:_noop,reportValidity:_noopTrue,checkValidity:_noopTrue,labels:[],form:null,shadowRoot:null,localName:this.tagName.toLowerCase(),ariaLabel:"",ariaChecked:null,ariaDisabled:null,ariaExpanded:null,ariaHidden:null,ariaSelected:null,ariaValueNow:null,ariaValueText:null,ariaValueMin:null,ariaValueMax:null,role:""}; };',
+    // computedStyleMap (CSS Typed OM, Chrome 66+)
+    '_StubElement.prototype.computedStyleMap = function(){ var s=this.style; return {get:function(p){return s.getPropertyValue(p)||null;},getAll:function(p){return [s.getPropertyValue(p)];},has:function(p){return !!s.getPropertyValue(p);},entries:function(){return [];}}; };',
     '_StubElement.prototype.attachShadow = function(o){ var sr=new _StubElement("shadow-root"); sr.mode=(o&&o.mode)||"open"; sr.host=this; this.shadowRoot=sr; return sr; };',
     '_StubElement.prototype.shadowRoot = null;',
     '_StubElement.prototype.assignedSlot = null;',
@@ -1178,6 +1189,17 @@ export function createPageJS(
     'var performance = (function(){',
     '  var _t0 = Date.now();',
     '  var _marks = {}; var _entries = [];',
+    // PerformanceNavigationTiming entry — Chrome uses this for analytics/telemetry
+    '  var _navEntry = {entryType:"navigation",name:location.href,startTime:0,duration:0,initiatorType:"navigation",',
+    '    unloadEventStart:0,unloadEventEnd:0,domInteractive:0,domContentLoadedEventStart:0,domContentLoadedEventEnd:0,',
+    '    domComplete:0,loadEventStart:0,loadEventEnd:0,type:"navigate",redirectCount:0,',
+    '    fetchStart:0,domainLookupStart:0,domainLookupEnd:0,connectStart:0,connectEnd:0,',
+    '    requestStart:0,responseStart:0,responseEnd:0,secureConnectionStart:0,',
+    '    transferSize:0,encodedBodySize:0,decodedBodySize:0,',
+    '    serverTiming:[],workerStart:0,nextHopProtocol:"h2",',
+    '    toJSON:function(){return this;}',
+    '  };',
+    '  _entries.push(_navEntry);',
     '  return {',
     '    now: function(){ return Date.now()-_t0; },',
     '    timeOrigin: _t0,',
@@ -1187,13 +1209,14 @@ export function createPageJS(
     '    clearMeasures: _noop,',
     '    getEntries: function(){ return _entries.slice(); },',
     '    getEntriesByType: function(t){ return _entries.filter(function(e){return e.entryType===t;}); },',
-    '    getEntriesByName: function(n){ return _entries.filter(function(e){return e.name===n;}); },',
-    '    navigation: {type:0,redirectCount:0},',
-    '    timing: {navigationStart:_t0,responseEnd:_t0,domInteractive:_t0,domContentLoadedEventEnd:_t0,domComplete:_t0,loadEventStart:_t0,loadEventEnd:_t0},',
+    '    getEntriesByName: function(n,t){ return _entries.filter(function(e){return e.name===n&&(!t||e.entryType===t);}); },',
+    '    navigation: {type:"navigate",redirectCount:0},',
+    '    timing: {navigationStart:_t0,fetchStart:_t0,domainLookupStart:_t0,domainLookupEnd:_t0,connectStart:_t0,connectEnd:_t0,requestStart:_t0,responseStart:_t0,responseEnd:_t0,domInteractive:_t0,domContentLoadedEventEnd:_t0,domComplete:_t0,loadEventStart:_t0,loadEventEnd:_t0},',
     '    memory: {jsHeapSizeLimit:2147483648,usedJSHeapSize:4000000,totalJSHeapSize:8000000},',
-    '    eventCounts: new Map(),',
+    '    eventCounts: {value:new Map(),get:function(t){return 0;}},',
     '    setResourceTimingBufferSize: _noop,',
     '    clearResourceTimings: _noop,',
+    '    onresourcetimingbufferfull: null,',
     '    addEventListener: _noop, removeEventListener: _noop',
     '  };',
     '})();',
@@ -9427,6 +9450,17 @@ export function createPageJS(
     // CPU fault with _js_fault_active == 0 halts the OS.  We want the setjmp
     // frame up for every eval, not just external/large scripts.
     var _useGuarded = typeof (kernel as any).evalGuarded === 'function';
+    // ── External script size cap ─────────────────────────────────────────────
+    // Google's XJS bundle (987KB) overflows QuickJS compiler buffers during
+    // parsing, causing heap corruption that kills the main runtime.  Cap
+    // external scripts at 512KB — inline scripts are always small and safe.
+    // All normal frameworks (jQuery 87KB, React 130KB, Angular 150KB, Vue 100KB)
+    // fit under 512KB.  Google's inline scripts already handle core UI; the
+    // mega-bundle adds optional features we can skip.
+    if (scriptURL && code.length > 512 * 1024) {
+      cb.log('[JS exec] external-too-large ' + (code.length / 1024).toFixed(0) + 'KB — skipping (cap=512KB): ' + scriptURL.slice(0, 80));
+      return;
+    }
     if (code.length > 2 * 1024 * 1024) {
       cb.log('[JS exec] oversized-skip ' + (code.length / 1024 / 1024).toFixed(1) + 'MB ' + (scriptURL || '(inline)'));
       return;
@@ -9521,11 +9555,31 @@ export function createPageJS(
           // Replace dynamic import() — child doesn't have native import support
           if (_guardedCode.indexOf('import(') >= 0)
             _guardedCode = _guardedCode.replace(/\bimport\s*\(/g, '__jsos_dynamic_import__(');
+          // Track heap violations before/after procEval to detect heap corruption
+          var _preViolations = 0;
+          try { _preViolations = (kernel as any).heapStats().headViolations || 0; } catch(_) {}
           try {
             var _t0Eval = Date.now();
             var _childResult = (kernel as any).procEval(_pageChildId, _guardedCode);
             var _evalMs = Date.now() - _t0Eval;
             if (_evalMs > 100) cb.log('[JS eval] ' + _evalMs + 'ms ' + (code.length/1024).toFixed(0) + 'KB ' + (scriptURL||'inline').slice(0,80));
+            // Force GC after significant scripts to flush latent heap corruption.
+            // Without this, corrupted blocks aren't freed until the GC runs
+            // organically, making the post-eval heapStats check miss violations.
+            if (code.length > 1024) {
+              try { (kernel as any).gc(); } catch(_) {}
+            }
+            // Check for heap corruption IMMEDIATELY after procEval + forced GC
+            var _postViolations = 0;
+            try { _postViolations = (kernel as any).heapStats().headViolations || 0; } catch(_) {}
+            if (_postViolations > _preViolations) {
+              cb.log('[JS] heap corruption detected after script (' +
+                (_postViolations - _preViolations) + ' new violations) — destroying child');
+              try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
+              _clearChildProc();
+              _pageFaulted = true;  // prevent further script execution
+              return;
+            }
             // procEval returns "Error: ..." on exception in the child
             if (typeof _childResult === 'string' && _childResult.indexOf('Error') === 0) {
               cb.log('[JS child error] ' + _childResult.slice(0, 300));
@@ -9771,15 +9825,16 @@ export function createPageJS(
     var url = src.startsWith('http') ? src : _resolveURL(src, _baseHref);
     cb.log('[JS] loadExternalScript: ' + url.slice(0, 120));
     var _lsFinished = false;
-    // 15-second wall-clock timeout: if the fetch hangs, continue to next script
-    // rather than blocking the entire page load indefinitely.
+    // 120-second wall-clock timeout: Google's main JS bundles can be 500KB+ and
+    // take 30-60 seconds to download over QEMU's NAT.  60s caused premature
+    // timeouts when fetch coroutines were blocked by CSS rerender (~7s).
     var _lsTimer = setTimeout_(() => {
       if (!_lsFinished) {
         _lsFinished = true;
-        cb.log('[JS] loadExternalScript timeout (15s): ' + url.slice(0, 80));
+        cb.log('[JS] loadExternalScript timeout (120s): ' + url.slice(0, 80));
         done(undefined);
       }
-    }, 15000);
+    }, 120000);
     // Use deduplicated fetch to avoid redundant network requests for the same
     // script URL (common in SPAs with code-splitting / React.lazy / Suspense).
     JITBrowserEngine.deduplicatedFetch(url, (resp: FetchResponse | null, _err?: string) => {
@@ -9787,7 +9842,12 @@ export function createPageJS(
       _lsFinished = true;
       clearTimeout_(_lsTimer);
       if (resp && resp.status === 200) {
-        if (!noAutoExec) execScript(resp.bodyText, url);
+        cb.log('[JS] loadExternalScript OK: ' + (resp.bodyText.length / 1024).toFixed(1) + 'KB from ' + url.slice(0, 80));
+        if (!noAutoExec) {
+          try { execScript(resp.bodyText, url); } catch(_ee) {
+            cb.log('[JS] loadExternalScript exec error: ' + String(_ee).slice(0, 120));
+          }
+        }
         done(resp.bodyText);
       } else {
         cb.log('[JS] failed to load script (' + (resp ? resp.status : 'null') + '): ' + url);
@@ -10181,6 +10241,23 @@ export function createPageJS(
 
     checkDirty();
     if (needsRerender) doRerender();
+
+    // Post-script heap integrity check: inline script compilation may have
+    // corrupted adjacent malloc headers.  The corruption is "latent" — it
+    // doesn't surface until later free/realloc calls hit the bad headers.
+    // Detect violations NOW and destroy the child process before those
+    // later operations trigger cascading page faults.
+    try {
+      var _postScriptViolations = (kernel as any).heapStats().headViolations || 0;
+      if (_postScriptViolations > 0) {
+        cb.log('[JS] post-script heap check: ' + _postScriptViolations + ' violations — destroying child');
+        if (_pageChildId >= 0) {
+          try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
+          _clearChildProc();
+        }
+        _pageFaulted = true;
+      }
+    } catch(_) {}
   }
 
 
@@ -10751,6 +10828,25 @@ export function createPageJS(
     },
     tick(nowMs: number): void {
       if (disposed) return;
+      // Heap integrity gate: if heap corruption was detected since the page
+      // loaded, do NOT tick any JS.  Corrupted function pointers in QuickJS
+      // vtables cause repeated #PF at the same EIP every frame, burning all
+      // 5 consecutive-fault slots before the main loop can recover.
+      // Checking once per frame here (~60 Hz) costs essentially nothing.
+      if (!_pageFaulted) {
+        try {
+          var _hsv = (kernel as any).heapStats();
+          if (_hsv && _hsv.headViolations > 0) {
+            cb.log('[JS] tick heap gate: ' + _hsv.headViolations + ' violations — halting JS');
+            if (_pageChildId >= 0) {
+              try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
+              _clearChildProc();
+            }
+            _pageFaulted = true;
+          }
+        } catch(_) {}
+      }
+      if (_pageFaulted) return;
       var frameStart = _perf.now();
       // Fire RAF callbacks — coalesce rerender to end of tick
       if (rafCallbacks.length) {

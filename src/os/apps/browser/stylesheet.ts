@@ -80,6 +80,17 @@ export interface CSSRule {
   _stamp?: number;  // dedup stamp for candidateRules (avoids Set allocation)
   /** Pre-computed pseudo-element info for content rules (avoids regex in getPseudoContent hot path) */
   _pseudoInfos?: Array<{ pseudo: 'before' | 'after'; hostParsed: ParsedSel } | null>;
+  /** True if ALL selectors require :hover/:focus/:active — skip during static layout */
+  _stateOnly?: boolean;
+  /** Rightmost compound tag (if any) for fast pre-rejection in matching loop */
+  _reqTag?: string;
+  /** ALL classes from rightmost compound for multi-class pre-rejection */
+  _reqClasses?: string[];
+  /** Rightmost compound ID (if any) for fast pre-rejection */
+  _reqId?: string;
+  /** True if single-selector, single-compound, no pseudos, no attrs —
+   *  when all pre-checks pass, skip matchesParsedSel entirely */
+  _simpleMatch?: boolean;
 }
 
 // ── Pre-parsed selector types (no regex at match time) ───────────────────────
@@ -281,6 +292,7 @@ const _parsedCompoundCache = new Map<string, ParsedCompound>();
 /**
  * Parse a compound selector string into a ParsedCompound struct.
  * Called once per unique compound string at parseStylesheet time.
+ * Regex-free: uses charCodeAt for all token scanning.
  */
 function _parseCompound(compound: string): ParsedCompound {
   var cached = _parsedCompoundCache.get(compound);
@@ -298,47 +310,101 @@ function _parseCompound(compound: string): ParsedCompound {
     return result0;
   }
 
-  var rest = compound;
+  var i = 0;
+  var n = compound.length;
 
-  // Type selector at start
-  var typeM = rest.match(/^([a-zA-Z][a-zA-Z0-9-]*)/);
-  if (typeM) {
-    tag = typeM[1]!.toLowerCase();
-    rest = rest.slice(typeM[1]!.length);
+  // Helper: is char an ident char (a-z, A-Z, 0-9, -, _)?
+  function _isIdent(cc: number): boolean {
+    return (cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) ||
+           (cc >= 48 && cc <= 57) || cc === 45 || cc === 95;
+  }
+  // Read ident token starting at i (returns lowercased)
+  function _readIdent(): string {
+    var s = i;
+    while (i < n && _isIdent(compound.charCodeAt(i))) i++;
+    return compound.slice(s, i).toLowerCase();
+  }
+  // Read until boundary char (.#[:space)
+  function _readUntilBound(): string {
+    var s = i;
+    while (i < n) {
+      var cc = compound.charCodeAt(i);
+      if (cc === 46 /*.*/ || cc === 35 /*#*/ || cc === 91 /*[*/ ||
+          cc === 58 /*:*/ || cc <= 32) break;
+      i++;
+    }
+    return compound.slice(s, i);
+  }
+
+  // Type selector at start (a-zA-Z)
+  var firstCC = compound.charCodeAt(0);
+  if ((firstCC >= 97 && firstCC <= 122) || (firstCC >= 65 && firstCC <= 90)) {
+    tag = _readIdent();
+    if (tag === '*') tag = null; // already handled above but defensive
+  } else if (firstCC === 42 /* * */) {
+    i++; // skip *
   }
 
   // Parse remaining simple selectors iteratively
-  while (rest.length > 0) {
-    var ch = rest[0]!;
-    if (ch === '#') {
-      var idM = rest.match(/^#([^.#[:\s]+)/);
-      if (!idM) break;
-      ids.push(idM[1]!);
-      rest = rest.slice(idM[0].length);
-    } else if (ch === '.') {
-      var clM = rest.match(/^\.([^.#[:\s]+)/);
-      if (!clM) break;
-      classes.push(clM[1]!);
-      rest = rest.slice(clM[0].length);
-    } else if (ch === '[') {
-      var atM = rest.match(/^\[([^\]]+)\]/);
-      if (!atM) break;
-      var atExpr = atM[1]!;
-      var eqM = atExpr.match(/^([a-zA-Z_-][a-zA-Z0-9_-]*)([~|^$*]?=)?(.+)?$/);
-      if (eqM) {
-        attrs.push({
-          name: eqM[1]!.toLowerCase().trim(),
-          op:   eqM[2] || '',
-          val:  (eqM[3] || '').replace(/^['"]|['"]$/g, ''),
-        });
+  while (i < n) {
+    var ch = compound.charCodeAt(i);
+    if (ch === 35 /* # */) {
+      i++; // skip #
+      var idVal = _readUntilBound();
+      if (idVal) ids.push(idVal);
+    } else if (ch === 46 /* . */) {
+      i++; // skip .
+      var clVal = _readUntilBound();
+      if (clVal) classes.push(clVal);
+    } else if (ch === 91 /* [ */) {
+      i++; // skip [
+      var closeBracket = compound.indexOf(']', i);
+      if (closeBracket < 0) break;
+      var atExpr = compound.slice(i, closeBracket);
+      i = closeBracket + 1;
+      // Parse attr[op[=val]]
+      var ai2 = 0;
+      var atName = '';
+      while (ai2 < atExpr.length && _isIdent(atExpr.charCodeAt(ai2))) ai2++;
+      atName = atExpr.slice(0, ai2).toLowerCase().trim();
+      var atOp = '';
+      var atVal = '';
+      if (ai2 < atExpr.length) {
+        var opStart = ai2;
+        while (ai2 < atExpr.length && atExpr.charCodeAt(ai2) !== 61 /* = */) ai2++;
+        if (ai2 < atExpr.length) {
+          atOp = atExpr.slice(opStart, ai2 + 1); // includes =
+          ai2++;
+          atVal = atExpr.slice(ai2).trim();
+          // Strip quotes
+          if (atVal.length >= 2) {
+            var q = atVal.charCodeAt(0);
+            if ((q === 34 || q === 39) && atVal.charCodeAt(atVal.length - 1) === q) {
+              atVal = atVal.slice(1, -1);
+            }
+          }
+        }
       }
-      rest = rest.slice(atM[0].length);
-    } else if (ch === ':') {
-      var psM = rest.match(/^::?([a-zA-Z-]+)(?:\(([^)]*)\))?/);
-      if (!psM) { rest = rest.slice(1); continue; }
-      var psName = psM[1]!.toLowerCase();
-      var psArg  = psM[2] || '';
-      rest = rest.slice(psM[0].length);
+      if (atName) attrs.push({ name: atName, op: atOp, val: atVal });
+    } else if (ch === 58 /* : */) {
+      i++; // skip :
+      if (i < n && compound.charCodeAt(i) === 58) i++; // skip :: (pseudo-element)
+      var psName = _readIdent();
+      var psArg = '';
+      if (i < n && compound.charCodeAt(i) === 40 /* ( */) {
+        i++; // skip (
+        // Read balanced parens
+        var depth = 1;
+        var argStart = i;
+        while (i < n && depth > 0) {
+          var pc = compound.charCodeAt(i);
+          if (pc === 40) depth++;
+          else if (pc === 41) depth--;
+          if (depth > 0) i++;
+        }
+        psArg = compound.slice(argStart, i);
+        if (i < n) i++; // skip )
+      }
       // Pre-parse :not/:is/:where argument into compounds
       var argParsed: ParsedCompound[] | undefined;
       if ((psName === 'not' || psName === 'is' || psName === 'where') && psArg) {
@@ -430,7 +496,11 @@ function _matchParsedCompound(
       // pseudo-elements — match the host element
     } else if (pn === 'hover' || pn === 'focus' || pn === 'active' ||
                pn === 'focus-within' || pn === 'focus-visible') {
-      // state pseudo-classes — optimistically match
+      // State pseudo-classes — conservative: during static layout no element
+      // is hovered/focused/active.  Returning false eliminates matching of all
+      // :hover/:focus/:active rules (e.g. Google has ~20 such rules) which
+      // wastes mergeProps work and applies wrong styles.
+      return false;
     } else if (pn === 'checked' || pn === 'selected') {
       if (!attrs.has('checked')) return false;
     } else if (pn === 'disabled') {
@@ -524,19 +594,33 @@ export function matchesParsedSel(
   var ancIdx = 0;
   for (var pi = 1; pi < compounds.length; pi++) {
     var comb = combinators[pi - 1]!;
+    var reqComp = compounds[pi]!;
     if (comb === '>') {
       if (ancIdx >= ancestors.length) return false;
       var pa = ancestors[ancIdx]!;
-      if (!_matchParsedCompound(pa.tag, pa.id, pa.cls, null, pa.attrs, compounds[pi]!)) return false;
+      if (!_matchParsedCompound(pa.tag, pa.id, pa.cls, null, pa.attrs, reqComp)) return false;
       ancIdx++;
     } else if (comb === ' ') {
-      var found = false;
-      while (ancIdx < ancestors.length) {
-        var an = ancestors[ancIdx]!;
-        ancIdx++;
-        if (_matchParsedCompound(an.tag, an.id, an.cls, null, an.attrs, compounds[pi]!)) { found = true; break; }
+      // Fast pre-check: if the required compound specifies a tag, scan ancestor
+      // tags first before doing full compound matching at each level.
+      var reqTag = reqComp.tag;
+      if (reqTag !== null) {
+        var found = false;
+        while (ancIdx < ancestors.length) {
+          var an = ancestors[ancIdx]!;
+          ancIdx++;
+          if (an.tag === reqTag && _matchParsedCompound(an.tag, an.id, an.cls, null, an.attrs, reqComp)) { found = true; break; }
+        }
+        if (!found) return false;
+      } else {
+        var found = false;
+        while (ancIdx < ancestors.length) {
+          var an = ancestors[ancIdx]!;
+          ancIdx++;
+          if (_matchParsedCompound(an.tag, an.id, an.cls, null, an.attrs, reqComp)) { found = true; break; }
+        }
+        if (!found) return false;
       }
-      if (!found) return false;
     }
     // + and ~ sibling combinators: optimistic pass
   }
@@ -727,7 +811,31 @@ function _splitOutsideParens(s: string, delim: string): string[] {
  *  - Comments removed: `/* ... *\/`
  *  - Nested @media blocks: descent once (one level of nesting)
  */
+// ── Stylesheet parse cache ─────────────────────────────────────────────────
+// Caches parsed CSSRule[] by CSS text hash to avoid reparsing identical
+// <style> blocks (Google re-injects the same styles on DOM mutations,
+// and page reloads see the same content).
+var _sheetCache = new Map<string, CSSRule[]>();
+var _sheetCacheHits = 0;
+
+export function flushSheetCache(): void { _sheetCache.clear(); _sheetCacheHits = 0; }
+
 export function parseStylesheet(css: string): CSSRule[] {
+  // Check cache — use first 200 chars + length as key (fast, low collision)
+  var _cacheKey = css.length + ':' + css.slice(0, 200);
+  var _cached = _sheetCache.get(_cacheKey);
+  if (_cached) {
+    _sheetCacheHits++;
+    // Return cloned rules to avoid mutation of cached data
+    // (order field is stamped per-use by buildRuleIndex)
+    var cloned: CSSRule[] = new Array(_cached.length);
+    for (var _ci2 = 0; _ci2 < _cached.length; _ci2++) {
+      var _cr = _cached[_ci2]!;
+      cloned[_ci2] = { sels: _cr.sels, parsedSels: _cr.parsedSels, props: _cr.props, spec: _cr.spec, order: 0 };
+    }
+    return cloned;
+  }
+
   var rules: CSSRule[] = [];
 
   // Remove comments — indexOf scan (faster than regex in QuickJS's regex engine)
@@ -934,6 +1042,10 @@ export function parseStylesheet(css: string): CSSRule[] {
   }
 
   // parsedSels are now built inline during rule creation (no separate pass needed)
+  // Cache for future use (bounded to 128 entries)
+  if (_sheetCache.size < 128) {
+    _sheetCache.set(_cacheKey, rules);
+  }
   return rules;
 }
 
@@ -1272,14 +1384,36 @@ export function computeElementStyle(
   };
 
   // ── Collect matching rules (with result cache for stable elements) ─────────
-  // Cache key: tag + id + sorted-cls only — inlineStyle is intentionally
+  // Cache key: tag + id + CSS-relevant-cls only — inlineStyle is intentionally
   // excluded so that elements with unique inline styles (e.g. style="left: Npx")
   // still get cache hits for their sheet-matched rules.
   // Cache is flushed (via flushCSSMatchCache) whenever sheets change.
-  // Pre-computed sortedClsKey avoids cls.slice().sort().join() on every call.
-  var _sortedCls = sortedClsKey !== undefined ? sortedClsKey
-    : cls.length > 1 ? cls.slice().sort().join(' ') : (cls[0] || '');
-  var _cacheKey = tag + '\x00' + id + '\x00' + _sortedCls;
+  //
+  // Key optimization: strip classes not referenced in any CSS selector.
+  // CSS-in-JS pages (Google, React) add many classes for JavaScript purposes
+  // (event handlers, DOM queries) that don't match any CSS rule.  Including
+  // them in the cache key creates unique keys for elements that would otherwise
+  // share the same matched rules.  Using cssClassSet from the RuleIndex,
+  // we filter to only CSS-relevant classes, dramatically improving hit rate.
+  var _filteredCls: string;
+  if (index && (index as any).cssClassSet) {
+    var _ccSet = (index as any).cssClassSet as Set<string>;
+    if (cls.length === 0) {
+      _filteredCls = '';
+    } else if (cls.length === 1) {
+      _filteredCls = _ccSet.has(cls[0]!) ? cls[0]! : '';
+    } else {
+      var _fc: string[] = [];
+      for (var _fi = 0; _fi < cls.length; _fi++) {
+        if (_ccSet.has(cls[_fi]!)) _fc.push(cls[_fi]!);
+      }
+      _filteredCls = _fc.length > 1 ? _fc.sort().join(' ') : (_fc[0] || '');
+    }
+  } else {
+    _filteredCls = sortedClsKey !== undefined ? sortedClsKey
+      : cls.length > 1 ? cls.slice().sort().join(' ') : (cls[0] || '');
+  }
+  var _cacheKey = tag + '\x00' + id + '\x00' + _filteredCls;
   _cssMatchTotal++;
   var _cachedMatch = _cssMatchCache.get(_cacheKey);
 
@@ -1333,6 +1467,33 @@ export function computeElementStyle(
 
   for (var ri = 0; ri < candidates.length; ri++) {
     var rule = candidates[ri]!;
+    // Skip rules that only match via :hover/:focus/:active (never match during static layout)
+    if (rule._stateOnly) continue;
+    // Fast pre-rejection: check rightmost compound tag/class/id before calling
+    // the full matchesParsedSel function.  Saves function-call overhead entirely
+    // for rules that can't match this element.
+    var _rt = rule._reqTag;
+    if (_rt !== undefined && _rt !== tag) continue;
+    var _rcs = rule._reqClasses;
+    if (_rcs !== undefined) {
+      var _clsMiss = false;
+      if (_clsSet) {
+        for (var _ci = 0; _ci < _rcs.length; _ci++) { if (!_clsSet.has(_rcs[_ci]!)) { _clsMiss = true; break; } }
+      } else {
+        for (var _ci = 0; _ci < _rcs.length; _ci++) { if (cls.indexOf(_rcs[_ci]!) < 0) { _clsMiss = true; break; } }
+      }
+      if (_clsMiss) continue;
+    }
+    var _rid = rule._reqId;
+    if (_rid !== undefined && _rid !== id) continue;
+    // Fast path: simple single-compound rules with no pseudos/attrs —
+    // all pre-checks passed above, so the rule matches without calling matchesParsedSel.
+    // This eliminates 2 function calls (matchesParsedSel + _matchParsedCompound) per rule.
+    if (rule._simpleMatch) {
+      var srcOrder = index ? rule.order : ri;
+      _gmProps[_gmLen] = rule.props; _gmSpec[_gmLen] = rule.spec; _gmOrder[_gmLen] = srcOrder; _gmLen++;
+      continue;
+    }
     // Hot path: use pre-parsed selectors (no regex) when available
     if (rule.parsedSels) {
       for (var si = 0; si < rule.parsedSels.length; si++) {
@@ -1452,11 +1613,73 @@ export function computeElementStyle(
  * reducing CSS matching from O(rules) to O(candidates).
  */
 export function buildSheetIndex(rules: CSSRule[]): RuleIndex {
+  // Pre-classify rules: mark those that ONLY match via :hover/:focus/:active
+  // so the matching loop can skip them during static layout (save ~20% work).
+  // Also pre-compute _reqTag, _reqClasses, _reqId, _simpleMatch for the rightmost compound of each
+  // rule's FIRST parsed selector — enables fast pre-rejection in matching loop
+  // without calling matchesParsedSel() at all (saves function call overhead).
+  var _statePseudos = new Set(['hover', 'focus', 'active', 'focus-within', 'focus-visible']);
+  var _stateSkipped = 0;
+  for (var _ssi = 0; _ssi < rules.length; _ssi++) {
+    var _sr = rules[_ssi]!;
+    if (_sr.parsedSels && _sr.parsedSels.length > 0) {
+      var _allState = true;
+      for (var _sj = 0; _sj < _sr.parsedSels.length && _allState; _sj++) {
+        var _sComp = _sr.parsedSels[_sj]!.compounds;
+        // Check if ANY compound in the selector chain has a state pseudo
+        var _hasState = false;
+        for (var _sk = 0; _sk < _sComp.length && !_hasState; _sk++) {
+          var _sPseudos = _sComp[_sk]!.pseudos;
+          for (var _sl = 0; _sl < _sPseudos.length; _sl++) {
+            if (_statePseudos.has(_sPseudos[_sl]!.name)) { _hasState = true; break; }
+          }
+        }
+        if (!_hasState) _allState = false;
+      }
+      _sr._stateOnly = _allState;
+      if (_allState) _stateSkipped++;
+
+      // Pre-compute rightmost compound data for fast pre-rejection.
+      // Use the FIRST parsedSel (most common case: rules have only 1 selector
+      // after comma-split).  Even for multi-selector rules, this is a valid
+      // fast-fail: if ALL selectors share the same reqTag, the check is exact;
+      // if they differ, we skip the pre-check (set undefined).
+      var _rc0 = _sr.parsedSels[0]!.compounds[0];
+      if (_rc0) {
+        if (_sr.parsedSels.length === 1) {
+          // Single selector: exact pre-rejection
+          _sr._reqTag = _rc0.tag && _rc0.tag !== '*' ? _rc0.tag : undefined;
+          // ALL classes from rightmost compound — fixes the bucket-key problem
+          // where checking only the first class matches the bucket key and
+          // never rejects.  Checking ALL classes catches multi-class mismatches.
+          _sr._reqClasses = _rc0.classes.length > 0 ? _rc0.classes : undefined;
+          _sr._reqId = _rc0.ids.length > 0 ? _rc0.ids[0] : undefined;
+          // Fast path: single-compound, no pseudos, no attrs → skip matchesParsedSel
+          var _ps0 = _sr.parsedSels[0]!;
+          _sr._simpleMatch = _ps0.compounds.length === 1 &&
+            _rc0.pseudos.length === 0 && _rc0.attrs.length === 0;
+        } else {
+          // Multi-selector: only set _reqTag if ALL selectors require the same tag
+          var _commonTag: string | undefined = _rc0.tag && _rc0.tag !== '*' ? _rc0.tag : undefined;
+          for (var _msi = 1; _msi < _sr.parsedSels.length && _commonTag; _msi++) {
+            var _mrc = _sr.parsedSels[_msi]!.compounds[0];
+            if (!_mrc || _mrc.tag !== _commonTag) _commonTag = undefined;
+          }
+          _sr._reqTag = _commonTag;
+          // Don't set _reqClasses/_reqId/_simpleMatch for multi-selector rules
+        }
+      }
+    }
+  }
   var idx = buildRuleIndex(rules);
   // Debug: log how many rules landed in universalRules (checked for EVERY element)
   if (typeof os !== 'undefined' && os && os.debug) {
+    var _simpleCount = 0;
+    for (var _dbi = 0; _dbi < rules.length; _dbi++) { if (rules[_dbi]!._simpleMatch) _simpleCount++; }
     os.debug.log('[browser] ruleIndex: rules=' + rules.length +
       ' universalRules=' + idx.universalRules.length +
+      ' stateOnly=' + _stateSkipped +
+      ' simpleMatch=' + _simpleCount +
       ' classBuckets=' + idx.classBuckets.size +
       ' tagBuckets='   + idx.tagBuckets.size +
       ' idBuckets='    + idx.idBuckets.size);

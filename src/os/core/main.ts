@@ -390,17 +390,58 @@ function main(): void {
       // crash loop.  Clear all pending coroutines to break the cycle so the OS
       // can continue operating.  The threshold is low (3) so recovery is fast.
       var _consecutiveFaults = 0;
-      var _FAULT_THRESHOLD = 3;
+      var _FAULT_THRESHOLD = 5;
+      var _faultStormCount = 0;     // how many fault storms we've seen this page
+      var _faultCooldownUntil = 0;  // skip ticks until this uptime
       var _idleCount = 0;
       for (;;) {
+        // Cooldown: after a fault storm, skip event loop ticks for 500ms to let
+        // the system stabilize (GC finishes, corrupted pointers settle).
+        if (_faultCooldownUntil > 0) {
+          var _ut = kernel.getUptime();
+          if (_ut < _faultCooldownUntil) {
+            kernel.sleep(10);
+            continue;
+          }
+          _faultCooldownUntil = 0;
+        }
         if (_guardedRun) {
           var _gr = _guardedRun(_tickFn);
           if (_gr === -1) {
             _consecutiveFaults++;
+            // Accelerated fault storm: if heap corruption is confirmed,
+            // skip the remaining consecutive-fault countdown — the same
+            // corrupted function pointer will fault every frame anyway.
+            if (_consecutiveFaults < _FAULT_THRESHOLD) {
+              try {
+                var _fhs = (kernel as any).heapStats();
+                if (_fhs && _fhs.headViolations > 0) {
+                  kernel.serialPut('[main] heap violations detected (' + _fhs.headViolations + ') — accelerating fault storm\n');
+                  _consecutiveFaults = _FAULT_THRESHOLD;
+                }
+              } catch(_) {}
+            }
             if (_consecutiveFaults >= _FAULT_THRESHOLD) {
-              kernel.serialPut('[main] fault storm (' + _consecutiveFaults + ' consecutive faults) — clearing coroutines\n');
+              _faultStormCount++;
+              kernel.serialPut('[main] fault storm #' + _faultStormCount + ' (' + _consecutiveFaults + ' consecutive faults) — clearing coroutines\n');
               threadManager.clearCoroutines();
+              // Reload the browser page to flush any corrupted QJS heap objects
+              // (child buffer overflow can corrupt main runtime QJS objects;
+              //  reloading creates fresh layout lines and DOM objects).
+              // Only reload once — avoid infinite navigate loop.
+              if (_faultStormCount <= 1) {
+                try {
+                  var _reloadUrl = browserApp.currentUrl();
+                  if (_reloadUrl && _reloadUrl !== 'about:blank' && _reloadUrl !== 'about:jsos') {
+                    kernel.serialPut('[main] fault storm — reloading browser: ' + _reloadUrl + '\n');
+                    browserApp.navigate(_reloadUrl);
+                  }
+                } catch (_fre) {}
+              }
               _consecutiveFaults = 0;
+              // Cooldown: pause event loop for 500ms so any pending GC /
+              // free operations that touch corrupted metadata can settle.
+              _faultCooldownUntil = kernel.getUptime() + 500;
             }
           } else {
             _consecutiveFaults = 0;

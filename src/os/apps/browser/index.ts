@@ -36,8 +36,8 @@ import type {
 } from './types.js';
 
 import { parseURL, urlEncode, encodeFormData, decodeBMP, readPNGDimensions, decodeBase64 } from './utils.js';
-import { parseHTML, parseHTMLFromTokens, tokenise } from './html.js';
-import { parseStylesheet, buildSheetIndex, type CSSRule, type RuleIndex, resetCSSVars, setViewport, flushCSSMatchCache, getCSSMatchCacheStats } from './stylesheet.js';
+import { parseHTML, parseHTMLFromTokens, tokenise, fastExtractFromTokens } from './html.js';
+import { parseStylesheet, buildSheetIndex, type CSSRule, type RuleIndex, resetCSSVars, setViewport, flushCSSMatchCache, getCSSMatchCacheStats, flushSheetCache } from './stylesheet.js';
 import { decodePNG }    from './img-png.js';
 import { decodeJPEG }   from './img-jpeg.js';
 import { layoutNodes }  from './layout.js';
@@ -930,6 +930,14 @@ export class BrowserApp implements App {
       return;
     }
 
+    // When content has changed (new layout / scroll), ignore the damage rect and force
+    // a full repaint.  A stale damage rect from a widget-only dirty would otherwise clip
+    // the canvas to a small area, skipping text lines outside that region, and then the
+    // tileContentVer is updated so those lines are never painted at all.
+    if (this._contentVersion !== this._tileContentVer || this._scrollY !== this._tileScrollY) {
+      _dmg = null;
+    }
+
     // Mark the right set of tiles dirty before painting.
     if (_dmg !== null) {
       // Partial update: only tiles overlapping the damage rect need repainting.
@@ -1197,11 +1205,10 @@ export class BrowserApp implements App {
       }
 
       // R23: Fill gaps between lines with matching bgColor (paint container bg into inter-child gaps)
-      v if (!(line.boxDeco && line.boxDeco.bgGradient)) {
-          var _gx  = line.boxDeco ? line.boxDeco.x : 0;
-          var _gw  = line.boxDeco ? line.boxDeco.w : w;
-          renderGradientCSS(canvas, _gx, absY - 1, _gw, line.lineH + 1, line.bgGradient);
-        }
+      if (!(line.boxDeco && line.boxDeco.bgGradient)) {
+        var _gx  = line.boxDeco ? line.boxDeco.x : 0;
+        var _gw  = line.boxDeco ? line.boxDeco.w : w;
+        renderGradientCSS(canvas, _gx, absY - 1, _gw, line.lineH + 1, line.bgGradient);
       }
       // CSS background-image url() tile (item 386)
       if (line.bgImageUrl) {
@@ -2079,10 +2086,14 @@ export class BrowserApp implements App {
   /** Public entry-point: navigate the browser to `url`. */
   navigate(url: string): void { this._navigate(url); }
 
+  /** Return the URL of the currently loaded page. */
+  currentUrl(): string { return this._pageURL; }
+
   private _navigate(url: string): void {
     // Flush all per-page caches (layout, styles, images) before loading new page
     flushAllCaches();
     flushCSSMatchCache();
+    flushSheetCache();
     resetCSSVars();
     this._histIdx++;
     this._history.splice(this._histIdx);
@@ -2622,12 +2633,44 @@ export class BrowserApp implements App {
     // token array.  On Google's ~100KB HTML this saves 2 redundant O(HTML) scans
     // and eliminates all associated string allocation in passes 2 and 3.
     var _htmlTokens = tokenise(html);
+    var _shTok = Date.now();
     pumpCursor();  // keep cursor alive after tokenise (~200-500ms)
-    var r = parseHTMLFromTokens(_htmlTokens);
-    pumpCursor();  // keep cursor alive after pass1 parse (~500-1500ms)
+
+    // ── Fast extract vs full parse decision ────────────────────────────────────
+    // Use ultra-fast metadata extraction (scripts/styles/links only) to skip
+    // building the full DOM tree during pass1.  The initial layout will use a
+    // minimal placeholder; the full CSS-aware render happens during rerender
+    // after scripts and external CSS load.  The fast path is only used when
+    // the page HAS scripts (JS-heavy page where unstyled pass1 nodes are
+    // immediately obsoleted by the script-driven rerender).
+    //
+    // For non-JS pages (no scripts), we still do the full parse because there
+    // won't be any JS-triggered rerender to produce the styled output.
+    var _fastExtract = fastExtractFromTokens(_htmlTokens);
+    var _isJSPage = _fastExtract.scripts.length > 0 && _fastExtract.nodeCount > 20;
+    var r: any;  // ParseResult (or subset for fast path)
+
+    if (_isJSPage) {
+      // JS-heavy page: use fast extract result, create a minimal ParseResult
+      r = {
+        nodes: [],
+        title: _fastExtract.title,
+        forms: [],
+        widgets: [],
+        baseURL: _fastExtract.baseURL,
+        scripts: _fastExtract.scripts,
+        styles: _fastExtract.styles,
+        styleLinks: _fastExtract.styleLinks,
+        favicon: _fastExtract.favicon,
+      };
+    } else {
+      // Non-JS page: full DOM parse
+      r = parseHTMLFromTokens(_htmlTokens);
+    }
+    pumpCursor();  // keep cursor alive after parse
     var _shT1 = Date.now();
-    var _pass1NodeCount = r.nodes.length;
-    os.debug.log('[browser] pass1:', r.nodes.length, 'nodes', r.scripts.length, 'scripts', r.styles.length, 'styles', r.styleLinks.length, 'cssLinks', 'in', (_shT1 - _shT0) + 'ms');
+    var _pass1NodeCount = _isJSPage ? _fastExtract.nodeCount : r.nodes.length;
+    os.debug.log('[browser] pass1:', _pass1NodeCount, 'nodes', r.scripts.length, 'scripts', r.styles.length, 'styles', r.styleLinks.length, 'cssLinks', 'in', (_shT1 - _shT0) + 'ms (tokenise:', (_shTok - _shT0) + 'ms', _isJSPage ? 'fastExtract' : 'parse', (_shT1 - _shTok) + 'ms)');
     // ── Pre-fetch external scripts ASAP — overlaps download with CSS parse + pass2 ──
     // deduplicatedFetch dedup (30s window) ensures loadExternalScript joins in-flight
     // fetch instead of starting a new one.  ~4s head-start on 500KB Google XJS bundle.
@@ -2695,25 +2738,29 @@ export class BrowserApp implements App {
             }
             _cssPending--;
             if (_cssPending === 0 && _newCSSRules.length > 0) {
-              // Re-parse and re-layout with all sheets (inline + cached + newly fetched).
-              // Update `sheets` in-place so the `rerender` closure (used when JS
-              // mutates the DOM) also sees the external CSS — not just inline rules.
+              // Update sheets so the rerender closure sees external CSS.
               sheets = sheets.concat(_newCSSRules);
               // Rebuild cached index since sheets changed (new rules added)
               // Also flush CSS match cache so next rerender is fresh
               flushCSSMatchCache();
               _cachedIndex = buildSheetIndex(sheets);
-              var r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex);  // reuses tokens — no re-tokenize
-              pumpCursor();  // keep cursor alive after CSS re-parse
-              // Fallback: if external CSS hid most content, re-parse ignoring display:none
-              if (r3.nodes.length < 10 && _pass1NodeCount > 20) {
-                r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, true);
+
+              // For JS-heavy pages, skip the full re-parse+layout of the original
+              // HTML — the JS-driven rerender will produce the real DOM with these
+              // CSS rules.  Doing a parseHTMLFromTokens here is wasted work (~2s)
+              // that gets immediately replaced by the rerender.
+              if (!_isJSPage) {
+                var r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, _pass1NodeCount > 20);
+                pumpCursor();
+                if (r3.nodes.length < 10 && _pass1NodeCount > 20 && !(r3.nodes.length > 0)) {
+                  r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, true);
+                  pumpCursor();
+                }
+                _self_css._forms       = r3.forms;
+                _self_css._pageBaseURL = r3.baseURL ? _self_css._resolveHref(r3.baseURL) : '';
+                _self_css._layoutPage(r3.nodes as any, r3.widgets as any, r3.title || fallbackTitle || url, url);
                 pumpCursor();
               }
-              _self_css._forms       = r3.forms;
-              _self_css._pageBaseURL = r3.baseURL ? _self_css._resolveHref(r3.baseURL) : '';
-              _self_css._layoutPage(r3.nodes as any, r3.widgets as any, r3.title || fallbackTitle || url, url);
-              pumpCursor();  // keep cursor alive after CSS re-layout
             }
           });
         })(_uncachedCSSLinks[_uli]!);
@@ -2727,23 +2774,45 @@ export class BrowserApp implements App {
     if (sheets.length > 0) {
       try {
         var _shT2b = Date.now();
-        r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex);  // reuses tokens — no re-tokenize
-        pumpCursor();  // keep cursor alive after pass2 parse (~500-2000ms)
-        os.debug.log('[browser] pass2 parseHTML:', r.nodes.length, 'nodes in', (Date.now() - _shT2b) + 'ms');
+        // Performance optimisation — JS-heavy sites (e.g. Google, React SPAs) use
+        // CSS display:none / visibility:hidden to hide ALL content until JavaScript
+        // runs (FOUC prevention).  Doing a full pass2 WITH display:none filtering on
+        // such pages wastes ~2-3 seconds and always produces 0 visible nodes, forcing
+        // an immediate fallback re-parse.  Instead, skip straight to
+        // ignoreDisplayNone=true when both of the following are true:
+        //   1. The page has scripts  (JS will control visibility at runtime)
+        //   2. Pass1 found substantial content (>20 nodes)
+        // For pages WITHOUT scripts, or pages with very little pass1 content, we
+        // still run display:none filtering so pure-CSS hidden sections stay hidden.
+        var _p2IgnoreNone = r.scripts.length > 0 && _pass1NodeCount > 20;
 
-        // Fallback: if CSS display:none hid nearly everything (JS-dependent page)
-        // and pass1 had substantially more content, re-parse ignoring display:none.
-        // This ensures JS-heavy pages like Google still show readable content.
-        if ((r.nodes.length < 10 || r.nodes.length < _pass1NodeCount * 0.4) && _pass1NodeCount > 20) {
-          os.debug.log('[browser] pass2 too few nodes (' + r.nodes.length + ' vs pass1=' + _pass1NodeCount + ') — re-parsing without display:none');
-          var _shT2c = Date.now();
-          r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, true);  // ignoreDisplayNone=true
-          pumpCursor();
-          os.debug.log('[browser] pass2-fallback:', r.nodes.length, 'nodes', r.widgets.length, 'widgets in', (Date.now() - _shT2c) + 'ms');
+        // BIG PERF WIN: For JS-heavy pages, skip pass2 CSS matching entirely.
+        // Inline scripts will inject their own <style> tags and trigger a
+        // rerender with full CSS.  Pass2's CSS computation (~7s) is immediately
+        // obsoleted.  Use unstyled pass1 nodes for the initial layout — the
+        // visible result is shown for <1s before the rerender replaces it.
+        if (_p2IgnoreNone) {
+          os.debug.log('[browser] JS-page: skipping pass2 CSS (deferred to rerender), rules:', sheets.length);
+          // Don't re-parse — keep pass1's nodes/scripts.
+          // forms/baseURL are already set from pass1.
+        } else {
+          r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, _p2IgnoreNone);
+          pumpCursor();  // keep cursor alive after pass2 parse (~500-2000ms)
+          os.debug.log('[browser] pass2 parseHTML:', r.nodes.length, 'nodes in', (Date.now() - _shT2b) + 'ms');
+
+          // Fallback for non-JS pages: if display:none hid nearly everything,
+          // re-parse without it so something is shown.
+          if ((r.nodes.length < 10 || r.nodes.length < _pass1NodeCount * 0.4) && _pass1NodeCount > 20) {
+            os.debug.log('[browser] pass2 too few nodes (' + r.nodes.length + ' vs pass1=' + _pass1NodeCount + ') — re-parsing without display:none');
+            var _shT2c = Date.now();
+            r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, true);  // ignoreDisplayNone=true
+            pumpCursor();
+            os.debug.log('[browser] pass2-fallback:', r.nodes.length, 'nodes', r.widgets.length, 'widgets in', (Date.now() - _shT2c) + 'ms');
+          }
+
+          this._forms       = r.forms;
+          this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
         }
-
-        this._forms       = r.forms;
-        this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
       } catch (_p2Err) {
         os.debug.log('[browser] pass2 parseHTML THREW:', String(_p2Err).slice(0, 200));
       }
@@ -2843,24 +2912,18 @@ export class BrowserApp implements App {
               }
             }
           }
-          // Pass cached RuleIndex to avoid rebuilding 800+ rules on every DOM mutation
+          // Pass cached RuleIndex to avoid rebuilding 800+ rules on every DOM mutation.
+          // During rerender, use ignoreDisplayNone=true to override CSS-rule-based
+          // display:none (which hides content until JS fully runs), while still
+          // respecting inline-style display:none (set explicitly by JS).
           var _rrT0 = Date.now();
-          var r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex);
+          var r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex, true);
           pumpCursor();  // keep cursor alive after rerender parse
           var [_cacheHits, _cacheTotal, _cacheSize] = getCSSMatchCacheStats();
-          os.debug.log('[browser] rerender CSS in', (Date.now() - _rrT0) + 'ms, rules:', sheets.length, 'idx:', _cachedIndex ? 'cached' : 'none', 'cacheHit:', _cacheHits + '/' + _cacheTotal + ' sz:' + _cacheSize);
-          // Fallback: if CSS hid nearly everything, re-parse ignoring display:none
-          if ((r2.nodes.length < 10 || r2.nodes.length < _pass1NodeCount * 0.4) && _pass1NodeCount > 20) {
-            os.debug.log('[browser] rerender: too few nodes (' + r2.nodes.length + ') — re-parsing without display:none');
-            r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex, true);
-            pumpCursor();
-          }
-          os.debug.log('[browser] rerender: assigning forms nodes=' + r2.nodes.length + ' widgets=' + r2.widgets.length);
+          os.debug.log('[browser] rerender CSS in', (Date.now() - _rrT0) + 'ms, rules:', sheets.length, 'cacheHit:', _cacheHits + '/' + _cacheTotal);
           self2._forms = r2.forms;
-          os.debug.log('[browser] rerender: calling _layoutPage');
           self2._layoutPage(r2.nodes as any, r2.widgets as any, self2._pageTitle, self2._pageURL, true /*isRerender*/);
           pumpCursor();  // keep cursor alive after rerender layout
-          os.debug.log('[browser] rerender: _layoutPage done');
         },
         log: (msg: string) => os.debug.log(msg),
         getWidgetValue: (id: string) => {
@@ -2916,7 +2979,7 @@ export class BrowserApp implements App {
     // ── Compress large vertical gaps (widget-anchor based) ─────────────
     var _gapLines = lr.lines;
     var _gapWidgets = lr.widgets;
-    var _GAP_MAX = 1; // R23: minimum gap between widget anchors (tight but no overlap)
+    var _GAP_MAX = 40; // Allow vertical spacing between widgets (CSS margins/padding)
     if (_gapLines.length > 1) {
       // Collect anchors from visible widgets only (reliable visual indicators)
       var _gAnchors: { y: number; yEnd: number }[] = [];
@@ -2995,9 +3058,7 @@ export class BrowserApp implements App {
     if (hasImages || hasBgImages) this._fetchImages();
 
     // ── Write layout rects back to VElements for getBoundingClientRect() ──────
-    os.debug.log('[browser] _layoutPage: calling _pushLayoutRects isRerender=' + (isRerender ? 'yes' : 'no'));
     if (this._pageJS) this._pushLayoutRects();
-    os.debug.log('[browser] _layoutPage: _pushLayoutRects done');
 
     this._dirty = true;
   }

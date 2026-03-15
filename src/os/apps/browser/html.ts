@@ -286,6 +286,138 @@ function _parseColorCSS(val: string): number | undefined {
   return parseCSSColor(val);
 }
 
+// ── Fast metadata extract (skip DOM construction) ─────────────────────────────
+
+/**
+ * Ultra-fast pass over pre-tokenised HTML that extracts ONLY the metadata
+ * needed to start script execution and CSS loading:
+ *   scripts, styles, styleLinks, title, baseURL, favicon, nodeCount
+ *
+ * Does NOT build RenderNode[], FormState[], WidgetBlueprint[], or any CSS
+ * property computation.  For JS-heavy pages (Google, React SPAs), the first
+ * render is the JS-driven rerender anyway, so pass1 DOM nodes are wasted work.
+ * This function is 5-10x faster than a full parseHTMLFromTokens pass.
+ */
+export interface FastExtractResult {
+  scripts:    ScriptRecord[];
+  styles:     string[];
+  styleLinks: string[];
+  title:      string;
+  baseURL:    string;
+  favicon:    string;
+  nodeCount:  number;     // approximate element count (for _pass1NodeCount)
+}
+
+export function fastExtractFromTokens(tokens: HtmlToken[]): FastExtractResult {
+  var scripts:    ScriptRecord[] = [];
+  var styles:     string[]       = [];
+  var styleLinks: string[]       = [];
+  var title       = '';
+  var baseURL     = '';
+  var favicon     = '';
+  var nodeCount   = 0;
+
+  var inScript = false;
+  var inScriptBuf = '';
+  var inScriptSrc = '';
+  var inScriptType = '';
+  var inStyle  = false;
+  var inStyleBuf = '';
+  var inTitle  = false;
+  var inTitleBuf = '';
+  var noscriptDepth = 0;   // skip everything inside <noscript>
+
+  for (var i = 0; i < tokens.length; i++) {
+    var tok = tokens[i]!;
+    var kind = tok.kind;
+    var tag  = tok.tag;
+
+    // ── noscript / template tracking ─────────────────────────
+    if (tag === 'noscript' || tag === 'template') {
+      if (kind === 'open') { noscriptDepth++; continue; }
+      if (kind === 'close') { if (noscriptDepth > 0) noscriptDepth--; continue; }
+    }
+    if (noscriptDepth > 0) continue;   // inside <noscript>/<template> → skip
+
+    // ── Script collection ─────────────────────────────────────
+    if (inScript) {
+      if (kind === 'close' && tag === 'script') {
+        if (inScriptSrc) {
+          scripts.push({ inline: false, src: inScriptSrc, code: '', type: inScriptType || 'text/javascript' });
+        } else if (inScriptBuf.trim()) {
+          scripts.push({ inline: true, src: '', code: inScriptBuf, type: inScriptType || 'text/javascript' });
+        }
+        inScript = false; inScriptBuf = ''; inScriptSrc = ''; inScriptType = '';
+      } else if (kind === 'text') {
+        inScriptBuf += tok.text;
+      }
+      continue;
+    }
+
+    // ── Style collection ─────────────────────────────────────
+    if (inStyle) {
+      if (kind === 'close' && tag === 'style') {
+        if (inStyleBuf.trim()) styles.push(inStyleBuf);
+        inStyleBuf = ''; inStyle = false;
+      } else if (kind === 'text') {
+        inStyleBuf += tok.text;
+      }
+      continue;
+    }
+
+    // ── Title collection ─────────────────────────────────────
+    if (inTitle) {
+      if (kind === 'close' && tag === 'title') {
+        title = inTitleBuf; inTitle = false; inTitleBuf = '';
+      } else if (kind === 'text') {
+        inTitleBuf += tok.text;
+      }
+      continue;
+    }
+
+    if (kind === 'open') {
+      nodeCount++;
+      if (tag === 'script') {
+        inScript = true;
+        inScriptSrc = tok.attrs.get('src') || '';
+        inScriptType = tok.attrs.get('type') || '';
+      } else if (tag === 'style') {
+        inStyle = true;
+      } else if (tag === 'title') {
+        inTitle = true;
+      } else if (tag === 'link') {
+        var rel = (tok.attrs.get('rel') || '').toLowerCase();
+        var href = tok.attrs.get('href') || '';
+        if (href && rel === 'stylesheet') {
+          styleLinks.push(href);
+        } else if (href && (rel === 'icon' || rel === 'shortcut icon') && !favicon) {
+          favicon = href;
+        }
+      } else if (tag === 'base') {
+        var _bh = tok.attrs.get('href');
+        if (_bh && !baseURL) baseURL = _bh;
+      }
+    } else if (kind === 'self') {
+      nodeCount++;
+      if (tag === 'link') {
+        var rel = (tok.attrs.get('rel') || '').toLowerCase();
+        var href = tok.attrs.get('href') || '';
+        if (href && rel === 'stylesheet') {
+          styleLinks.push(href);
+        } else if (href && (rel === 'icon' || rel === 'shortcut icon') && !favicon) {
+          favicon = href;
+        }
+      } else if (tag === 'base') {
+        var _bh = tok.attrs.get('href');
+        if (_bh && !baseURL) baseURL = _bh;
+      }
+    }
+    // close/text tokens that aren't in script/style/title → skip entirely
+  }
+
+  return { scripts, styles, styleLinks, title, baseURL, favicon, nodeCount };
+}
+
 // ── HTML parser ───────────────────────────────────────────────────────────────
 
 /** Parse pre-tokenised input (skips tokenise() allocation — item 1.2). */
@@ -392,16 +524,10 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
   function pushCSS(p: CSSProps): void {
     cssStack.push({ ...curCSS });
     // Handle hidden visibility specially (tracks skipDepth counter)
-    if (p.hidden && !ignoreDisplayNone) {
+    if (p.hidden) {
       curCSS.hidden = true; skipDepth++;
     }
     else if (p.hidden === false) { if (curCSS.hidden) skipDepth = Math.max(0, skipDepth - 1); curCSS.hidden = false; }
-    // When ignoring display:none, force hidden elements to display:block
-    // so they participate in layout instead of being invisible.
-    if (ignoreDisplayNone && p.hidden) {
-      p.display = 'block';
-      p.hidden = false;
-    }
     // Reset non-inherited CSS properties before merging the new element's CSS.
     // In CSS, position/top/right/bottom/left/z-index/float are NOT inherited —
     // children must not carry forward a parent's position:fixed/absolute.
@@ -587,14 +713,15 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       }
       frame.children.push(child);
     } else if (nodes.length > 0) {
-      // Anonymous content — preserve ALL nodes (including widgets) as children.
+      // Anonymous content — preserve ALL nodes (including widgets and children) as children.
       // Widget nodes have empty spans but contain widget blueprints used by layout.
-      var _hasWidgets = false;
+      // Nodes with children (e.g. nested flex-row) also need tree preservation.
+      var _needTree = false;
       for (var _chk = 0; _chk < nodes.length; _chk++) {
-        if (nodes[_chk].type === 'widget') { _hasWidgets = true; break; }
+        if (nodes[_chk].type === 'widget' || (nodes[_chk].children && nodes[_chk].children!.length > 0)) { _needTree = true; break; }
       }
-      if (_hasWidgets) {
-        // Preserve node tree as children — widgets need their type/widget data
+      if (_needTree) {
+        // Preserve node tree as children — widgets/nested containers need their type/widget/children data
         var anonChild2: RenderNode = { type: 'block', spans: [], children: nodes.slice() };
         frame.children.push(anonChild2);
       } else {
@@ -937,6 +1064,23 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
                  (attrs.has('onclick') ? (attrs.get('id') || attrs.get('data-jsos-el') || '_ocl') : '') ||
                  '';
     var ep = computeElementStyle(tag, id, cls, attrs, curCSS, sheets, inl, _ruleIndex ?? undefined, ancestorStack, _sibIdx, undefined, _sortedClsKey);
+    // ignoreDisplayNone: only ignore display:none that came from CSS rules,
+    // not from inline styles.  Inline display:none is intentional (set by JS
+    // or the author) and should be respected even in ignore mode.
+    if (ignoreDisplayNone && ep.hidden) {
+      // Check if inline style explicitly sets display:none
+      var _inlHasNone = inl ? /display\s*:\s*none/i.test(inl) : false;
+      if (!_inlHasNone) {
+        // display:none came from CSS rules — override it
+        ep.hidden = false;
+        if (!ep.display) ep.display = 'block';
+      }
+      // else: inline style explicitly set display:none — keep it hidden
+    }
+    // HTML hidden attribute: treat as display:none (spec requirement)
+    if (attrs.has('hidden') && !ep.hidden) {
+      ep.hidden = true;
+    }
     // Apply counter-reset / counter-increment from computed style (item 434)
     _applyCounters(ep);
     if (hasPseudo) {
@@ -1858,6 +2002,9 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
                 if (curCSS.justifyContent) _cp.justifyContent = curCSS.justifyContent;
                 if (curCSS.alignItems) _cp.alignItems = curCSS.alignItems;
                 if (curCSS.gap !== undefined) _cp.gap = curCSS.gap;
+                // Start a proper flex child before pushing nested container
+                // so the parent tracks child boundaries correctly
+                startContainerChild(_cp);
                 pushContainer(tok.tag, 'flex', _cp);
                 break;
               }
@@ -1871,6 +2018,8 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
                 if (curCSS.gridAutoRows) _cp.gridAutoRows = curCSS.gridAutoRows;
                 if (curCSS.gridAutoFlow) _cp.gridAutoFlow = curCSS.gridAutoFlow;
                 if (curCSS.justifyItems) _cp.justifyItems = curCSS.justifyItems;
+                // Start a proper flex child before pushing nested container
+                startContainerChild(_cp);
                 pushContainer(tok.tag, 'grid', _cp);
                 break;
               }
@@ -2084,7 +2233,9 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
       // ── Text token ─────────────────────────────────────────────────────────
       var txt = tok.text;
       if (inTitle) { title += txt.replace(/\s+/g, ' ').trim(); continue; }
-      if (inHead || skipDepth > 0) continue;
+      if (inHead || skipDepth > 0) {
+        continue;
+      }
 
       if (inPre) {
         var preLines = txt.split('\n');

@@ -710,13 +710,29 @@ static void jsos_free(JSMallocState *s, void *ptr)
     if (unlikely(hc != JSOS_CANARY_HEAD)) {
         _heap_head_violations++;
         _heap_leaks_prevented++;
-        platform_serial_puts("[HEAP] HEAD violation free ptr=");
-        _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
-        platform_serial_puts(" stored_size=");
-        _heap_puts_hex32((uint32_t)size);
-        platform_serial_puts(" canary=");
-        _heap_puts_hex32(hc);
-        platform_serial_puts(" — LEAK\n");
+        /* Limit serial spam to first 8 unique violations */
+        if (_heap_head_violations <= 8) {
+            platform_serial_puts("[HEAP] HEAD violation free ptr=");
+            _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
+            platform_serial_puts(" stored_size=");
+            _heap_puts_hex32((uint32_t)size);
+            platform_serial_puts(" canary=");
+            _heap_puts_hex32(hc);
+            /* Tag as main-runtime or child so crash source is clear */
+            platform_serial_puts(_cur_proc >= 0 ? " [child]" : " [main]");
+            platform_serial_puts(" — LEAK\n");
+        }
+        /* Nullify payload to prevent QJS from following corrupted pointers out of
+         * this block.  Set first uint32 (ref_count in JSObject/JSString) to a
+         * high sentinel so the GC never tries to free it again, zero the rest. */
+        uint32_t *z = (uint32_t *)ptr;
+        z[0] = 0x7FFFFFFFu;  /* pin ref_count: prevents GC from re-freeing */
+        z[1]=z[2]=z[3]=z[4]=z[5]=z[6]=z[7]=
+        z[8]=z[9]=z[10]=z[11]=z[12]=z[13]=z[14]=z[15]=0;
+        /* Bump main GC threshold: heap corruption means GC would walk
+         * corrupted pointers → page fault cascade.  Disable GC entirely
+         * (threshold = 1GB) to prevent any heap walking after corruption. */
+        if (rt) JS_SetGCThreshold(rt, 1024u * 1024u * 1024u);
         return;  /* intentional leak: don't pass corrupted block to free() */
     }
 
@@ -725,13 +741,22 @@ static void jsos_free(JSMallocState *s, void *ptr)
     if (unlikely(tc != JSOS_CANARY_TAIL)) {
         _heap_tail_violations++;
         _heap_leaks_prevented++;
-        platform_serial_puts("[HEAP] TAIL violation free ptr=");
-        _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
-        platform_serial_puts(" size=");
-        _heap_puts_dec((uint32_t)size);
-        platform_serial_puts(" tail=");
-        _heap_puts_hex32(tc);
-        platform_serial_puts(" — LEAK\n");
+        if (_heap_tail_violations <= 8) {
+            platform_serial_puts("[HEAP] TAIL violation free ptr=");
+            _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
+            platform_serial_puts(" size=");
+            _heap_puts_dec((uint32_t)size);
+            platform_serial_puts(" tail=");
+            _heap_puts_hex32(tc);
+            platform_serial_puts(" — LEAK\n");
+        }
+        /* Null-fill payload: prevent QJS from following stale pointers */
+        uint32_t *z = (uint32_t *)ptr;
+        z[0] = 0x7FFFFFFFu;
+        z[1]=z[2]=z[3]=z[4]=z[5]=z[6]=z[7]=
+        z[8]=z[9]=z[10]=z[11]=z[12]=z[13]=z[14]=z[15]=0;
+        /* Disable GC — heap is corrupted */
+        if (rt) JS_SetGCThreshold(rt, 1024u * 1024u * 1024u);
         return;  /* intentional leak: don't free overflowed block */
     }
 
@@ -769,21 +794,31 @@ static void *jsos_realloc(JSMallocState *s, void *ptr, size_t size)
     uint32_t hc = *((uint32_t *)hdr + 1);
     if (unlikely(hc != JSOS_CANARY_HEAD)) {
         _heap_head_violations++;
-        platform_serial_puts("[HEAP] HEAD violation realloc ptr=");
-        _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
-        platform_serial_puts(" — deny\n");
+        _heap_leaks_prevented++;
+        if (_heap_head_violations <= 8) {
+            platform_serial_puts("[HEAP] HEAD violation realloc ptr=");
+            _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
+            platform_serial_puts(" — deny\n");
+        }
+        /* Disable GC — heap corruption detected */
+        if (rt) JS_SetGCThreshold(rt, 1024u * 1024u * 1024u);
         return NULL;
     }
     uint32_t tc = *(uint32_t *)((char *)ptr + old_size);
     if (unlikely(tc != JSOS_CANARY_TAIL)) {
         _heap_tail_violations++;
-        platform_serial_puts("[HEAP] TAIL violation realloc ptr=");
-        _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
-        platform_serial_puts(" size=");
-        _heap_puts_dec((uint32_t)old_size);
-        platform_serial_puts(" tail=");
-        _heap_puts_hex32(tc);
-        platform_serial_puts(" — deny\n");
+        _heap_leaks_prevented++;
+        if (_heap_tail_violations <= 8) {
+            platform_serial_puts("[HEAP] TAIL violation realloc ptr=");
+            _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
+            platform_serial_puts(" size=");
+            _heap_puts_dec((uint32_t)old_size);
+            platform_serial_puts(" tail=");
+            _heap_puts_hex32(tc);
+            platform_serial_puts(" — deny\n");
+        }
+        /* Disable GC — heap corruption detected */
+        if (rt) JS_SetGCThreshold(rt, 1024u * 1024u * 1024u);
         return NULL;
     }
 
@@ -846,11 +881,13 @@ extern void   __real__free_r(struct _reent *, void *);
 extern void  *__real__realloc_r(struct _reent *, void *, size_t);
 
 /* Fallback bump allocator — used when the main heap is broken */
-#define FALLBACK_HEAP_SIZE   (2u * 1024u * 1024u)  /* 2 MB */
+#define FALLBACK_HEAP_SIZE   (16u * 1024u * 1024u)  /* 16 MB — enough to survive heap corruption and finish rendering */
 static char  _fallback_arena[FALLBACK_HEAP_SIZE]
     __attribute__((aligned(16)));
 static volatile uint32_t _fallback_offset = 0;
 static volatile int      _heap_broken     = 0;
+static volatile int      _free_faults     = 0;   /* count of _free_r / _realloc_r faults; switch to fallback after 50 */
+static volatile int      _total_leaks     = 0;   /* total leaked allocations (for diagnostics) */
 
 static void *_fallback_alloc(size_t size) {
     /* 8-byte align all allocations */
@@ -872,13 +909,20 @@ void *__wrap__malloc_r(struct _reent *r, size_t size)
     memcpy(_saved, _js_fault_buf, sizeof(jmp_buf));
 
     if (setjmp(_js_fault_buf) != 0) {
-        /* _malloc_r faulted — heap is irreparably corrupted */
+        /* _malloc_r faulted — use per-call fallback, keep dlmalloc for future calls.
+         * Only switch to full fallback after 50+ total faults. */
         __asm__ volatile("sti");
         _js_fault_active = _act;
         memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
-        _heap_broken = 1;
+        _free_faults++;
+        _total_leaks++;
         _heap_leaks_prevented++;
-        platform_serial_puts("[HEAP] _malloc_r FAULTED — switching to fallback allocator\n");
+        if (_free_faults >= 50) {
+            _heap_broken = 1;
+            platform_serial_puts("[HEAP] _malloc_r FAULTED x50 — switching to fallback allocator\n");
+        } else if (_free_faults <= 8) {
+            platform_serial_puts("[HEAP] _malloc_r FAULTED — per-call fallback (dlmalloc continues)\n");
+        }
         return _fallback_alloc(size);
     }
 
@@ -906,15 +950,25 @@ void __wrap__free_r(struct _reent *r, void *ptr)
     memcpy(_saved, _js_fault_buf, sizeof(jmp_buf));
 
     if (setjmp(_js_fault_buf) != 0) {
-        /* _free_r faulted — heap is irreparably corrupted */
+        /* _free_r faulted — heap metadata is corrupted around this chunk.
+         * Don't immediately switch to fallback: dlmalloc often works fine
+         * for OTHER chunks.  Only switch after 3 consecutive free faults. */
         __asm__ volatile("sti");
         _js_fault_active = _act;
         memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
-        _heap_broken = 1;
+        _free_faults++;
+        _total_leaks++;
         _heap_leaks_prevented++;
-        platform_serial_puts("[HEAP] _free_r FAULTED ptr=");
-        _heap_puts_hex32((uint32_t)p);
-        platform_serial_puts(" — switching to fallback allocator\n");
+        if (_free_faults >= 50) {
+            _heap_broken = 1;
+            platform_serial_puts("[HEAP] _free_r FAULTED x50 — switching to fallback allocator\n");
+        } else if (_free_faults <= 8) {
+            platform_serial_puts("[HEAP] _free_r FAULTED ptr=");
+            _heap_puts_hex32((uint32_t)p);
+            platform_serial_puts(" — leaked (dlmalloc continues)\n");
+        }
+        /* Bump main GC threshold to prevent GC from walking corrupted heap */
+        if (rt) JS_SetGCThreshold(rt, 1024u * 1024u * 1024u);
         return;
     }
 
@@ -960,13 +1014,21 @@ void *__wrap__realloc_r(struct _reent *r, void *ptr, size_t size)
     memcpy(_saved, _js_fault_buf, sizeof(jmp_buf));
 
     if (setjmp(_js_fault_buf) != 0) {
-        /* _realloc_r faulted — heap is irreparably corrupted */
+        /* _realloc_r faulted — heap metadata is corrupted around this chunk.
+         * Use same tolerance as _free_r — count faults before fallback. */
         __asm__ volatile("sti");
         _js_fault_active = _act;
         memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
-        _heap_broken = 1;
+        _free_faults++;
+        _total_leaks++;
         _heap_leaks_prevented++;
-        platform_serial_puts("[HEAP] _realloc_r FAULTED — switching to fallback allocator\n");
+        if (_free_faults >= 50) {
+            _heap_broken = 1;
+            platform_serial_puts("[HEAP] _realloc_r FAULTED x50 — switching to fallback allocator\n");
+        } else if (_free_faults <= 8) {
+            platform_serial_puts("[HEAP] _realloc_r FAULTED — per-call fallback (dlmalloc continues)\n");
+        }
+        if (rt) JS_SetGCThreshold(rt, 1024u * 1024u * 1024u);
         return _fallback_alloc(size);
     }
 
@@ -2142,6 +2204,8 @@ static JSValue js_proc_eval(JSContext *c, JSValueConst this_val,
     JS_ToInt32(c, &id, argv[0]);
     if (id < 0 || id >= JSPROC_MAX || !_procs[id].used)
         return JS_NewString(c, "Error: invalid process id");
+    /* Tainted children must not execute — heap is corrupted from a prior fault */
+    if (_procs[id].tainted) return JS_NewString(c, "Error: tainted child runtime");
     const char *code = JS_ToCString(c, argv[1]);
     if (!code) return JS_NewString(c, "undefined");
 
@@ -2164,9 +2228,11 @@ static JSValue js_proc_eval(JSContext *c, JSValueConst this_val,
         /* Do NOT FreeCString — `code` was extracted from the coordinator's
          * context but the longjmp may have invalidated the stack frame
          * that held the length metadata.  Leak is acceptable here. */
-        platform_serial_puts("[kernel] procEval fault recovered (child ");
+        /* Quarantine: mark child as tainted so no further execution occurs */
+        _procs[id].tainted = 1;
+        platform_serial_puts("[kernel] procEval fault recovered — tainted child ");
         { char _idb[4]; _idb[0]='0'+(char)id; _idb[1]=0; platform_serial_puts(_idb); }
-        platform_serial_puts(")\n");
+        platform_serial_puts("\n");
         return JS_NewString(c, "Error: CPU fault in child runtime");
     }
 

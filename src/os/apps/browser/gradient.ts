@@ -42,7 +42,8 @@ interface ParsedGradient {
 // ── CSS gradient detector ─────────────────────────────────────────────────────
 
 /** Returns true if `val` is any CSS gradient function. */
-export function isGradient(val: string): boolean {
+export function isGradient(val: string | undefined | null): boolean {
+  if (!val) return false;
   return /^(repeating-)?(linear|radial|conic)-gradient\s*\(/i.test(val.trim());
 }
 
@@ -365,7 +366,7 @@ export function renderGradient(
 export function renderGradientCSS(
   canvas: Canvas,
   x: number, y: number, w: number, h: number,
-  val: string,
+  val: string | undefined | null,
 ): boolean {
   if (!isGradient(val)) return false;
   var g = parseGradient(val);

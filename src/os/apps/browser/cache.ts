@@ -284,6 +284,10 @@ export interface RuleIndex {
   idBuckets:      Map<string, CSSRule[]>;
   universalRules: CSSRule[];
   contentRules:   CSSRule[];   // rules with props.content set (for ::before/::after)
+  /** All class names referenced in ANY CSS selector — used to filter
+   *  cache keys: classes not in this set are irrelevant to CSS matching
+   *  and can be stripped from cache keys for better hit rate. */
+  cssClassSet:    Set<string>;
 }
 
 /** Build a RuleIndex from a list of CSSRule objects. */
@@ -320,8 +324,23 @@ export function buildRuleIndex(rules: CSSRule[]): RuleIndex {
         if (pc.tag && pc.tag !== '*') {
           bucket(tagBuckets, pc.tag, rule); placed = true; continue;
         }
-        // Universal / pseudo / attr only — falls through to universalRules
-        if (!placed) { universalRules.push(rule); placed = true; }
+        // Universal / pseudo / attr only — try to sub-bucket by pseudo-class
+        // before falling through to universalRules (checked against every element).
+        if (!placed) {
+          var _subBucketed = false;
+          for (var _pi = 0; _pi < pc.pseudos.length && !_subBucketed; _pi++) {
+            var _pn = pc.pseudos[_pi]!.name;
+            if (_pn === 'root') {
+              bucket(tagBuckets, 'html', rule); _subBucketed = true;
+            } else if (_pn === 'link' || _pn === 'any-link') {
+              bucket(tagBuckets, 'a', rule); _subBucketed = true;
+            } else if (_pn === 'visited') {
+              // :visited is always a conservative miss — discard rule entirely
+              _subBucketed = true;
+            }
+          }
+          if (_subBucketed) { placed = true; } else { universalRules.push(rule); placed = true; }
+        }
       }
       if (!placed) universalRules.push(rule);
       continue;  // handled via parsedSels; skip the string-regex path below
@@ -359,7 +378,33 @@ export function buildRuleIndex(rules: CSSRule[]): RuleIndex {
     if (rules[ci]!.props.content) contentRules.push(rules[ci]!);
   }
 
-  return { tagBuckets, classBuckets, idBuckets, universalRules, contentRules };
+  // Collect ALL class names referenced in ANY CSS selector — used for cache key normalization.
+  // Classes not in this set are irrelevant to styling and can be stripped from cache keys.
+  var cssClassSet = new Set<string>();
+  for (var _cci = 0; _cci < rules.length; _cci++) {
+    var _ccr = rules[_cci]!;
+    if (_ccr.parsedSels) {
+      for (var _csi = 0; _csi < _ccr.parsedSels.length; _csi++) {
+        var _cps = _ccr.parsedSels[_csi]!;
+        for (var _cpi = 0; _cpi < _cps.compounds.length; _cpi++) {
+          var _cpc = _cps.compounds[_cpi]!;
+          for (var _cli = 0; _cli < _cpc.classes.length; _cli++) cssClassSet.add(_cpc.classes[_cli]!);
+          // Also collect classes from :not/:is/:where argument selectors
+          for (var _cxi = 0; _cxi < _cpc.pseudos.length; _cxi++) {
+            var _cpx = _cpc.pseudos[_cxi]!;
+            if (_cpx.argParsed) {
+              for (var _cai = 0; _cai < _cpx.argParsed.length; _cai++) {
+                var _cap = _cpx.argParsed[_cai]!;
+                for (var _cak = 0; _cak < _cap.classes.length; _cak++) cssClassSet.add(_cap.classes[_cak]!);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return { tagBuckets, classBuckets, idBuckets, universalRules, contentRules, cssClassSet };
 }
 
 /**

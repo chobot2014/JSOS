@@ -302,7 +302,7 @@ function _layoutNodesImpl(
 
   // Track consecutive blank space to cap excessive gaps
   var _consecBlank = 0;
-  var _maxConsecBlank = 4; // R23: Cap blank gaps at 4px for balanced layout
+  var _maxConsecBlank = 60; // Allow CSS margins/padding to create reasonable spacing
 
   function blank(h: number): void {
     if (_consecBlank >= _maxConsecBlank) return; // Already at blank cap
@@ -676,6 +676,12 @@ function _layoutNodesImpl(
         // R21: min-height enforcement for flex container
         if (nd.minHeight && nd.minHeight > 0 && (y - _fxYBeforeBox) < nd.minHeight) {
           var _fxMinPad = nd.minHeight - (y - _fxYBeforeBox);
+          // Cap empty flex containers (no visible children) to prevent huge invisible spacers
+          var _fxHasVisContent = false;
+          for (var _fxci = _fxLinesStart; _fxci < lines.length; _fxci++) {
+            if (lines[_fxci].nodes.length > 0) { _fxHasVisContent = true; break; }
+          }
+          if (!_fxHasVisContent && !nd.bgColor && !nd.bgGradient && _fxMinPad > 40) _fxMinPad = 40;
           lines.push({ y, nodes: [], lineH: _fxMinPad }); y += _fxMinPad;
         }
         // R21: boxDeco — render background, border, shadow, opacity on flex containers
@@ -958,6 +964,12 @@ function _layoutNodesImpl(
       // R21: min-height enforcement for flex container
       if (nd.minHeight && nd.minHeight > 0 && (y - _fxYBeforeBox) < nd.minHeight) {
         var _fxMinPad3 = nd.minHeight - (y - _fxYBeforeBox);
+        // Cap empty flex containers to prevent huge invisible spacers
+        var _fxHasVisContent3 = false;
+        for (var _fxci3 = _fxLinesStart; _fxci3 < lines.length; _fxci3++) {
+          if (lines[_fxci3].nodes.length > 0) { _fxHasVisContent3 = true; break; }
+        }
+        if (!_fxHasVisContent3 && !nd.bgColor && !nd.bgGradient && _fxMinPad3 > 40) _fxMinPad3 = 40;
         lines.push({ y, nodes: [], lineH: _fxMinPad3 }); y += _fxMinPad3;
       }
       // R21: boxDeco — render background, border, shadow, opacity on flex containers
@@ -1078,9 +1090,9 @@ function _layoutNodesImpl(
         var _bbPad = (nd.paddingLeft || 0) + (nd.paddingRight || 0) + (nd.borderWidth || 0) * 2;
         _effectBoxW = Math.max(0, _effectBoxW - _bbPad);
       }
-      var blkLeft   = xLeft + (nd.paddingLeft ? Math.round(nd.paddingLeft / CHAR_W) * CHAR_W : 0);
-      var blkRight  = nd.paddingRight ? Math.round(nd.paddingRight / CHAR_W) * CHAR_W : 0;
-      var blkMaxX   = (_effectBoxW ? Math.min(maxX, xLeft + _effectBoxW) : maxX) - blkRight;
+      var blkLeft   = xLeft + (nd.paddingLeft || 0) + (nd.marginLeft || 0);
+      var blkRight  = (nd.paddingRight || 0) + (nd.marginRight || 0);
+      var blkMaxX   = (_effectBoxW ? Math.min(maxX, xLeft + (nd.marginLeft || 0) + _effectBoxW) : maxX) - blkRight;
       // margin: auto centering — shift block inward when explicit width set (item 2.2)
       // R19: use available width (maxX - xLeft) instead of contentW to avoid CONTENT_PAD offset error
       if (nd.centerBlock && _effectBoxW > 0) {
@@ -1188,29 +1200,37 @@ function _layoutNodesImpl(
           }
           y = _mcY0 + _mcMaxH;
         } else {
-          commit(flowSpans(ndSpans, blkLeft, blkMaxX, lh, CLR_BODY, _combinedOpts));
+          // Block with children but no text spans — recursively lay out children
+          if (ndSpans.length === 0 && nd.children && nd.children.length > 0) {
+            var _blkCW = blkMaxX - blkLeft + CONTENT_PAD * 2;
+            var _childResult = _layoutNodesImpl(nd.children, [], _blkCW);
+            // Stamp child lines into parent coordinate space
+            var _blkFirstY = _childResult.lines.length > 0 ? _childResult.lines[0].y : CONTENT_PAD;
+            for (var _cri = 0; _cri < _childResult.lines.length; _cri++) {
+              var _crl = _childResult.lines[_cri];
+              var _crRelY = _crl.y - _blkFirstY;
+              var _crShifted = _crl.nodes.map(function(n) { return { ...n, x: n.x + blkLeft - CONTENT_PAD }; });
+              lines.push({ y: y + _crRelY, nodes: _crShifted, lineH: _crl.lineH, bgColor: _crl.bgColor, bgGradient: _crl.bgGradient, preBg: _crl.preBg, boxDeco: _crl.boxDeco });
+            }
+            var _blkLastLine = _childResult.lines.length > 0 ? _childResult.lines[_childResult.lines.length - 1] : null;
+            var _blkChildH = _blkLastLine ? (_blkLastLine.y + (_blkLastLine.lineH || LINE_H) - _blkFirstY) : 0;
+            y += _blkChildH;
+            // Stamp child widgets
+            for (var _cwi = 0; _cwi < _childResult.widgets.length; _cwi++) {
+              var _cww = _childResult.widgets[_cwi];
+              _cww.px += blkLeft - CONTENT_PAD;
+              _cww.py += y - _blkChildH - _blkFirstY;
+              widgets.push(_cww);
+            }
+          } else {
+            commit(flowSpans(ndSpans, blkLeft, blkMaxX, lh, CLR_BODY, _combinedOpts));
+          }
         }
         // Apply padding-bottom after block content
         if (nd.paddingBottom && nd.paddingBottom > 0) blank(nd.paddingBottom);
         // text-align: shift committed line nodes for center / right / justify
         var _ta = nd.textAlign;
-        // Auto-center narrow root-level lines (same heuristic as widget centering)
-        if (!_ta && blkLeft < 20 && lines.length > _blockLineStart) {
-          var _acLineW = blkMaxX - blkLeft;
-          for (var _aci = _blockLineStart; _aci < lines.length; _aci++) {
-            var _acLine = lines[_aci];
-            if (!_acLine.nodes.length) continue;
-            var _acLast = _acLine.nodes[_acLine.nodes.length - 1]!;
-            var _acUsed = (_acLast.x - blkLeft) + _acLast.text.length * CHAR_W * (_acLast.fontScale || 1);
-            if (_acUsed < _acLineW * 0.3) {
-              var _acFree = Math.max(0, _acLineW - _acUsed);
-              var _acShift = Math.floor(_acFree / 2);
-              if (_acShift > 0) {
-                lines[_aci] = { ..._acLine, nodes: _acLine.nodes.map(function(n) { return { ...n, x: n.x + _acShift }; }) };
-              }
-            }
-          }
-        }
+        // Removed auto-centering heuristic — CSS text-align handles alignment
         if (_ta && _ta !== 'left' && lines.length > _blockLineStart) {
           var _lineW = blkMaxX - blkLeft;
           for (var _tai = _blockLineStart; _tai < lines.length; _tai++) {
@@ -1252,12 +1272,19 @@ function _layoutNodesImpl(
         if (_activeLeftFloatLines  === 0) _activeLeftFloatIndent  = 0;
         if (_activeRightFloatLines === 0) _activeRightFloatIndent = 0;
         // Enforce min-height: pad with blank space if content is shorter
+        // Cap empty blocks (no text produced) — prevent huge invisible spacers (e.g., Google's centering divs)
+        var _blockHasContent = lines.length > _blockLineStart;
+        var _blockCapH = 40; // max height for empty blocks with no visual content
         if (nd.minHeight && nd.minHeight > 0 && (y - yBeforeBlock) < nd.minHeight) {
-          blank(nd.minHeight - (y - yBeforeBlock));
+          var _effMinH = nd.minHeight;
+          if (!_blockHasContent && !nd.bgColor && !nd.bgGradient && !nd.bgImage && _effMinH > _blockCapH) _effMinH = _blockCapH;
+          blank(_effMinH - (y - yBeforeBlock));
         }
         // Enforce explicit CSS height: pad with blank space if content is shorter (R22)
         if (nd.height && nd.height > 0 && (y - yBeforeBlock) < nd.height) {
-          blank(nd.height - (y - yBeforeBlock));
+          var _effH = nd.height;
+          if (!_blockHasContent && !nd.bgColor && !nd.bgGradient && !nd.bgImage && _effH > _blockCapH) _effH = _blockCapH;
+          blank(_effH - (y - yBeforeBlock));
         }
         // Enforce aspect-ratio: derive height from block width when height is not explicit
         if (nd.aspectRatio && !nd.height) {
@@ -1305,8 +1332,10 @@ function _layoutNodesImpl(
         var _needsTracking = nd.elId && lines.length > _blockLineStart && !lines[_blockLineStart].boxDeco;
         if ((_hasBoxDeco || _needsTracking) && lines.length > _blockLineStart) {
           var _blkH = y - yBeforeBlock;
-          var _blkW = (blkMaxX - blkLeft) || (maxX - xLeft);
-          var _deco: BoxDecoration = { x: blkLeft, w: _blkW, h: _blkH };
+          // Box decoration should cover the full box including padding (not just content area)
+          var _decoX = xLeft + (nd.marginLeft || 0);
+          var _decoW = (_effectBoxW > 0) ? _effectBoxW : (maxX - _decoX - (nd.marginRight || 0));
+          var _deco: BoxDecoration = { x: _decoX, w: _decoW, h: _blkH };
           if (nd.borderRadius !== undefined) _deco.borderRadius = nd.borderRadius;
           if (nd.borderWidth)  _deco.borderWidth  = nd.borderWidth;
           if (nd.borderColor !== undefined) _deco.borderColor = nd.borderColor;
@@ -1375,6 +1404,13 @@ function _layoutNodesImpl(
     if (nd.type === 'widget' && nd.widget) {
       var bp = nd.widget;
       if (bp.kind === 'hidden') continue;
+      // Skip file input widgets — rarely visible on initial page load (hidden upload panels)
+      if (bp.kind === 'file') continue;
+      // Skip upload-panel submit buttons — these are from hidden interactive panels
+      if ((bp.kind === 'submit' || bp.kind === 'button') && bp.value) {
+        var _btnTxt = bp.value.toLowerCase();
+        if (_btnTxt.indexOf('upload') >= 0 || _btnTxt.indexOf('remove file') >= 0) continue;
+      }
 
       var ww = 0; var wh = 0;
       var wOpts = bp.options || [];
@@ -1441,7 +1477,13 @@ function _layoutNodesImpl(
       // CSS width/height override (if specified via stylesheet/inline CSS)
       // R22: Resolve percentage width against available container
       if (!bp.cssWidth && bp.cssWidthPct && bp.cssWidthPct > 0) {
-        bp.cssWidth = Math.floor((maxX - xLeft) * bp.cssWidthPct / 100);
+        var _pctW = Math.floor((maxX - xLeft) * bp.cssWidthPct / 100);
+        // For inline SVG icons: don't expand percentage width beyond natural SVG dimensions
+        // (prevents tiny 24×24 icons from being blown up to 976×976)
+        if (bp.imgSrc === 'svg:inline' && bp.imgNatW && bp.imgNatW > 0 && _pctW > bp.imgNatW * 2) {
+          _pctW = bp.imgNatW;
+        }
+        bp.cssWidth = _pctW;
       }
       var _cssWSet = !!(bp.cssWidth && bp.cssWidth > 0);
       var _cssHSet = !!(bp.cssHeight && bp.cssHeight > 0);
@@ -1483,6 +1525,15 @@ function _layoutNodesImpl(
       }
       // Cap extremely tall narrow images (decorative icons) to reduce layout waste (R22: relaxed threshold)
       if (bp.kind === 'img' && wh > 200 && ww < 20 && !_cssHSet) wh = 200;
+
+      // Clamp minimum widget dimensions — prevent negative or zero sizes
+      if (ww < 1) ww = 1;
+      if (wh < 1) wh = 1;
+
+      // Skip effectively invisible widgets (< 2px in both dimensions)
+      if (ww < 2 && wh < 2) continue;
+      // Skip submit/button widgets that are too small to display meaningfully
+      if ((bp.kind === 'submit' || bp.kind === 'button') && ww < 8) continue;
 
       if (bp.kind !== 'checkbox' && bp.kind !== 'radio') {
         if (y > CONTENT_PAD) { blank(4); }
