@@ -1030,7 +1030,17 @@ export class BrowserApp implements App {
               for (var _bk = 3; _bk >= 1; _bk--) {
                 var _bSpr  = _sl.blur * _bk / 3;
                 var _bAlph = Math.round(_slA * (1 - _bk / 4)) >>> 0;
-                var _bClr  = (_sl.color & 0x00FFFFFF) | (_bAlph << 24);
+                if (_bAlph < 1) continue; // skip invisible layers
+                // Pre-blend semi-transparent shadow color with white background
+                // since canvas.fillRect does not do alpha blending
+                var _bR = (_sl.color >> 16) & 0xFF;
+                var _bG = (_sl.color >> 8)  & 0xFF;
+                var _bB = _sl.color & 0xFF;
+                var _bInv = 255 - _bAlph;
+                var _bClr = 0xFF000000 |
+                  (Math.round((_bR * _bAlph + 255 * _bInv) / 255) << 16) |
+                  (Math.round((_bG * _bAlph + 255 * _bInv) / 255) << 8) |
+                  Math.round((_bB * _bAlph + 255 * _bInv) / 255);
                 canvas.fillRect(
                   Math.round(decoX + _sl.offsetX - _spd - _bSpr),
                   Math.round(decoY + _sl.offsetY - _spd - _bSpr),
@@ -1039,14 +1049,26 @@ export class BrowserApp implements App {
                   _bClr,
                 );
               }
-            } else {
+            } else if (_slA > 0) {
               // No blur — solid shadow rect (spread expands size, offsets position)
+              // Pre-blend with white if semi-transparent
+              var _ssClr = _sl.color;
+              if (_slA < 255) {
+                var _ssR = (_sl.color >> 16) & 0xFF;
+                var _ssG = (_sl.color >> 8)  & 0xFF;
+                var _ssB = _sl.color & 0xFF;
+                var _ssInv = 255 - _slA;
+                _ssClr = 0xFF000000 |
+                  (Math.round((_ssR * _slA + 255 * _ssInv) / 255) << 16) |
+                  (Math.round((_ssG * _slA + 255 * _ssInv) / 255) << 8) |
+                  Math.round((_ssB * _slA + 255 * _ssInv) / 255);
+              }
               canvas.fillRect(
                 Math.round(decoX + _sl.offsetX - _spd),
                 Math.round(decoY + _sl.offsetY - _spd),
                 Math.round(decoW + _spd * 2),
                 Math.round(decoH + _spd * 2),
-                _sl.color,
+                _ssClr,
               );
             }
           }
@@ -1057,8 +1079,14 @@ export class BrowserApp implements App {
           if (deco.bgColor !== undefined) {
             var _dbgc = deco.bgColor;
             if (_decoOpacity < 1) {
-              var _da = ((_dbgc >>> 24) & 0xFF) * _decoOpacity;
-              _dbgc = (_dbgc & 0x00FFFFFF) | (Math.round(_da) << 24);
+              // Pre-blend with white instead of setting raw alpha (fillRoundRect doesn't alpha-blend)
+              var _da = Math.round(((_dbgc >>> 24) & 0xFF) * _decoOpacity);
+              var _dR = (_dbgc >> 16) & 0xFF, _dG = (_dbgc >> 8) & 0xFF, _dB = _dbgc & 0xFF;
+              var _dInv = 255 - _da;
+              _dbgc = 0xFF000000 |
+                (Math.round((_dR * _da + 255 * _dInv) / 255) << 16) |
+                (Math.round((_dG * _da + 255 * _dInv) / 255) << 8) |
+                Math.round((_dB * _da + 255 * _dInv) / 255);
             }
             canvas.fillRoundRect(decoX, decoY, decoW, decoH, decoR, _dbgc);
           }
@@ -1072,7 +1100,16 @@ export class BrowserApp implements App {
         } else if (deco.bgColor !== undefined) {
           // R21: Flat box bgColor — render at exact box dimensions instead of relying on line.bgColor
           var _dbgcFlat = deco.bgColor;
-          if (_decoOpacity < 1) { var _dfA = ((_dbgcFlat >>> 24) & 0xFF) * _decoOpacity; _dbgcFlat = (_dbgcFlat & 0x00FFFFFF) | (Math.round(_dfA) << 24); }
+          if (_decoOpacity < 1) {
+            // Pre-blend with white instead of setting raw alpha (fillRect doesn't alpha-blend)
+            var _dfA = Math.round(((_dbgcFlat >>> 24) & 0xFF) * _decoOpacity);
+            var _dfR = (_dbgcFlat >> 16) & 0xFF, _dfG = (_dbgcFlat >> 8) & 0xFF, _dfB = _dbgcFlat & 0xFF;
+            var _dfInv = 255 - _dfA;
+            _dbgcFlat = 0xFF000000 |
+              (Math.round((_dfR * _dfA + 255 * _dfInv) / 255) << 16) |
+              (Math.round((_dfG * _dfA + 255 * _dfInv) / 255) << 8) |
+              Math.round((_dfB * _dfA + 255 * _dfInv) / 255);
+          }
           canvas.fillRect(decoX, decoY, decoW, decoH, _dbgcFlat);
         }
 
@@ -1085,13 +1122,23 @@ export class BrowserApp implements App {
             var _ilA = (_il.color >>> 24) & 0xFF;
             if (_ilA === 0) continue;
             var _iSpd = _il.spread;
+            // Pre-blend semi-transparent inset shadow color with white
+            var _ilR = (_il.color >> 16) & 0xFF;
+            var _ilG = (_il.color >> 8)  & 0xFF;
+            var _ilB = _il.color & 0xFF;
             // Inset shadow: drawn inward from box edges. Spread shrinks the lit area.
             // Approximate with 3 progressively-smaller translucent rects from each edge.
             if (_il.blur > 0) {
               for (var _ibk = 3; _ibk >= 1; _ibk--) {
                 var _ibSpr  = _il.blur * _ibk / 3;
                 var _ibAlph = Math.round(_ilA * (1 - _ibk / 4)) >>> 0;
-                var _ibClr  = (_il.color & 0x00FFFFFF) | (_ibAlph << 24);
+                if (_ibAlph < 1) continue;
+                // Pre-blend with white
+                var _ibInv = 255 - _ibAlph;
+                var _ibClr = 0xFF000000 |
+                  (Math.round((_ilR * _ibAlph + 255 * _ibInv) / 255) << 16) |
+                  (Math.round((_ilG * _ibAlph + 255 * _ibInv) / 255) << 8) |
+                  Math.round((_ilB * _ibAlph + 255 * _ibInv) / 255);
                 var _ibW = Math.round(_ibSpr + _iSpd);
                 if (_ibW <= 0) continue;
                 // Top edge
@@ -1104,12 +1151,20 @@ export class BrowserApp implements App {
                 canvas.fillRect(decoX + decoW - _ibW + Math.round(_il.offsetX), decoY, _ibW, decoH, _ibClr);
               }
             } else {
-              // No blur — solid inset band
+              // No blur — solid inset band, pre-blend if semi-transparent
+              var _isClr = _il.color;
+              if (_ilA < 255) {
+                var _isInv = 255 - _ilA;
+                _isClr = 0xFF000000 |
+                  (Math.round((_ilR * _ilA + 255 * _isInv) / 255) << 16) |
+                  (Math.round((_ilG * _ilA + 255 * _isInv) / 255) << 8) |
+                  Math.round((_ilB * _ilA + 255 * _isInv) / 255);
+              }
               var _isW = Math.max(1, Math.round(_iSpd));
-              canvas.fillRect(decoX, decoY + Math.round(_il.offsetY), decoW, _isW, _il.color);
-              canvas.fillRect(decoX, decoY + decoH - _isW + Math.round(_il.offsetY), decoW, _isW, _il.color);
-              canvas.fillRect(decoX + Math.round(_il.offsetX), decoY, _isW, decoH, _il.color);
-              canvas.fillRect(decoX + decoW - _isW + Math.round(_il.offsetX), decoY, _isW, decoH, _il.color);
+              canvas.fillRect(decoX, decoY + Math.round(_il.offsetY), decoW, _isW, _isClr);
+              canvas.fillRect(decoX, decoY + decoH - _isW + Math.round(_il.offsetY), decoW, _isW, _isClr);
+              canvas.fillRect(decoX + Math.round(_il.offsetX), decoY, _isW, decoH, _isClr);
+              canvas.fillRect(decoX + decoW - _isW + Math.round(_il.offsetX), decoY, _isW, decoH, _isClr);
             }
           }
         }
@@ -1119,10 +1174,16 @@ export class BrowserApp implements App {
         if (!_bsNone && deco.borderWidth && deco.borderWidth > 0 && deco.borderColor !== undefined) {
           var _brd = deco.borderWidth;
           var _brdClr = deco.borderColor;
-          // Apply opacity to border color
+
+          // Apply opacity to border color — pre-blend with white
           if (_decoOpacity < 1) {
-            var _ba2 = ((_brdClr >>> 24) & 0xFF) * _decoOpacity;
-            _brdClr = (_brdClr & 0x00FFFFFF) | (Math.round(_ba2) << 24);
+            var _ba2 = Math.round(((_brdClr >>> 24) & 0xFF) * _decoOpacity);
+            var _br2 = (_brdClr >> 16) & 0xFF, _bg2 = (_brdClr >> 8) & 0xFF, _bb2 = _brdClr & 0xFF;
+            var _bi2 = 255 - _ba2;
+            _brdClr = 0xFF000000 |
+              (Math.round((_br2 * _ba2 + 255 * _bi2) / 255) << 16) |
+              (Math.round((_bg2 * _ba2 + 255 * _bi2) / 255) << 8) |
+              Math.round((_bb2 * _ba2 + 255 * _bi2) / 255);
           }
           canvas.drawRoundRect(decoX, decoY, decoW, decoH, decoR, _brdClr);
           for (var _bi = 1; _bi < _brd; _bi++) {
@@ -1138,34 +1199,44 @@ export class BrowserApp implements App {
         var _hasSideBorder = !_bsNone && (deco.borderTopWidth || deco.borderRightWidth || deco.borderBottomWidth || deco.borderLeftWidth);
         if (_hasSideBorder) {
           var _fallbackClr = deco.borderColor !== undefined ? deco.borderColor : 0xFF000000;
-          // Apply opacity to fallback border color
+          // Pre-blend with white helper for opacity
+          var _preBlend = function(_c: number, _a: number): number {
+            var _pr = (_c >> 16) & 0xFF, _pg = (_c >> 8) & 0xFF, _pb = _c & 0xFF;
+            var _pi = 255 - _a;
+            return 0xFF000000 |
+              (Math.round((_pr * _a + 255 * _pi) / 255) << 16) |
+              (Math.round((_pg * _a + 255 * _pi) / 255) << 8) |
+              Math.round((_pb * _a + 255 * _pi) / 255);
+          };
+          // Apply opacity to fallback border color — pre-blend with white
           if (_decoOpacity < 1) {
-            var _fba = ((_fallbackClr >>> 24) & 0xFF) * _decoOpacity;
-            _fallbackClr = (_fallbackClr & 0x00FFFFFF) | (Math.round(_fba) << 24);
+            var _fba = Math.round(((_fallbackClr >>> 24) & 0xFF) * _decoOpacity);
+            _fallbackClr = _preBlend(_fallbackClr, _fba);
           }
           // Top border
           if (deco.borderTopWidth && deco.borderTopWidth > 0) {
             var _btClr = deco.borderTopColor !== undefined ? deco.borderTopColor : _fallbackClr;
-            if (_decoOpacity < 1 && deco.borderTopColor !== undefined) { var _bta = ((_btClr >>> 24) & 0xFF) * _decoOpacity; _btClr = (_btClr & 0x00FFFFFF) | (Math.round(_bta) << 24); }
-            canvas.fillRect(decoX, decoY, decoW, deco.borderTopWidth, _btClr);
+
+              if (_decoOpacity < 1 && deco.borderTopColor !== undefined) { _btClr = _preBlend(_btClr, Math.round(((_btClr >>> 24) & 0xFF) * _decoOpacity)); }
+              canvas.fillRect(decoX, decoY, decoW, deco.borderTopWidth, _btClr);
           }
           // Bottom border
           if (deco.borderBottomWidth && deco.borderBottomWidth > 0) {
             var _bbClr = deco.borderBottomColor !== undefined ? deco.borderBottomColor : _fallbackClr;
-            if (_decoOpacity < 1 && deco.borderBottomColor !== undefined) { var _bba = ((_bbClr >>> 24) & 0xFF) * _decoOpacity; _bbClr = (_bbClr & 0x00FFFFFF) | (Math.round(_bba) << 24); }
-            canvas.fillRect(decoX, decoY + decoH - deco.borderBottomWidth, decoW, deco.borderBottomWidth, _bbClr);
+              if (_decoOpacity < 1 && deco.borderBottomColor !== undefined) { _bbClr = _preBlend(_bbClr, Math.round(((_bbClr >>> 24) & 0xFF) * _decoOpacity)); }
+              canvas.fillRect(decoX, decoY + decoH - deco.borderBottomWidth, decoW, deco.borderBottomWidth, _bbClr);
           }
           // Left border
           if (deco.borderLeftWidth && deco.borderLeftWidth > 0) {
             var _blClr = deco.borderLeftColor !== undefined ? deco.borderLeftColor : _fallbackClr;
-            if (_decoOpacity < 1 && deco.borderLeftColor !== undefined) { var _bla = ((_blClr >>> 24) & 0xFF) * _decoOpacity; _blClr = (_blClr & 0x00FFFFFF) | (Math.round(_bla) << 24); }
-            canvas.fillRect(decoX, decoY, deco.borderLeftWidth, decoH, _blClr);
+              if (_decoOpacity < 1 && deco.borderLeftColor !== undefined) { _blClr = _preBlend(_blClr, Math.round(((_blClr >>> 24) & 0xFF) * _decoOpacity)); }
+              canvas.fillRect(decoX, decoY, deco.borderLeftWidth, decoH, _blClr);
           }
           // Right border
           if (deco.borderRightWidth && deco.borderRightWidth > 0) {
             var _brClr = deco.borderRightColor !== undefined ? deco.borderRightColor : _fallbackClr;
-            if (_decoOpacity < 1 && deco.borderRightColor !== undefined) { var _bra = ((_brClr >>> 24) & 0xFF) * _decoOpacity; _brClr = (_brClr & 0x00FFFFFF) | (Math.round(_bra) << 24); }
-            canvas.fillRect(decoX + decoW - deco.borderRightWidth, decoY, deco.borderRightWidth, decoH, _brClr);
+              if (_decoOpacity < 1 && deco.borderRightColor !== undefined) { _brClr = _preBlend(_brClr, Math.round(((_brClr >>> 24) & 0xFF) * _decoOpacity)); }
+              canvas.fillRect(decoX + decoW - deco.borderRightWidth, decoY, deco.borderRightWidth, decoH, _brClr);
           }
         }
         // overflow:hidden: push canvas clip rect so children are clipped to this box (item 3.10)
@@ -1199,7 +1270,15 @@ export class BrowserApp implements App {
         // Skip full-width fill when boxDeco already painted a rounded background
         if (!(line.boxDeco && (line.boxDeco.borderRadius || 0) > 0)) {
           var _lbgc = line.bgColor;
-          if (_decoOpacity < 1) { var _la = ((_lbgc >>> 24) & 0xFF) * _decoOpacity; _lbgc = (_lbgc & 0x00FFFFFF) | (Math.round(_la) << 24); }
+          var _lbR = (_lbgc >> 16) & 0xFF, _lbG = (_lbgc >> 8) & 0xFF, _lbB = _lbgc & 0xFF;
+          if (_decoOpacity < 1) {
+            var _la = Math.round(((_lbgc >>> 24) & 0xFF) * _decoOpacity);
+            var _laInv = 255 - _la;
+            _lbgc = 0xFF000000 |
+              (Math.round((_lbR * _la + 255 * _laInv) / 255) << 16) |
+              (Math.round((_lbG * _la + 255 * _laInv) / 255) << 8) |
+              Math.round((_lbB * _la + 255 * _laInv) / 255);
+          }
           canvas.fillRect(0, absY - 1, w, line.lineH + 1, _lbgc);
         }
       }
@@ -1387,7 +1466,7 @@ export class BrowserApp implements App {
         if (_fxDeco.bgGradient) {
           renderGradientCSS(canvas, _fxDecoX, _fxDecoY, _fxDecoW, _fxDecoH, _fxDeco.bgGradient);
         }
-        // Box-shadow
+        // Box-shadow — pre-blend semi-transparent colors with white
         if (_fxDeco.boxShadow) {
           var _fxShLayers = _parseBoxShadow(_fxDeco.boxShadow);
           for (var _fxSli = 0; _fxSli < _fxShLayers.length; _fxSli++) {
@@ -1395,12 +1474,46 @@ export class BrowserApp implements App {
             if (_fxSl.inset) continue;
             var _fxSlA = (_fxSl.color >>> 24) & 0xFF;
             if (_fxSlA === 0) continue;
-            canvas.fillRect(
-              Math.round(_fxDecoX + _fxSl.offsetX - _fxSl.spread),
-              Math.round(_fxDecoY + _fxSl.offsetY - _fxSl.spread),
-              Math.round(_fxDecoW + _fxSl.spread * 2),
-              Math.round(_fxDecoH + _fxSl.spread * 2),
-              _fxSl.color);
+            var _fxSpd = _fxSl.spread;
+            if (_fxSl.blur > 0) {
+              for (var _fxBk = 3; _fxBk >= 1; _fxBk--) {
+                var _fxBSpr  = _fxSl.blur * _fxBk / 3;
+                var _fxBAlph = Math.round(_fxSlA * (1 - _fxBk / 4)) >>> 0;
+                if (_fxBAlph < 1) continue;
+                var _fxBR = (_fxSl.color >> 16) & 0xFF;
+                var _fxBG2 = (_fxSl.color >> 8)  & 0xFF;
+                var _fxBB = _fxSl.color & 0xFF;
+                var _fxBInv = 255 - _fxBAlph;
+                var _fxBClr = 0xFF000000 |
+                  (Math.round((_fxBR * _fxBAlph + 255 * _fxBInv) / 255) << 16) |
+                  (Math.round((_fxBG2 * _fxBAlph + 255 * _fxBInv) / 255) << 8) |
+                  Math.round((_fxBB * _fxBAlph + 255 * _fxBInv) / 255);
+                canvas.fillRect(
+                  Math.round(_fxDecoX + _fxSl.offsetX - _fxSpd - _fxBSpr),
+                  Math.round(_fxDecoY + _fxSl.offsetY - _fxSpd - _fxBSpr),
+                  Math.round(_fxDecoW + _fxSpd * 2 + _fxBSpr * 2),
+                  Math.round(_fxDecoH + _fxSpd * 2 + _fxBSpr * 2),
+                  _fxBClr);
+              }
+            } else {
+              var _fxSsClr = _fxSl.color;
+              if (_fxSlA < 255) {
+                var _fxSsR = (_fxSl.color >> 16) & 0xFF;
+                var _fxSsG = (_fxSl.color >> 8)  & 0xFF;
+                var _fxSsB = _fxSl.color & 0xFF;
+                var _fxSsInv = 255 - _fxSlA;
+                _fxSsClr = 0xFF000000 |
+                  (Math.round((_fxSsR * _fxSlA + 255 * _fxSsInv) / 255) << 16) |
+                  (Math.round((_fxSsG * _fxSlA + 255 * _fxSsInv) / 255) << 8) |
+                  Math.round((_fxSsB * _fxSlA + 255 * _fxSsInv) / 255);
+              }
+              canvas.fillRect(
+                Math.round(_fxDecoX + _fxSl.offsetX - _fxSpd),
+                Math.round(_fxDecoY + _fxSl.offsetY - _fxSpd),
+                Math.round(_fxDecoW + _fxSpd * 2),
+                Math.round(_fxDecoH + _fxSpd * 2),
+                _fxSsClr);
+            }
           }
         }
         // Border
@@ -2979,14 +3092,21 @@ export class BrowserApp implements App {
     // ── Compress large vertical gaps (widget-anchor based) ─────────────
     var _gapLines = lr.lines;
     var _gapWidgets = lr.widgets;
-    var _GAP_MAX = 40; // Allow vertical spacing between widgets (CSS margins/padding)
+    var _GAP_MAX = 20; // Allow vertical spacing between widgets (CSS margins/padding)
     if (_gapLines.length > 1) {
-      // Collect anchors from visible widgets only (reliable visual indicators)
+      // Collect anchors from visible widgets AND text lines (reliable visual indicators)
       var _gAnchors: { y: number; yEnd: number }[] = [];
       for (var _gwi = 0; _gwi < _gapWidgets.length; _gwi++) {
         if (_gapWidgets[_gwi].kind === 'hidden') continue;
         if (_gapWidgets[_gwi].ph <= 0) continue;
         _gAnchors.push({ y: _gapWidgets[_gwi].py, yEnd: _gapWidgets[_gwi].py + _gapWidgets[_gwi].ph });
+      }
+      // Also include text lines with visible content as anchors
+      for (var _tli = 0; _tli < _gapLines.length; _tli++) {
+        var _tl = _gapLines[_tli];
+        if (_tl.nodes.length > 0) {
+          _gAnchors.push({ y: _tl.y, yEnd: _tl.y + (_tl.lineH || 13) });
+        }
       }
       _gAnchors.sort(function(a, b) { return a.y - b.y; });
       // Merge overlapping/adjacent anchors

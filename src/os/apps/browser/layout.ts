@@ -681,7 +681,7 @@ function _layoutNodesImpl(
           for (var _fxci = _fxLinesStart; _fxci < lines.length; _fxci++) {
             if (lines[_fxci].nodes.length > 0) { _fxHasVisContent = true; break; }
           }
-          if (!_fxHasVisContent && !nd.bgColor && !nd.bgGradient && _fxMinPad > 40) _fxMinPad = 40;
+          if (!_fxHasVisContent && _fxMinPad > 20) _fxMinPad = 20;
           lines.push({ y, nodes: [], lineH: _fxMinPad }); y += _fxMinPad;
         }
         // R21: boxDeco — render background, border, shadow, opacity on flex containers
@@ -964,12 +964,12 @@ function _layoutNodesImpl(
       // R21: min-height enforcement for flex container
       if (nd.minHeight && nd.minHeight > 0 && (y - _fxYBeforeBox) < nd.minHeight) {
         var _fxMinPad3 = nd.minHeight - (y - _fxYBeforeBox);
-        // Cap empty flex containers to prevent huge invisible spacers
+        // Cap empty flex containers (no visible children) to prevent huge invisible spacers
         var _fxHasVisContent3 = false;
         for (var _fxci3 = _fxLinesStart; _fxci3 < lines.length; _fxci3++) {
           if (lines[_fxci3].nodes.length > 0) { _fxHasVisContent3 = true; break; }
         }
-        if (!_fxHasVisContent3 && !nd.bgColor && !nd.bgGradient && _fxMinPad3 > 40) _fxMinPad3 = 40;
+        if (!_fxHasVisContent3 && _fxMinPad3 > 20) _fxMinPad3 = 20;
         lines.push({ y, nodes: [], lineH: _fxMinPad3 }); y += _fxMinPad3;
       }
       // R21: boxDeco — render background, border, shadow, opacity on flex containers
@@ -1272,18 +1272,22 @@ function _layoutNodesImpl(
         if (_activeLeftFloatLines  === 0) _activeLeftFloatIndent  = 0;
         if (_activeRightFloatLines === 0) _activeRightFloatIndent = 0;
         // Enforce min-height: pad with blank space if content is shorter
-        // Cap empty blocks (no text produced) — prevent huge invisible spacers (e.g., Google's centering divs)
-        var _blockHasContent = lines.length > _blockLineStart;
-        var _blockCapH = 40; // max height for empty blocks with no visual content
+        // Cap empty blocks (no text produced) — prevent huge invisible spacers from CSS min-height/height
+        // Check for actual visible content (lines with nodes), not just empty spacer lines
+        var _blockHasContent = false;
+        for (var _bci = _blockLineStart; _bci < lines.length; _bci++) {
+          if (lines[_bci].nodes.length > 0) { _blockHasContent = true; break; }
+        }
+        var _blockCapH = 20; // max height for empty blocks with no visual content
         if (nd.minHeight && nd.minHeight > 0 && (y - yBeforeBlock) < nd.minHeight) {
           var _effMinH = nd.minHeight;
-          if (!_blockHasContent && !nd.bgColor && !nd.bgGradient && !nd.bgImage && _effMinH > _blockCapH) _effMinH = _blockCapH;
+          if (!_blockHasContent && _effMinH > _blockCapH) _effMinH = _blockCapH;
           blank(_effMinH - (y - yBeforeBlock));
         }
         // Enforce explicit CSS height: pad with blank space if content is shorter (R22)
         if (nd.height && nd.height > 0 && (y - yBeforeBlock) < nd.height) {
           var _effH = nd.height;
-          if (!_blockHasContent && !nd.bgColor && !nd.bgGradient && !nd.bgImage && _effH > _blockCapH) _effH = _blockCapH;
+          if (!_blockHasContent && _effH > _blockCapH) _effH = _blockCapH;
           blank(_effH - (y - yBeforeBlock));
         }
         // Enforce aspect-ratio: derive height from block width when height is not explicit
@@ -1295,6 +1299,7 @@ function _layoutNodesImpl(
           if (_arNumW > 0) {
             var _arEffW = (nd.boxWidth && nd.boxWidth > 0) ? nd.boxWidth : (maxX - xLeft);
             var _arTargH = Math.round(_arEffW * _arNumH / _arNumW);
+            if (!_blockHasContent && _arTargH > _blockCapH) _arTargH = _blockCapH;
             if (_arTargH > 0 && (y - yBeforeBlock) < _arTargH) {
               blank(_arTargH - (y - yBeforeBlock));
             }
@@ -1404,13 +1409,6 @@ function _layoutNodesImpl(
     if (nd.type === 'widget' && nd.widget) {
       var bp = nd.widget;
       if (bp.kind === 'hidden') continue;
-      // Skip file input widgets — rarely visible on initial page load (hidden upload panels)
-      if (bp.kind === 'file') continue;
-      // Skip upload-panel submit buttons — these are from hidden interactive panels
-      if ((bp.kind === 'submit' || bp.kind === 'button') && bp.value) {
-        var _btnTxt = bp.value.toLowerCase();
-        if (_btnTxt.indexOf('upload') >= 0 || _btnTxt.indexOf('remove file') >= 0) continue;
-      }
 
       var ww = 0; var wh = 0;
       var wOpts = bp.options || [];
@@ -1547,13 +1545,6 @@ function _layoutNodesImpl(
         _wpx = xLeft + Math.floor((maxX - xLeft - ww) / 2);
       } else if (nd.textAlign === 'right' && ww < (maxX - xLeft)) {
         _wpx = maxX - ww;
-      } else if ((bp.kind === 'textarea' || bp.kind === 'submit' || bp.kind === 'reset' || bp.kind === 'button') && ww < (maxX - xLeft) * 0.8) {
-        // Heuristic: center form widgets (search boxes, buttons) that are
-        // significantly narrower than the container
-        _wpx = xLeft + Math.floor((maxX - xLeft - ww) / 2);
-      } else if (bp.kind === 'img' && ww < 100 && xLeft < 20 && ww < (maxX - xLeft) * 0.3) {
-        // Center small images that are at the outermost container level
-        _wpx = xLeft + Math.floor((maxX - xLeft - ww) / 2);
       }
 
       // ── Button grouping: place consecutive buttons side-by-side ──────────
@@ -1612,6 +1603,11 @@ function _layoutNodesImpl(
   oofNodes.sort(function(a, b) { return (a.zIndex ?? 0) - (b.zIndex ?? 0); });
   for (var oi = 0; oi < oofNodes.length; oi++) {
     var oof      = oofNodes[oi];
+    // Skip elements with opacity:0 (invisible overlays/modals)
+    if (oof.opacity !== undefined && oof.opacity < 0.01) continue;
+    // Skip elements positioned far off-screen (negative top/left)
+    if (oof.posTop !== undefined && oof.posTop < -100) continue;
+    if (oof.posLeft !== undefined && oof.posLeft < -100) continue;
     // R23: Resolve percentage width/height for absolute/fixed elements against containing block
     var _oofContW = maxX - xLeft;
     var oofW     = oof.boxWidth ?? _oofContW;
