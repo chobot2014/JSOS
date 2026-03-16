@@ -1753,15 +1753,9 @@ export class BrowserApp implements App {
 
   private _drawImage(canvas: Canvas, wp: PositionedWidget, wy: number): void {
     if (!wp.imgLoaded) {
-      canvas.fillRect(wp.px, wy, wp.pw, wp.ph, CLR_IMG_PH_BG);
-      canvas.drawRect(wp.px, wy, wp.pw, wp.ph, CLR_IMG_PH_BD);
-      var alt = wp.imgAlt || wp.imgSrc || '';
-      if (alt) {
-        var maxC = Math.max(1, Math.floor((wp.pw - 8) / CHAR_W));
-        canvas.drawText(wp.px + 4,
-          wy + Math.max(0, Math.floor((wp.ph - CHAR_H) / 2)),
-          ('[' + alt + ']').slice(0, maxC), CLR_IMG_PH_TXT);
-      }
+      // Don't draw grey placeholder boxes for images that haven't loaded.
+      // This matches real browser behavior (nothing shown until image loads)
+      // and avoids visual clutter from unloadable icons/decorations.
       return;
     }
     if (wp.imgData) {
@@ -3025,7 +3019,6 @@ export class BrowserApp implements App {
               }
             }
           }
-          // Pass cached RuleIndex to avoid rebuilding 800+ rules on every DOM mutation.
           // During rerender, use ignoreDisplayNone=true to override CSS-rule-based
           // display:none (which hides content until JS fully runs), while still
           // respecting inline-style display:none (set explicitly by JS).
@@ -3091,7 +3084,14 @@ export class BrowserApp implements App {
 
     // ── Compress large vertical gaps (widget-anchor based) ─────────────
     var _gapLines = lr.lines;
-    var _gapWidgets = lr.widgets;
+    // Filter out small decorative images (WAI: images without alt text are
+    // presentational).  These often appear when ignoreDisplayNone un-hides
+    // icon containers that CSS intended to keep hidden.
+    var _gapWidgets = lr.widgets.filter(function(w: any) {
+      if (w.kind === 'img' && !w.name && w.pw <= 50 && w.ph <= 50
+          && (!w.imgAlt || !w.imgAlt.trim())) return false;
+      return true;
+    });
     var _GAP_MAX = 20; // Allow vertical spacing between widgets (CSS margins/padding)
     if (_gapLines.length > 1) {
       // Collect anchors from visible widgets AND text lines (reliable visual indicators)
@@ -3156,7 +3156,7 @@ export class BrowserApp implements App {
     this._pageLines = lr.lines;
     this._rebuildStickyIndex();
     this._contentVersion++;          // Phase 3: invalidate tile cache on new layout
-    this._widgets   = lr.widgets;
+    this._widgets   = _gapWidgets;
 
     var contentH = this._contentH();
     var last     = this._pageLines[this._pageLines.length - 1];

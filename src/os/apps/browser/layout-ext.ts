@@ -375,12 +375,55 @@ export function layoutTable(
       if (colWidths[ci3] <= 0) colWidths[ci3] = Math.max(equalW, 20);
     }
   } else {
-    // Auto: measure max-content of non-spanning cells first
+    // Auto: first apply explicit cell width hints (boxWidth px, widthPct %)
+    for (var ri1a = 0; ri1a < rows.length; ri1a++) {
+      for (var ci1a = 0; ci1a < colCount; ci1a++) {
+        var gc1a = gridCells[ri1a][ci1a];
+        if (!gc1a || gc1a.cspan > 1) continue;
+        var cellN = gc1a.cell;
+        // <td width="N"> (absolute px)
+        if (cellN.boxWidth && cellN.boxWidth > colWidths[ci1a]) {
+          colWidths[ci1a] = cellN.boxWidth;
+        }
+        // <td width="N%"> (percentage of table width)
+        if (cellN.widthPct && cellN.widthPct > 0) {
+          var pctW = Math.floor(tableW * cellN.widthPct / 100);
+          if (pctW > colWidths[ci1a]) colWidths[ci1a] = pctW;
+        }
+      }
+    }
+    // Auto: measure max-content of non-spanning cells
     for (var ri2 = 0; ri2 < rows.length; ri2++) {
       for (var ci4 = 0; ci4 < colCount; ci4++) {
         var gc = gridCells[ri2][ci4];
         if (!gc || gc.cspan > 1) continue; // skip spanning cells for now
         var mc = measureMaxContent(gc.cell.spans);
+        // Also measure children subtree text content for cells with nested elements
+        if (mc <= CONTENT_PAD * 2 && gc.cell.children && gc.cell.children.length > 0) {
+          var _cellChildW = 0;
+          var _cellStack: RenderNode[] = gc.cell.children.slice();
+          while (_cellStack.length > 0) {
+            var _cellN = _cellStack.pop()!;
+            if (_cellN.spans) {
+              for (var _csi2 = 0; _csi2 < _cellN.spans.length; _csi2++) {
+                _cellChildW += _cellN.spans[_csi2].text.length * CHAR_W * (_cellN.spans[_csi2].fontScale ?? 1);
+              }
+            }
+            // Account for widget inputs: approximate width from cols
+            if (_cellN.type === 'widget' && _cellN.widget) {
+              var _wBp = _cellN.widget;
+              if (_wBp.kind === 'text' || _wBp.kind === 'password') {
+                _cellChildW = Math.max(_cellChildW, (_wBp.cols || 20) * CHAR_W + 8);
+              } else if (_wBp.kind === 'submit' || _wBp.kind === 'reset' || _wBp.kind === 'button') {
+                _cellChildW = Math.max(_cellChildW, (_wBp.value || 'Submit').length * CHAR_W + 24);
+              }
+            }
+            if (_cellN.children) {
+              for (var _cci2 = 0; _cci2 < _cellN.children.length; _cci2++) _cellStack.push(_cellN.children[_cci2]);
+            }
+          }
+          if (_cellChildW > 0) mc = Math.ceil(_cellChildW) + CONTENT_PAD * 2;
+        }
         if (mc > colWidths[ci4]) colWidths[ci4] = mc;
       }
     }

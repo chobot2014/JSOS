@@ -1776,7 +1776,13 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
             var tdbg = tok.attrs.get('bgcolor');
             if (tdbg) tableCellNode.bgColor = _parseColorCSS(tdbg);
             var tdwi = tok.attrs.get('width');
-            if (tdwi) tableCellNode.boxWidth = parseInt(tdwi, 10) || undefined;
+            if (tdwi) {
+              if (tdwi.indexOf('%') >= 0) {
+                tableCellNode.widthPct = parseInt(tdwi, 10) || undefined;
+              } else {
+                tableCellNode.boxWidth = parseInt(tdwi, 10) || undefined;
+              }
+            }
           } else { pushSpan('| '); }
           break;
         }

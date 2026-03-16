@@ -734,20 +734,34 @@ function _layoutNodesImpl(
           }
           _bw = Math.ceil(_cw0);
         }
+        // flex-basis: auto with children — measure intrinsic width from subtree text
+        if (!_fbExplicit && _bw === 0 && fSorted[fi].children && fSorted[fi].children.length > 0) {
+          var _childTextW = 0;
+          var _childStack: RenderNode[] = fSorted[fi].children!.slice();
+          while (_childStack.length > 0) {
+            var _cn = _childStack.pop()!;
+            if (_cn.spans) {
+              for (var _csi = 0; _csi < _cn.spans.length; _csi++) {
+                _childTextW += _cn.spans[_csi].text.length * CHAR_W * (_cn.spans[_csi].fontScale || 1);
+              }
+            }
+            if (_cn.children) {
+              for (var _cci = 0; _cci < _cn.children.length; _cci++) {
+                _childStack.push(_cn.children[_cci]);
+              }
+            }
+          }
+          if (_childTextW > 0) _bw = Math.ceil(_childTextW);
+        }
         fBaseW.push(_bw);
       }
-      var fFixedTotal = 0, flexibleCount = 0;
-      for (var fi2 = 0; fi2 < fSorted.length; fi2++) {
-        if (fBaseW[fi2] > 0) fFixedTotal += fBaseW[fi2];
-        else flexibleCount++;
-      }
-      var fFlexPool = fxFreeInit - fFixedTotal;
-      var fFreeSpace = flexibleCount > 0 ? fFlexPool / flexibleCount : 0;
+      // CSS Flexbox: hypothetical main size = base size directly (no pre-distribution)
       var fHypoW: number[] = [];
-      for (var fi3 = 0; fi3 < fSorted.length; fi3++) {
-        fHypoW.push(fBaseW[fi3] > 0 ? fBaseW[fi3] : Math.max(0, fFreeSpace));
+      var fHypoTotal = 0;
+      for (var fi2 = 0; fi2 < fSorted.length; fi2++) {
+        fHypoW.push(fBaseW[fi2]);
+        fHypoTotal += fBaseW[fi2];
       }
-      var fHypoTotal = fHypoW.reduce(function(a, b) { return a + b; }, 0);
       var fFree = fxFreeInit - fHypoTotal;
 
       // Item 402: Apply flex-grow (positive) or flex-shrink (negative)
@@ -755,10 +769,27 @@ function _layoutNodesImpl(
       if (fFree >= 0) {
         var totalGrow = 0;
         for (var fi4 = 0; fi4 < fSorted.length; fi4++) totalGrow += (fSorted[fi4].flexGrow ?? 0);
-        for (var fi5 = 0; fi5 < fSorted.length; fi5++) {
-          var grow = fSorted[fi5].flexGrow ?? 0;
-          var extra = totalGrow > 0 ? fFree * grow / totalGrow : 0;
-          fFinalW.push(Math.max(0, Math.floor(fHypoW[fi5] + extra)));
+        // Fallback: if no items have flex-grow but some have zero base width,
+        // distribute free space equally (auto-sized flex items)
+        if (totalGrow === 0) {
+          var _zeroCount = 0;
+          for (var _zci = 0; _zci < fSorted.length; _zci++) { if (fBaseW[_zci] === 0) _zeroCount++; }
+          if (_zeroCount > 0) {
+            var _autoShare = Math.floor(fFree / _zeroCount);
+            for (var fi5a = 0; fi5a < fSorted.length; fi5a++) {
+              fFinalW.push(fBaseW[fi5a] === 0 ? _autoShare : fBaseW[fi5a]);
+            }
+          } else {
+            for (var fi5b = 0; fi5b < fSorted.length; fi5b++) {
+              fFinalW.push(Math.floor(fHypoW[fi5b]));
+            }
+          }
+        } else {
+          for (var fi5 = 0; fi5 < fSorted.length; fi5++) {
+            var grow = fSorted[fi5].flexGrow ?? 0;
+            var extra = fFree * grow / totalGrow;
+            fFinalW.push(Math.max(0, Math.floor(fHypoW[fi5] + extra)));
+          }
         }
       } else {
         var totalShrinkFactor = 0;
@@ -832,10 +863,25 @@ function _layoutNodesImpl(
           if (fwLineFree >= 0) {
             var fwTotalGrow = 0;
             for (var fwgi = 0; fwgi < fwItems.length; fwgi++) fwTotalGrow += (fSorted[fwItems[fwgi]].flexGrow ?? 0);
-            for (var fwgi2 = 0; fwgi2 < fwItems.length; fwgi2++) {
-              var fwGrow2 = fSorted[fwItems[fwgi2]].flexGrow ?? 0;
-              var fwExtra = fwTotalGrow > 0 ? fwLineFree * fwGrow2 / fwTotalGrow : 0;
-              fwLineWidths.push(Math.max(0, Math.floor(fHypoW[fwItems[fwgi2]] + fwExtra)));
+            if (fwTotalGrow === 0) {
+              var _fwZeroCount = 0;
+              for (var _fwzci = 0; _fwzci < fwItems.length; _fwzci++) { if (fBaseW[fwItems[_fwzci]] === 0) _fwZeroCount++; }
+              if (_fwZeroCount > 0) {
+                var _fwAutoShare = Math.floor(fwLineFree / _fwZeroCount);
+                for (var fwgi2a = 0; fwgi2a < fwItems.length; fwgi2a++) {
+                  fwLineWidths.push(fBaseW[fwItems[fwgi2a]] === 0 ? _fwAutoShare : fBaseW[fwItems[fwgi2a]]);
+                }
+              } else {
+                for (var fwgi2b = 0; fwgi2b < fwItems.length; fwgi2b++) {
+                  fwLineWidths.push(Math.floor(fHypoW[fwItems[fwgi2b]]));
+                }
+              }
+            } else {
+              for (var fwgi2 = 0; fwgi2 < fwItems.length; fwgi2++) {
+                var fwGrow2 = fSorted[fwItems[fwgi2]].flexGrow ?? 0;
+                var fwExtra = fwLineFree * fwGrow2 / fwTotalGrow;
+                fwLineWidths.push(Math.max(0, Math.floor(fHypoW[fwItems[fwgi2]] + fwExtra)));
+              }
             }
           } else {
             var fwTotalSF2 = 0;
@@ -1203,6 +1249,10 @@ function _layoutNodesImpl(
           // Block with children but no text spans — recursively lay out children
           if (ndSpans.length === 0 && nd.children && nd.children.length > 0) {
             var _blkCW = blkMaxX - blkLeft + CONTENT_PAD * 2;
+            // Skip child layout for very narrow containers (< 30px content width)
+            // These are CSS-collapsed containers whose content cannot render
+            // meaningfully — text wraps every 2-3 characters creating garbled output.
+            if (_blkCW < 30) { continue; }
             var _childResult = _layoutNodesImpl(nd.children, [], _blkCW);
             // Stamp child lines into parent coordinate space
             var _blkFirstY = _childResult.lines.length > 0 ? _childResult.lines[0].y : CONTENT_PAD;
@@ -1223,7 +1273,11 @@ function _layoutNodesImpl(
               widgets.push(_cww);
             }
           } else {
-            commit(flowSpans(ndSpans, blkLeft, blkMaxX, lh, CLR_BODY, _combinedOpts));
+            // Skip text flow for unreadably narrow containers (< 4 chars wide)
+            // This prevents garbled text from CSS-collapsed blocks
+            if (blkMaxX - blkLeft >= CHAR_W * 4) {
+              commit(flowSpans(ndSpans, blkLeft, blkMaxX, lh, CLR_BODY, _combinedOpts));
+            }
           }
         }
         // Apply padding-bottom after block content
@@ -1409,6 +1463,10 @@ function _layoutNodesImpl(
     if (nd.type === 'widget' && nd.widget) {
       var bp = nd.widget;
       if (bp.kind === 'hidden') continue;
+      // Skip widgets in zero/negative-width containers — their parent has
+      // CSS width:0 or similar, making content effectively invisible.
+      // This prevents JS-injected overlay/modal content from cluttering the page.
+      if (maxX - xLeft <= 0 && bp.kind !== 'img') continue;
 
       var ww = 0; var wh = 0;
       var wOpts = bp.options || [];
@@ -1418,6 +1476,13 @@ function _layoutNodesImpl(
         case 'password':
           ww = (bp.cols || 20) * CHAR_W + 8;
           wh = WIDGET_INPUT_H;
+          // Widen text/search inputs to fill container when no explicit size is set
+          if (!bp.cols) {
+            var _tiAvail = maxX - xLeft;
+            if (_tiAvail > 300 && ww < _tiAvail * 0.5) {
+              ww = Math.floor(_tiAvail * 0.5);
+            }
+          }
           break;
         case 'submit':
         case 'reset':
@@ -1485,7 +1550,8 @@ function _layoutNodesImpl(
       }
       var _cssWSet = !!(bp.cssWidth && bp.cssWidth > 0);
       var _cssHSet = !!(bp.cssHeight && bp.cssHeight > 0);
-      if (_cssWSet) ww = Math.min(bp.cssWidth!, maxX - xLeft);
+      // Clamp CSS width to available container space, but never below 1px
+      if (_cssWSet) ww = Math.max(Math.min(bp.cssWidth!, maxX - xLeft), 1);
       if (_cssHSet) {
         // For buttons, cap CSS height to prevent oversized rendering
         if (bp.kind === 'submit' || bp.kind === 'reset' || bp.kind === 'button') {
@@ -1497,7 +1563,7 @@ function _layoutNodesImpl(
       // R20: Maintain image aspect ratio when CSS sets only one dimension
       if (bp.kind === 'img' && bp.imgNatW && bp.imgNatH && bp.imgNatW > 0 && bp.imgNatH > 0) {
         if (_cssWSet && !_cssHSet) wh = Math.round(ww * bp.imgNatH / bp.imgNatW);
-        else if (_cssHSet && !_cssWSet) ww = Math.min(Math.round(wh * bp.imgNatW / bp.imgNatH), maxX - xLeft);
+        else if (_cssHSet && !_cssWSet) ww = Math.max(Math.min(Math.round(wh * bp.imgNatW / bp.imgNatH), maxX - xLeft), 1);
       }
 
       // object-fit: adjust image dimensions when CSS constrains the container
@@ -1527,6 +1593,8 @@ function _layoutNodesImpl(
       // Clamp minimum widget dimensions — prevent negative or zero sizes
       if (ww < 1) ww = 1;
       if (wh < 1) wh = 1;
+
+
 
       // Skip effectively invisible widgets (< 2px in both dimensions)
       if (ww < 2 && wh < 2) continue;
