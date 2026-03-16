@@ -13,13 +13,25 @@
 
 import { os, Canvas, Colors, defaultFont, type App, type WMWindow, type KeyEvent, type MouseEvent } from '../../core/sdk.js';
 import terminal from '../../ui/terminal.js';
+import fs from '../../fs/filesystem.js';
 
 declare var kernel: import('../../core/kernel.js').KernelAPI;
 
-// ── Simple canvas-based text buffer ───────────────────────────────────────
+// ── Canvas terminal with scrollback buffer + scrollbar ────────────────────
 
 const CHAR_W = 8;
 const CHAR_H = 8;
+const SCROLLBAR_W = 10;      // pixels reserved on the right for the scrollbar
+const SCROLLBACK_MAX = 2000; // max scrollback lines
+
+/** A single cell in the text buffer. */
+interface Cell { ch: number; fg: number; }
+
+function blankCellRow(cols: number, fg: number): Cell[] {
+  var row: Cell[] = [];
+  for (var i = 0; i < cols; i++) row.push({ ch: 0x20, fg: fg });
+  return row;
+}
 
 class CanvasTerminal {
   private _canvas:  Canvas;
@@ -30,15 +42,33 @@ class CanvasTerminal {
   private _fgColor = Colors.LIGHT_GREY;
   private _bgColor = 0xFF111111;
 
+  // ── Cell buffer (logical screen) ──────────────────────────────────────────
+  private _screen: Cell[][] = [];   // current visible rows (length = _rows)
+
+  // ── Scrollback ring buffer ────────────────────────────────────────────────
+  private _sb: Cell[][] = [];
+  private _sbWrite = 0;
+  private _sbCount = 0;
+
+  // ── Scroll view state ────────────────────────────────────────────────────
+  private _viewOffset = 0;  // 0 = live; >0 = lines scrolled back
+
   constructor(canvas: Canvas) {
     this._canvas = canvas;
-    this._cols   = Math.floor(canvas.width  / CHAR_W);
+    this._cols   = Math.floor((canvas.width - SCROLLBAR_W) / CHAR_W);
     this._rows   = Math.floor(canvas.height / CHAR_H);
-    this.clear();
+    for (var r = 0; r < this._rows; r++) {
+      this._screen.push(blankCellRow(this._cols, this._fgColor));
+    }
+    this._canvas.clear(this._bgColor);
   }
 
   get cols(): number { return this._cols; }
   get rows(): number { return this._rows; }
+  get row(): number { return this._row; }
+  get col(): number { return this._col; }
+  get viewOffset(): number { return this._viewOffset; }
+  get scrollbackCount(): number { return this._sbCount; }
 
   setColor(fg: number): void { this._fgColor = fg; }
 
@@ -46,9 +76,15 @@ class CanvasTerminal {
     this._canvas.clear(this._bgColor);
     this._row = 0;
     this._col = 0;
+    this._viewOffset = 0;
+    for (var r = 0; r < this._rows; r++) {
+      this._screen[r] = blankCellRow(this._cols, this._fgColor);
+    }
   }
 
+  /** Print text at the current cursor position. */
   print(text: string): void {
+    if (this._viewOffset !== 0) this.resumeLive();
     for (var i = 0; i < text.length; i++) {
       var ch = text[i];
       if (ch === '\n') {
@@ -59,15 +95,13 @@ class CanvasTerminal {
       } else if (ch === '\b') {
         if (this._col > 0) {
           this._col--;
-          this._canvas.fillRect(this._col * CHAR_W, this._row * CHAR_H,
-                                CHAR_W, CHAR_H, this._bgColor);
+          this._screen[this._row][this._col] = { ch: 0x20, fg: this._fgColor };
+          this._drawCell(this._row, this._col);
         }
       } else {
-        this._canvas.fillRect(this._col * CHAR_W, this._row * CHAR_H,
-                              CHAR_W, CHAR_H, this._bgColor);
-        defaultFont.renderChar(this._canvas,
-                               this._col * CHAR_W, this._row * CHAR_H,
-                               ch, this._fgColor);
+        var cell: Cell = { ch: ch.charCodeAt(0) & 0xFF, fg: this._fgColor };
+        this._screen[this._row][this._col] = cell;
+        this._drawCell(this._row, this._col);
         this._col++;
         if (this._col >= this._cols) {
           this._col = 0;
@@ -81,6 +115,17 @@ class CanvasTerminal {
     this.print(text + '\n');
   }
 
+  /** Draw a single cell to the canvas. */
+  private _drawCell(row: number, col: number): void {
+    var c = this._screen[row][col];
+    var px = col * CHAR_W;
+    var py = row * CHAR_H;
+    this._canvas.fillRect(px, py, CHAR_W, CHAR_H, this._bgColor);
+    if (c.ch !== 0x20) {
+      defaultFont.renderChar(this._canvas, px, py, String.fromCharCode(c.ch), c.fg);
+    }
+  }
+
   private _nextLine(): void {
     this._row++;
     if (this._row >= this._rows) {
@@ -89,24 +134,137 @@ class CanvasTerminal {
   }
 
   private _scrollUp(): void {
-    var cw = this._canvas.width;
-    var rowPixels = CHAR_H;
-    // Blit rows up
-    for (var r = 0; r < this._rows - 1; r++) {
-      this._canvas.blit(
-        this._canvas,
-        0, (r + 1) * rowPixels,  // src
-        0, r * rowPixels,         // dst
-        cw, rowPixels
-      );
+    // Push evicted top row into scrollback ring
+    if (this._sb.length < SCROLLBACK_MAX) {
+      this._sb.push(this._screen[0].slice());
+    } else {
+      // Reuse existing slot
+      var dst = this._sb[this._sbWrite];
+      for (var c = 0; c < this._cols; c++) {
+        if (c < dst.length) { dst[c] = this._screen[0][c]; }
+        else dst.push({ ch: this._screen[0][c].ch, fg: this._screen[0][c].fg });
+      }
     }
-    // Clear last row
-    this._canvas.fillRect(0, (this._rows - 1) * rowPixels, cw, rowPixels, this._bgColor);
+    this._sbWrite = (this._sbWrite + 1) % SCROLLBACK_MAX;
+    if (this._sbCount < SCROLLBACK_MAX) this._sbCount++;
+
+    // Shift screen rows up
+    for (var r = 0; r < this._rows - 1; r++) {
+      this._screen[r] = this._screen[r + 1];
+    }
+    this._screen[this._rows - 1] = blankCellRow(this._cols, this._fgColor);
     this._row = this._rows - 1;
+
+    // Repaint entire screen
+    this._repaintAll();
+  }
+
+  /** Repaint all visible rows from the cell buffer. */
+  private _repaintAll(): void {
+    for (var r = 0; r < this._rows; r++) {
+      for (var c = 0; c < this._cols; c++) {
+        this._drawCell(r, c);
+      }
+    }
+  }
+
+  // ── Scrollback view ───────────────────────────────────────────────────────
+
+  scrollUp(n: number = 3): void {
+    if (this._sbCount === 0) return;
+    this._viewOffset += n;
+    if (this._viewOffset > this._sbCount) this._viewOffset = this._sbCount;
+    this._renderScrollbackView();
+  }
+
+  scrollDown(n: number = 3): void {
+    if (this._viewOffset === 0) return;
+    this._viewOffset -= n;
+    if (this._viewOffset < 0) this._viewOffset = 0;
+    if (this._viewOffset === 0) {
+      this._repaintAll();
+    } else {
+      this._renderScrollbackView();
+    }
+  }
+
+  resumeLive(): void {
+    if (this._viewOffset === 0) return;
+    this._viewOffset = 0;
+    this._repaintAll();
+  }
+
+  /** Render the scrollback view onto the canvas. */
+  private _renderScrollbackView(): void {
+    for (var r = 0; r < this._rows; r++) {
+      var tapeIdx = r + this._sbCount - this._viewOffset;
+      if (tapeIdx < 0) {
+        // Above the scrollback — blank
+        for (var c = 0; c < this._cols; c++) {
+          this._canvas.fillRect(c * CHAR_W, r * CHAR_H, CHAR_W, CHAR_H, this._bgColor);
+        }
+      } else if (tapeIdx < this._sbCount) {
+        // From scrollback ring
+        var sbAbs = this._sbWrite - this._sbCount + tapeIdx;
+        var idx = ((sbAbs % SCROLLBACK_MAX) + SCROLLBACK_MAX) % SCROLLBACK_MAX;
+        var sbRow = this._sb[idx];
+        for (var c = 0; c < this._cols; c++) {
+          var px = c * CHAR_W;
+          var py = r * CHAR_H;
+          this._canvas.fillRect(px, py, CHAR_W, CHAR_H, this._bgColor);
+          if (c < sbRow.length && sbRow[c].ch !== 0x20) {
+            defaultFont.renderChar(this._canvas, px, py,
+              String.fromCharCode(sbRow[c].ch), sbRow[c].fg);
+          }
+        }
+      } else {
+        // From live screen
+        var liveR = tapeIdx - this._sbCount;
+        if (liveR >= 0 && liveR < this._rows) {
+          for (var c = 0; c < this._cols; c++) {
+            var cell = this._screen[liveR][c];
+            var px2 = c * CHAR_W;
+            var py2 = r * CHAR_H;
+            this._canvas.fillRect(px2, py2, CHAR_W, CHAR_H, this._bgColor);
+            if (cell.ch !== 0x20) {
+              defaultFont.renderChar(this._canvas, px2, py2,
+                String.fromCharCode(cell.ch), cell.fg);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ── Scrollbar rendering ───────────────────────────────────────────────────
+
+  /** Draw the vertical scrollbar on the right edge of the canvas. */
+  drawScrollbar(): void {
+    var x = this._cols * CHAR_W + 1;  // 1px gap after text area
+    var w = SCROLLBAR_W - 1;
+    var h = this._canvas.height;
+    var totalLines = this._sbCount + this._rows;
+
+    // Track background
+    this._canvas.fillRect(x, 0, w, h, 0xFF1A1A2A);
+
+    // Thumb
+    if (totalLines > this._rows) {
+      var ratio = this._rows / totalLines;
+      var thumbH = Math.max(12, Math.floor(h * ratio));
+      // Position: 0 offset = thumb at bottom, max offset = thumb at top
+      var scrollFraction = this._viewOffset / (totalLines - this._rows);
+      var thumbY = Math.floor((h - thumbH) * (1 - scrollFraction));
+      this._canvas.fillRect(x + 1, thumbY, w - 2, thumbH, 0xFF5577AA);
+      // Thumb border
+      this._canvas.fillRect(x + 1, thumbY, w - 2, 1, 0xFF6699CC);
+      this._canvas.fillRect(x + 1, thumbY + thumbH - 1, w - 2, 1, 0xFF6699CC);
+    }
   }
 
   /** Draw (show=true) or erase (show=false) a 2-px underline cursor at the current position. */
   drawCursor(show: boolean): void {
+    if (this._viewOffset !== 0) return;  // don't show cursor in scrollback
     var cx = this._col * CHAR_W;
     var cy = this._row * CHAR_H + CHAR_H - 2;
     this._canvas.fillRect(cx, cy, CHAR_W, 2, show ? Colors.LIGHT_GREY : this._bgColor);
@@ -120,6 +278,137 @@ const VGA_TO_ARGB: number[] = [
   Colors.DARK_GREY, 0xFF5555FF,        Colors.LIGHT_GREEN, Colors.LIGHT_CYAN,
   Colors.LIGHT_RED, 0xFFFF55FF,        Colors.YELLOW,      Colors.WHITE,
 ];
+
+// ── Autocomplete helpers ──────────────────────────────────────────────────
+
+const AC_MAX_VISIBLE = 8;    // max items visible in the popup
+const AC_POPUP_W = 200;      // popup width in pixels
+const AC_ITEM_H = 10;        // height of each autocomplete item in pixels
+const AC_BG   = 0xFF1E2840;  // popup background
+const AC_SEL  = 0xFF2D4F8A;  // selected item background
+const AC_BORDER = 0xFF4466AA; // popup border
+const AC_TEXT = Colors.LIGHT_GREY;
+const AC_TEXT_HI = Colors.WHITE;
+const AC_TYPE_FN  = Colors.YELLOW;
+const AC_TYPE_OBJ = Colors.LIGHT_CYAN;
+
+/** Get tab-completion candidates for the current input buffer. */
+function _getCompletions(buf: string): string[] {
+  // ── Filesystem path inside a string literal ──────────────────────────────
+  var pathM = buf.match(/(['"])(\/?[^'"]*?)([^/]*)$/);
+  if (pathM) {
+    var quote    = pathM[1];
+    var pathDir  = pathM[2];
+    var pathFile = pathM[3];
+    var rawBefore = buf.slice(0, buf.lastIndexOf(quote));
+    var singles = (rawBefore.match(/'/g) || []).length;
+    var doubles = (rawBefore.match(/"/g) || []).length;
+    if ((quote === "'" && singles % 2 === 0) ||
+        (quote === '"' && doubles % 2 === 0)) {
+      var dirToList = pathDir || '/';
+      if (!dirToList.startsWith('/')) {
+        dirToList = fs.cwd().replace(/\/?$/, '/') + dirToList;
+      }
+      var entries: Array<{ name: string; type: string }>;
+      try { entries = (fs.ls(dirToList) as Array<{ name: string; type: string }>) || []; } catch(_) { entries = []; }
+      var results: string[] = [];
+      for (var ei = 0; ei < entries.length; ei++) {
+        var ent = entries[ei];
+        if (ent.name.indexOf(pathFile) === 0) {
+          results.push(quote + pathDir + ent.name + (ent.type === 'directory' ? '/' : ''));
+        }
+      }
+      return results.sort();
+    }
+  }
+
+  // ── Identifier / property completion ─────────────────────────────────────
+  var m = buf.match(/[\w$][\w$.]*$/);
+  var prefix = m ? m[0] : '';
+  if (!prefix) return [];
+
+  var g = globalThis as any;
+  var dot = prefix.lastIndexOf('.');
+
+  if (dot === -1) {
+    var keys: string[] = [];
+    for (var k in g) {
+      if (k.indexOf(prefix) === 0) keys.push(k);
+    }
+    return keys.sort();
+  } else {
+    var objExpr = prefix.slice(0, dot);
+    var propPfx = prefix.slice(dot + 1);
+    var obj: any;
+    // Try to resolve the object expression via dot-splitting
+    var parts = objExpr.split('.');
+    obj = g;
+    for (var pi = 0; pi < parts.length; pi++) {
+      if (obj == null) return [];
+      obj = obj[parts[pi]];
+    }
+    if (obj == null) return [];
+    var keys2: string[] = [];
+    for (var k2 in obj) {
+      if (k2.indexOf(propPfx) === 0) keys2.push(objExpr + '.' + k2);
+    }
+    // Also include own-property names from the prototype chain
+    try {
+      var ownKeys = Object.getOwnPropertyNames(obj);
+      for (var oi = 0; oi < ownKeys.length; oi++) {
+        var ok = ownKeys[oi];
+        if (ok.indexOf(propPfx) === 0 && keys2.indexOf(objExpr + '.' + ok) === -1) {
+          keys2.push(objExpr + '.' + ok);
+        }
+      }
+    } catch (_) {}
+    return keys2.sort();
+  }
+}
+
+/** Get the type label for a completion candidate (for icon display). */
+function _getCompletionType(name: string): string {
+  try {
+    var g = globalThis as any;
+    var dot = name.lastIndexOf('.');
+    var val: any;
+    if (dot === -1) {
+      val = g[name];
+    } else {
+      var parts = name.split('.');
+      val = g;
+      for (var i = 0; i < parts.length; i++) {
+        if (val == null) return '?';
+        val = val[parts[i]];
+      }
+    }
+    if (typeof val === 'function') return 'fn';
+    if (typeof val === 'object' && val !== null) return 'obj';
+    if (typeof val === 'string') return 'str';
+    if (typeof val === 'number') return 'num';
+    if (typeof val === 'boolean') return 'bool';
+    return typeof val;
+  } catch (_) { return '?'; }
+}
+
+/** Extract a brief function signature. */
+function _getFnSignature(name: string): string {
+  try {
+    var g = globalThis as any;
+    var parts = name.split('.');
+    var val: any = g;
+    for (var i = 0; i < parts.length; i++) {
+      if (val == null) return '';
+      val = val[parts[i]];
+    }
+    if (typeof val !== 'function') return '';
+    var src = val.toString();
+    var sm = src.match(/^(?:async\s+)?(?:function\s*\w*\s*)?\(([^)]*)\)/);
+    if (!sm) sm = src.match(/^(?:async\s+)?(\([^)]*\))\s*=>/);
+    var params = sm ? (sm[1] || sm[0]) : '';
+    return '(' + params + ')';
+  } catch (_) { return ''; }
+}
 
 // ── TerminalApp ────────────────────────────────────────────────────────────
 
@@ -137,6 +426,12 @@ export class TerminalApp implements App {
   private _history:    string[] = [];   // oldest at index 0
   private _historyPos: number   = -1;  // -1 = no traversal, 0..n-1 = browsing
   private _historyDraft = '';          // saved live input while browsing
+
+  // ── Autocomplete state ────────────────────────────────────────────────────
+  private _acVisible = false;
+  private _acItems: string[] = [];
+  private _acSelected = 0;
+  private _acScroll = 0;        // scroll offset within the completion list
 
   onMount(win: WMWindow): void {
     this._win  = win;
@@ -161,8 +456,48 @@ export class TerminalApp implements App {
     this._blinkMs = 0;
     this._blinkOn = true;
 
+    // ── Scrollback: PgUp / PgDown ──────────────────────────────────────────
+    if (key === 'PageUp') {
+      this._term.scrollUp(this._term.rows - 1);
+      this._dismissAC();
+      return;
+    }
+    if (key === 'PageDown') {
+      this._term.scrollDown(this._term.rows - 1);
+      this._dismissAC();
+      return;
+    }
+
+    // ── Autocomplete navigation ────────────────────────────────────────────
+    if (this._acVisible) {
+      if (key === 'ArrowUp') {
+        this._acSelected = Math.max(0, this._acSelected - 1);
+        // Scroll popup if selection moves above visible area
+        if (this._acSelected < this._acScroll) this._acScroll = this._acSelected;
+        return;
+      }
+      if (key === 'ArrowDown') {
+        this._acSelected = Math.min(this._acItems.length - 1, this._acSelected + 1);
+        // Scroll popup if selection moves below visible area
+        if (this._acSelected >= this._acScroll + AC_MAX_VISIBLE) {
+          this._acScroll = this._acSelected - AC_MAX_VISIBLE + 1;
+        }
+        return;
+      }
+      if (key === 'Escape') {
+        this._dismissAC();
+        return;
+      }
+      if (ch === '\t' || (ch === '\n' || ch === '\r')) {
+        // Accept current completion
+        this._acceptCompletion();
+        return;
+      }
+    }
+
     // ── History navigation (items 642–643) ─────────────────────────────────
     if (key === 'ArrowUp') {
+      this._dismissAC();
       if (this._history.length === 0) return;
       if (this._historyPos < 0) {
         // Start browsing: save the current draft
@@ -175,6 +510,7 @@ export class TerminalApp implements App {
       return;
     }
     if (key === 'ArrowDown') {
+      this._dismissAC();
       if (this._historyPos < 0) return;
       if (this._historyPos < this._history.length - 1) {
         this._historyPos++;
@@ -191,6 +527,7 @@ export class TerminalApp implements App {
     this._historyPos = -1;
 
     if (ch === '\n' || ch === '\r') {
+      this._dismissAC();
       this._term.print('\n');
       var cmd = this._inputBuf.trim();
       this._eval(cmd);
@@ -206,10 +543,151 @@ export class TerminalApp implements App {
       if (this._inputBuf.length > 0) {
         this._inputBuf = this._inputBuf.slice(0, -1);
         this._term.print('\b');
+        this._updateAC();
       }
+    } else if (ch === '\t') {
+      // Tab without AC visible — trigger completion
+      this._updateAC();
+      if (this._acItems.length === 1) {
+        this._acceptCompletion();
+      } else if (!this._acVisible && this._acItems.length > 0) {
+        this._acVisible = true;
+        this._acSelected = 0;
+        this._acScroll = 0;
+      }
+    } else if (ch === '\x1b') {
+      this._dismissAC();
     } else if (ch >= ' ') {
       this._inputBuf += ch;
       this._term.print(ch);
+      this._updateAC();
+    }
+  }
+
+  // ── Autocomplete logic ──────────────────────────────────────────────────
+
+  /** Update the autocomplete list based on current input. */
+  private _updateAC(): void {
+    if (this._inputBuf.length < 2) { this._dismissAC(); return; }
+    var items = _getCompletions(this._inputBuf);
+    if (items.length === 0 || (items.length === 1 && items[0] === this._inputBuf)) {
+      this._dismissAC();
+      return;
+    }
+    this._acItems = items.slice(0, 50); // cap at 50 candidates
+    this._acSelected = 0;
+    this._acScroll = 0;
+    this._acVisible = true;
+  }
+
+  /** Dismiss the autocomplete popup. */
+  private _dismissAC(): void {
+    this._acVisible = false;
+    this._acItems = [];
+    this._acSelected = 0;
+    this._acScroll = 0;
+  }
+
+  /** Accept the currently selected completion. */
+  private _acceptCompletion(): void {
+    if (!this._term || this._acItems.length === 0) return;
+    var full = this._acItems[this._acSelected];
+    // Find the prefix being completed
+    var m = this._inputBuf.match(/[\w$][\w$.]*$/);
+    var partial = m ? m[0] : '';
+    var suffix = full.slice(partial.length);
+    // Erase current input and reprint with the completion
+    for (var i = 0; i < this._inputBuf.length; i++) this._term.print('\b');
+    this._inputBuf = this._inputBuf.slice(0, this._inputBuf.length - partial.length) + full;
+    this._term.print(this._inputBuf);
+    this._dismissAC();
+  }
+
+  /** Render the autocomplete popup overlay. */
+  private _renderAC(): void {
+    if (!this._acVisible || !this._term || !this._win) return;
+    var canvas = this._win.canvas;
+    var term = this._term;
+
+    // Position popup below the cursor
+    var cursorPx = term.col * CHAR_W;
+    var cursorPy = (term.row + 1) * CHAR_H;  // one row below cursor
+
+    // Clamp so popup doesn't go off-screen
+    var visibleCount = Math.min(this._acItems.length, AC_MAX_VISIBLE);
+    var popupH = visibleCount * AC_ITEM_H + 4; // 2px border top+bottom
+    var popupW = AC_POPUP_W;
+
+    // If popup would go below canvas, show above cursor instead
+    if (cursorPy + popupH > canvas.height) {
+      cursorPy = term.row * CHAR_H - popupH;
+      if (cursorPy < 0) cursorPy = 0;
+    }
+    // Clamp horizontally
+    if (cursorPx + popupW > canvas.width - SCROLLBAR_W) {
+      cursorPx = canvas.width - SCROLLBAR_W - popupW;
+      if (cursorPx < 0) cursorPx = 0;
+    }
+
+    var x = cursorPx;
+    var y = cursorPy;
+
+    // Background + border
+    canvas.fillRect(x, y, popupW, popupH, AC_BG);
+    canvas.drawRect(x, y, popupW, popupH, AC_BORDER);
+
+    // Items
+    for (var i = 0; i < visibleCount; i++) {
+      var idx = i + this._acScroll;
+      if (idx >= this._acItems.length) break;
+      var item = this._acItems[idx];
+      var iy = y + 2 + i * AC_ITEM_H;
+      var isSelected = idx === this._acSelected;
+
+      // Selected highlight
+      if (isSelected) {
+        canvas.fillRect(x + 1, iy, popupW - 2, AC_ITEM_H, AC_SEL);
+      }
+
+      // Type icon (2 chars)
+      var type = _getCompletionType(item);
+      var iconColor = type === 'fn' ? AC_TYPE_FN :
+                      type === 'obj' ? AC_TYPE_OBJ :
+                      type === 'str' ? Colors.LIGHT_GREEN :
+                      type === 'num' ? Colors.LIGHT_CYAN :
+                      Colors.DARK_GREY;
+      var iconLabel = type === 'fn' ? 'f' : type === 'obj' ? '{}' :
+                      type === 'str' ? 'S' : type === 'num' ? '#' :
+                      type === 'bool' ? 'B' : '?';
+      canvas.drawText(x + 3, iy + 1, iconLabel, iconColor);
+
+      // Item name (truncate to fit)
+      var displayName = item;
+      // Show only the last segment after the last dot for readability
+      var lastDot = item.lastIndexOf('.');
+      if (lastDot !== -1) displayName = item.slice(lastDot + 1);
+      if (displayName.length > 20) displayName = displayName.slice(0, 18) + '..';
+      canvas.drawText(x + 16, iy + 1, displayName, isSelected ? AC_TEXT_HI : AC_TEXT);
+
+      // Function signature hint for the selected item
+      if (isSelected && type === 'fn') {
+        var sig = _getFnSignature(item);
+        if (sig) {
+          var sigTrunc = sig.length > 18 ? sig.slice(0, 16) + '..' : sig;
+          canvas.drawText(x + 16 + (displayName.length + 1) * 8, iy + 1, sigTrunc, Colors.DARK_GREY);
+        }
+      }
+    }
+
+    // Scrollbar in popup if there are more items than visible
+    if (this._acItems.length > AC_MAX_VISIBLE) {
+      var sbX = x + popupW - 5;
+      var sbH = popupH - 4;
+      canvas.fillRect(sbX, y + 2, 3, sbH, 0xFF2A2A3A);
+      var ratio = AC_MAX_VISIBLE / this._acItems.length;
+      var thumbH = Math.max(4, Math.floor(sbH * ratio));
+      var thumbY = y + 2 + Math.floor((sbH - thumbH) * (this._acScroll / (this._acItems.length - AC_MAX_VISIBLE)));
+      canvas.fillRect(sbX, thumbY, 3, thumbH, 0xFF6688AA);
     }
   }
 
@@ -243,6 +721,28 @@ export class TerminalApp implements App {
   }
 
   onMouse(event: MouseEvent): void {
+    if (!this._term) return;
+    this._dirty = true;
+
+    // ── Scrollbar drag: click on scrollbar area to jump ────────────────────
+    var sbX = this._term.cols * CHAR_W + 1;
+    if (event.type === 'click' && event.x >= sbX) {
+      var totalLines = this._term.scrollbackCount + this._term.rows;
+      if (totalLines > this._term.rows) {
+        var fraction = event.y / (this._win?.canvas.height || 1);
+        var targetOffset = Math.floor((1 - fraction) * (totalLines - this._term.rows));
+        targetOffset = Math.max(0, Math.min(this._term.scrollbackCount, targetOffset));
+        if (targetOffset === 0) {
+          this._term.resumeLive();
+        } else {
+          // Use scrollUp/scrollDown to reach the target
+          this._term.resumeLive();
+          this._term.scrollUp(targetOffset);
+        }
+      }
+      return;
+    }
+
     // [Item 673] OSC 8 hyperlink click: map pixel → VGA cell, look up link
     if (event.type === 'click') {
       var col = Math.floor(event.x / CHAR_W);
@@ -270,7 +770,11 @@ export class TerminalApp implements App {
     }
     if (!this._dirty) return false;
     this._dirty = false;
-    if (this._term) this._term.drawCursor(this._blinkOn);
+    if (this._term) {
+      this._term.drawCursor(this._blinkOn);
+      this._term.drawScrollbar();
+      this._renderAC();
+    }
     return true;
   }
 
@@ -280,6 +784,7 @@ export class TerminalApp implements App {
     this._term.println('JSOS Terminal (windowed mode)');
     this._term.setColor(Colors.DARK_GREY);
     this._term.println('Type JavaScript. Enter to evaluate.');
+    this._term.println('PgUp/PgDown to scroll. Tab for autocomplete.');
     this._term.println('');
     this._term.setColor(Colors.LIGHT_GREY);
   }
