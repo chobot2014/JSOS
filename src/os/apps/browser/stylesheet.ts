@@ -41,6 +41,15 @@ interface CSSMatchEntry {
 const _cssMatchCache = new Map<string, CSSMatchEntry>();
 var _cssMatchHits = 0;
 var _cssMatchTotal = 0;
+// Pre-rejection counters (for diagnostics)
+var _rejState = 0;
+var _rejTag = 0;
+var _rejCls = 0;
+var _rejId = 0;
+var _rejAttr = 0;
+var _rejParent = 0;
+var _fastSimple = 0;
+var _fullMatch = 0;
 
 // ── Module-level reusable buffers for cache-miss match collection ────────────
 // Avoids allocating 3 arrays per cache miss (153 misses × 3 = 459 allocs saved
@@ -61,6 +70,8 @@ export function flushCSSMatchCache(): void {
   _cssMatchCache.clear();
   _cssMatchHits  = 0;
   _cssMatchTotal = 0;
+  _rejState = 0; _rejTag = 0; _rejCls = 0; _rejId = 0; _rejAttr = 0; _rejParent = 0;
+  _fastSimple = 0; _fullMatch = 0;
   _parsedCompoundCache.clear();
   _declBlockCache.clear();  // CSS vars change across pages, invalidates cached props
 }
@@ -68,6 +79,13 @@ export function flushCSSMatchCache(): void {
 /** Return CSS match cache stats: [hits, total, cacheSize] */
 export function getCSSMatchCacheStats(): [number, number, number] {
   return [_cssMatchHits, _cssMatchTotal, _cssMatchCache.size];
+}
+
+/** Return pre-rejection breakdown string for diagnostics. */
+export function getCSSRejectionStats(): string {
+  return 'rej:state=' + _rejState + ' tag=' + _rejTag + ' cls=' + _rejCls +
+    ' id=' + _rejId + ' attr=' + _rejAttr + ' parent=' + _rejParent +
+    ' simple=' + _fastSimple + ' full=' + _fullMatch;
 }
 
 export type { RuleIndex };
@@ -91,6 +109,10 @@ export interface CSSRule {
   _reqClasses?: string[];
   /** Rightmost compound ID (if any) for fast pre-rejection */
   _reqId?: string;
+  /** Required attribute name from rightmost compound (for universal rule fast-reject) */
+  _reqAttr?: string;
+  /** Required parent tag for '>' (direct child) combinator rules */
+  _reqParentTag?: string;
   /** True if single-selector, single-compound, no pseudos, no attrs —
    *  when all pre-checks pass, skip matchesParsedSel entirely */
   _simpleMatch?: boolean;
@@ -900,13 +922,22 @@ export function parseStylesheet(css: string): CSSRule[] {
     // At-rule
     if (css.charCodeAt(i) === CC_AT) {
       i++;
-      var atKw = readUntil(' {;').replace(/\s+/g, '').toLowerCase();
+      // Read at-rule keyword (stops at space, '{', or ';')
+      var atKw = readUntil(' {;').trim().toLowerCase();
       skipWs();
+      // Read at-rule prelude (name/condition after keyword) until '{' or ';'.
+      // Example: @keyframes shift { → atKw="keyframes", atPrelude="shift"
+      //          @media (max-width: 768px) { → atKw="media", atPrelude="(max-width: 768px)"
+      var atPrelude = '';
+      if (i < css.length && css.charCodeAt(i) !== CC_LBRACE && css.charCodeAt(i) !== CC_SEMI) {
+        atPrelude = readUntil('{;').trim();
+        skipWs();
+      }
       if (i < css.length && css.charCodeAt(i) === CC_SEMI) { i++; continue; } // @import etc
       if (i < css.length && css.charCodeAt(i) === CC_LBRACE) {
         i++;
         // For @media — parse inner rules if query matches
-        if (atKw.startsWith('media') || atKw.startsWith('supports') || atKw.startsWith('layer')) {
+        if (atKw === 'media' || atKw === 'supports' || atKw === 'layer') {
           // Read inner content (handles one level of nesting)
           var depth2 = 1;
           var start2 = i;
@@ -919,12 +950,10 @@ export function parseStylesheet(css: string): CSSRule[] {
           var inner = css.slice(start2, i - 1);
           // Evaluate @media condition (skip on mismatch)
           var shouldInclude = true;
-          if (atKw.startsWith('media')) {
-            var mediaCondition = atKw.slice(5).trim();
-            shouldInclude = evalMediaQuery(mediaCondition);
-          } else if (atKw.startsWith('supports')) {
-            var supportsCondition = atKw.slice(8).trim();
-            shouldInclude = evalSupportsQuery(supportsCondition);
+          if (atKw === 'media') {
+            shouldInclude = evalMediaQuery(atPrelude);
+          } else if (atKw === 'supports') {
+            shouldInclude = evalSupportsQuery(atPrelude);
           }
           // @layer — always include (layer ordering not implemented)
           if (shouldInclude) {
@@ -1386,6 +1415,14 @@ export function computeElementStyle(
     colorScheme:    inherited.colorScheme,
   };
 
+  // ── Apply always-matching universal rules as lowest-priority base ──────────
+  // These rules (e.g. * { box-sizing: border-box }) match every element
+  // unconditionally.  Applying them here once avoids per-element iteration
+  // in the matching loop.  Higher-specificity rules will override as needed.
+  if (index && index.alwaysMatchProps) {
+    mergeProps(result, index.alwaysMatchProps);
+  }
+
   // ── Collect matching rules (with result cache for stable elements) ─────────
   // Cache key: tag + filteredId + CSS-relevant-cls only — inlineStyle is
   // intentionally excluded so that elements with unique inline styles
@@ -1475,12 +1512,12 @@ export function computeElementStyle(
   for (var ri = 0; ri < candidates.length; ri++) {
     var rule = candidates[ri]!;
     // Skip rules that only match via :hover/:focus/:active (never match during static layout)
-    if (rule._stateOnly) continue;
+    if (rule._stateOnly) { _rejState++; continue; }
     // Fast pre-rejection: check rightmost compound tag/class/id before calling
     // the full matchesParsedSel function.  Saves function-call overhead entirely
     // for rules that can't match this element.
     var _rt = rule._reqTag;
-    if (_rt !== undefined && _rt !== tag) continue;
+    if (_rt !== undefined && _rt !== tag) { _rejTag++; continue; }
     var _rcs = rule._reqClasses;
     if (_rcs !== undefined) {
       var _clsMiss = false;
@@ -1489,19 +1526,30 @@ export function computeElementStyle(
       } else {
         for (var _ci = 0; _ci < _rcs.length; _ci++) { if (cls.indexOf(_rcs[_ci]!) < 0) { _clsMiss = true; break; } }
       }
-      if (_clsMiss) continue;
+      if (_clsMiss) { _rejCls++; continue; }
     }
     var _rid = rule._reqId;
-    if (_rid !== undefined && _rid !== id) continue;
+    if (_rid !== undefined && _rid !== id) { _rejId++; continue; }
+    // Fast attribute pre-rejection: rules with [attr...] selectors
+    // can be rejected by a single Map.has() check if the element lacks the attribute.
+    var _ra = rule._reqAttr;
+    if (_ra !== undefined && !attrs.has(_ra)) { _rejAttr++; continue; }
+    // Fast parent-tag pre-rejection: rules with '>' combinator require
+    // a specific parent tag.  Check ancestors[0].tag before calling
+    // matchesParsedSel (saves full ancestor-walking function call overhead).
+    var _rpt = rule._reqParentTag;
+    if (_rpt !== undefined && ancestors && ancestors.length > 0 && ancestors[0]!.tag !== _rpt) { _rejParent++; continue; }
     // Fast path: simple single-compound rules with no pseudos/attrs —
     // all pre-checks passed above, so the rule matches without calling matchesParsedSel.
     // This eliminates 2 function calls (matchesParsedSel + _matchParsedCompound) per rule.
     if (rule._simpleMatch) {
+      _fastSimple++;
       var srcOrder = index ? rule.order : ri;
       _gmProps[_gmLen] = rule.props; _gmSpec[_gmLen] = rule.spec; _gmOrder[_gmLen] = srcOrder; _gmLen++;
       continue;
     }
     // Hot path: use pre-parsed selectors (no regex) when available
+    _fullMatch++;
     if (rule.parsedSels) {
       for (var si = 0; si < rule.parsedSels.length; si++) {
         if (matchesParsedSel(tag, id, cls, attrs, rule.parsedSels[si]!, ancestors, sibIdx, sibCount, _clsSet)) {
@@ -1661,10 +1709,26 @@ export function buildSheetIndex(rules: CSSRule[]): RuleIndex {
           // never rejects.  Checking ALL classes catches multi-class mismatches.
           _sr._reqClasses = _rc0.classes.length > 0 ? _rc0.classes : undefined;
           _sr._reqId = _rc0.ids.length > 0 ? _rc0.ids[0] : undefined;
+          // Pre-compute required attribute for rules with [attr...] selectors.
+          // ANY attribute selector ([attr], [attr=val], [attr^=val], etc.)
+          // requires the attribute to EXIST on the element.  Checking
+          // attrs.has() is O(1) and eliminates matchesParsedSel overhead.
+          if (_rc0.attrs.length > 0) {
+            _sr._reqAttr = _rc0.attrs[0]!.name;
+          }
           // Fast path: single-compound, no pseudos, no attrs → skip matchesParsedSel
           var _ps0 = _sr.parsedSels[0]!;
           _sr._simpleMatch = _ps0.compounds.length === 1 &&
             _rc0.pseudos.length === 0 && _rc0.attrs.length === 0;
+          // Pre-compute required parent tag for '>' (direct child) combinators.
+          // If compounds[1] has a tag and the combinator is '>', we can reject
+          // by checking ancestors[0].tag instead of calling matchesParsedSel.
+          if (_ps0.compounds.length >= 2 && _ps0.combinators[0] === '>') {
+            var _pc1 = _ps0.compounds[1]!;
+            if (_pc1.tag && _pc1.tag !== '*') {
+              _sr._reqParentTag = _pc1.tag;
+            }
+          }
         } else {
           // Multi-selector: only set _reqTag if ALL selectors require the same tag
           var _commonTag: string | undefined = _rc0.tag && _rc0.tag !== '*' ? _rc0.tag : undefined;
@@ -1679,12 +1743,49 @@ export function buildSheetIndex(rules: CSSRule[]): RuleIndex {
     }
   }
   var idx = buildRuleIndex(rules);
+
+  // ── Pre-merge always-matching universal rules ─────────────────────────────
+  // Universal rules with _simpleMatch=true (single-compound, no pseudos, no
+  // attrs) and no _reqTag/_reqClasses/_reqId/_reqAttr match EVERY element
+  // unconditionally.  Pre-merging them into idx.alwaysMatchProps and removing
+  // them from universalRules eliminates per-element iteration/matching overhead.
+  var _amRules: CSSRule[] = [];
+  var _nonAmRules: CSSRule[] = [];
+  for (var _ami = 0; _ami < idx.universalRules.length; _ami++) {
+    var _amr = idx.universalRules[_ami]!;
+    if (_amr._simpleMatch && !_amr._reqTag && !_amr._reqClasses && !_amr._reqId && !_amr._reqAttr) {
+      _amRules.push(_amr);
+    } else {
+      _nonAmRules.push(_amr);
+    }
+  }
+  if (_amRules.length > 0) {
+    // Sort by (spec, order) to match cascade ordering
+    _amRules.sort(function(a, b) { return a.spec !== b.spec ? a.spec - b.spec : a.order - b.order; });
+    var _amMerged: CSSProps = {} as CSSProps;
+    for (var _amj = 0; _amj < _amRules.length; _amj++) {
+      mergeProps(_amMerged, _amRules[_amj]!.props);
+    }
+    // Pre-compute _ks for fast mergeProps on every computeElementStyle call
+    var _amKeys = Object.keys(_amMerged);
+    var _amKs: string[] = [];
+    for (var _aki = 0; _aki < _amKeys.length; _aki++) {
+      var _akk = _amKeys[_aki]!;
+      if (_akk !== 'important' && _akk !== '_inherit' && _akk !== '_initial' && _akk !== '_ks') _amKs.push(_akk);
+    }
+    (_amMerged as any)._ks = _amKs;
+    idx.alwaysMatchProps = _amMerged;
+    idx.alwaysMatchCount = _amRules.length;
+    idx.universalRules = _nonAmRules;
+  }
+
   // Debug: log how many rules landed in universalRules (checked for EVERY element)
   if (typeof os !== 'undefined' && os && os.debug) {
     var _simpleCount = 0;
     for (var _dbi = 0; _dbi < rules.length; _dbi++) { if (rules[_dbi]!._simpleMatch) _simpleCount++; }
     os.debug.log('[browser] ruleIndex: rules=' + rules.length +
       ' universalRules=' + idx.universalRules.length +
+      ' alwaysMatch=' + idx.alwaysMatchCount +
       ' stateOnly=' + _stateSkipped +
       ' simpleMatch=' + _simpleCount +
       ' classBuckets=' + idx.classBuckets.size +

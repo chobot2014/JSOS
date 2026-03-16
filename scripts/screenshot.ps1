@@ -222,30 +222,47 @@ if (-not $proc.HasExited) {
 
             Write-Host "  PPM: ${ppmW}x${ppmH}" -ForegroundColor DarkGray
 
-            $bitmap = New-Object System.Drawing.Bitmap($ppmW, $ppmH, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
-            $bmpData = $bitmap.LockBits(
-                (New-Object System.Drawing.Rectangle(0, 0, $ppmW, $ppmH)),
-                [System.Drawing.Imaging.ImageLockMode]::WriteOnly,
-                [System.Drawing.Imaging.PixelFormat]::Format24bppRgb
-            )
+            $pngPath = Join-Path (Resolve-Path "test-output").Path "screenshot.png"
+            # Remove stale PNG before saving to avoid GDI+ lock errors
+            if (Test-Path $pngPath) { Remove-Item $pngPath -Force -ErrorAction SilentlyContinue }
 
-            # PPM is RGB, BMP is BGR -- copy row by row with byte swap
-            $stride = $bmpData.Stride
-            $pixelData = $headerEnd
-            for ($y = 0; $y -lt $ppmH; $y++) {
-                $rowStart = $pixelData + ($y * $ppmW * 3)
-                for ($x = 0; $x -lt $ppmW; $x++) {
-                    $srcOff = $rowStart + ($x * 3)
-                    $dstOff = ($y * $stride) + ($x * 3)
-                    # RGB -> BGR
-                    [System.Runtime.InteropServices.Marshal]::WriteByte($bmpData.Scan0, $dstOff + 0, $raw[$srcOff + 2])
-                    [System.Runtime.InteropServices.Marshal]::WriteByte($bmpData.Scan0, $dstOff + 1, $raw[$srcOff + 1])
-                    [System.Runtime.InteropServices.Marshal]::WriteByte($bmpData.Scan0, $dstOff + 2, $raw[$srcOff + 0])
+            $bitmap = New-Object System.Drawing.Bitmap($ppmW, $ppmH, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+
+            try {
+                # Fast path: LockBits with RGB->BGR swap
+                $bmpData = $bitmap.LockBits(
+                    (New-Object System.Drawing.Rectangle(0, 0, $ppmW, $ppmH)),
+                    [System.Drawing.Imaging.ImageLockMode]::WriteOnly,
+                    [System.Drawing.Imaging.PixelFormat]::Format24bppRgb
+                )
+
+                $stride = $bmpData.Stride
+                $pixelData = $headerEnd
+                for ($y = 0; $y -lt $ppmH; $y++) {
+                    $rowStart = $pixelData + ($y * $ppmW * 3)
+                    for ($x = 0; $x -lt $ppmW; $x++) {
+                        $srcOff = $rowStart + ($x * 3)
+                        $dstOff = ($y * $stride) + ($x * 3)
+                        # RGB -> BGR
+                        [System.Runtime.InteropServices.Marshal]::WriteByte($bmpData.Scan0, $dstOff + 0, $raw[$srcOff + 2])
+                        [System.Runtime.InteropServices.Marshal]::WriteByte($bmpData.Scan0, $dstOff + 1, $raw[$srcOff + 1])
+                        [System.Runtime.InteropServices.Marshal]::WriteByte($bmpData.Scan0, $dstOff + 2, $raw[$srcOff + 0])
+                    }
+                }
+                $bitmap.UnlockBits($bmpData)
+            } catch {
+                Write-Host "  LockBits failed, using SetPixel fallback..." -ForegroundColor Yellow
+                # Slow fallback: SetPixel per pixel
+                $off = $headerEnd
+                for ($y = 0; $y -lt $ppmH; $y++) {
+                    for ($x = 0; $x -lt $ppmW; $x++) {
+                        $r = $raw[$off]; $g = $raw[$off+1]; $b = $raw[$off+2]; $off += 3
+                        # QEMU VGA FB is BGRA, PPM stores as-is: bytes are B,G,R
+                        $bitmap.SetPixel($x, $y, [System.Drawing.Color]::FromArgb(255, $b, $g, $r))
+                    }
                 }
             }
 
-            $bitmap.UnlockBits($bmpData)
-            $pngPath = (Resolve-Path "test-output").Path + "\screenshot.png"
             $bitmap.Save($pngPath, [System.Drawing.Imaging.ImageFormat]::Png)
             $bitmap.Dispose()
             $pngSize = (Get-Item $pngPath).Length

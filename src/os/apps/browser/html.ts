@@ -599,6 +599,21 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     curCSS.aspectRatio = undefined;
     // Merge all defined properties from p into curCSS using fast _ks path
     mergeProps(curCSS, p);
+    // Propagate containing block width constraint to children:
+    // When a block-level element has maxWidth or explicit width, constrain
+    // all descendant containers so they don't exceed the parent's width.
+    // _containingMaxWidth is NOT reset above (unlike maxWidth), so it
+    // survives across pushCSS calls until the element is popped.
+    if (curCSS.maxWidth !== undefined && curCSS.maxWidth > 0) {
+      curCSS._containingMaxWidth = curCSS._containingMaxWidth !== undefined
+        ? Math.min(curCSS._containingMaxWidth, curCSS.maxWidth)
+        : curCSS.maxWidth;
+    }
+    if (curCSS.width !== undefined && curCSS.width > 0 && curCSS.display !== 'flex' && curCSS.display !== 'grid') {
+      curCSS._containingMaxWidth = curCSS._containingMaxWidth !== undefined
+        ? Math.min(curCSS._containingMaxWidth, curCSS.width)
+        : curCSS.width;
+    }
   }
   function popCSS(): void {
     if (cssStack.length > 0) {
@@ -1852,6 +1867,10 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
               if (curCSS.heightPct && curCSS.heightPct > 0) _fp.heightPct = curCSS.heightPct;
               if (curCSS.minWidth !== undefined) _fp.minWidth = curCSS.minWidth;
               if (curCSS.maxWidth !== undefined) _fp.maxWidth = curCSS.maxWidth;
+              // Propagate ancestor block's width constraint to flex container
+              if (!_fp.maxWidth && !_fp.boxWidth && curCSS._containingMaxWidth !== undefined) {
+                _fp.maxWidth = curCSS._containingMaxWidth;
+              }
               if (curCSS.minHeight !== undefined) _fp.minHeight = curCSS.minHeight;
               if (curCSS.maxHeight !== undefined) _fp.maxHeight = curCSS.maxHeight;
               if (curCSS.aspectRatio !== undefined) _fp.aspectRatio = curCSS.aspectRatio;
@@ -1891,6 +1910,10 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
               if (curCSS.boxSizing) _fp.boxSizing = curCSS.boxSizing;
               if (curCSS.transform && curCSS.transform !== 'none') _fp.transform = curCSS.transform;
               if (curCSS._onclickElId) _fp.elId = curCSS._onclickElId;
+              // margin:auto centering for flex containers with width constraint
+              if ((curCSS.marginLeftAuto || curCSS.marginRightAuto) && (_fp.maxWidth || _fp.boxWidth)) {
+                _fp.centerBlock = true;
+              }
               pushContainer(tok.tag, 'flex', _fp);
               break;
             }
@@ -1916,6 +1939,10 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
               if (curCSS.heightPct && curCSS.heightPct > 0) _gp.heightPct = curCSS.heightPct;
               if (curCSS.minWidth !== undefined) _gp.minWidth = curCSS.minWidth;
               if (curCSS.maxWidth !== undefined) _gp.maxWidth = curCSS.maxWidth;
+              // Propagate ancestor block's width constraint to grid container
+              if (!_gp.maxWidth && !_gp.boxWidth && curCSS._containingMaxWidth !== undefined) {
+                _gp.maxWidth = curCSS._containingMaxWidth;
+              }
               if (curCSS.minHeight !== undefined) _gp.minHeight = curCSS.minHeight;
               if (curCSS.maxHeight !== undefined) _gp.maxHeight = curCSS.maxHeight;
               if (curCSS.bgColor !== undefined) _gp.bgColor = curCSS.bgColor;

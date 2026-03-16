@@ -13,7 +13,7 @@
  *  ArrayBufferPool       — fixed-size recycled ArrayBuffers for network I/O
  */
 
-import type { CSSRule } from './stylesheet.js';
+import type { CSSRule, CSSProps } from './stylesheet.js';
 import type { RenderedLine, RenderedSpan } from './types.js';
 import { CHAR_W } from './constants.js';
 
@@ -288,6 +288,12 @@ export interface RuleIndex {
    *  cache keys: classes not in this set are irrelevant to CSS matching
    *  and can be stripped from cache keys for better hit rate. */
   cssClassSet:    Set<string>;
+  /** Pre-merged props from universal rules that unconditionally match every element
+   *  (simple `*` selectors with no pseudos/attrs).  Applied at the start of
+   *  computeElementStyle, removed from universalRules to avoid redundant iteration. */
+  alwaysMatchProps: CSSProps | null;
+  /** Number of always-matching universal rules removed from universalRules. */
+  alwaysMatchCount: number;
 }
 
 /** Build a RuleIndex from a list of CSSRule objects. */
@@ -414,7 +420,7 @@ export function buildRuleIndex(rules: CSSRule[]): RuleIndex {
     }
   }
 
-  return { tagBuckets, classBuckets, idBuckets, universalRules, contentRules, cssClassSet };
+  return { tagBuckets, classBuckets, idBuckets, universalRules, contentRules, cssClassSet, alwaysMatchProps: null, alwaysMatchCount: 0 };
 }
 
 /**

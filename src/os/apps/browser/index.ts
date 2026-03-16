@@ -979,6 +979,10 @@ export class BrowserApp implements App {
     }
     // Clip stack for overflow:hidden containers (item 3.10)
     var _clipStack: Array<{endY: number; saved: ReturnType<typeof canvas.saveClipRect>}> = [];
+    // Track active boxDeco region for contained background fills
+    var _activeDecoX = 0;
+    var _activeDecoW = w;
+    var _activeDecoEndY = -1; // absolute Y where the active deco box ends
     for (var i = _lo; i < _lines.length; i++) {
       var line  = _lines[i];
       var lineY = line.y - _sv;
@@ -1007,6 +1011,10 @@ export class BrowserApp implements App {
       // Track opacity for this element — affects bg + text alpha
       var _decoOpacity = 1;
       var _decoTextShadow: _TextShadowLayer[] | null = null;
+      // Expire active deco region when past its end
+      if (_activeDecoEndY >= 0 && absY > _activeDecoEndY) {
+        _activeDecoX = 0; _activeDecoW = w; _activeDecoEndY = -1;
+      }
       if (line.boxDeco) {
         var deco   = line.boxDeco;
         if (deco.opacity !== undefined && deco.opacity < 1) _decoOpacity = deco.opacity;
@@ -1014,6 +1022,10 @@ export class BrowserApp implements App {
         var decoY  = absY - 1;
         var decoW  = deco.w;
         var decoH  = deco.h;
+        // Track active deco region for contained bgColor fills
+        _activeDecoX = decoX;
+        _activeDecoW = decoW;
+        _activeDecoEndY = absY + decoH;
         var decoR  = deco.borderRadius || 0;
 
         // 1. Box-shadow (behind element — outer shadows; then inset shadows after bg)
@@ -1267,8 +1279,8 @@ export class BrowserApp implements App {
       }
 
       if (line.bgColor) {
-        // Skip full-width fill when boxDeco already painted a rounded background
-        if (!(line.boxDeco && (line.boxDeco.borderRadius || 0) > 0)) {
+        // Skip full-width fill when boxDeco already painted the background at correct dimensions
+        if (!(line.boxDeco && (line.boxDeco.bgColor !== undefined || (line.boxDeco.borderRadius || 0) > 0))) {
           var _lbgc = line.bgColor;
           var _lbR = (_lbgc >> 16) & 0xFF, _lbG = (_lbgc >> 8) & 0xFF, _lbB = _lbgc & 0xFF;
           if (_decoOpacity < 1) {
@@ -1279,7 +1291,8 @@ export class BrowserApp implements App {
               (Math.round((_lbG * _la + 255 * _laInv) / 255) << 8) |
               Math.round((_lbB * _la + 255 * _laInv) / 255);
           }
-          canvas.fillRect(0, absY - 1, w, line.lineH + 1, _lbgc);
+          // Use active deco region when inside a box, otherwise full-width
+          canvas.fillRect(_activeDecoX, absY - 1, _activeDecoW, line.lineH + 1, _lbgc);
         }
       }
 
@@ -2881,45 +2894,29 @@ export class BrowserApp implements App {
     if (sheets.length > 0) {
       try {
         var _shT2b = Date.now();
-        // Performance optimisation — JS-heavy sites (e.g. Google, React SPAs) use
-        // CSS display:none / visibility:hidden to hide ALL content until JavaScript
-        // runs (FOUC prevention).  Doing a full pass2 WITH display:none filtering on
-        // such pages wastes ~2-3 seconds and always produces 0 visible nodes, forcing
-        // an immediate fallback re-parse.  Instead, skip straight to
-        // ignoreDisplayNone=true when both of the following are true:
-        //   1. The page has scripts  (JS will control visibility at runtime)
-        //   2. Pass1 found substantial content (>20 nodes)
-        // For pages WITHOUT scripts, or pages with very little pass1 content, we
-        // still run display:none filtering so pure-CSS hidden sections stay hidden.
+        // JS-heavy sites (e.g. Google, React SPAs) use CSS display:none to hide
+        // ALL content until JavaScript runs (FOUC prevention).  For such pages,
+        // skip display:none filtering entirely (ignoreDisplayNone=true) since JS
+        // controls visibility at runtime.  For pure-CSS pages, honour display:none.
         var _p2IgnoreNone = r.scripts.length > 0 && _pass1NodeCount > 20;
 
-        // BIG PERF WIN: For JS-heavy pages, skip pass2 CSS matching entirely.
-        // Inline scripts will inject their own <style> tags and trigger a
-        // rerender with full CSS.  Pass2's CSS computation (~7s) is immediately
-        // obsoleted.  Use unstyled pass1 nodes for the initial layout — the
-        // visible result is shown for <1s before the rerender replaces it.
-        if (_p2IgnoreNone) {
-          os.debug.log('[browser] JS-page: skipping pass2 CSS (deferred to rerender), rules:', sheets.length);
-          // Don't re-parse — keep pass1's nodes/scripts.
-          // forms/baseURL are already set from pass1.
-        } else {
-          r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, _p2IgnoreNone);
-          pumpCursor();  // keep cursor alive after pass2 parse (~500-2000ms)
-          os.debug.log('[browser] pass2 parseHTML:', r.nodes.length, 'nodes in', (Date.now() - _shT2b) + 'ms');
+        r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, _p2IgnoreNone);
+        pumpCursor();  // keep cursor alive after pass2 parse (~500-2000ms)
+        os.debug.log('[browser] pass2 parseHTML:', r.nodes.length, 'nodes in', (Date.now() - _shT2b) + 'ms',
+          _p2IgnoreNone ? '(ignoreDisplayNone)' : '');
 
-          // Fallback for non-JS pages: if display:none hid nearly everything,
-          // re-parse without it so something is shown.
-          if ((r.nodes.length < 10 || r.nodes.length < _pass1NodeCount * 0.4) && _pass1NodeCount > 20) {
-            os.debug.log('[browser] pass2 too few nodes (' + r.nodes.length + ' vs pass1=' + _pass1NodeCount + ') — re-parsing without display:none');
-            var _shT2c = Date.now();
-            r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, true);  // ignoreDisplayNone=true
-            pumpCursor();
-            os.debug.log('[browser] pass2-fallback:', r.nodes.length, 'nodes', r.widgets.length, 'widgets in', (Date.now() - _shT2c) + 'ms');
-          }
-
-          this._forms       = r.forms;
-          this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
+        // Fallback for non-JS pages: if display:none hid nearly everything,
+        // re-parse without it so something is shown.
+        if (!_p2IgnoreNone && (r.nodes.length < 10 || r.nodes.length < _pass1NodeCount * 0.4) && _pass1NodeCount > 20) {
+          os.debug.log('[browser] pass2 too few nodes (' + r.nodes.length + ' vs pass1=' + _pass1NodeCount + ') — re-parsing without display:none');
+          var _shT2c = Date.now();
+          r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, true);  // ignoreDisplayNone=true
+          pumpCursor();
+          os.debug.log('[browser] pass2-fallback:', r.nodes.length, 'nodes', r.widgets.length, 'widgets in', (Date.now() - _shT2c) + 'ms');
         }
+
+        this._forms       = r.forms;
+        this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
       } catch (_p2Err) {
         os.debug.log('[browser] pass2 parseHTML THREW:', String(_p2Err).slice(0, 200));
       }
@@ -3026,7 +3023,7 @@ export class BrowserApp implements App {
           var r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex, true);
           pumpCursor();  // keep cursor alive after rerender parse
           var [_cacheHits, _cacheTotal, _cacheSize] = getCSSMatchCacheStats();
-          os.debug.log('[browser] rerender CSS in', (Date.now() - _rrT0) + 'ms, rules:', sheets.length, 'cacheHit:', _cacheHits + '/' + _cacheTotal);
+          os.debug.log('[browser] rerender CSS in', (Date.now() - _rrT0) + 'ms, rules:', sheets.length, 'cacheHit:', _cacheHits + '/' + _cacheTotal, 'cacheKeys:', _cacheSize);
           self2._forms = r2.forms;
           self2._layoutPage(r2.nodes as any, r2.widgets as any, self2._pageTitle, self2._pageURL, true /*isRerender*/);
           pumpCursor();  // keep cursor alive after rerender layout

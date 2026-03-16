@@ -580,6 +580,8 @@ export interface CSSProps {
   _pseudoAfter?:  string;  // resolved text of ::after  { content: "..." }
   // ── Click dispatch (set when element has onclick or data-jsos-el attr) ────
   _onclickElId?:  string;  // ID to fire click events on when user clicks this element
+  // ── Layout constraint propagation (non-CSS, curCSS-stack only) ────────────
+  _containingMaxWidth?: number; // Inherited max-width from ancestor block (not reset in pushCSS)
 }
 
 // ── Layout ────────────────────────────────────────────────────────────────────

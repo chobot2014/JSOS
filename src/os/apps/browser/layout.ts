@@ -537,7 +537,21 @@ function _layoutNodesImpl(
       }
       var fRowY0    = y;
       var fxLeft    = xLeft + (nd.paddingLeft || 0);
-      var fxAvail   = (nd.boxWidth ? Math.min(maxX, xLeft + nd.boxWidth) : maxX) - fxLeft - (nd.paddingRight || 0);
+      // Compute effective container width: explicit boxWidth → maxWidth → available space
+      var _fxEffMaxX = nd.boxWidth ? Math.min(maxX, xLeft + nd.boxWidth) : maxX;
+      if (!nd.boxWidth && nd.maxWidth && nd.maxWidth > 0) {
+        _fxEffMaxX = Math.min(_fxEffMaxX, xLeft + nd.maxWidth);
+      }
+      // margin:auto centering for flex containers with width constraint
+      if (nd.centerBlock && nd.maxWidth && nd.maxWidth > 0) {
+        var _fxAvailW = maxX - xLeft;
+        if (nd.maxWidth < _fxAvailW) {
+          var _fxCenterOff = Math.floor((_fxAvailW - nd.maxWidth) / 2);
+          fxLeft = xLeft + _fxCenterOff + (nd.paddingLeft || 0);
+          _fxEffMaxX = xLeft + _fxCenterOff + nd.maxWidth;
+        }
+      }
+      var fxAvail   = _fxEffMaxX - fxLeft - (nd.paddingRight || 0);
       var containerAlignItems = nd.alignItems || 'stretch';
       var justCon  = nd.justifyContent || 'flex-start';
       // Item 403: sort by 'order' property
@@ -1022,7 +1036,11 @@ function _layoutNodesImpl(
       if (lines.length > _fxLinesStart) {
         var _fxH3 = y - _fxYBeforeBox;
         var _fxW3 = (nd.boxWidth ? nd.boxWidth : (maxX - xLeft));
-        var _fxDeco3: BoxDecoration = { x: xLeft, w: _fxW3, h: _fxH3 };
+        // Constrain by maxWidth (from CSS or inherited containing block)
+        if (nd.maxWidth && nd.maxWidth > 0 && _fxW3 > nd.maxWidth) _fxW3 = nd.maxWidth;
+        // Use fxLeft (adjusted for centering/padding) for boxDeco x position
+        var _fxDecoX = nd.centerBlock && nd.maxWidth ? (fxLeft - (nd.paddingLeft || 0)) : xLeft;
+        var _fxDeco3: BoxDecoration = { x: _fxDecoX, w: _fxW3, h: _fxH3 };
         if (nd.borderRadius !== undefined) _fxDeco3.borderRadius = nd.borderRadius;
         if (nd.borderWidth) _fxDeco3.borderWidth = nd.borderWidth;
         if (nd.borderColor !== undefined) _fxDeco3.borderColor = nd.borderColor;
@@ -1590,11 +1608,16 @@ function _layoutNodesImpl(
       // Cap extremely tall narrow images (decorative icons) to reduce layout waste (R22: relaxed threshold)
       if (bp.kind === 'img' && wh > 200 && ww < 20 && !_cssHSet) wh = 200;
 
+      // Ensure buttons are at least wide enough for their label text
+      if (bp.kind === 'submit' || bp.kind === 'reset' || bp.kind === 'button') {
+        var _btnLabel = bp.value || (bp.kind === 'reset' ? 'Reset' : 'Submit');
+        var _btnMinW = _btnLabel.length * CHAR_W + 24;
+        if (ww < _btnMinW) ww = _btnMinW;
+      }
+
       // Clamp minimum widget dimensions — prevent negative or zero sizes
       if (ww < 1) ww = 1;
       if (wh < 1) wh = 1;
-
-
 
       // Skip effectively invisible widgets (< 2px in both dimensions)
       if (ww < 2 && wh < 2) continue;
