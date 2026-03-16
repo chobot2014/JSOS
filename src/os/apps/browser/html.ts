@@ -1046,6 +1046,17 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
     var _sibIdx = childCountStack.length > 0 ? childCountStack[childCountStack.length - 1]! : 0;
     if (childCountStack.length > 0) childCountStack[childCountStack.length - 1]!++;
     childCountStack.push(0);
+    // Fast-path: if inline style sets display:none, skip CSS entirely.
+    // ignoreDisplayNone respects inline display:none, so the element stays hidden
+    // regardless.  This avoids expensive computeElementStyle for elements JS
+    // intentionally hides (Google hides many fallback containers this way).
+    // Only when not already in a hidden subtree (skipCompute handles that case).
+    if (!skipCompute && inl && ignoreDisplayNone && inl.indexOf('display') >= 0 && /display\s*:\s*none/i.test(inl)) {
+      cssStack.push({ ...curCSS });
+      curCSS.hidden = true; skipDepth++;
+      ancestorStack.push({ tag, id, cls, attrs });
+      return false;
+    }
     if (skipCompute || (!inl && !sheets.length)) {
       cssStack.push({ ...curCSS });
       ancestorStack.push({ tag, id, cls, attrs });

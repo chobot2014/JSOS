@@ -3082,6 +3082,36 @@ export class BrowserApp implements App {
     var w  = this._win ? this._win.canvas.width : 800;
     var lr = layoutNodes(nodes, bps, w);
 
+    // ── Auto-center form widgets when page has centered content ────────────
+    // After layout, if any large image is visually centered, retroactively
+    // center form widgets (textarea, submit, button, etc.) that aren't.
+    // This handles the common "hero image + search form" pattern where the
+    // image gets centered via CSS (margin:auto, text-align:center in parent
+    // blocks) but form widgets lose centering context.
+    var _pageCX = w / 2;
+    var _hasCenteredImg = false;
+    for (var _aci = 0; _aci < lr.widgets.length; _aci++) {
+      var _acw = lr.widgets[_aci];
+      if (_acw.kind === 'img' && _acw.pw > 60) {
+        var _acImgCX = _acw.px + _acw.pw / 2;
+        if (Math.abs(_acImgCX - _pageCX) < w * 0.1) {
+          _hasCenteredImg = true;
+          break;
+        }
+      }
+    }
+    if (_hasCenteredImg) {
+      var _avail = w - CONTENT_PAD * 2;
+      for (var _aci2 = 0; _aci2 < lr.widgets.length; _aci2++) {
+        var _acw2 = lr.widgets[_aci2];
+        if ((_acw2.kind === 'textarea' || _acw2.kind === 'text' || _acw2.kind === 'search' ||
+             _acw2.kind === 'submit' || _acw2.kind === 'button' || _acw2.kind === 'reset') &&
+            _acw2.pw < _avail * 0.85 && _acw2.px <= CONTENT_PAD + 1) {
+          _acw2.px = CONTENT_PAD + Math.floor((_avail - _acw2.pw) / 2);
+        }
+      }
+    }
+
     // ── Compress large vertical gaps (widget-anchor based) ─────────────
     var _gapLines = lr.lines;
     // Filter out small decorative images (WAI: images without alt text are
@@ -3102,9 +3132,19 @@ export class BrowserApp implements App {
         _gAnchors.push({ y: _gapWidgets[_gwi].py, yEnd: _gapWidgets[_gwi].py + _gapWidgets[_gwi].ph });
       }
       // Also include text lines with visible content as anchors
+      // (skip lines containing only short non-alphanumeric text — these are
+      // typically decoration symbols like arrows/carets from un-hidden CSS containers)
       for (var _tli = 0; _tli < _gapLines.length; _tli++) {
         var _tl = _gapLines[_tli];
         if (_tl.nodes.length > 0) {
+          // Check if this line has meaningful text content
+          var _tlText = '';
+          for (var _tni = 0; _tni < _tl.nodes.length; _tni++) {
+            _tlText += _tl.nodes[_tni].text;
+          }
+          _tlText = _tlText.trim();
+          // Skip isolated symbol-only lines (< 4 chars, no letters/digits)
+          if (_tlText.length > 0 && _tlText.length < 4 && !/[a-zA-Z0-9]/.test(_tlText)) continue;
           _gAnchors.push({ y: _tl.y, yEnd: _tl.y + (_tl.lineH || 13) });
         }
       }
@@ -3149,6 +3189,19 @@ export class BrowserApp implements App {
             if (_origWY >= _breaks[_ciW].y) { _shiftW = _breaks[_ciW].shift; break; }
           }
           if (_shiftW > 0) _gapWidgets[_gwi2].py = _origWY - _shiftW;
+        }
+      }
+    }
+
+    // Filter out isolated symbol-only text lines (decorations from un-hidden CSS containers)
+    for (var _fli = lr.lines.length - 1; _fli >= 0; _fli--) {
+      var _fl = lr.lines[_fli];
+      if (_fl.nodes.length > 0 && _fl.nodes.length <= 2) {
+        var _flText = '';
+        for (var _fni = 0; _fni < _fl.nodes.length; _fni++) _flText += _fl.nodes[_fni].text;
+        _flText = _flText.trim();
+        if (_flText.length > 0 && _flText.length < 4 && !/[a-zA-Z0-9]/.test(_flText)) {
+          lr.lines.splice(_fli, 1);
         }
       }
     }

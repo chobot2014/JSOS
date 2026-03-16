@@ -306,6 +306,10 @@ export function buildRuleIndex(rules: CSSRule[]): RuleIndex {
   for (var ri = 0; ri < rules.length; ri++) {
     var rule = rules[ri];
     rule.order = ri;  // stamp source order for O(1) cascade ordering (avoids indexOf O(n²))
+    // Skip state-only rules (:hover/:focus/:active) — they never match during
+    // static layout, so adding them to buckets wastes iterations in candidateRules
+    // and the matching loop.  _stateOnly is set by buildSheetIndex before this call.
+    if (rule._stateOnly) continue;
     var placed = false;
 
     // Fast-path: if parsedSels are available, use them directly (no regex)
@@ -378,18 +382,24 @@ export function buildRuleIndex(rules: CSSRule[]): RuleIndex {
     if (rules[ci]!.props.content) contentRules.push(rules[ci]!);
   }
 
-  // Collect ALL class names referenced in ANY CSS selector — used for cache key normalization.
-  // Classes not in this set are irrelevant to styling and can be stripped from cache keys.
+  // Collect class names from the RIGHTMOST compound of each CSS selector.
+  // Only rightmost-compound classes affect which rules match the ELEMENT itself
+  // (non-rightmost classes are ancestor-matching context, which is already not
+  // captured in the cache key).  Using only rightmost classes dramatically
+  // reduces cache key uniqueness, improving hit rate.
+  // Also include classes from :not/:is/:where pseudo-class arguments (they
+  // test the current element, not ancestors).
   var cssClassSet = new Set<string>();
   for (var _cci = 0; _cci < rules.length; _cci++) {
     var _ccr = rules[_cci]!;
     if (_ccr.parsedSels) {
       for (var _csi = 0; _csi < _ccr.parsedSels.length; _csi++) {
         var _cps = _ccr.parsedSels[_csi]!;
-        for (var _cpi = 0; _cpi < _cps.compounds.length; _cpi++) {
-          var _cpc = _cps.compounds[_cpi]!;
+        // compounds[0] is the rightmost compound (the subject element)
+        var _cpc = _cps.compounds[0];
+        if (_cpc) {
           for (var _cli = 0; _cli < _cpc.classes.length; _cli++) cssClassSet.add(_cpc.classes[_cli]!);
-          // Also collect classes from :not/:is/:where argument selectors
+          // Also collect from :not/:is/:where argument selectors (test current element)
           for (var _cxi = 0; _cxi < _cpc.pseudos.length; _cxi++) {
             var _cpx = _cpc.pseudos[_cxi]!;
             if (_cpx.argParsed) {

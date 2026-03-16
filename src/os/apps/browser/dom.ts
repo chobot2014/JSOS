@@ -2913,6 +2913,8 @@ export function serializeDOM(doc: VDocument): string { return _serialize(doc.bod
 // ── VDocument → HtmlToken[] (item 1.2 — eliminate serialize/reparse) ─────────
 // Walk the VDocument tree and emit HtmlToken[] directly, avoiding the
 // O(N) string allocation of serializeDOM() and O(N) re-tokenisation.
+// Shared empty Map for tokens that don't carry attributes (text / close tags).
+var _emptyAttrs: Map<string, string> = new Map();
 
 export function vdocToTokens(doc: VDocument): HtmlToken[] {
   var tokens: HtmlToken[] = [];
@@ -2924,7 +2926,7 @@ function _emitTokens(nodes: VNode[], out: HtmlToken[]): void {
   for (var i = 0; i < nodes.length; i++) {
     var n = nodes[i];
     if (n instanceof VText) {
-      out.push({ kind: 'text', tag: '', text: (n as VText).data, attrs: new Map() });
+      out.push({ kind: 'text', tag: '', text: (n as VText).data, attrs: _emptyAttrs });
     } else if (n instanceof VElement) {
       _emitElTokens(n as VElement, out);
     }
@@ -2936,6 +2938,18 @@ function _emitElTokens(el: VElement, out: HtmlToken[]): void {
   var tag = el.tagName.toLowerCase();
   // Fragment / shadow-root wrappers: emit children only
   if (tag === '#fragment' || tag === '#shadow-root') { _emitTokens(el.childNodes, out); return; }
+  // Skip elements with inline display:none — they and all descendants are hidden.
+  // This avoids serializing hundreds of hidden elements (Google hides fallback
+  // containers via inline style), saving token creation + parseHTMLFromTokens work.
+  // Check both the _style._map (JS-set) and _attrs style (HTML-set).
+  var _jsDisplay = el._style._map.get('display');
+  if (_jsDisplay === 'none') return;
+  // Only check original HTML style if JS hasn't set the display property at all.
+  // If JS has set it (even to '' to clear), the JS value takes precedence.
+  if (_jsDisplay === undefined) {
+    var _rawStyle = el._attrs.get('style');
+    if (_rawStyle && _rawStyle.indexOf('display') >= 0 && /display\s*:\s*none/i.test(_rawStyle)) return;
+  }
   // <slot>: distribute light DOM children from shadow host
   if (tag === 'slot') {
     var _cur: VNode | null = el.parentNode;
@@ -2954,41 +2968,50 @@ function _emitElTokens(el: VElement, out: HtmlToken[]): void {
   }
   // <template>: emit from _content fragment
   if (tag === 'template') {
-    out.push({ kind: 'open', tag: 'template', text: '', attrs: new Map() });
+    out.push({ kind: 'open', tag: 'template', text: '', attrs: _emptyAttrs });
     if ((el as any)._content) {
       _emitTokens(((el as any)._content as VElement).childNodes, out);
     }
-    out.push({ kind: 'close', tag: 'template', text: '', attrs: new Map() });
+    out.push({ kind: 'close', tag: 'template', text: '', attrs: _emptyAttrs });
     return;
   }
-  // Build attrs map (same merge logic as _serializeEl)
-  var attrs = new Map<string, string>();
-  el._attrs.forEach((v, k) => {
-    if (k === 'style') return; // handled below
-    attrs.set(k, v);
-  });
-  // Merge style: original + _style._map overlay
+  // Build attrs map — reuse element's map directly when no style overlay needed
   var origStyle = el._attrs.get('style') || '';
   var hasStyleMap = el._style._map.size > 0;
-  if (origStyle || hasStyleMap) {
-    var styleMap: Map<string, string> = new Map();
-    if (origStyle) {
-      origStyle.split(';').forEach(p => {
-        var ci = p.indexOf(':');
-        if (ci >= 0) {
-          var pk = p.slice(0, ci).trim();
-          var pv = p.slice(ci + 1).trim();
-          if (pk) styleMap.set(pk, pv);
-        }
-      });
-    }
-    el._style._map.forEach((v, k) => {
-      if (k && !k.startsWith('-webkit-') && !k.startsWith('-moz-') && !k.startsWith('-ms-') && !k.startsWith('-o-'))
-        styleMap.set(k, v);
+  var attrs: Map<string, string>;
+  if (!hasStyleMap) {
+    // Fast path: no JS style modifications — reuse original attrs map directly
+    // (style attr, if present, is already in _attrs)
+    attrs = el._attrs;
+  } else {
+    attrs = new Map<string, string>();
+    el._attrs.forEach((v, k) => {
+      if (k === 'style') return; // handled below
+      attrs.set(k, v);
     });
-    var parts: string[] = [];
-    styleMap.forEach((v, k) => { if (v) parts.push(k + ':' + v); });
-    if (parts.length > 0) attrs.set('style', parts.join(';'));
+    if (origStyle || hasStyleMap) {
+      var styleMap: Map<string, string> = new Map();
+      if (origStyle) {
+        var _segs = origStyle.split(';');
+        for (var _si = 0; _si < _segs.length; _si++) {
+          var _p = _segs[_si]!;
+          var ci2 = _p.indexOf(':');
+          if (ci2 >= 0) {
+            var pk = _p.slice(0, ci2).trim();
+            var pv = _p.slice(ci2 + 1).trim();
+            if (pk) styleMap.set(pk, pv);
+          }
+        }
+      }
+      el._style._map.forEach((v, k) => {
+        // Skip vendor-prefixed props (e.g. -webkit-*, -moz-*) but keep CSS custom properties (--*)
+        if (k && !(k.charCodeAt(0) === 45 && k.charCodeAt(1) !== 45))
+          styleMap.set(k, v);
+      });
+      var parts: string[] = [];
+      styleMap.forEach((v, k) => { if (v) parts.push(k + ':' + v); });
+      if (parts.length > 0) attrs.set('style', parts.join(';'));
+    }
   }
   if (_VOID.has(tag)) {
     out.push({ kind: 'self', tag, text: '', attrs });
@@ -3002,7 +3025,7 @@ function _emitElTokens(el: VElement, out: HtmlToken[]): void {
   } else {
     _emitTokens(el.childNodes, out);
   }
-  out.push({ kind: 'close', tag, text: '', attrs: new Map() });
+  out.push({ kind: 'close', tag, text: '', attrs: _emptyAttrs });
 }
 
 // ── Named HTML entity table (item 350) ───────────────────────────────────────

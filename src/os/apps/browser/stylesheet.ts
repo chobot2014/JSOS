@@ -50,6 +50,9 @@ var _gmSpec:  number[]   = [];
 var _gmOrder: number[]   = [];
 var _gmLen   = 0;
 
+/** Shared singleton for empty getPseudoContent results — avoids alloc per call */
+var _EMPTY_PSEUDO: { before: string; after: string } = { before: '', after: '' };
+
 
 export { resetCSSVars, setViewport };
 
@@ -1285,7 +1288,7 @@ export function getPseudoContent(
   sibCount?: number,
 ): { before: string; after: string } {
   // Fast path: if we have an index and no rules have content, skip entirely
-  if (index && index.contentRules.length === 0) return { before: '', after: '' };
+  if (index && index.contentRules.length === 0) return _EMPTY_PSEUDO;
 
   var before = '';
   var after  = '';
@@ -1327,7 +1330,7 @@ export function getPseudoContent(
       break;  // only one selector per rule matches per pseudo
     }
   }
-  return { before, after };
+  return before || after ? { before, after } : _EMPTY_PSEUDO;
 }
 
 /**
@@ -1384,20 +1387,24 @@ export function computeElementStyle(
   };
 
   // ── Collect matching rules (with result cache for stable elements) ─────────
-  // Cache key: tag + id + CSS-relevant-cls only — inlineStyle is intentionally
-  // excluded so that elements with unique inline styles (e.g. style="left: Npx")
-  // still get cache hits for their sheet-matched rules.
+  // Cache key: tag + filteredId + CSS-relevant-cls only — inlineStyle is
+  // intentionally excluded so that elements with unique inline styles
+  // (e.g. style="left: Npx") still get cache hits for their sheet-matched rules.
   // Cache is flushed (via flushCSSMatchCache) whenever sheets change.
   //
-  // Key optimization: strip classes not referenced in any CSS selector.
-  // CSS-in-JS pages (Google, React) add many classes for JavaScript purposes
+  // Key optimizations for cache hit rate:
+  //  1. Strip classes not referenced in any CSS selector.
+  //  2. Strip IDs not referenced in any CSS selector.
+  // CSS-in-JS pages (Google, React) add many IDs/classes for JavaScript purposes
   // (event handlers, DOM queries) that don't match any CSS rule.  Including
   // them in the cache key creates unique keys for elements that would otherwise
-  // share the same matched rules.  Using cssClassSet from the RuleIndex,
-  // we filter to only CSS-relevant classes, dramatically improving hit rate.
+  // share the same matched rules.
   var _filteredCls: string;
-  if (index && (index as any).cssClassSet) {
-    var _ccSet = (index as any).cssClassSet as Set<string>;
+  var _filteredId = id;
+  if (index) {
+    // Strip ID from cache key if not referenced by any CSS selector
+    if (id && !index.idBuckets.has(id)) _filteredId = '';
+    var _ccSet = index.cssClassSet;
     if (cls.length === 0) {
       _filteredCls = '';
     } else if (cls.length === 1) {
@@ -1413,7 +1420,7 @@ export function computeElementStyle(
     _filteredCls = sortedClsKey !== undefined ? sortedClsKey
       : cls.length > 1 ? cls.slice().sort().join(' ') : (cls[0] || '');
   }
-  var _cacheKey = tag + '\x00' + id + '\x00' + _filteredCls;
+  var _cacheKey = tag + '\x00' + _filteredId + '\x00' + _filteredCls;
   _cssMatchTotal++;
   var _cachedMatch = _cssMatchCache.get(_cacheKey);
 
@@ -1682,7 +1689,8 @@ export function buildSheetIndex(rules: CSSRule[]): RuleIndex {
       ' simpleMatch=' + _simpleCount +
       ' classBuckets=' + idx.classBuckets.size +
       ' tagBuckets='   + idx.tagBuckets.size +
-      ' idBuckets='    + idx.idBuckets.size);
+      ' idBuckets='    + idx.idBuckets.size +
+      ' cssClassSet='  + idx.cssClassSet.size);
   }
   return idx;
 }
