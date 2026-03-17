@@ -240,27 +240,42 @@ class CanvasTerminal {
 
   /** Draw the vertical scrollbar on the right edge of the canvas. */
   drawScrollbar(): void {
-    var x = this._cols * CHAR_W + 1;  // 1px gap after text area
-    var w = SCROLLBAR_W - 1;
+    var x = this._cols * CHAR_W;     // right edge of text area
+    var w = SCROLLBAR_W;
     var h = this._canvas.height;
     var totalLines = this._sbCount + this._rows;
 
-    // Track background
-    this._canvas.fillRect(x, 0, w, h, 0xFF1A1A2A);
+    // Separator line between text area and scrollbar
+    this._canvas.fillRect(x, 0, 1, h, 0xFF2A2A3A);
 
-    // Thumb
+    // Track background
+    this._canvas.fillRect(x + 1, 0, w - 1, h, 0xFF161622);
+
+    // Thumb (only when there's scrollback content)
     if (totalLines > this._rows) {
       var ratio = this._rows / totalLines;
-      var thumbH = Math.max(12, Math.floor(h * ratio));
-      // Position: 0 offset = thumb at bottom, max offset = thumb at top
-      var scrollFraction = this._viewOffset / (totalLines - this._rows);
+      var thumbH = Math.max(16, Math.floor(h * ratio));
+      // Position: offset=0 → thumb at bottom, offset=max → thumb at top
+      var maxOffset = totalLines - this._rows;
+      var scrollFraction = this._viewOffset / maxOffset;
       var thumbY = Math.floor((h - thumbH) * (1 - scrollFraction));
-      this._canvas.fillRect(x + 1, thumbY, w - 2, thumbH, 0xFF5577AA);
-      // Thumb border
-      this._canvas.fillRect(x + 1, thumbY, w - 2, 1, 0xFF6699CC);
-      this._canvas.fillRect(x + 1, thumbY + thumbH - 1, w - 2, 1, 0xFF6699CC);
+
+      // Rounded-ish thumb: draw with 1px inset and a subtle gradient look
+      this._canvas.fillRect(x + 3, thumbY + 1, w - 5, thumbH - 2, 0xFF3A5070);
+      // Thumb highlight (top edge)
+      this._canvas.fillRect(x + 3, thumbY + 1, w - 5, 1, 0xFF4A6888);
+      // Thumb center grip lines (3 small horizontal lines)
+      var gripY = thumbY + Math.floor(thumbH / 2) - 3;
+      if (thumbH > 24) {
+        for (var gi = 0; gi < 3; gi++) {
+          this._canvas.fillRect(x + 5, gripY + gi * 3, w - 9, 1, 0xFF5A7898);
+        }
+      }
     }
   }
+
+  /** Public repaint – redraws all visible cells from the buffer. */
+  repaint(): void { this._repaintAll(); }
 
   /** Draw (show=true) or erase (show=false) a 2-px underline cursor at the current position. */
   drawCursor(show: boolean): void {
@@ -282,15 +297,22 @@ const VGA_TO_ARGB: number[] = [
 // ── Autocomplete helpers ──────────────────────────────────────────────────
 
 const AC_MAX_VISIBLE = 8;    // max items visible in the popup
-const AC_POPUP_W = 200;      // popup width in pixels
-const AC_ITEM_H = 10;        // height of each autocomplete item in pixels
-const AC_BG   = 0xFF1E2840;  // popup background
-const AC_SEL  = 0xFF2D4F8A;  // selected item background
-const AC_BORDER = 0xFF4466AA; // popup border
-const AC_TEXT = Colors.LIGHT_GREY;
-const AC_TEXT_HI = Colors.WHITE;
-const AC_TYPE_FN  = Colors.YELLOW;
-const AC_TYPE_OBJ = Colors.LIGHT_CYAN;
+const AC_POPUP_W = 180;      // popup width in pixels
+const AC_ITEM_H = 12;        // height of each autocomplete item in pixels
+const AC_PAD_X = 2;          // horizontal padding inside popup
+const AC_PAD_Y = 3;          // vertical padding inside popup
+const AC_ICON_W = 12;        // width reserved for the type icon column
+const AC_BG      = 0xFF1C1C2E;  // popup background (dark blue-grey)
+const AC_SEL     = 0xFF2A4A7A;  // selected item background
+const AC_BORDER  = 0xFF3A5580;  // popup border
+const AC_DIVIDER = 0xFF2A3040;  // subtle line between items
+const AC_TEXT    = 0xFFBBBBCC;  // normal item text
+const AC_TEXT_HI = Colors.WHITE; // selected item text
+const AC_TYPE_FN  = 0xFFDDCC55; // function icon colour
+const AC_TYPE_OBJ = 0xFF55BBDD; // object icon colour
+const AC_TYPE_STR = 0xFF88CC88; // string icon colour
+const AC_TYPE_NUM = 0xFF88BBEE; // number icon colour
+const AC_HINT     = 0xFF666688; // signature hint text colour
 
 /** Get tab-completion candidates for the current input buffer. */
 function _getCompletions(buf: string): string[] {
@@ -526,6 +548,37 @@ export class TerminalApp implements App {
     // Any non-arrow input exits history browsing mode
     this._historyPos = -1;
 
+    // ── Standard terminal shortcuts ────────────────────────────────────────
+    if (event.ctrl) {
+      if (ch === '\x03' || key === 'c' || key === 'C') {
+        // Ctrl+C — cancel current input
+        this._dismissAC();
+        this._term.setColor(Colors.DARK_GREY);
+        this._term.print('^C');
+        this._term.setColor(Colors.LIGHT_GREY);
+        this._term.print('\n');
+        this._inputBuf = '';
+        this._historyPos = -1;
+        this._printPrompt();
+        return;
+      }
+      if (ch === '\x15' || key === 'u' || key === 'U') {
+        // Ctrl+U — erase entire input line
+        this._dismissAC();
+        for (var ci = 0; ci < this._inputBuf.length; ci++) this._term.print('\b');
+        this._inputBuf = '';
+        return;
+      }
+      if (ch === '\x0C' || key === 'l' || key === 'L') {
+        // Ctrl+L — clear screen and reprint prompt
+        this._dismissAC();
+        this._term.clear();
+        this._printPrompt();
+        this._term.print(this._inputBuf);
+        return;
+      }
+    }
+
     if (ch === '\n' || ch === '\r') {
       this._dismissAC();
       this._term.print('\n');
@@ -580,12 +633,18 @@ export class TerminalApp implements App {
     this._acVisible = true;
   }
 
-  /** Dismiss the autocomplete popup. */
+  /** Dismiss the autocomplete popup and repaint the area it occupied. */
   private _dismissAC(): void {
+    var wasVisible = this._acVisible;
     this._acVisible = false;
     this._acItems = [];
     this._acSelected = 0;
     this._acScroll = 0;
+    // Repaint underlying terminal cells so the old popup doesn't ghost
+    if (wasVisible && this._term) {
+      this._term.repaint();
+      this._term.drawScrollbar();
+    }
   }
 
   /** Accept the currently selected completion. */
@@ -611,16 +670,17 @@ export class TerminalApp implements App {
 
     // Position popup below the cursor
     var cursorPx = term.col * CHAR_W;
-    var cursorPy = (term.row + 1) * CHAR_H;  // one row below cursor
+    var cursorPy = (term.row + 1) * CHAR_H + 2;  // small gap below cursor
 
-    // Clamp so popup doesn't go off-screen
     var visibleCount = Math.min(this._acItems.length, AC_MAX_VISIBLE);
-    var popupH = visibleCount * AC_ITEM_H + 4; // 2px border top+bottom
+    var popupH = visibleCount * AC_ITEM_H + AC_PAD_Y * 2;
     var popupW = AC_POPUP_W;
+    var hasMiniSB = this._acItems.length > AC_MAX_VISIBLE;
+    var miniSBW = hasMiniSB ? 6 : 0;
 
-    // If popup would go below canvas, show above cursor instead
+    // Flip above cursor if not enough room below
     if (cursorPy + popupH > canvas.height) {
-      cursorPy = term.row * CHAR_H - popupH;
+      cursorPy = term.row * CHAR_H - popupH - 2;
       if (cursorPy < 0) cursorPy = 0;
     }
     // Clamp horizontally
@@ -632,62 +692,87 @@ export class TerminalApp implements App {
     var x = cursorPx;
     var y = cursorPy;
 
-    // Background + border
+    // ── Drop shadow (1px offset) ────────────────────────────────────────
+    canvas.fillRect(x + 2, y + 2, popupW, popupH, 0xCC000000);
+
+    // ── Background + border ─────────────────────────────────────────────
     canvas.fillRect(x, y, popupW, popupH, AC_BG);
     canvas.drawRect(x, y, popupW, popupH, AC_BORDER);
 
-    // Items
+    // ── Items ────────────────────────────────────────────────────────────
+    var textAreaW = popupW - AC_PAD_X * 2 - AC_ICON_W - miniSBW;
+    var maxChars = Math.floor(textAreaW / 8);
+
     for (var i = 0; i < visibleCount; i++) {
       var idx = i + this._acScroll;
       if (idx >= this._acItems.length) break;
       var item = this._acItems[idx];
-      var iy = y + 2 + i * AC_ITEM_H;
+      var iy = y + AC_PAD_Y + i * AC_ITEM_H;
       var isSelected = idx === this._acSelected;
 
-      // Selected highlight
+      // Selected item highlight
       if (isSelected) {
-        canvas.fillRect(x + 1, iy, popupW - 2, AC_ITEM_H, AC_SEL);
+        canvas.fillRect(x + 1, iy, popupW - 2 - miniSBW, AC_ITEM_H, AC_SEL);
       }
 
-      // Type icon (2 chars)
-      var type = _getCompletionType(item);
-      var iconColor = type === 'fn' ? AC_TYPE_FN :
-                      type === 'obj' ? AC_TYPE_OBJ :
-                      type === 'str' ? Colors.LIGHT_GREEN :
-                      type === 'num' ? Colors.LIGHT_CYAN :
-                      Colors.DARK_GREY;
-      var iconLabel = type === 'fn' ? 'f' : type === 'obj' ? '{}' :
-                      type === 'str' ? 'S' : type === 'num' ? '#' :
-                      type === 'bool' ? 'B' : '?';
-      canvas.drawText(x + 3, iy + 1, iconLabel, iconColor);
+      // Subtle divider between items (skip first)
+      if (i > 0 && !isSelected && idx !== this._acSelected + 1) {
+        canvas.fillRect(x + AC_PAD_X + AC_ICON_W, iy, textAreaW, 1, AC_DIVIDER);
+      }
 
-      // Item name (truncate to fit)
+      // ── Type icon: single character on a coloured pill ──────────────
+      var type = _getCompletionType(item);
+      var iconColor = type === 'fn'  ? AC_TYPE_FN :
+                      type === 'obj' ? AC_TYPE_OBJ :
+                      type === 'str' ? AC_TYPE_STR :
+                      type === 'num' ? AC_TYPE_NUM :
+                      0xFF777788;
+      var iconCh = type === 'fn'  ? 'f' :
+                   type === 'obj' ? 'o' :
+                   type === 'str' ? 's' :
+                   type === 'num' ? 'n' :
+                   type === 'bool' ? 'b' : '?';
+      // Icon background pill
+      var pillBg = isSelected ? 0xFF1A1A2E : 0xFF252535;
+      canvas.fillRect(x + AC_PAD_X + 1, iy + 2, 9, 8, pillBg);
+      canvas.drawText(x + AC_PAD_X + 2, iy + 2, iconCh, iconColor);
+
+      // ── Item name ──────────────────────────────────────────────────────
       var displayName = item;
-      // Show only the last segment after the last dot for readability
       var lastDot = item.lastIndexOf('.');
       if (lastDot !== -1) displayName = item.slice(lastDot + 1);
-      if (displayName.length > 20) displayName = displayName.slice(0, 18) + '..';
-      canvas.drawText(x + 16, iy + 1, displayName, isSelected ? AC_TEXT_HI : AC_TEXT);
+      if (displayName.length > maxChars) displayName = displayName.slice(0, maxChars - 2) + '..';
 
-      // Function signature hint for the selected item
+      var nameX = x + AC_PAD_X + AC_ICON_W + 2;
+      var nameY = iy + 2;
+      canvas.drawText(nameX, nameY, displayName, isSelected ? AC_TEXT_HI : AC_TEXT);
+
+      // ── Function signature hint (selected row only) ────────────────
       if (isSelected && type === 'fn') {
         var sig = _getFnSignature(item);
         if (sig) {
-          var sigTrunc = sig.length > 18 ? sig.slice(0, 16) + '..' : sig;
-          canvas.drawText(x + 16 + (displayName.length + 1) * 8, iy + 1, sigTrunc, Colors.DARK_GREY);
+          var sigMaxChars = maxChars - displayName.length - 1;
+          if (sigMaxChars > 4) {
+            var sigTrunc = sig.length > sigMaxChars ? sig.slice(0, sigMaxChars - 2) + '..' : sig;
+            canvas.drawText(nameX + (displayName.length + 1) * 8, nameY, sigTrunc, AC_HINT);
+          }
         }
       }
     }
 
-    // Scrollbar in popup if there are more items than visible
-    if (this._acItems.length > AC_MAX_VISIBLE) {
-      var sbX = x + popupW - 5;
-      var sbH = popupH - 4;
-      canvas.fillRect(sbX, y + 2, 3, sbH, 0xFF2A2A3A);
+    // ── Mini scrollbar inside popup ──────────────────────────────────────
+    if (hasMiniSB) {
+      var sbX = x + popupW - miniSBW;
+      var sbY = y + AC_PAD_Y;
+      var sbH = popupH - AC_PAD_Y * 2;
+      // Track
+      canvas.fillRect(sbX, sbY, miniSBW - 1, sbH, 0xFF252535);
+      // Thumb
       var ratio = AC_MAX_VISIBLE / this._acItems.length;
-      var thumbH = Math.max(4, Math.floor(sbH * ratio));
-      var thumbY = y + 2 + Math.floor((sbH - thumbH) * (this._acScroll / (this._acItems.length - AC_MAX_VISIBLE)));
-      canvas.fillRect(sbX, thumbY, 3, thumbH, 0xFF6688AA);
+      var thumbH = Math.max(6, Math.floor(sbH * ratio));
+      var maxScroll = this._acItems.length - AC_MAX_VISIBLE;
+      var thumbY = sbY + Math.floor((sbH - thumbH) * (this._acScroll / maxScroll));
+      canvas.fillRect(sbX + 1, thumbY, miniSBW - 3, thumbH, 0xFF5577AA);
     }
   }
 
@@ -741,6 +826,12 @@ export class TerminalApp implements App {
         }
       }
       return;
+    }
+
+    // ── Click outside autocomplete popup → dismiss it ──────────────────
+    if (event.type === 'click' && this._acVisible) {
+      this._dismissAC();
+      // Don't return — allow click-through for hyperlinks etc.
     }
 
     // [Item 673] OSC 8 hyperlink click: map pixel → VGA cell, look up link
