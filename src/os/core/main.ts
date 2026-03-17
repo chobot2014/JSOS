@@ -326,11 +326,21 @@ function main(): void {
       // Launch the JSOS native TypeScript browser.  Written 100% in TypeScript
       // — no Chromium, no external runtimes.  Uses the JSOS DNS + HTTP/HTTPS
       // stack for real network requests and renders HTML on the WM canvas.
+      // ── Tiled layout: browser on top, terminal on bottom ──────────────
+      // TITLE_H=22, TASKBAR_H=28 (from wm.ts constants)
+      var WM_TITLE_H   = 22;
+      var WM_TASKBAR_H = 28;
+      var usableH = screen.height - WM_TASKBAR_H;     // total height minus taskbar
+      var browserContentH = Math.floor(usableH * 0.60) - WM_TITLE_H;  // ~60% for browser
+      var browserWinH     = browserContentH + WM_TITLE_H;             // full window height
+      var termY           = browserWinH;                               // terminal starts below browser
+      var termContentH    = usableH - browserWinH - WM_TITLE_H;       // remaining space for terminal content
+
       var browserWin = wmInst.createWindow({
         title:     'Browser',
         x: 0, y: 0,
         width:  screen.width,
-        height: screen.height - 50,
+        height: browserContentH,
         app:    browserApp,
         closeable: true,
       });
@@ -351,14 +361,14 @@ function main(): void {
 
       wmInst.createWindow({
         title:  'Terminal',
-        x: 20, y: 20,
-        width: Math.min(screen.width - 40, 800),
-        height: Math.min(screen.height - 80, 500),
+        x: 0, y: termY,
+        width:  screen.width,
+        height: termContentH,
         app:       terminalApp,
         closeable: false,
       });
 
-      // Focus the browser window so it renders on top of the terminal
+      // Focus the browser window so it renders on top
       wmInst.focusWindow(browserWin.id);
       wmInst.bringToFront(browserWin.id);
 
