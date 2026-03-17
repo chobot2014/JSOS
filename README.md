@@ -6,8 +6,6 @@
 
 JSOS compiles TypeScript to JavaScript, embeds it in a custom C kernel powered by [QuickJS](https://bellard.org/quickjs/) (a full ES2023 engine by Fabrice Bellard), and boots from a standard ISO image via GRUB. The C code handles only raw hardware I/O. Everything above that — the scheduler, memory manager, filesystem, network stack, window manager, and browser — is TypeScript running natively on bare metal.
 
-![JSOS Demo](2026-02-18%2009-30-26.gif)
-
 ---
 
 ## What's Inside
