@@ -18,10 +18,39 @@
 #include "io.h"
 #include "embedded_js.h"
 #include "ata.h"
+#include <setjmp.h>
+
+/* Recovery globals declared in irq.c */
+extern jmp_buf       _js_fault_buf;
+extern volatile int  _js_fault_active;
+extern volatile int  _js_fault_vector;
+extern volatile int  _js_in_page_eval;
 #include "virtio_net.h"
+#include "jit.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdlib.h>
+#include <assert.h>
+
+/* Match QuickJS's MALLOC_OVERHEAD for consistent GC threshold accounting */
+#ifndef MALLOC_OVERHEAD
+#define MALLOC_OVERHEAD  8
+#endif
+
+/* QuickJS uses unlikely() for branch prediction hints */
+#ifndef unlikely
+#define unlikely(x)  __builtin_expect(!!(x), 0)
+#endif
+
+/* Forward-declare heap canary diagnostic counters (defined with allocator) */
+static volatile uint32_t _heap_head_violations;
+static volatile uint32_t _heap_tail_violations;
+static volatile uint32_t _heap_leaks_prevented;
+
+/* Forward-declare fallback allocator state (defined with --wrap wrappers) */
+static volatile int      _heap_broken;
+static volatile uint32_t _fallback_offset;
 
 /* Static ATA sector buffer: 8 sectors × 256 words = 4 KB on BSS, not stack */
 static uint16_t ata_sector_buf[256 * 8];
@@ -42,10 +71,11 @@ static JSContext *ctx = NULL;
 
 /* ── Phase 10: Multi-process pool ─────────────────────────────────────────
  * Each slot is an independent QuickJS runtime (separate GC, heap, globals).
- * Up to 8 concurrent child processes; 4 MB heap each.
+ * Up to 16 concurrent child processes; up to 1 GB heap each (JS_SetMemoryLimit soft cap;
+ * no pre-allocation — pages come from the shared 2 GB NOLOAD _sbrk window lazily).
  * IPC is done via ring-buffer message queues in BSS (parent ↔ child).
  */
-#define JSPROC_MAX       8
+#define JSPROC_MAX       16
 #define JSPROC_MSGSLOTS  8
 #define JSPROC_MSGSIZE   2048
 
@@ -55,16 +85,81 @@ typedef struct {
     JSRuntime  *rt;
     JSContext  *ctx;
     uint8_t     used;
+    uint8_t     tainted;          /* set after CPU fault — heap is corrupted, do not execute */
+    uint32_t    width, height;    /* render surface dimensions set by procSetDimensions */
     /* parent → child */
     ProcMsg_t   inbox[JSPROC_MSGSLOTS];
     int         inbox_r, inbox_w, inbox_cnt;
     /* child → parent */
     ProcMsg_t   outbox[JSPROC_MSGSLOTS];
     int         outbox_r, outbox_w, outbox_cnt;
+    /* Per-child slice deadline (PIT ticks); 0 = disabled */
+    volatile uint32_t slice_deadline;
 } JSProc_t;
 
 static JSProc_t _procs[JSPROC_MAX];
 static int      _cur_proc = -1;   /* -1 = main runtime; ≥0 = child slot index */
+
+/* Pending JIT request from a child runtime — stored by _jit_hook_child,
+ * consumed by js_proc_pending_jit() from the TypeScript tick loop.
+ * Declared early because js_proc_create / js_proc_destroy reference it.     */
+typedef struct {
+    uint32_t bc_addr;   /* physical address of JSFunctionBytecode, 0 = none  */
+    int      pending;   /* 1 if a compilation request is outstanding          */
+} JITProcPending_t;
+static JITProcPending_t _jit_proc_pending[JSPROC_MAX];
+
+/* Forward declaration — defined in the Step-5 block below (~line 1880).
+ * Called from js_proc_create which is compiled before that block. */
+#ifdef JSOS_JIT_HOOK
+extern void JS_SetJITHook(JSRuntime *rt,
+    int (*hook)(JSRuntime *, JSContext *, void *, void *, int));
+static int _jit_hook_child(JSRuntime *rt, JSContext *hook_ctx,
+                            void *bc_ptr, void *sp, int argc);
+#endif
+
+/* ── Phase A: Per-app BSS render surfaces (3 MB each = 1024×768 @ 32bpp) ──
+ * Stable BSS address — both main and child runtimes see the same bytes.
+ * Exposed via getRenderBuffer() (child) / getProcRenderBuffer(id) (main). */
+#define RENDER_BUF_BYTES  (3 * 1024 * 1024)
+static uint8_t _app_render_bufs[JSPROC_MAX][RENDER_BUF_BYTES] __attribute__((aligned(4096)));
+
+/* ── Phase B3: Per-child timer state ─────────────────────────────────────
+ * Callbacks stored as DupValue'd JSValues; freed safely in procDestroy. */
+#define MAX_TIMERS  32
+typedef struct {
+    uint32_t id;          /* timer handle returned to JS */
+    uint32_t interval_ms; /* delay (setTimeout) or period (setInterval) in ms */
+    uint32_t due_ticks;   /* PIT tick count when callback fires */
+    int      repeat;      /* 1 = interval, 0 = timeout */
+    int      active;      /* 0 = slot free */
+    JSValue  cb;          /* JS callback DupValue'd from child ctx */
+} ProcTimer_t;
+static ProcTimer_t _proc_timers[JSPROC_MAX][MAX_TIMERS];
+static uint32_t    _proc_timer_next_id[JSPROC_MAX]; /* monotonic ID per slot */
+
+/* ── Phase B4: Per-child event inbox (keyboard/mouse events as JSON) ──── */
+#define PROC_EVENT_QUEUE_SLOTS  16
+#define PROC_EVENT_SLOT_BYTES   256
+typedef struct { char data[PROC_EVENT_SLOT_BYTES]; int used; } ProcEventSlot_t;
+typedef struct {
+    ProcEventSlot_t slots[PROC_EVENT_QUEUE_SLOTS];
+    int             head, tail, count;
+} ProcEventQueue_t;
+static ProcEventQueue_t _proc_event_queues[JSPROC_MAX];
+
+/* ── Phase B6: Per-child window command outbox (child→WM JSON messages) ── */
+#define PROC_WINCMD_SLOTS  8
+#define PROC_WINCMD_SIZE   256
+typedef struct { char data[PROC_WINCMD_SIZE]; int len; } ProcWinCmd_t;
+typedef struct { ProcWinCmd_t slots[PROC_WINCMD_SLOTS]; int r, w, cnt; } ProcWinCmdBuf_t;
+static ProcWinCmdBuf_t _proc_wincmds[JSPROC_MAX];
+
+/* ── Phase B2: FS bridge ─────────────────────────────────────────────────
+ * Main runtime registers a JS object with readFile/writeFile/readDir/exists/stat
+ * methods via kernel.registerChildFSBridge(obj).  Child-side FS calls invoke
+ * those TS callbacks through the stable main-runtime context pointer `ctx'. */
+static JSValue _fs_bridge_obj; /* initialised to JS_UNDEFINED in quickjs_initialize() */
 
 /* ── Phase 10: Shared memory buffers ──────────────────────────────────────
  * Static BSS slabs mapped as ArrayBuffers into any runtime that calls
@@ -85,16 +180,19 @@ static void _sbuf_no_free(JSRuntime *rt, void *opaque, void *ptr) {
 }
 
 /* ── Phase 10: Time-slice interrupt handler ──────────────────────────────
- * Set on every child runtime.  When _proc_slice_deadline is non-zero and
- * the PIT tick counter reaches it, QuickJS throws "InternalError: interrupted"
- * which procEvalSlice() catches and returns as "timeout".
+ * Set on every child runtime.  Each child has its own slice_deadline in
+ * JSProc_t so concurrent eval-slices don't corrupt each other's deadlines.
+ * When the PIT tick counter reaches the deadline, QuickJS throws
+ * "InternalError: interrupted" which procEvalSlice() catches as "timeout".
  */
-static volatile uint32_t _proc_slice_deadline = 0;   /* 0 = disabled */
 
 static int _proc_interrupt_cb(JSRuntime *rt, void *opaque) {
-    (void)rt; (void)opaque;
-    if (_proc_slice_deadline == 0) return 0;
-    return (timer_get_ticks() >= _proc_slice_deadline) ? 1 : 0;
+    (void)rt;
+    int id = (int)(intptr_t)opaque;
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return 0;
+    uint32_t deadline = _procs[id].slice_deadline;
+    if (deadline == 0) return 0;
+    return (timer_get_ticks() >= deadline) ? 1 : 0;
 }
 
 /*  VGA raw access  */
@@ -258,8 +356,9 @@ static JSValue js_get_uptime(JSContext *c, JSValueConst this_val, int argc, JSVa
 }
 /* Forward-declared here so js_sleep() can call the scheduler hook on every
  * tick during its busy-wait.  The actual storage lives further down in the
- * Phase-5 section near js_register_scheduler_hook().                        */
-static JSValue _scheduler_hook;
+ * Phase-5 section near js_register_scheduler_hook().
+ * NOT static — referenced by quickjs_run_os() for global fault recovery. */
+JSValue _scheduler_hook;
 static JSValue js_sleep(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
     int32_t ms = 0; JS_ToInt32(c, &ms, argv[0]);
     uint32_t target    = timer_get_ms() + (uint32_t)ms;
@@ -271,6 +370,10 @@ static JSValue js_sleep(JSContext *c, JSValueConst this_val, int argc, JSValueCo
             /* Cooperatively yield to the TypeScript scheduler on each tick. */
             if (!JS_IsUndefined(_scheduler_hook)) {
                 JSValue r = JS_Call(c, _scheduler_hook, JS_UNDEFINED, 0, NULL);
+                if (JS_IsException(r)) {
+                    JSValue exc = JS_GetException(c);
+                    JS_FreeValue(c, exc);
+                }
                 JS_FreeValue(c, r);
             }
         }
@@ -288,6 +391,17 @@ static JSValue js_mem_info(JSContext *c, JSValueConst this_val, int argc, JSValu
     JS_SetPropertyStr(c, obj, "total", JS_NewInt32(c, (int32_t)stats.malloc_limit));
     JS_SetPropertyStr(c, obj, "used",  JS_NewInt32(c, (int32_t)stats.malloc_size));
     JS_SetPropertyStr(c, obj, "free",  JS_NewInt32(c, (int32_t)(stats.malloc_limit - stats.malloc_size)));
+    return obj;
+}
+
+/* Heap guard diagnostic counters (canary violation stats) */
+static JSValue js_heap_stats(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JSValue obj = JS_NewObject(c);
+    JS_SetPropertyStr(c, obj, "headViolations", JS_NewInt32(c, (int32_t)_heap_head_violations));
+    JS_SetPropertyStr(c, obj, "tailViolations", JS_NewInt32(c, (int32_t)_heap_tail_violations));
+    JS_SetPropertyStr(c, obj, "leaksPrevented", JS_NewInt32(c, (int32_t)_heap_leaks_prevented));
+    JS_SetPropertyStr(c, obj, "heapBroken",     JS_NewBool(c, _heap_broken));
+    JS_SetPropertyStr(c, obj, "fallbackUsed",   JS_NewInt32(c, (int32_t)_fallback_offset));
     return obj;
 }
 
@@ -343,6 +457,112 @@ static JSValue js_write_mem8(JSContext *c, JSValueConst this_val, int argc, JSVa
     return JS_UNDEFINED;
 }
 
+/* ─ Physical memory bulk access (Step 2) ─────────────────────────────────── */
+
+static void js_free_array_buffer(JSRuntime *rt, void *opaque, void *ptr) {
+    (void)opaque; js_free_rt(rt, ptr);
+}
+
+/*
+ * kernel.readPhysMem(addr, length) → ArrayBuffer | null
+ * Copy `length` bytes from the physical address `addr` into a new ArrayBuffer.
+ * Maximum length: 1 MB.  Returns null on bad arguments or allocation failure.
+ */
+static JSValue js_read_phys_mem(JSContext *c, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_NULL;
+    uint32_t addr = 0, length = 0;
+    JS_ToUint32(c, &addr,   argv[0]);
+    JS_ToUint32(c, &length, argv[1]);
+    if (length == 0 || length > (1024u * 1024u)) return JS_NULL;
+    uint8_t *buf = js_malloc(c, length);
+    if (!buf) return JS_NULL;
+    memcpy(buf, (const void *)(uintptr_t)addr, length);
+    return JS_NewArrayBuffer(c, buf, length, js_free_array_buffer, NULL, 0);
+}
+
+/*
+ * kernel.writePhysMem(addr, data) — copy an ArrayBuffer to a physical address.
+ * The caller is responsible for range-safety; no bounds checking is performed.
+ */
+static JSValue js_write_phys_mem(JSContext *c, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    uint32_t addr = 0;
+    JS_ToUint32(c, &addr, argv[0]);
+    size_t len = 0;
+    uint8_t *data = JS_GetArrayBuffer(c, &len, argv[1]);
+    if (!data || len == 0) return JS_UNDEFINED;
+    memcpy((void *)(uintptr_t)addr, data, len);
+    return JS_UNDEFINED;
+}
+
+/* ─ QuickJS internal struct offsets probe (Step 3) ───────────────────────── */
+/*
+ * kernel.qjsOffsets() → { bcBuf, bcLen, argCount, varCount, stackSize,
+ *                          cpoolPtr, cpoolCount, structSize,
+ *                          callCount, jitNativePtr, funcName,
+ *                          gcHeaderSize, objShape, objSize }
+ *
+ * Returns hardcoded offsets verified against the JSOS-patched QuickJS build
+ * (JSFunctionBytecode after Step-5 additions: call_count @20, jit_native_ptr @24).
+ * Used by qjs-jit.ts / QJSBytecodeReader to interpret live GC objects.
+ */
+static JSValue js_qjs_offsets(JSContext *c, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    JSValue o = JS_NewObject(c);
+    /* JSFunctionBytecode layout (post Step-5 patch, 32-bit i686):
+     *   [0]  gc_header      4 B   (GCObjectHeader)
+     *   [4]  realm          4 B   (JSContext*)
+     *   [8]  shape          4 B   (JSShape*)       → objShape
+     *  [12]  proto          8 B   (JSValue = tag+val) → objSize=12 for the pair
+     *  [20]  call_count     4 B   (uint32_t)        ← NEW Step-5 field
+     *  [24]  jit_native_ptr 4 B   (void*)           ← NEW Step-5 field
+     *  [28]  byte_code_buf  4 B   (uint8_t*)        → bcBuf
+     *  [32]  byte_code_len  4 B   (int)             → bcLen
+     *  [36]  func_name      4 B   (JSAtom)          → funcName
+     *  [40]  vardefs        4 B   (JSVarDef*)
+     *  [44]  closure_var    4 B   (JSClosureVar*)
+     *  [48]  arg_count      2 B   (uint16_t)        → argCount
+     *  [50]  var_count      2 B   (uint16_t)        → varCount
+     *  [52]  defined_arg_count 2 B
+     *  [54]  stack_size     2 B   (uint16_t)        → stackSize
+     *  [56]  closure_var_count 2 B
+     *  [58]  cpool_count    2 B                      (small variant; full below)
+     *  [60]  vardefs_count  2 B
+     *  [62]  ic_count       2 B
+     *  [64]  cpool          4 B   (JSValue*)        → cpoolPtr
+     *  [68]  ic             4 B                     → cpoolCount slot (count at [58])
+     *  [72]  source_len     4 B
+     *  structSize: 96 bytes total (aligned to 16 B with trailing bitfields).  */
+    JS_SetPropertyStr(c, o, "gcHeaderSize",  JS_NewUint32(c,  4));
+    JS_SetPropertyStr(c, o, "objShape",      JS_NewUint32(c,  8));
+    JS_SetPropertyStr(c, o, "objSize",       JS_NewUint32(c, 12));
+    JS_SetPropertyStr(c, o, "callCount",     JS_NewUint32(c, 20));
+    JS_SetPropertyStr(c, o, "jitNativePtr",  JS_NewUint32(c, 24));
+    JS_SetPropertyStr(c, o, "bcBuf",         JS_NewUint32(c, 28));
+    JS_SetPropertyStr(c, o, "bcLen",         JS_NewUint32(c, 32));
+    JS_SetPropertyStr(c, o, "funcName",      JS_NewUint32(c, 36));
+    JS_SetPropertyStr(c, o, "argCount",      JS_NewUint32(c, 48));
+    JS_SetPropertyStr(c, o, "varCount",      JS_NewUint32(c, 50));
+    JS_SetPropertyStr(c, o, "stackSize",     JS_NewUint32(c, 54));
+    JS_SetPropertyStr(c, o, "cpoolPtr",      JS_NewUint32(c, 64));
+    JS_SetPropertyStr(c, o, "cpoolCount",    JS_NewUint32(c, 58)); /* uint16 at [58] */
+    JS_SetPropertyStr(c, o, "closureVarCount", JS_NewUint32(c, 56)); /* uint16 at [56] */
+    JS_SetPropertyStr(c, o, "structSize",    JS_NewUint32(c, 96));
+
+    /* JSObject layout offsets for inline JIT-to-JIT call dispatch (Phase 1.1.4).
+     * These let the JIT compiler dereference JSObject* → JSFunctionBytecode*
+     * → jit_native_ptr entirely in generated x86 code without a C helper call. */
+    JS_SetPropertyStr(c, o, "objClassId",      JS_NewUint32(c, 6));  /* uint16_t class_id in JSObject */
+    JS_SetPropertyStr(c, o, "objFuncBC",       JS_NewUint32(c, 28)); /* u.func.function_bytecode in JSObject */
+    JS_SetPropertyStr(c, o, "classIdBCFunc",   JS_NewUint32(c, 13)); /* JS_CLASS_BYTECODE_FUNCTION */
+    return o;
+}
+
 /*  System  */
 
 static JSValue js_halt(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -389,7 +609,616 @@ static JSValue js_eval(JSContext *c, JSValueConst this_val, int argc, JSValueCon
     return ret;
 }
 
+/* ── JSOS Guarded Heap Allocator ──────────────────────────────────────────
+ *
+ * Replaces QuickJS's default malloc functions with an allocator that
+ * stores the allocation size in a header, plus HEAD and TAIL canaries
+ * for heap corruption detection.
+ *
+ * Layout:
+ *   [ 4 bytes: size ][ 4 bytes: HEAD canary 0xABCD1234 ]
+ *   [ user payload .............. (size bytes) ]
+ *   [ 4 bytes: TAIL canary 0xDEADBEEF ]
+ *
+ * On free/realloc both canaries are validated:
+ *   HEAD violation → header corruption, double-free, or wild write
+ *   TAIL violation → buffer overflow past the allocation boundary
+ *
+ * When a canary violation is detected, the block is intentionally LEAKED
+ * (never passed to free()) to prevent cascading heap corruption that
+ * crashes newlib's _free_r walking a corrupted freelist.
+ *
+ * Benefits:
+ *   1. Eliminates implicit malloc_usable_size dependency
+ *   2. Precise size tracking for GC threshold accounting
+ *   3. Catches heap corruption BEFORE it causes #PF in free()
+ *   4. Intentional leak policy prevents cascading damage
+ */
+#define JSOS_MALLOC_HDR_SIZE   8          /* [size(4)][head_canary(4)] — 8-byte aligned */
+#define JSOS_MALLOC_TAIL_SIZE  4          /* tail canary after user payload             */
+#define JSOS_CANARY_HEAD       0xABCD1234u
+#define JSOS_CANARY_TAIL       0xDEADBEEFu
+
+/* ── Serial output helpers (no printf/snprintf dependency) ─────────── */
+static void _heap_puts_hex32(uint32_t v) {
+    static const char _h[] = "0123456789ABCDEF";
+    char b[11];
+    b[0] = '0'; b[1] = 'x';
+    for (int i = 0; i < 8; i++) b[2 + i] = _h[(v >> (28 - i * 4)) & 0xF];
+    b[10] = '\0';
+    platform_serial_puts(b);
+}
+
+static void _heap_puts_dec(uint32_t v) {
+    char b[12];
+    int i = 11;
+    b[i] = '\0';
+    if (!v) { b[--i] = '0'; }
+    else while (v) { b[--i] = '0' + (v % 10); v /= 10; }
+    platform_serial_puts(&b[i]);
+}
+
+static size_t jsos_malloc_usable_size(const void *ptr)
+{
+    if (!ptr) return 0;
+    const size_t *hdr = (const size_t *)((const char *)ptr - JSOS_MALLOC_HDR_SIZE);
+    return *hdr;
+}
+
+static void *jsos_malloc(JSMallocState *s, size_t size)
+{
+    void *raw;
+    size_t real;
+    assert(size != 0);
+    real = size + JSOS_MALLOC_HDR_SIZE + JSOS_MALLOC_TAIL_SIZE;
+    /* Overflow-safe limit check: guard against both 32-bit wraparound
+     * and the edge case where malloc_size already exceeds malloc_limit. */
+    if (unlikely(s->malloc_size >= s->malloc_limit ||
+                 size > s->malloc_limit - s->malloc_size))
+        return NULL;
+    raw = malloc(real);
+    if (!raw)
+        return NULL;
+    *(size_t *)raw = size;                                                         /* stored size   */
+    *((uint32_t *)raw + 1) = JSOS_CANARY_HEAD;                                    /* head canary   */
+    *(uint32_t *)((char *)raw + JSOS_MALLOC_HDR_SIZE + size) = JSOS_CANARY_TAIL;   /* tail canary   */
+    s->malloc_count++;
+    s->malloc_size += size + MALLOC_OVERHEAD;
+    return (char *)raw + JSOS_MALLOC_HDR_SIZE;
+}
+
+static void jsos_free(JSMallocState *s, void *ptr)
+{
+    if (!ptr) return;
+
+    /* Quick range check: pointers outside the heap are obviously corrupted.
+     * Our heap lives between _heap_start (~0x0B..) and sbrk's current break.
+     * Anything above 0x80000000 (2 GB) is definitely not a valid heap ptr.
+     * Common bad values: 0xFFFFFFFC (-4 from NAN_BOXING integer miscast). */
+    uintptr_t p = (uintptr_t)ptr;
+    if (unlikely(p < 0x00100000u || p > 0x80000000u)) {
+        _heap_head_violations++;
+        _heap_leaks_prevented++;
+        return;  /* silently discard — no need to spam serial */
+    }
+
+    size_t *hdr = (size_t *)((char *)ptr - JSOS_MALLOC_HDR_SIZE);
+    size_t size = *hdr;
+    uint32_t hc = *((uint32_t *)hdr + 1);
+
+    /* HEAD canary — detects header corruption, double-free, wild write */
+    if (unlikely(hc != JSOS_CANARY_HEAD)) {
+        _heap_head_violations++;
+        _heap_leaks_prevented++;
+        /* Limit serial spam to first 8 unique violations */
+        if (_heap_head_violations <= 8) {
+            platform_serial_puts("[HEAP] HEAD violation free ptr=");
+            _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
+            platform_serial_puts(" stored_size=");
+            _heap_puts_hex32((uint32_t)size);
+            platform_serial_puts(" canary=");
+            _heap_puts_hex32(hc);
+            /* Tag as main-runtime or child so crash source is clear */
+            platform_serial_puts(_cur_proc >= 0 ? " [child]" : " [main]");
+            platform_serial_puts(" — LEAK\n");
+        }
+        /* Nullify payload to prevent QJS from following corrupted pointers out of
+         * this block.  Set first uint32 (ref_count in JSObject/JSString) to a
+         * high sentinel so the GC never tries to free it again, zero the rest. */
+        uint32_t *z = (uint32_t *)ptr;
+        z[0] = 0x7FFFFFFFu;  /* pin ref_count: prevents GC from re-freeing */
+        z[1]=z[2]=z[3]=z[4]=z[5]=z[6]=z[7]=
+        z[8]=z[9]=z[10]=z[11]=z[12]=z[13]=z[14]=z[15]=0;
+        /* Bump main GC threshold: heap corruption means GC would walk
+         * corrupted pointers → page fault cascade.  Disable GC entirely
+         * (threshold = 1GB) to prevent any heap walking after corruption. */
+        if (rt) JS_SetGCThreshold(rt, 1024u * 1024u * 1024u);
+        return;  /* intentional leak: don't pass corrupted block to free() */
+    }
+
+    /* TAIL canary — detects buffer overflow past allocation boundary */
+    uint32_t tc = *(uint32_t *)((char *)ptr + size);
+    if (unlikely(tc != JSOS_CANARY_TAIL)) {
+        _heap_tail_violations++;
+        _heap_leaks_prevented++;
+        if (_heap_tail_violations <= 8) {
+            platform_serial_puts("[HEAP] TAIL violation free ptr=");
+            _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
+            platform_serial_puts(" size=");
+            _heap_puts_dec((uint32_t)size);
+            platform_serial_puts(" tail=");
+            _heap_puts_hex32(tc);
+            platform_serial_puts(" — LEAK\n");
+        }
+        /* Null-fill payload: prevent QJS from following stale pointers */
+        uint32_t *z = (uint32_t *)ptr;
+        z[0] = 0x7FFFFFFFu;
+        z[1]=z[2]=z[3]=z[4]=z[5]=z[6]=z[7]=
+        z[8]=z[9]=z[10]=z[11]=z[12]=z[13]=z[14]=z[15]=0;
+        /* Disable GC — heap is corrupted */
+        if (rt) JS_SetGCThreshold(rt, 1024u * 1024u * 1024u);
+        return;  /* intentional leak: don't free overflowed block */
+    }
+
+    /* Canaries OK — poison head canary (catches double-free) then free */
+    *((uint32_t *)hdr + 1) = 0x00000000u;
+    s->malloc_count--;
+    s->malloc_size -= size + MALLOC_OVERHEAD;
+    free(hdr);                /* goes through our global fault-guarded free() */
+}
+
+static void *jsos_realloc(JSMallocState *s, void *ptr, size_t size)
+{
+    if (!ptr) {
+        if (size == 0) return NULL;
+        return jsos_malloc(s, size);
+    }
+
+    /* Range check: reject obviously-invalid pointers (same as jsos_free) */
+    uintptr_t p = (uintptr_t)ptr;
+    if (unlikely(p < 0x00100000u || p > 0x80000000u)) {
+        _heap_head_violations++;
+        if (size == 0) return NULL;
+        return jsos_malloc(s, size);  /* allocate fresh; can't realloc garbage */
+    }
+
+    size_t *hdr = (size_t *)((char *)ptr - JSOS_MALLOC_HDR_SIZE);
+    size_t old_size = *hdr;
+
+    if (size == 0) {
+        jsos_free(s, ptr);   /* route through guarded free */
+        return NULL;
+    }
+
+    /* Validate canaries before realloc */
+    uint32_t hc = *((uint32_t *)hdr + 1);
+    if (unlikely(hc != JSOS_CANARY_HEAD)) {
+        _heap_head_violations++;
+        _heap_leaks_prevented++;
+        if (_heap_head_violations <= 8) {
+            platform_serial_puts("[HEAP] HEAD violation realloc ptr=");
+            _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
+            platform_serial_puts(" — deny\n");
+        }
+        /* Disable GC — heap corruption detected */
+        if (rt) JS_SetGCThreshold(rt, 1024u * 1024u * 1024u);
+        return NULL;
+    }
+    uint32_t tc = *(uint32_t *)((char *)ptr + old_size);
+    if (unlikely(tc != JSOS_CANARY_TAIL)) {
+        _heap_tail_violations++;
+        _heap_leaks_prevented++;
+        if (_heap_tail_violations <= 8) {
+            platform_serial_puts("[HEAP] TAIL violation realloc ptr=");
+            _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
+            platform_serial_puts(" size=");
+            _heap_puts_dec((uint32_t)old_size);
+            platform_serial_puts(" tail=");
+            _heap_puts_hex32(tc);
+            platform_serial_puts(" — deny\n");
+        }
+        /* Disable GC — heap corruption detected */
+        if (rt) JS_SetGCThreshold(rt, 1024u * 1024u * 1024u);
+        return NULL;
+    }
+
+    /* Overflow-safe limit check (uses subtraction to avoid 32-bit wrap) */
+    if (size > old_size) {
+        size_t delta = size - old_size;
+        if (unlikely(s->malloc_size >= s->malloc_limit ||
+                     delta > s->malloc_limit - s->malloc_size))
+            return NULL;
+    }
+
+    hdr = realloc(hdr, size + JSOS_MALLOC_HDR_SIZE + JSOS_MALLOC_TAIL_SIZE);
+    if (!hdr)
+        return NULL;
+    *hdr = size;                                                                    /* update size   */
+    *((uint32_t *)hdr + 1) = JSOS_CANARY_HEAD;                                     /* refresh head  */
+    *(uint32_t *)((char *)hdr + JSOS_MALLOC_HDR_SIZE + size) = JSOS_CANARY_TAIL;    /* new tail      */
+    s->malloc_size += size - old_size;
+    return (char *)hdr + JSOS_MALLOC_HDR_SIZE;
+}
+
+static const JSMallocFunctions jsos_malloc_funcs = {
+    jsos_malloc,
+    jsos_free,
+    jsos_realloc,
+    jsos_malloc_usable_size,
+};
+
+/* ── Linker-level fault-guarded heap wrappers (--wrap) ────────────────────
+ *
+ * The GNU linker --wrap=_malloc_r / --wrap=_free_r / --wrap=_realloc_r
+ * option redirects ALL callers of these newlib _r functions through our
+ * wrappers — including internal cross-object calls inside newlib itself
+ * (e.g. _realloc_r → _malloc_r, _calloc_r → _malloc_r, printf → _malloc_r).
+ *
+ * This is strictly stronger than overriding the plain malloc/free/realloc
+ * symbols, because those only intercept external C callers while newlib's
+ * own internal code still calls _malloc_r/_free_r/_realloc_r directly.
+ *
+ * Each wrapper has two layers of protection:
+ *   1. If the heap is marked broken (_heap_broken), use a simple bump
+ *      allocator on a separate 2 MB static arena.  free() becomes a no-op.
+ *      This prevents the "fault storm" that occurs when the dlmalloc
+ *      free-list is permanently corrupted — every subsequent alloc/free
+ *      would fault otherwise.
+ *   2. If the heap is NOT broken, call __real__malloc_r etc. under
+ *      setjmp/longjmp fault protection.  If a #PF fires while walking
+ *      the corrupted free list, we catch it, mark the heap broken, and
+ *      fall through to the bump allocator.
+ *
+ * The bump allocator is intentionally simple: allocations grow linearly,
+ * free() is a no-op (memory is never reclaimed).  This keeps the OS
+ * alive long enough for the page to finish loading or error gracefully
+ * rather than entering an infinite fault loop.
+ */
+
+/* Forward declarations — __real_* are provided by --wrap linker magic */
+extern void  *__real__malloc_r(struct _reent *, size_t);
+extern void   __real__free_r(struct _reent *, void *);
+extern void  *__real__realloc_r(struct _reent *, void *, size_t);
+
+/* Fallback bump allocator — used when the main heap is broken */
+#define FALLBACK_HEAP_SIZE   (16u * 1024u * 1024u)  /* 16 MB — enough to survive heap corruption and finish rendering */
+static char  _fallback_arena[FALLBACK_HEAP_SIZE]
+    __attribute__((aligned(16)));
+static volatile uint32_t _fallback_offset = 0;
+static volatile int      _heap_broken     = 0;
+static volatile int      _free_faults     = 0;   /* count of _free_r / _realloc_r faults; switch to fallback after 50 */
+static volatile int      _total_leaks     = 0;   /* total leaked allocations (for diagnostics) */
+
+static void *_fallback_alloc(size_t size) {
+    /* 8-byte align all allocations */
+    size = (size + 7u) & ~7u;
+    if (size == 0) size = 8;
+    uint32_t off = _fallback_offset;
+    if (off + size > FALLBACK_HEAP_SIZE) return NULL;   /* OOM */
+    _fallback_offset = off + (uint32_t)size;
+    return _fallback_arena + off;
+}
+
+/* ── __wrap__malloc_r ──────────────────────────────────────────────────── */
+void *__wrap__malloc_r(struct _reent *r, size_t size)
+{
+    if (_heap_broken) return _fallback_alloc(size);
+
+    jmp_buf _saved;
+    int _act = _js_fault_active;
+    memcpy(_saved, _js_fault_buf, sizeof(jmp_buf));
+
+    if (setjmp(_js_fault_buf) != 0) {
+        /* _malloc_r faulted — use per-call fallback, keep dlmalloc for future calls.
+         * Only switch to full fallback after 50+ total faults. */
+        __asm__ volatile("sti");
+        _js_fault_active = _act;
+        memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
+        _free_faults++;
+        _total_leaks++;
+        _heap_leaks_prevented++;
+        if (_free_faults >= 50) {
+            _heap_broken = 1;
+            platform_serial_puts("[HEAP] _malloc_r FAULTED x50 — switching to fallback allocator\n");
+        } else if (_free_faults <= 8) {
+            platform_serial_puts("[HEAP] _malloc_r FAULTED — per-call fallback (dlmalloc continues)\n");
+        }
+        return _fallback_alloc(size);
+    }
+
+    _js_fault_active = 1;
+    void *result = __real__malloc_r(r, size);
+    _js_fault_active = _act;
+    memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
+    return result;
+}
+
+/* ── __wrap__free_r ────────────────────────────────────────────────────── */
+void __wrap__free_r(struct _reent *r, void *ptr)
+{
+    if (!ptr) return;
+
+    /* If the pointer is inside our fallback arena, just ignore it */
+    uintptr_t p = (uintptr_t)ptr;
+    uintptr_t a = (uintptr_t)_fallback_arena;
+    if (p >= a && p < a + FALLBACK_HEAP_SIZE) return;
+
+    if (_heap_broken) return;  /* leak — can't return to broken dlmalloc */
+
+    jmp_buf _saved;
+    int _act = _js_fault_active;
+    memcpy(_saved, _js_fault_buf, sizeof(jmp_buf));
+
+    if (setjmp(_js_fault_buf) != 0) {
+        /* _free_r faulted — heap metadata is corrupted around this chunk.
+         * Don't immediately switch to fallback: dlmalloc often works fine
+         * for OTHER chunks.  Only switch after 3 consecutive free faults. */
+        __asm__ volatile("sti");
+        _js_fault_active = _act;
+        memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
+        _free_faults++;
+        _total_leaks++;
+        _heap_leaks_prevented++;
+        if (_free_faults >= 50) {
+            _heap_broken = 1;
+            platform_serial_puts("[HEAP] _free_r FAULTED x50 — switching to fallback allocator\n");
+        } else if (_free_faults <= 8) {
+            platform_serial_puts("[HEAP] _free_r FAULTED ptr=");
+            _heap_puts_hex32((uint32_t)p);
+            platform_serial_puts(" — leaked (dlmalloc continues)\n");
+        }
+        /* Bump main GC threshold to prevent GC from walking corrupted heap */
+        if (rt) JS_SetGCThreshold(rt, 1024u * 1024u * 1024u);
+        return;
+    }
+
+    _js_fault_active = 1;
+    __real__free_r(r, ptr);
+    _js_fault_active = _act;
+    memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
+}
+
+/* ── __wrap__realloc_r ─────────────────────────────────────────────────── */
+void *__wrap__realloc_r(struct _reent *r, void *ptr, size_t size)
+{
+    if (_heap_broken) {
+        /* Can't realloc from broken heap — allocate fresh from fallback */
+        void *n = _fallback_alloc(size);
+        /* Best effort: copy old data if ptr exists and is accessible */
+        if (n && ptr) {
+            /* We don't know the old size; copy up to the new size.
+             * If ptr is in the fallback arena we can safely copy;
+             * if it's on the (broken) main heap we try under the
+             * same setjmp umbrella below but since _heap_broken is
+             * set we skip that.  Just do a safe memcpy here. */
+            jmp_buf _saved2;
+            int _act2 = _js_fault_active;
+            memcpy(_saved2, _js_fault_buf, sizeof(jmp_buf));
+            if (setjmp(_js_fault_buf) != 0) {
+                __asm__ volatile("sti");
+                _js_fault_active = _act2;
+                memcpy(_js_fault_buf, _saved2, sizeof(jmp_buf));
+                /* Copy failed — return the uninitialised buffer */
+                return n;
+            }
+            _js_fault_active = 1;
+            memcpy(n, ptr, size);
+            _js_fault_active = _act2;
+            memcpy(_js_fault_buf, _saved2, sizeof(jmp_buf));
+        }
+        return n;
+    }
+
+    jmp_buf _saved;
+    int _act = _js_fault_active;
+    memcpy(_saved, _js_fault_buf, sizeof(jmp_buf));
+
+    if (setjmp(_js_fault_buf) != 0) {
+        /* _realloc_r faulted — heap metadata is corrupted around this chunk.
+         * Use same tolerance as _free_r — count faults before fallback. */
+        __asm__ volatile("sti");
+        _js_fault_active = _act;
+        memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
+        _free_faults++;
+        _total_leaks++;
+        _heap_leaks_prevented++;
+        if (_free_faults >= 50) {
+            _heap_broken = 1;
+            platform_serial_puts("[HEAP] _realloc_r FAULTED x50 — switching to fallback allocator\n");
+        } else if (_free_faults <= 8) {
+            platform_serial_puts("[HEAP] _realloc_r FAULTED — per-call fallback (dlmalloc continues)\n");
+        }
+        if (rt) JS_SetGCThreshold(rt, 1024u * 1024u * 1024u);
+        return _fallback_alloc(size);
+    }
+
+    _js_fault_active = 1;
+    void *result = __real__realloc_r(r, ptr, size);
+    _js_fault_active = _act;
+    memcpy(_js_fault_buf, _saved, sizeof(jmp_buf));
+    return result;
+}
+
+/*
+ * kernel.evalGuarded(code [, filename])
+ *
+ * Evaluate JavaScript code with CPU-fault recovery.  If the QuickJS
+ * interpreter triggers a hardware exception (#PF, #GP, #UD) during
+ * execution, the exception handler longjmp()s back here and we throw
+ * a catchable JavaScript InternalError instead of halting the kernel.
+ *
+ * Use this whenever executing untrusted third-party scripts (e.g.
+ * Google's JS bundles) that may use memory patterns our interpreter
+ * doesn't handle cleanly.
+ */
+static JSValue js_eval_guarded(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    size_t len;
+    const char *code = JS_ToCStringLen(c, &len, argv[0]);
+    if (!code) return JS_EXCEPTION;
+    const char *filename = "<eval-guarded>";
+    void *_saved_frame = JS_GetCurrentStackFrame(c);
+    /* Save previous fault state so nested guardedRun works */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
+    /* Arm the recovery checkpoint */
+    _js_fault_active = 1;
+    _js_fault_vector = 0;
+    _js_in_page_eval = 1;
+    int recovered = setjmp(_js_fault_buf);
+    if (recovered != 0) {
+        _js_in_page_eval = _saved_in_page_eval;
+        __asm__ volatile("sti");
+        JS_ResetAfterFault(c, _saved_frame);
+        _js_fault_active = _saved_fault_active;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+        platform_serial_puts("[kernel] evalGuarded fault recovered (vector=");
+        {
+            static const char _h2[] = "0123456789ABCDEF";
+            char _vb[5];
+            unsigned _v = (unsigned)_js_fault_vector;
+            _vb[0] = '0'; _vb[1] = 'x';
+            _vb[2] = _h2[(_v >> 4) & 0xF];
+            _vb[3] = _h2[_v & 0xF];
+            _vb[4] = '\0';
+            platform_serial_puts(_vb);
+        }
+        platform_serial_puts(") — returning sentinel\n");
+        return JS_NewInt32(c, -9999);
+    }
+    /* Recalibrate stack top before entering the interpreter — the current
+     * ESP may differ from the value captured at JS_NewRuntime() time. */
+    JS_UpdateStackTop(JS_GetRuntime(c));
+    JSValue result = JS_Eval(c, code, len, filename, JS_EVAL_TYPE_GLOBAL);
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+    JS_FreeCString(c, code);
+    if (JS_IsException(result)) {
+        return JS_EXCEPTION;  /* propagate normal JS exceptions as-is */
+    }
+    JS_FreeValue(c, result);
+    return JS_UNDEFINED;
+}
+
+/*
+ * kernel.callGuarded(fn [, arg1, arg2, ...])
+ *
+ * Call a JavaScript function with CPU-fault recovery.  If the execution
+ * of fn triggers a hardware exception (#PF, #GP, #UD, #DE) the handler
+ * longjmp()s back here and we throw a catchable InternalError instead
+ * of halting the OS.
+ *
+ * This is the companion to evalGuarded for callbacks — RAF handlers,
+ * setTimeout callbacks, and event listeners contain JIT-compiled code that
+ * runs between evalGuarded calls (where _js_fault_active == 0), so any JIT
+ * bug in a callback currently halts the OS.  callGuarded re-arms the fault
+ * checkpoint for each callback invocation.
+ */
+static JSValue js_call_guarded(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    void *_saved_frame = JS_GetCurrentStackFrame(c);
+    /* Save previous fault state for proper nesting */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
+    _js_fault_active = 1;
+    _js_fault_vector = 0;
+    _js_in_page_eval = 1;
+    int recovered = setjmp(_js_fault_buf);
+    if (recovered != 0) {
+        _js_in_page_eval = _saved_in_page_eval;
+        __asm__ volatile("sti");
+        JS_ResetAfterFault(c, _saved_frame);
+        _js_fault_active = _saved_fault_active;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+        platform_serial_puts("[kernel] callGuarded fault recovered\n");
+        return JS_NewInt32(c, -9999);
+    }
+    JS_UpdateStackTop(JS_GetRuntime(c));
+    JSValue result = JS_Call(c, argv[0], JS_UNDEFINED,
+                             argc - 1,
+                             argc > 1 ? argv + 1 : (JSValueConst *)NULL);
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+    if (JS_IsException(result)) {
+        return JS_EXCEPTION;
+    }
+    JS_FreeValue(c, result);
+    return JS_UNDEFINED;
+}
+
 /*  Function table  */
+
+/*
+ * kernel.guardedRun(fn)
+ *
+ * Execute a JavaScript function with full CPU-fault recovery.  Designed for
+ * the main event loop so that any #PF / #GP / #UD during TypeScript
+ * execution (e.g. corrupted QJS heap pointer dereference) recovers here
+ * instead of triggering global idle recovery.
+ *
+ * All inner setjmp-using functions (evalGuarded, callGuarded, procEval,
+ * procTick, drainJobs, serviceTimers) save and restore the fault state,
+ * so this outer guard persists through nested protected calls.
+ *
+ * Returns:  0 = success, -1 = CPU fault recovered, -3 = JS exception consumed
+ */
+static JSValue js_guarded_run(JSContext *c, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1 || !JS_IsFunction(c, argv[0]))
+        return JS_NewInt32(c, -2);
+    void *_saved_frame = JS_GetCurrentStackFrame(c);
+    /* Save previous fault state */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
+    _js_fault_active = 1;
+    _js_in_page_eval = 0;
+    _js_fault_vector = 0;
+    int recovered = setjmp(_js_fault_buf);
+    if (recovered != 0) {
+        _js_fault_active = _saved_fault_active;
+        _js_in_page_eval = _saved_in_page_eval;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+        __asm__ volatile("sti");
+        JS_ResetAfterFault(c, _saved_frame);
+        platform_serial_puts("[guardedRun] recovered from fault (vector=");
+        {
+            static const char _h2[] = "0123456789ABCDEF";
+            char _vb[5];
+            unsigned _v = (unsigned)_js_fault_vector;
+            _vb[0] = '0'; _vb[1] = 'x';
+            _vb[2] = _h2[(_v >> 4) & 0xF];
+            _vb[3] = _h2[_v & 0xF];
+            _vb[4] = '\0';
+            platform_serial_puts(_vb);
+        }
+        platform_serial_puts(")\n");
+        return JS_NewInt32(c, -1);
+    }
+    JS_UpdateStackTop(JS_GetRuntime(c));
+    JSValue r = JS_Call(c, argv[0], JS_UNDEFINED, 0, NULL);
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+    if (JS_IsException(r)) {
+        JSValue exc = JS_GetException(c);
+        JS_FreeValue(c, exc);
+        JS_FreeValue(c, r);
+        return JS_NewInt32(c, -3);
+    }
+    JS_FreeValue(c, r);
+    return JS_NewInt32(c, 0);
+}
+
 /* ── Framebuffer bindings ──────────────────────────────────────────── */
 
 /*
@@ -451,6 +1280,42 @@ static JSValue js_fb_blit(JSContext *c, JSValueConst this_val, int argc, JSValue
         fb_blit_buf[i] = px;
     }
     platform_fb_blit(fb_blit_buf, x, y, w, h);
+    return JS_UNDEFINED;
+}
+
+/*
+ * kernel.fbBlitStrided(buffer, srcStride, srcX, srcY, dstX, dstY, w, h)
+ *
+ * Blit a sub-rectangle from a larger source buffer (stride != w) directly to
+ * the framebuffer.  Avoids the need to copy into a contiguous temp buffer.
+ * srcStride is the full width of the source buffer in pixels.
+ * srcX, srcY are the source offset within the buffer.
+ */
+static JSValue js_fb_blit_strided(JSContext *c, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 8) return JS_UNDEFINED;
+    int32_t srcStride = 0, srcX = 0, srcY = 0;
+    int32_t dstX = 0, dstY = 0, w = 0, h = 0;
+    size_t byte_len = 0;
+    uint8_t *ab_data = JS_GetArrayBuffer(c, &byte_len, argv[0]);
+    if (!ab_data) return JS_UNDEFINED;
+
+    JS_ToInt32(c, &srcStride, argv[1]);
+    JS_ToInt32(c, &srcX,      argv[2]);
+    JS_ToInt32(c, &srcY,      argv[3]);
+    JS_ToInt32(c, &dstX,      argv[4]);
+    JS_ToInt32(c, &dstY,      argv[5]);
+    JS_ToInt32(c, &w,         argv[6]);
+    JS_ToInt32(c, &h,         argv[7]);
+    if (w <= 0 || h <= 0 || srcStride <= 0) return JS_UNDEFINED;
+
+    /* Sanity: source region must fit in buffer */
+    size_t needed = ((size_t)(srcY + h - 1) * (size_t)srcStride + (size_t)(srcX + w)) * 4;
+    if (needed > byte_len) return JS_UNDEFINED;
+
+    const uint32_t *src = (const uint32_t *)ab_data + (size_t)srcY * (size_t)srcStride + srcX;
+    platform_fb_blit_strided(src, srcStride, dstX, dstY, w, h);
     return JS_UNDEFINED;
 }
 
@@ -965,6 +1830,12 @@ static JSValue js_yield(JSContext *c, JSValueConst this_val,
     (void)this_val; (void)argc; (void)argv;
     if (!JS_IsUndefined(_scheduler_hook)) {
         JSValue r = JS_Call(c, _scheduler_hook, JS_UNDEFINED, 0, NULL);
+        if (JS_IsException(r)) {
+            /* Consume the pending exception so it doesn't leak into the
+             * caller's context and cause a stale 'throw null' later. */
+            JSValue exc = JS_GetException(c);
+            JS_FreeValue(c, exc);
+        }
         JS_FreeValue(c, r);
     }
     return JS_UNDEFINED;
@@ -979,6 +1850,50 @@ static JSValue js_sched_tick(JSContext *c, JSValueConst this_val,
     uint32_t n = _preempt_counter;
     _preempt_counter = 0;
     return JS_NewUint32(c, n);
+}
+
+/* kernel.drainJobs() — drain all pending Promise microtasks (JS jobs) for
+ * the main runtime.  Must be called periodically from the JS event loop
+ * so that Promise .then() / async-await callbacks fire correctly.
+ * Returns the number of jobs that were executed.
+ * Without this, Promise callbacks in page scripts never run!
+ *
+ * drainJobs drains Promise callbacks from ALL origins, including page scripts
+ * evaluated via evalGuarded.  Page-script functions may use patterns the JIT
+ * compiler doesn't handle, so we suppress JIT during draining.  OS-level
+ * async functions that were already JIT-compiled during normal execution
+ * will still fall back to interpreted mode here — a small perf cost
+ * weighed against the stability of avoiding JIT on arbitrary page JS. */
+static JSValue js_drain_jobs(JSContext *c, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    if (!rt) return JS_NewInt32(c, 0);
+    void *_saved_frame = JS_GetCurrentStackFrame(c);
+    /* Save/restore fault state for nesting */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
+    _js_fault_active = 1;
+    _js_fault_vector = 0;
+    _js_in_page_eval = 1;   /* suppress JIT for page-script callbacks */
+    int recovered = setjmp(_js_fault_buf);
+    if (recovered != 0) {
+        _js_fault_active = _saved_fault_active;
+        _js_in_page_eval = _saved_in_page_eval;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+        __asm__ volatile("sti");
+        JS_ResetAfterFault(c, _saved_frame);
+        return JS_NewInt32(c, -1);  /* negative = fault during drain */
+    }
+    JS_UpdateStackTop(rt);
+    int count = 0;
+    JSContext *job_ctx = NULL;
+    while (JS_ExecutePendingJob(rt, &job_ctx) > 0 && count < 10000) count++;
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+    return JS_NewInt32(c, count);
 }
 
 static JSValue js_tss_set_esp0(JSContext *c, JSValueConst this_val,
@@ -1141,6 +2056,22 @@ static JSValue js_shared_buf_size(JSContext *c, JSValueConst this_val,
     return JS_NewUint32(c, _sbuf_sizes[id]);
 }
 
+/* Forward declarations for child-only APIs defined later in this translation unit */
+static JSValue js_child_get_render_buf(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_get_width(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_get_height(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_fs_read_file(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_fs_write_file(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_fs_read_dir(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_fs_exists(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_fs_stat(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_set_timeout(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_clear_timeout(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_set_interval(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_clear_interval(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_poll_event(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue js_child_window_command(JSContext *, JSValueConst, int, JSValueConst *);
+
 /* Minimal kernel API exposed inside child runtimes */
 static const JSCFunctionListEntry js_child_kernel_funcs[] = {
     JS_CFUNC_DEF("serialPut",       1, js_serial_put),
@@ -1148,11 +2079,31 @@ static const JSCFunctionListEntry js_child_kernel_funcs[] = {
     JS_CFUNC_DEF("getUptime",       0, js_get_uptime),
     JS_CFUNC_DEF("sleep",           1, js_sleep),
     JS_CFUNC_DEF("getMemoryInfo",   0, js_mem_info),
+    JS_CFUNC_DEF("heapStats",      0, js_heap_stats),
     JS_CFUNC_DEF("postMessage",     1, js_proc_post_msg),
     JS_CFUNC_DEF("pollMessage",     0, js_proc_poll_msg),
     /* Shared memory — same physical bytes as parent */
     JS_CFUNC_DEF("sharedBufferOpen", 1, js_shared_buf_open),
     JS_CFUNC_DEF("sharedBufferSize", 1, js_shared_buf_size),
+    /* Phase A/B: render surface + dimensions */
+    JS_CFUNC_DEF("getRenderBuffer", 0, js_child_get_render_buf),
+    JS_CFUNC_DEF("getWidth",        0, js_child_get_width),
+    JS_CFUNC_DEF("getHeight",       0, js_child_get_height),
+    /* Phase B2: FS bridge */
+    JS_CFUNC_DEF("fsReadFile",        1, js_child_fs_read_file),
+    JS_CFUNC_DEF("fsWriteFile",       2, js_child_fs_write_file),
+    JS_CFUNC_DEF("fsReadDir",         1, js_child_fs_read_dir),
+    JS_CFUNC_DEF("fsExists",          1, js_child_fs_exists),
+    JS_CFUNC_DEF("fsStat",            1, js_child_fs_stat),
+    /* Phase B3: timers */
+    JS_CFUNC_DEF("setTimeout",      2, js_child_set_timeout),
+    JS_CFUNC_DEF("clearTimeout",    1, js_child_clear_timeout),
+    JS_CFUNC_DEF("setInterval",     2, js_child_set_interval),
+    JS_CFUNC_DEF("clearInterval",   1, js_child_clear_interval),
+    /* Phase B4: event queue */
+    JS_CFUNC_DEF("pollEvent",       0, js_child_poll_event),
+    /* Phase B6: window commands */
+    JS_CFUNC_DEF("windowCommand",   1, js_child_window_command),
 };
 
 /* kernel.procCreate() → id (0-7) or -1 if all slots are occupied */
@@ -1165,10 +2116,31 @@ static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
     if (id < 0) return JS_NewInt32(c, -1);
     JSProc_t *p = &_procs[id];
     memset(p, 0, sizeof(*p));
-    p->rt = JS_NewRuntime();
+    p->rt = JS_NewRuntime2(&jsos_malloc_funcs, NULL);
     if (!p->rt) return JS_NewInt32(c, -1);
-    JS_SetMemoryLimit(p->rt, 4 * 1024 * 1024);   /* 4 MB per child process */
-    JS_SetMaxStackSize(p->rt, 64 * 1024);
+    JS_SetMemoryLimit(p->rt, 1u * 1024u * 1024u * 1024u); /* 1 GB per child.
+                                                    * Covers heavy tabs: Gmail, Google Docs,
+                                                    * Maps, SPAs, video editors (100 MB–1 GB).
+                                                    * Hard ceiling on 32-bit i686: x86 without
+                                                    * PAE can only address ~3 GB physical RAM
+                                                    * (4 GB minus ~1 GB MMIO/PCI hole at
+                                                    * 0xC0000000). 1 GB/child is the practical
+                                                    * maximum for a single runtime; true 4 GB+
+                                                    * tabs require a 64-bit kernel.
+                                                    * Heap window is 2 GB NOLOAD. In cooperative
+                                                    * scheduling only 2-3 runtimes run at once
+                                                    * (~1-1.3 GB real peak). If sbrk exhausts
+                                                    * the window, that child gets ENOMEM —
+                                                    * kernel continues unaffected. */
+    JS_SetGCThreshold(p->rt, 64u * 1024u * 1024u);  /* GC at 64 MB — on 32-bit i686, 256 MB
+                                                    * allowed massive garbage accumulation that
+                                                    * made GC cycles slow and increased the
+                                                    * window for heap corruption.  64 MB keeps
+                                                    * the live set compact while still giving
+                                                    * headroom for React/Vue reconciliation. */
+    JS_SetMaxStackSize(p->rt, 512 * 1024);        /* 512 KB — deep component trees (React,
+                                                    * Angular), recursive HTML parser, deeply
+                                                    * nested JS eval all need headroom. */
     p->ctx = JS_NewContext(p->rt);
     if (!p->ctx) { JS_FreeRuntime(p->rt); p->rt = NULL; return JS_NewInt32(c, -1); }
     /* Inject minimal child kernel API */
@@ -1177,12 +2149,49 @@ static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
     JS_SetPropertyFunctionList(p->ctx, kobj, js_child_kernel_funcs,
         sizeof(js_child_kernel_funcs) / sizeof(js_child_kernel_funcs[0]));
     JS_SetPropertyStr(p->ctx, global, "kernel", kobj);
+    /* Inject console stub so child code can use console.log() */
+    JS_Eval(p->ctx,
+        "var console={log:function(){var a=Array.prototype.slice.call(arguments);"
+        "kernel.serialPut(a.join(' '));},"
+        "error:function(){var a=Array.prototype.slice.call(arguments);"
+        "kernel.serialPut('[E] '+a.join(' '));},"
+        "warn:function(){var a=Array.prototype.slice.call(arguments);"
+        "kernel.serialPut('[W] '+a.join(' '));}}",
+        strlen("var console={log:function(){var a=Array.prototype.slice.call(arguments);"
+        "kernel.serialPut(a.join(' '));},"
+        "error:function(){var a=Array.prototype.slice.call(arguments);"
+        "kernel.serialPut('[E] '+a.join(' '));},"
+        "warn:function(){var a=Array.prototype.slice.call(arguments);"
+        "kernel.serialPut('[W] '+a.join(' '));}}"),
+        "<boot>", JS_EVAL_TYPE_GLOBAL);
+    /* Inject Date.now() using kernel uptime */
+    JS_Eval(p->ctx,
+        "var Date={now:function(){return kernel.getUptime();}}",
+        strlen("var Date={now:function(){return kernel.getUptime();}}"),
+        "<boot>", JS_EVAL_TYPE_GLOBAL);
     JS_FreeValue(p->ctx, global);
+    /* Initialise per-proc BSS state */
+    memset(&_proc_timers[id], 0, sizeof(_proc_timers[id]));
+    memset(&_proc_event_queues[id], 0, sizeof(_proc_event_queues[id]));
+    memset(&_proc_wincmds[id], 0, sizeof(_proc_wincmds[id]));
+    _proc_timer_next_id[id] = 0;
+    _procs[id].width  = 0;
+    _procs[id].height = 0;
     /* Arm the time-slice interrupt handler on the child runtime.
-     * _proc_interrupt_cb fires periodically during JS_Eval and returns 1
-     * when _proc_slice_deadline (a PIT tick count) has been reached.       */
-    JS_SetInterruptHandler(p->rt, _proc_interrupt_cb, NULL);
+     * _proc_interrupt_cb uses the proc id (passed as opaque) to read
+     * the per-child slice_deadline from JSProc_t. */
+    JS_SetInterruptHandler(p->rt, _proc_interrupt_cb, (void *)(intptr_t)id);
+    /* Arm the JIT hook so hot functions in the child defer compilation to
+     * the main-runtime tick loop (procPendingJIT / _serviceChildJIT).     */
+#ifdef JSOS_JIT_HOOK
+    JS_SetJITHook(p->rt, _jit_hook_child);
+#endif
+    /* Reset any leftover JIT allocation slab for this slot */
+    jit_proc_reset(id);
+    memset(&_jit_proc_pending[id], 0, sizeof(_jit_proc_pending[id]));
     p->used = 1;
+    p->tainted = 0;
+    p->slice_deadline = 0;
     return JS_NewInt32(c, id);
 }
 
@@ -1195,11 +2204,45 @@ static JSValue js_proc_eval(JSContext *c, JSValueConst this_val,
     JS_ToInt32(c, &id, argv[0]);
     if (id < 0 || id >= JSPROC_MAX || !_procs[id].used)
         return JS_NewString(c, "Error: invalid process id");
+    /* Tainted children must not execute — heap is corrupted from a prior fault */
+    if (_procs[id].tainted) return JS_NewString(c, "Error: tainted child runtime");
     const char *code = JS_ToCString(c, argv[1]);
     if (!code) return JS_NewString(c, "undefined");
+
+    /* Arm fault recovery — save/restore previous state for nesting. */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
+    _js_fault_active = 1;
+    _js_fault_vector = 0;
+    _js_in_page_eval = 1;
+    int _pf_recovered = setjmp(_js_fault_buf);
+    if (_pf_recovered != 0) {
+        _js_in_page_eval = _saved_in_page_eval;
+        __asm__ volatile("sti");
+        JS_ResetAfterFault(_procs[id].ctx, NULL);  /* reset child GC state */
+        _js_fault_active = _saved_fault_active;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+        _cur_proc = -1;
+        /* Do NOT FreeCString — `code` was extracted from the coordinator's
+         * context but the longjmp may have invalidated the stack frame
+         * that held the length metadata.  Leak is acceptable here. */
+        /* Quarantine: mark child as tainted so no further execution occurs */
+        _procs[id].tainted = 1;
+        platform_serial_puts("[kernel] procEval fault recovered — tainted child ");
+        { char _idb[4]; _idb[0]='0'+(char)id; _idb[1]=0; platform_serial_puts(_idb); }
+        platform_serial_puts("\n");
+        return JS_NewString(c, "Error: CPU fault in child runtime");
+    }
+
     _cur_proc = id;
+    JS_UpdateStackTop(_procs[id].rt);
     JSValue result = JS_Eval(_procs[id].ctx, code, strlen(code),
                              "<process>", JS_EVAL_TYPE_GLOBAL);
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
     _cur_proc = -1;
     JS_FreeCString(c, code);
     if (JS_IsException(result)) {
@@ -1229,10 +2272,40 @@ static JSValue js_proc_tick(JSContext *c, JSValueConst this_val,
     int32_t id = 0;
     JS_ToInt32(c, &id, argv[0]);
     if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_NewInt32(c, 0);
+    /* Tainted children must not execute — heap is corrupted from a prior fault */
+    if (_procs[id].tainted) return JS_NewInt32(c, -1);
+    /* Arm fault recovery — save/restore for nesting */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
+    _js_fault_active = 1;
+    _js_fault_vector = 0;
+    _js_in_page_eval = 1;   /* suppress JIT for child page-script callbacks */
+    int _pt_recovered = setjmp(_js_fault_buf);
+    if (_pt_recovered != 0) {
+        _js_in_page_eval = _saved_in_page_eval;
+        __asm__ volatile("sti");
+        JS_ResetAfterFault(_procs[id].ctx, NULL);  /* reset child GC state */
+        _js_fault_active = _saved_fault_active;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+        _cur_proc = -1;
+        /* Quarantine: mark child as tainted so no further execution occurs.
+         * The TypeScript scheduler sees -1 and should call procDestroy. */
+        _procs[id].tainted = 1;
+        platform_serial_puts("[kernel] procTick fault recovered, child ");
+        { char _idb[4]; _idb[0]='0'+(char)id; _idb[1]=0; platform_serial_puts(_idb); }
+        platform_serial_puts(" quarantined\n");
+        return JS_NewInt32(c, -1);   /* negative = fault indicator */
+    }
     _cur_proc = id;
+    JS_UpdateStackTop(_procs[id].rt);
     int count = 0;
     JSContext *job_ctx = NULL;
-    while (JS_ExecutePendingJob(_procs[id].rt, &job_ctx) > 0 && count < 256) count++;
+    while (JS_ExecutePendingJob(_procs[id].rt, &job_ctx) > 0 && count < 32) count++;
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
     _cur_proc = -1;
     return JS_NewInt32(c, count);
 }
@@ -1286,11 +2359,39 @@ static JSValue js_proc_destroy(JSContext *c, JSValueConst this_val,
     int32_t id = 0;
     JS_ToInt32(c, &id, argv[0]);
     if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_UNDEFINED;
-    JS_FreeContext(_procs[id].ctx);
-    JS_FreeRuntime(_procs[id].rt);
-    _procs[id].ctx  = NULL;
-    _procs[id].rt   = NULL;
-    _procs[id].used = 0;
+    if (_procs[id].tainted) {
+        /* Child heap is corrupted — do NOT call JS_FreeValue/JS_FreeContext/
+         * JS_FreeRuntime, as those walk corrupted object graphs and crash.
+         * Intentionally leak the runtime (one-time per-crash cost). */
+        for (int i = 0; i < MAX_TIMERS; i++)
+            _proc_timers[id][i].active = 0;
+        _procs[id].ctx  = NULL;
+        _procs[id].rt   = NULL;
+        _procs[id].used = 0;
+        _procs[id].tainted = 0;
+        platform_serial_puts("[kernel] procDestroy: tainted child leaked\n");
+    } else {
+        /* Free timer callbacks BEFORE FreeContext so JSValues are still valid */
+        for (int i = 0; i < MAX_TIMERS; i++) {
+            ProcTimer_t *t = &_proc_timers[id][i];
+            if (t->active) {
+                JS_FreeValue(_procs[id].ctx, t->cb);
+                t->active = 0;
+            }
+        }
+        JS_FreeContext(_procs[id].ctx);
+        JS_FreeRuntime(_procs[id].rt);
+        _procs[id].ctx  = NULL;
+        _procs[id].rt   = NULL;
+        _procs[id].used = 0;
+    }
+    /* Clear JIT slab + pending requests for this slot */
+    _jit_proc_pending[id].pending = 0;
+    _jit_proc_pending[id].bc_addr = 0;
+    jit_proc_reset(id);
+    /* Clear per-proc queues */
+    memset(&_proc_event_queues[id], 0, sizeof(_proc_event_queues[id]));
+    memset(&_proc_wincmds[id], 0, sizeof(_proc_wincmds[id]));
     return JS_UNDEFINED;
 }
 
@@ -1347,17 +2448,45 @@ static JSValue js_proc_eval_slice(JSContext *c, JSValueConst this_val,
     if (argc >= 3) JS_ToInt32(c, &max_ms, argv[2]);
     if (id < 0 || id >= JSPROC_MAX || !_procs[id].used)
         return JS_NewString(c, "error:invalid process id");
+    if (_procs[id].tainted)
+        return JS_NewString(c, "error:child runtime quarantined after fault");
     const char *code = JS_ToCString(c, argv[1]);
     if (!code) return JS_NewString(c, "error:null code");
-    /* Arm deadline: timer_get_ticks() runs at 100 Hz (10 ms/tick) */
+    /* Arm fault recovery — save/restore for nesting */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
+    _js_fault_active = 1;
+    _js_fault_vector = 0;
+    _js_in_page_eval = 1;
+    int _ps_recovered = setjmp(_js_fault_buf);
+    if (_ps_recovered != 0) {
+        _js_in_page_eval = _saved_in_page_eval;
+        __asm__ volatile("sti");
+        JS_ResetAfterFault(_procs[id].ctx, NULL);  /* reset child GC state */
+        _js_fault_active = _saved_fault_active;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+        _procs[id].slice_deadline = 0;
+        _cur_proc = -1;
+        /* Quarantine: mark child as tainted so no further execution occurs */
+        _procs[id].tainted = 1;
+        platform_serial_puts("[kernel] procEvalSlice fault recovered, child quarantined\n");
+        return JS_NewString(c, "error:CPU fault in child runtime");
+    }
+    /* Arm deadline: timer_get_ticks() runs at TIMER_HZ (1000 Hz = 1 ms/tick) */
     if (max_ms > 0)
-        _proc_slice_deadline = timer_get_ticks() + (uint32_t)(max_ms / 10u + 1u);
+        _procs[id].slice_deadline = timer_get_ticks() + MS_TO_TICKS((uint32_t)max_ms);
     else
-        _proc_slice_deadline = 0;
+        _procs[id].slice_deadline = 0;
     _cur_proc = id;
+    JS_UpdateStackTop(_procs[id].rt);
     JSValue result = JS_Eval(_procs[id].ctx, code, strlen(code),
                              "<slice>", JS_EVAL_TYPE_GLOBAL);
-    _proc_slice_deadline = 0;   /* always clear immediately after eval */
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+    _procs[id].slice_deadline = 0;   /* always clear immediately after eval */
     _cur_proc = -1;
     JS_FreeCString(c, code);
     if (JS_IsException(result)) {
@@ -1441,6 +2570,1614 @@ static JSValue js_shared_buf_release(JSContext *c, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* ── Phase 11: JIT compiler primitives ───────────────────────────────────
+ *
+ * These three functions are the entire C surface exposed to the TypeScript
+ * JIT compiler.  All compilation logic lives in jit.ts; C only provides:
+ *   jitAlloc(size)           — carve RWX memory from the 256 KB JIT pool
+ *   jitWrite(addr, bytes[])  — bulk-copy machine code bytes into the pool
+ *   jitCallI(addr,a,b,c,d)  — call compiled cdecl fn with 4 int32 args
+ *   jitUsedBytes()           — diagnostic: bytes consumed in pool
+ */
+
+/*
+ * kernel.jitAlloc(size) → address (uint32) or 0 on failure.
+ * Allocates `size` bytes from the static 256 KB RWX JIT pool.
+ */
+static JSValue js_jit_alloc(JSContext *c, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    (void)this_val;
+    int32_t size = 0;
+    if (argc >= 1) JS_ToInt32(c, &size, argv[0]);
+    if (size <= 0) return JS_NewInt32(c, 0);
+    void *p = jit_alloc((size_t)size);
+    return JS_NewUint32(c, p ? (uint32_t)(uintptr_t)p : 0u);
+}
+
+/*
+ * kernel.jitWrite(addr, bytes) — copy a JS number[] of byte values into
+ * the JIT pool at the address returned by jitAlloc().
+ */
+static JSValue js_jit_write(JSContext *c, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    uint32_t addr = 0;
+    JS_ToUint32(c, &addr, argv[0]);
+    if (!addr) return JS_UNDEFINED;
+
+    /* Fast path: ArrayBuffer */
+    size_t ab_len = 0;
+    uint8_t *ab = JS_GetArrayBuffer(c, &ab_len, argv[1]);
+    if (ab) {
+        jit_write((void *)(uintptr_t)addr, ab, ab_len);
+        return JS_UNDEFINED;
+    }
+
+    /* Slow path: plain JS number[] */
+    int32_t len_i = 0;
+    JSValue lv = JS_GetPropertyStr(c, argv[1], "length");
+    JS_ToInt32(c, &len_i, lv);
+    JS_FreeValue(c, lv);
+    if (len_i <= 0) return JS_UNDEFINED;
+    if (len_i > (int32_t)JIT_ALLOC_MAX) len_i = (int32_t)JIT_ALLOC_MAX;
+
+    /* Stack-allocate up to 4 KB; heap-allocate larger (rare). */
+    static uint8_t _jit_write_buf[JIT_ALLOC_MAX];
+    for (int32_t i = 0; i < len_i; i++) {
+        JSValue bv = JS_GetPropertyUint32(c, argv[1], (uint32_t)i);
+        int32_t b  = 0;
+        JS_ToInt32(c, &b, bv);
+        JS_FreeValue(c, bv);
+        _jit_write_buf[i] = (uint8_t)b;
+    }
+    jit_write((void *)(uintptr_t)addr, _jit_write_buf, (size_t)len_i);
+    return JS_UNDEFINED;
+}
+
+/*
+ * kernel.jitCallI(addr, a0, a1, a2, a3) → int32
+ * Call a JIT-compiled cdecl function with four 32-bit integer arguments.
+ */
+static JSValue js_jit_call_i(JSContext *c, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewInt32(c, 0);
+    uint32_t addr = 0;
+    JS_ToUint32(c, &addr, argv[0]);
+    if (!addr) return JS_NewInt32(c, 0);
+    int32_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+    if (argc > 1) JS_ToInt32(c, &a0, argv[1]);
+    if (argc > 2) JS_ToInt32(c, &a1, argv[2]);
+    if (argc > 3) JS_ToInt32(c, &a2, argv[3]);
+    if (argc > 4) JS_ToInt32(c, &a3, argv[4]);
+    return JS_NewInt32(c, jit_call_i4((void *)(uintptr_t)addr, a0, a1, a2, a3));
+}
+
+/*
+ * kernel.jitUsedBytes() → uint32
+ * Returns bytes consumed in the JIT pool (for diagnostics / budget checks).
+ */
+static JSValue js_jit_used_bytes(JSContext *c, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewUint32(c, jit_used_bytes());
+}
+
+/*
+ * kernel.jitMainReset() — reset the main JIT pool bump pointer to 0.
+ * TypeScript must call kernel.setJITNative(addr, 0) for every compiled
+ * function before calling this, so that stale native pointers are cleared.
+ * Returns the number of bytes that were reclaimed.
+ */
+static JSValue js_jit_main_reset(JSContext *c, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    uint32_t reclaimed = jit_used_bytes();
+    jit_main_reset();
+    return JS_NewUint32(c, reclaimed);
+}
+
+/*
+ * kernel.jitCallI8(addr, a0..a7) → int32
+ * Call a JIT-compiled cdecl function with eight 32-bit integer arguments.
+ */
+static JSValue js_jit_call_i8(JSContext *c, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewInt32(c, 0);
+    uint32_t addr = 0;
+    JS_ToUint32(c, &addr, argv[0]);
+    if (!addr) return JS_NewInt32(c, 0);
+    int32_t a[8] = {0};
+    for (int i = 0; i < 8 && (i + 1) < argc; i++)
+        JS_ToInt32(c, &a[i], argv[i + 1]);
+    return JS_NewInt32(c, jit_call_i8((void *)(uintptr_t)addr,
+                                      a[0], a[1], a[2], a[3],
+                                      a[4], a[5], a[6], a[7]));
+}
+
+/*
+ * kernel.jitCallF4(addr, d0, d1, d2, d3) → float64
+ * Call a JIT-compiled float64 function (x87 double-cdecl ABI, up to 4 double args).
+ * addr — native address returned by kernel.jitAlloc() for a FloatJITCompiler result.
+ */
+static JSValue js_jit_call_f(JSContext *c, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewFloat64(c, 0.0);
+    uint32_t addr = 0;
+    JS_ToUint32(c, &addr, argv[0]);
+    if (!addr) return JS_NewFloat64(c, 0.0);
+    double a[4] = {0.0, 0.0, 0.0, 0.0};
+    for (int i = 0; i < 4 && (i + 1) < argc; i++)
+        JS_ToFloat64(c, &a[i], argv[i + 1]);
+    return JS_NewFloat64(c, jit_call_d4((void *)(uintptr_t)addr,
+                                        a[0], a[1], a[2], a[3]));
+}
+
+/*
+ * kernel.physAddrOf(arrayBuffer) → uint32
+ * Return the physical (linear) address of a JS ArrayBuffer's backing store.
+ * QuickJS uses reference-counting (not a moving GC), so the address is stable
+ * for the lifetime of the buffer.  Returns 0 if not an ArrayBuffer.
+ *
+ * JSOS-specific: enables JIT-compiled code to operate directly on JS TypedArray
+ * data (canvas pixel buffers, audio buffers, etc.) without an extra copy.
+ */
+static JSValue js_physaddr_of(JSContext *c, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewUint32(c, 0);
+    size_t len = 0;
+    uint8_t *ptr = JS_GetArrayBuffer(c, &len, argv[0]);
+    if (!ptr) return JS_NewUint32(c, 0);
+    return JS_NewUint32(c, (uint32_t)(uintptr_t)ptr);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * JIT runtime helpers — cdecl int32 functions called directly from JIT'd x86.
+ * These use the static `ctx` global so they need no context argument.
+ * Addresses are exposed to TypeScript via kernel.jitHelperAddrs().
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * jit_js_getprop_i32(obj_ptr, atom_val) → int32
+ * Read an integer property from a JSObject.  Called from OP_get_field slow path.
+ * obj_ptr = raw JSObject* passed as int32 from the JIT eval stack (via fixed _JARG).
+ * atom_val = JSAtom (property name identifier).
+ */
+static int32_t jit_js_getprop_i32(uint32_t obj_ptr, uint32_t atom_val)
+{
+    if (!ctx || !obj_ptr) return 0;
+    JSValue obj = JS_MKPTR(JS_TAG_OBJECT, (void *)(uintptr_t)obj_ptr);
+    JSValue val = JS_GetProperty(ctx, obj, (JSAtom)atom_val);
+    int32_t r = 0;
+    if (!JS_IsException(val)) {
+        if (JS_VALUE_GET_TAG(val) == JS_TAG_INT)
+            r = JS_VALUE_GET_INT(val);
+        else
+            JS_ToInt32(ctx, &r, val);
+    }
+    JS_FreeValue(ctx, val);
+    return r;
+}
+
+/*
+ * jit_js_setprop_i32(obj_ptr, atom_val, ival) → void
+ * Write an int32 value to a JSObject property.  Called from OP_put_field slow path.
+ */
+static void jit_js_setprop_i32(uint32_t obj_ptr, uint32_t atom_val, int32_t ival)
+{
+    if (!ctx || !obj_ptr) return;
+    JSValue obj = JS_MKPTR(JS_TAG_OBJECT, (void *)(uintptr_t)obj_ptr);
+    JS_SetProperty(ctx, obj, (JSAtom)atom_val, JS_NewInt32(ctx, ival));
+}
+
+/*
+ * jit_js_call_fn(fn_ptr, a0, a1, a2, a3, argc) → int32
+ * Call a JS function from JIT'd code.  Used by OP_call / OP_call0 slow path.
+ * fn_ptr = raw JSObject* of the callee (function).
+ * a0..a3 = int32 arguments (pass 0 for unused slots).
+ * argc   = actual argument count (0–4).
+ * Returns int32 result, or 0 on exception / non-integer result.
+ */
+static int32_t jit_js_call_fn(uint32_t fn_ptr,
+                               int32_t a0, int32_t a1, int32_t a2, int32_t a3,
+                               int32_t argc)
+{
+    if (!ctx || !fn_ptr || argc < 0 || argc > 4) return 0;
+    JSValue fn = JS_MKPTR(JS_TAG_OBJECT, (void *)(uintptr_t)fn_ptr);
+    JSValue args[4] = {
+        JS_NewInt32(ctx, a0), JS_NewInt32(ctx, a1),
+        JS_NewInt32(ctx, a2), JS_NewInt32(ctx, a3)
+    };
+    JSValue res = JS_Call(ctx, fn, JS_UNDEFINED, (int)argc, args);
+    int32_t r = 0;
+    if (!JS_IsException(res)) {
+        if (JS_VALUE_GET_TAG(res) == JS_TAG_INT)
+            r = JS_VALUE_GET_INT(res);
+        else
+            JS_ToInt32(ctx, &r, res);
+    }
+    JS_FreeValue(ctx, res);
+    for (int i = 0; i < 4; i++) JS_FreeValue(ctx, args[i]);
+    return r;
+}
+
+/*
+ * jit_resolve_native(fn_ptr) → uint32 native address or 0.
+ * Given a raw JSObject* pointer (uint32 from the JIT eval stack), resolves
+ * the callee's jit_native_ptr.  Returns 0 if the object isn't a bytecode
+ * function, isn't JIT-compiled, or uses float64-ABI (tagged bit 0).
+ * Called from JIT code as a fast resolve + fallback guard.
+ */
+static uint32_t jit_resolve_native(uint32_t fn_ptr)
+{
+    if (!fn_ptr) return 0;
+    uint8_t *obj = (uint8_t *)(uintptr_t)fn_ptr;
+    /* class_id is uint16_t at offset 6 in JSObject */
+    uint16_t class_id = *(uint16_t *)(obj + 6);
+    if (class_id != 13) return 0; /* JS_CLASS_BYTECODE_FUNCTION */
+    /* u.func.function_bytecode pointer at offset 28 in JSObject */
+    uint8_t *bc = *(uint8_t **)(obj + 28);
+    if (!bc) return 0;
+    /* jit_native_ptr at offset 24 in JSFunctionBytecode */
+    uintptr_t native = *(uintptr_t *)(bc + 24);
+    if (!native || (native & 1u)) return 0; /* null or float64-tagged */
+    return (uint32_t)native;
+}
+
+/*
+ * jit_js_string_eq(str_a, str_b) → int32 (1 = equal, 0 = not equal)
+ * Compare two JSString* pointers for equality.  Called from OP_strict_eq
+ * slow path when both operands are JS_TAG_STRING.
+ */
+static int32_t jit_js_string_eq(uint32_t str_a, uint32_t str_b)
+{
+    if (str_a == str_b) return 1;  /* same pointer → equal */
+    if (!str_a || !str_b) return 0;
+    uint8_t *a = (uint8_t *)(uintptr_t)str_a;
+    uint8_t *b = (uint8_t *)(uintptr_t)str_b;
+    /* len+is_wide_char packed at offset 4 */
+    uint32_t a_lenw = *(uint32_t *)(a + 4);
+    uint32_t b_lenw = *(uint32_t *)(b + 4);
+    if (a_lenw != b_lenw) return 0;  /* different len or char width */
+    uint32_t len = a_lenw & 0x7FFFFFFF;
+    uint32_t is_wide = a_lenw >> 31;
+    uint32_t byte_len = is_wide ? len * 2 : len;
+    /* character data starts at offset 16 */
+    const uint8_t *ad = a + 16;
+    const uint8_t *bd = b + 16;
+    for (uint32_t i = 0; i < byte_len; i++) {
+        if (ad[i] != bd[i]) return 0;
+    }
+    return 1;
+}
+
+/*
+ * jit_js_string_len(str_ptr) → int32 (string length in characters)
+ * Extract the length from a JSString* pointer.
+ */
+static int32_t jit_js_string_len(uint32_t str_ptr)
+{
+    if (!str_ptr) return 0;
+    uint8_t *s = (uint8_t *)(uintptr_t)str_ptr;
+    return (int32_t)(*(uint32_t *)(s + 4) & 0x7FFFFFFF);
+}
+
+/*
+ * jit_js_string_charat(str_ptr, idx) → int32 (char code or -1)
+ * Get the character code at the given index.
+ */
+static int32_t jit_js_string_charat(uint32_t str_ptr, int32_t idx)
+{
+    if (!str_ptr) return -1;
+    uint8_t *s = (uint8_t *)(uintptr_t)str_ptr;
+    uint32_t lenw = *(uint32_t *)(s + 4);
+    uint32_t len = lenw & 0x7FFFFFFF;
+    if (idx < 0 || (uint32_t)idx >= len) return -1;
+    if (lenw >> 31) {
+        /* 16-bit chars */
+        return (int32_t)((uint16_t *)(s + 16))[idx];
+    } else {
+        return (int32_t)s[16 + idx];
+    }
+}
+
+/*
+ * jit_js_get_var_ref_i32(obj_ptr, idx) → int32
+ * Read a closure variable's value as int32 from JSObject's var_refs array.
+ * obj_ptr = JSObject* of the closure function (saved by JIT prologue from
+ * the _jit_current_closure global set by the dispatch path).
+ * idx     = closure variable index (u16 from OP_get_var_ref operand).
+ *
+ * Uses raw pointer arithmetic to avoid needing internal QuickJS types
+ * (JSVarRef, JSObject internal union, set_value) which are only available
+ * inside quickjs.c.  Offsets for 32-bit:
+ *   JSObject.u.func.var_refs = +32  (JSVarRef** pointer)
+ *   JSVarRef.pvalue           = +16  (JSValue* pointer, after GC header union)
+ */
+extern volatile uint32_t _jit_current_closure;
+
+#define JSOBJ_VAR_REFS_OFFSET   32
+#define JSVARREF_PVALUE_OFFSET  16
+
+static int32_t jit_js_get_var_ref_i32(uint32_t obj_ptr, uint32_t idx)
+{
+    if (!ctx || !obj_ptr) return 0;
+
+    /* p->u.func.var_refs (void** at offset 32) */
+    void **var_refs = *(void ***)((uint8_t *)(uintptr_t)obj_ptr + JSOBJ_VAR_REFS_OFFSET);
+    if (!var_refs) return 0;
+
+    /* var_refs[idx] (JSVarRef*) */
+    void *vr = var_refs[idx];
+    if (!vr) return 0;
+
+    /* vr->pvalue (JSValue* at offset 16) */
+    JSValue *pvalue = *(JSValue **)((uint8_t *)vr + JSVARREF_PVALUE_OFFSET);
+    if (!pvalue) return 0;
+
+    JSValue val = *pvalue;
+    int32_t r = 0;
+    if (JS_VALUE_GET_TAG(val) == JS_TAG_INT) {
+        r = JS_VALUE_GET_INT(val);
+    } else {
+        JSValue dup = JS_DupValue(ctx, val);
+        JS_ToInt32(ctx, &r, dup);
+        JS_FreeValue(ctx, dup);
+    }
+    return r;
+}
+
+/*
+ * jit_js_put_var_ref_i32(obj_ptr, idx, ival) → void
+ * Write an int32 value to a closure variable through JSObject's var_refs.
+ * Properly reference-counts the old value and installs the new one.
+ * Manual set_value: read old → write new → free old.
+ */
+static void jit_js_put_var_ref_i32(uint32_t obj_ptr, uint32_t idx, int32_t ival)
+{
+    if (!ctx || !obj_ptr) return;
+
+    void **var_refs = *(void ***)((uint8_t *)(uintptr_t)obj_ptr + JSOBJ_VAR_REFS_OFFSET);
+    if (!var_refs) return;
+
+    void *vr = var_refs[idx];
+    if (!vr) return;
+
+    JSValue *pvalue = *(JSValue **)((uint8_t *)vr + JSVARREF_PVALUE_OFFSET);
+    if (!pvalue) return;
+
+    /* Manual set_value: swap old for new, free old */
+    JSValue old_val = *pvalue;
+    *pvalue = JS_NewInt32(ctx, ival);
+    JS_FreeValue(ctx, old_val);
+}
+
+/*
+ * kernel.jitHelperAddrs() → {getPropI32, setPropI32, callFn, resolveNative,
+ *                             stringEq, stringLen, stringCharAt,
+ *                             getVarRef, putVarRef, closureGlobal}
+ * Returns an object containing the uint32 physical addresses of the
+ * JIT runtime helper functions.  JIT'd x86 code loads these addresses
+ * into ECX and executes CALL ECX to invoke the helper in cdecl fashion.
+ */
+static JSValue js_jit_get_helper_addrs(JSContext *c, JSValueConst this_val,
+                                        int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    JSValue o = JS_NewObject(c);
+    JS_SetPropertyStr(c, o, "getPropI32",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_getprop_i32));
+    JS_SetPropertyStr(c, o, "setPropI32",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_setprop_i32));
+    JS_SetPropertyStr(c, o, "callFn",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_call_fn));
+    JS_SetPropertyStr(c, o, "resolveNative",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_resolve_native));
+    JS_SetPropertyStr(c, o, "stringEq",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_string_eq));
+    JS_SetPropertyStr(c, o, "stringLen",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_string_len));
+    JS_SetPropertyStr(c, o, "stringCharAt",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_string_charat));
+    JS_SetPropertyStr(c, o, "getVarRef",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_get_var_ref_i32));
+    JS_SetPropertyStr(c, o, "putVarRef",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)jit_js_put_var_ref_i32));
+    JS_SetPropertyStr(c, o, "closureGlobal",
+        JS_NewUint32(c, (uint32_t)(uintptr_t)&_jit_current_closure));
+    return o;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Step 5: QJS JIT hook — callback dispatch + per-process JIT management
+ *
+ * Compile-time gate: define JSOS_JIT_HOOK once quickjs.c has been patched
+ * (Step-5 WSL changes add js_jit_hook_t / JS_SetJITHook / JS_SetNativeIfHot).
+ * Until then the global state + JS bindings compile unconditionally; only the
+ * C→QuickJS glue that references the new API is guarded by the #ifdef.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+static JSValue         _jit_ts_callback = { 0 };   /* initialised in quickjs_initialize */
+static int             _in_jit_hook     = 0;        /* reentrancy guard                  */
+
+#ifdef JSOS_JIT_HOOK
+/* Forward declarations for QuickJS post-Step-5 API */
+typedef int (*js_jit_hook_t)(JSRuntime *rt, JSContext *ctx, void *bc_ptr,
+                              void *stack_ptr, int argc);
+extern void JS_SetJITHook(JSRuntime *rt, js_jit_hook_t hook);
+extern void JS_SetNativeIfHot(JSContext *ctx, void *bc_ptr, void *native_ptr);
+
+/*
+ * Main-runtime JIT hook.
+ * Called by QuickJS when a function's call_count reaches JIT_THRESHOLD.
+ * Invokes the TypeScript QJSJITHook callback synchronously.
+ * Returns non-zero to replace the call with the native version.
+ */
+static int _jit_hook_impl(JSRuntime *rt, JSContext *hook_ctx,
+                           void *bc_ptr, void *sp, int argc) {
+    (void)rt; (void)hook_ctx;
+    if (_in_jit_hook || JS_IsUndefined(_jit_ts_callback)) return 0;
+    _in_jit_hook = 1;
+    JSValue args[3] = {
+        JS_NewUint32(ctx, (uint32_t)(uintptr_t)bc_ptr),
+        JS_NewUint32(ctx, (uint32_t)(uintptr_t)sp),
+        JS_NewInt32 (ctx, argc)
+    };
+    JSValue result = JS_Call(ctx, _jit_ts_callback, JS_UNDEFINED, 3, args);
+    JS_FreeValue(ctx, args[0]);
+    JS_FreeValue(ctx, args[1]);
+    JS_FreeValue(ctx, args[2]);
+    int ret = 0;
+    if (!JS_IsException(result) && !JS_IsUndefined(result)) {
+        int32_t r = 0; JS_ToInt32(ctx, &r, result); ret = r;
+    }
+    JS_FreeValue(ctx, result);
+    _in_jit_hook = 0;
+    return ret;
+}
+
+/*
+ * Child-runtime JIT hook.
+ * Stores the pending request for pickup by the TypeScript WM tick loop via
+ * kernel.procPendingJIT(id).  Must NOT call back into JS (different runtime).
+ */
+static int _jit_hook_child(JSRuntime *rt, JSContext *hook_ctx,
+                            void *bc_ptr, void *sp, int argc) {
+    (void)hook_ctx; (void)sp; (void)argc;
+    /* Suppress JIT for page-script children — they run briefly and are
+     * disposed.  Attempting to JIT-compile their bytecode risks reading
+     * from unmapped child heap addresses → CPU fault with no recovery. */
+    if (_js_in_page_eval) return 0;
+    /* Identify which child slot owns this runtime */
+    for (int i = 0; i < JSPROC_MAX; i++) {
+        if (_procs[i].used && _procs[i].rt == rt) {
+            if (!_jit_proc_pending[i].pending) {
+                _jit_proc_pending[i].bc_addr = (uint32_t)(uintptr_t)bc_ptr;
+                _jit_proc_pending[i].pending  = 1;
+            }
+            break;
+        }
+    }
+    return 0; /* native pointer not ready yet — run as bytecode this call */
+}
+#endif /* JSOS_JIT_HOOK */
+
+/* ── JS bindings for the JIT hook API ──────────────────────────────────── */
+
+/*
+ * kernel.setJITHook(callback) — install the TS JIT compiler callback.
+ * callback(bcAddr, spAddr, argc) → 1 if native code was installed, else 0.
+ */
+static JSValue js_set_jit_hook(JSContext *c, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc;
+    if (!JS_IsUndefined(_jit_ts_callback)) JS_FreeValue(c, _jit_ts_callback);
+    _jit_ts_callback = JS_DupValue(c, argv[0]);
+#ifdef JSOS_JIT_HOOK
+    JS_SetJITHook(rt, _jit_hook_impl);
+#endif
+    return JS_UNDEFINED;
+}
+
+/*
+ * kernel.setJITNative(bcAddr, nativeAddr) — write the compiled function
+ * pointer back into the JSFunctionBytecode so QuickJS dispatches it directly.
+ */
+static JSValue js_set_jit_native(JSContext *c, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 2) return JS_UNDEFINED;
+    uint32_t bc_addr = 0, native_addr = 0;
+    JS_ToUint32(c, &bc_addr,     argv[0]);
+    JS_ToUint32(c, &native_addr, argv[1]);
+    if (!bc_addr || !native_addr) return JS_UNDEFINED;
+#ifdef JSOS_JIT_HOOK
+    JS_SetNativeIfHot(ctx,
+                      (void *)(uintptr_t)bc_addr,
+                      (void *)(uintptr_t)native_addr);
+#else
+    /* Without the patched QuickJS, manually write jit_native_ptr field @24 */
+    *(uint32_t *)((uint8_t *)(uintptr_t)bc_addr + 24) = native_addr;
+#endif
+    return JS_UNDEFINED;
+}
+
+/*
+ * kernel.procPendingJIT(id) → uint32 bc_addr (0 = none).
+ * Returns and clears the next pending JIT compilation request for child `id`.
+ */
+static JSValue js_proc_pending_jit(JSContext *c, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 1) return JS_NewUint32(c, 0);
+    int32_t id = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX) return JS_NewUint32(c, 0);
+    if (!_jit_proc_pending[id].pending) return JS_NewUint32(c, 0);
+    uint32_t addr = _jit_proc_pending[id].bc_addr;
+    _jit_proc_pending[id].pending = 0;
+    _jit_proc_pending[id].bc_addr = 0;
+    return JS_NewUint32(c, addr);
+}
+
+/*
+ * kernel.jitProcAlloc(id, size) → uint32 address in child's JIT partition.
+ * Allocates `size` bytes from the 512 KB per-process JIT slab.
+ */
+static JSValue js_jit_proc_alloc(JSContext *c, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 2) return JS_NewUint32(c, 0);
+    int32_t id = 0; int32_t size = 0;
+    JS_ToInt32(c, &id,   argv[0]);
+    JS_ToInt32(c, &size, argv[1]);
+    if (id < 0 || id >= JSPROC_MAX || size <= 0) return JS_NewUint32(c, 0);
+    void *p = jit_proc_alloc(id, (size_t)size);
+    return JS_NewUint32(c, p ? (uint32_t)(uintptr_t)p : 0u);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Phase A/B: Child render buffer, dimensions, FS bridge, event, wincmd, timers
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Helper: call a named method on _fs_bridge_obj with one string argument.
+ * Runs in the MAIN context — safe because cooperative scheduling. */
+static JSValue _fs_bridge_call(const char *method, const char *arg) {
+    if (JS_IsUndefined(_fs_bridge_obj)) return JS_NULL;
+    JSValue fn = JS_GetPropertyStr(ctx, _fs_bridge_obj, method);
+    if (!JS_IsFunction(ctx, fn)) { JS_FreeValue(ctx, fn); return JS_NULL; }
+    JSValue arg_v = JS_NewString(ctx, arg ? arg : "");
+    JSValue result = JS_Call(ctx, fn, _fs_bridge_obj, 1, &arg_v);
+    JS_FreeValue(ctx, arg_v);
+    JS_FreeValue(ctx, fn);
+    return result;
+}
+
+/* ── Main-side: kernel.getProcRenderBuffer(id) → ArrayBuffer (view of BSS) ── */
+static JSValue js_get_proc_render_buf(JSContext *c, JSValueConst this_val,
+                                      int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    int32_t id = 0; JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_NULL;
+    uint32_t w = _procs[id].width, h = _procs[id].height;
+    if (w == 0 || h == 0) return JS_NULL;
+    size_t bytes = (size_t)w * (size_t)h * 4;
+    if (bytes > RENDER_BUF_BYTES) bytes = RENDER_BUF_BYTES;
+    return JS_NewArrayBuffer(c, _app_render_bufs[id], bytes,
+                             _sbuf_no_free, NULL, 0);
+}
+
+/* ── Main-side: kernel.procSetDimensions(id, w, h) ── */
+static JSValue js_proc_set_dimensions(JSContext *c, JSValueConst this_val,
+                                      int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 3) return JS_UNDEFINED;
+    int32_t id = 0, w = 0, h = 0;
+    JS_ToInt32(c, &id, argv[0]);
+    JS_ToInt32(c, &w, argv[1]);
+    JS_ToInt32(c, &h, argv[2]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_UNDEFINED;
+    _procs[id].width  = (uint32_t)w;
+    _procs[id].height = (uint32_t)h;
+    return JS_UNDEFINED;
+}
+
+/* ── Main-side: kernel.registerChildFSBridge(obj) ── */
+static JSValue js_register_child_fs_bridge(JSContext *c, JSValueConst this_val,
+                                           int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    if (!JS_IsUndefined(_fs_bridge_obj)) JS_FreeValue(c, _fs_bridge_obj);
+    _fs_bridge_obj = JS_DupValue(c, argv[0]);
+    return JS_UNDEFINED;
+}
+
+/* ── Main-side: kernel.procSendEvent(id, evObj) — JSON-encode evObj into child event queue ── */
+static JSValue js_proc_send_event(JSContext *c, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_FALSE;
+    int32_t id = 0; JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_FALSE;
+    ProcEventQueue_t *q = &_proc_event_queues[id];
+    if (q->count >= PROC_EVENT_QUEUE_SLOTS) return JS_FALSE;
+    JSValue _json_global = JS_GetGlobalObject(c);
+    JSValue json_fn = JS_GetPropertyStr(c, _json_global, "JSON");
+    JS_FreeValue(c, _json_global);
+    JSValue stringify = JS_GetPropertyStr(c, json_fn, "stringify");
+    JSValue json_str  = JS_Call(c, stringify, json_fn, 1, &argv[1]);
+    JS_FreeValue(c, stringify); JS_FreeValue(c, json_fn);
+    if (JS_IsException(json_str)) { JS_FreeValue(c, json_str); return JS_FALSE; }
+    const char *s = JS_ToCString(c, json_str);
+    JS_FreeValue(c, json_str);
+    if (!s) return JS_FALSE;
+    ProcEventSlot_t *slot = &q->slots[q->tail];
+    int n = (int)strlen(s);
+    if (n >= PROC_EVENT_SLOT_BYTES) n = PROC_EVENT_SLOT_BYTES - 1;
+    memcpy(slot->data, s, (size_t)n);
+    slot->data[n] = '\0';
+    slot->used = 1;
+    JS_FreeCString(c, s);
+    q->tail = (q->tail + 1) % PROC_EVENT_QUEUE_SLOTS;
+    q->count++;
+    return JS_TRUE;
+}
+
+/* ── Main-side: kernel.procDequeueWindowCommand(id) → {type,...} or null ── */
+static JSValue js_proc_dequeue_window_cmd(JSContext *c, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    int32_t id = 0; JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_NULL;
+    ProcWinCmdBuf_t *b = &_proc_wincmds[id];
+    if (b->cnt == 0) return JS_NULL;
+    ProcWinCmd_t *slot = &b->slots[b->r];
+    /* Parse JSON in main context */
+    JSValue parsed = JS_ParseJSON(c, slot->data, (size_t)slot->len, "<wincmd>");
+    b->r = (b->r + 1) % PROC_WINCMD_SLOTS;
+    b->cnt--;
+    return parsed;
+}
+
+/* ── Main-side: kernel.serviceTimers(id) — fire expired timers for child id ── */
+static JSValue js_service_timers(JSContext *c, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 1) return JS_UNDEFINED;
+    int32_t id = 0; JS_ToInt32(c, &id, argv[0]);
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_UNDEFINED;
+    if (_procs[id].tainted) return JS_UNDEFINED;  /* quarantined */
+    /* Arm fault recovery — save/restore for nesting */
+    jmp_buf _saved_fault_buf;
+    int _saved_fault_active = _js_fault_active;
+    int _saved_in_page_eval = _js_in_page_eval;
+    memcpy(_saved_fault_buf, _js_fault_buf, sizeof(jmp_buf));
+    _js_fault_active = 1;
+    _js_fault_vector = 0;
+    _js_in_page_eval = 1;   /* suppress JIT for child timer callbacks */
+    int _st_recovered = setjmp(_js_fault_buf);
+    if (_st_recovered != 0) {
+        _js_in_page_eval = _saved_in_page_eval;
+        __asm__ volatile("sti");
+        _js_fault_active = _saved_fault_active;
+        memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+        _cur_proc = -1;
+        /* Quarantine: mark child as tainted */
+        _procs[id].tainted = 1;
+        platform_serial_puts("[kernel] serviceTimers fault, child ");
+        { char _idb[4]; _idb[0]='0'+(char)id; _idb[1]=0; platform_serial_puts(_idb); }
+        platform_serial_puts(" quarantined\n");
+        return JS_NewInt32(c, -1);
+    }
+    uint32_t now = timer_get_ticks();
+    JSContext *cc = _procs[id].ctx;
+    _cur_proc = id;
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        ProcTimer_t *t = &_proc_timers[id][i];
+        if (!t->active) continue;
+        if ((int32_t)(now - t->due_ticks) < 0) continue; /* not yet due */
+        /* Fire callback */
+        JSValue r = JS_Call(cc, t->cb, JS_UNDEFINED, 0, NULL);
+        if (JS_IsException(r)) {
+            /* item 113: log exception instead of silently discarding */
+            JSValue exc = JS_GetException(cc);
+            const char *msg = JS_ToCString(cc, exc);
+            if (msg) {
+                platform_serial_puts("[timer] exception in callback: ");
+                platform_serial_puts(msg);
+                platform_serial_puts("\n");
+                JS_FreeCString(cc, msg);
+            }
+            JS_FreeValue(cc, exc);
+        }
+        JS_FreeValue(cc, r);
+        if (t->repeat) {
+            t->due_ticks = now + MS_TO_TICKS(t->interval_ms);
+        } else {
+            JS_FreeValue(cc, t->cb);
+            t->cb = JS_UNDEFINED;
+            t->active = 0;
+        }
+    }
+    _js_fault_active = _saved_fault_active;
+    _js_in_page_eval = _saved_in_page_eval;
+    memcpy(_js_fault_buf, _saved_fault_buf, sizeof(jmp_buf));
+    _cur_proc = -1;
+    return JS_UNDEFINED;
+}
+
+/* ── Child-side: kernel.getRenderBuffer() → ArrayBuffer pointing at BSS slab ── */
+static JSValue js_child_get_render_buf(JSContext *c, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX || !_procs[id].used) return JS_NULL;
+    uint32_t w = _procs[id].width, h = _procs[id].height;
+    if (w == 0 || h == 0) return JS_NULL;
+    size_t bytes = (size_t)w * (size_t)h * 4;
+    if (bytes > RENDER_BUF_BYTES) bytes = RENDER_BUF_BYTES;
+    return JS_NewArrayBuffer(c, _app_render_bufs[id], bytes,
+                             _sbuf_no_free, NULL, 0);
+}
+
+/* ── Child-side: kernel.getWidth() / kernel.getHeight() ── */
+static JSValue js_child_get_width(JSContext *c, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_NewUint32(c, 0);
+    return JS_NewUint32(c, _procs[id].width);
+}
+static JSValue js_child_get_height(JSContext *c, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_NewUint32(c, 0);
+    return JS_NewUint32(c, _procs[id].height);
+}
+
+/* ── Child-side: FS bridge calls ── */
+static JSValue js_child_fs_read_file(JSContext *c, JSValueConst this_val,
+                                      int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    const char *path = JS_ToCString(c, argv[0]);
+    if (!path) return JS_NULL;
+    JSValue main_result = _fs_bridge_call("readFile", path);
+    JS_FreeCString(c, path);
+    if (JS_IsNull(main_result) || JS_IsUndefined(main_result)) return JS_NULL;
+    const char *str = JS_ToCString(ctx, main_result);
+    JS_FreeValue(ctx, main_result);
+    if (!str) return JS_NULL;
+    JSValue ret = JS_NewString(c, str);
+    JS_FreeCString(ctx, str);
+    return ret;
+}
+static JSValue js_child_fs_write_file(JSContext *c, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_FALSE;
+    const char *path = JS_ToCString(c, argv[0]);
+    const char *cont = JS_ToCString(c, argv[1]);
+    if (!path || !cont) { JS_FreeCString(c,path); JS_FreeCString(c,cont); return JS_FALSE; }
+    /* encode as "path\x00content" and use writeFile with two args via JSON hack */
+    JSValue path_v = JS_NewString(ctx, path);
+    JSValue cont_v = JS_NewString(ctx, cont);
+    JS_FreeCString(c, path); JS_FreeCString(c, cont);
+    if (JS_IsUndefined(_fs_bridge_obj)) { JS_FreeValue(ctx,path_v); JS_FreeValue(ctx,cont_v); return JS_FALSE; }
+    JSValue fn = JS_GetPropertyStr(ctx, _fs_bridge_obj, "writeFile");
+    JSValue args[2] = { path_v, cont_v };
+    JSValue r = JS_Call(ctx, fn, _fs_bridge_obj, 2, args);
+    JS_FreeValue(ctx,fn); JS_FreeValue(ctx,path_v); JS_FreeValue(ctx,cont_v);
+    int ok = JS_ToBool(ctx, r);
+    JS_FreeValue(ctx, r);
+    return JS_NewBool(c, ok);
+}
+static JSValue js_child_fs_read_dir(JSContext *c, JSValueConst this_val,
+                                     int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    const char *path = JS_ToCString(c, argv[0]);
+    if (!path) return JS_NULL;
+    JSValue main_result = _fs_bridge_call("readDir", path);
+    JS_FreeCString(c, path);
+    const char *str = JS_IsNull(main_result)||JS_IsUndefined(main_result) ? NULL : JS_ToCString(ctx, main_result);
+    JS_FreeValue(ctx, main_result);
+    if (!str) return JS_NULL;
+    JSValue ret = JS_ParseJSON(c, str, strlen(str), "<readDir>");
+    JS_FreeCString(ctx, str);
+    return ret;
+}
+static JSValue js_child_fs_exists(JSContext *c, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_FALSE;
+    const char *path = JS_ToCString(c, argv[0]);
+    if (!path) return JS_FALSE;
+    JSValue main_result = _fs_bridge_call("exists", path);
+    JS_FreeCString(c, path);
+    int ok = JS_ToBool(ctx, main_result);
+    JS_FreeValue(ctx, main_result);
+    return JS_NewBool(c, ok);
+}
+static JSValue js_child_fs_stat(JSContext *c, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    const char *path = JS_ToCString(c, argv[0]);
+    if (!path) return JS_NULL;
+    JSValue main_result = _fs_bridge_call("stat", path);
+    JS_FreeCString(c, path);
+    const char *str = JS_IsNull(main_result)||JS_IsUndefined(main_result) ? NULL : JS_ToCString(ctx, main_result);
+    JS_FreeValue(ctx, main_result);
+    if (!str) return JS_NULL;
+    JSValue ret = JS_ParseJSON(c, str, strlen(str), "<stat>");
+    JS_FreeCString(ctx, str);
+    return ret;
+}
+
+/* ── Child-side: setTimeout / clearTimeout / setInterval / clearInterval ── */
+static JSValue js_child_set_timeout(JSContext *c, JSValueConst this_val,
+                                     int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_NewInt32(c, -1);
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_NewInt32(c, -1);
+    int32_t ms = 0; JS_ToInt32(c, &ms, argv[1]);
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        ProcTimer_t *t = &_proc_timers[id][i];
+        if (t->active) continue;
+        t->id          = ++_proc_timer_next_id[id];
+        t->interval_ms = (uint32_t)(ms > 0 ? ms : 1);
+        t->due_ticks   = timer_get_ticks() + MS_TO_TICKS(t->interval_ms);
+        t->repeat      = 0;
+        t->active      = 1;
+        t->cb          = JS_DupValue(c, argv[0]);
+        return JS_NewUint32(c, t->id);
+    }
+    return JS_NewInt32(c, -1); /* no free slot */
+}
+static JSValue js_child_clear_timeout(JSContext *c, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 1) return JS_UNDEFINED;
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_UNDEFINED;
+    uint32_t tid = 0; JS_ToUint32(c, &tid, argv[0]);
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        ProcTimer_t *t = &_proc_timers[id][i];
+        if (!t->active || t->id != tid) continue;
+        JS_FreeValue(c, t->cb); t->cb = JS_UNDEFINED; t->active = 0; break;
+    }
+    return JS_UNDEFINED;
+}
+static JSValue js_child_set_interval(JSContext *c, JSValueConst this_val,
+                                      int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_NewInt32(c, -1);
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_NewInt32(c, -1);
+    int32_t ms = 0; JS_ToInt32(c, &ms, argv[1]);
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        ProcTimer_t *t = &_proc_timers[id][i];
+        if (t->active) continue;
+        t->id          = ++_proc_timer_next_id[id];
+        t->interval_ms = (uint32_t)(ms > 0 ? ms : 1);
+        t->due_ticks   = timer_get_ticks() + MS_TO_TICKS(t->interval_ms);
+        t->repeat      = 1;
+        t->active      = 1;
+        t->cb          = JS_DupValue(c, argv[0]);
+        return JS_NewUint32(c, t->id);
+    }
+    return JS_NewInt32(c, -1);
+}
+static JSValue js_child_clear_interval(JSContext *c, JSValueConst this_val,
+                                        int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_UNDEFINED;
+    uint32_t tid = 0; JS_ToUint32(c, &tid, argv[0]);
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        ProcTimer_t *t = &_proc_timers[id][i];
+        if (!t->active || t->id != tid) continue;
+        JS_FreeValue(c, t->cb); t->cb = JS_UNDEFINED; t->active = 0; break;
+    }
+    return JS_UNDEFINED;
+}
+
+/* ── Child-side: kernel.pollEvent() → parsed object or null ── */
+static JSValue js_child_poll_event(JSContext *c, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_NULL;
+    ProcEventQueue_t *q = &_proc_event_queues[id];
+    if (q->count == 0) return JS_NULL;
+    ProcEventSlot_t *slot = &q->slots[q->head];
+    JSValue parsed = JS_ParseJSON(c, slot->data, strlen(slot->data), "<event>");
+    slot->used = 0;
+    q->head = (q->head + 1) % PROC_EVENT_QUEUE_SLOTS;
+    q->count--;
+    return parsed;
+}
+
+/* ── Child-side: kernel.sendWindowCommand(jsonStr) ── */
+static JSValue js_child_window_command(JSContext *c, JSValueConst this_val,
+                                        int argc, JSValueConst *argv) {
+    (void)this_val; (void)c;
+    if (argc < 1) return JS_FALSE;
+    int id = _cur_proc;
+    if (id < 0 || id >= JSPROC_MAX) return JS_FALSE;
+    ProcWinCmdBuf_t *b = &_proc_wincmds[id];
+    if (b->cnt >= PROC_WINCMD_SLOTS) return JS_FALSE;
+    const char *s = JS_ToCString(c, argv[0]);
+    if (!s) return JS_FALSE;
+    ProcWinCmd_t *slot = &b->slots[b->w];
+    int n = (int)strlen(s);
+    if (n >= PROC_WINCMD_SIZE) n = PROC_WINCMD_SIZE - 1;
+    memcpy(slot->data, s, (size_t)n);
+    slot->data[n] = '\0';
+    slot->len = n;
+    JS_FreeCString(c, s);
+    b->w = (b->w + 1) % PROC_WINCMD_SLOTS;
+    b->cnt++;
+    return JS_TRUE;
+}
+
+/* ── sys.gc() — run the QuickJS garbage collector (item 116) ─────────────── */
+static JSValue js_gc(JSContext *c, JSValueConst this_val,
+                     int argc, JSValueConst *argv) {
+    (void)c; (void)this_val; (void)argc; (void)argv;
+    JS_RunGC(rt);
+    return JS_UNDEFINED;
+}
+
+/* ── New system bindings (items 118-127) ─────────────────────────────────── */
+
+/* Pull in new subsystem headers */
+/* timer.h already included above */
+#include "acpi.h"
+#include "cpuid.h"
+#include "cmdline.h"
+#include "memory.h"
+#include "symtab.h"
+#include "irq.h"
+#include "hpet.h"
+#include "virtio_blk.h"
+#include "virtio_gpu.h"
+
+/* kernel.tscHz() → number of TSC ticks per second (item 46) */
+static JSValue js_tsc_hz(JSContext *c, JSValueConst _t,
+                         int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewUint32(c, timer_tsc_hz());
+}
+
+/* kernel.rtcRead() → {seconds,minutes,hours,day,month,year,unix} (item 50) */
+static JSValue js_rtc_read(JSContext *c, JSValueConst _t,
+                            int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    rtc_time_t t;
+    rtc_read(&t);
+    JSValue o = JS_NewObject(c);
+    JS_SetPropertyStr(c, o, "seconds", JS_NewUint32(c, t.seconds));
+    JS_SetPropertyStr(c, o, "minutes", JS_NewUint32(c, t.minutes));
+    JS_SetPropertyStr(c, o, "hours",   JS_NewUint32(c, t.hours));
+    JS_SetPropertyStr(c, o, "day",     JS_NewUint32(c, t.day));
+    JS_SetPropertyStr(c, o, "month",   JS_NewUint32(c, t.month));
+    JS_SetPropertyStr(c, o, "year",    JS_NewUint32(c, t.year));
+    JS_SetPropertyStr(c, o, "unix",    JS_NewUint32(c, rtc_unix_time()));
+    return o;
+}
+
+/* kernel.setWallClock(unixSeconds) — NTP sync: store wall-clock epoch (item 51) */
+static JSValue js_set_wall_clock(JSContext *c, JSValueConst _t,
+                                  int ac, JSValueConst *av) {
+    (void)_t;
+    if (ac < 1) return JS_UNDEFINED;
+    uint32_t epoch;
+    if (JS_ToUint32(c, &epoch, av[0])) return JS_UNDEFINED;
+    timer_set_wall_clock(epoch);
+    return JS_UNDEFINED;
+}
+
+/* kernel.getWallClock() → Unix seconds (NTP-adjusted or RTC fallback) (item 51) */
+static JSValue js_get_wall_clock(JSContext *c, JSValueConst _t,
+                                  int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewUint32(c, timer_get_wall_clock());
+}
+
+/* kernel.allocPage() → physical address of a 4 KB page, 0 on OOM (item 33) */
+static JSValue js_alloc_page(JSContext *c, JSValueConst _t,
+                              int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewUint32(c, alloc_page());
+}
+
+/* kernel.freePage(physAddr) — return a page to the allocator (item 34) */
+static JSValue js_free_page(JSContext *c, JSValueConst _t,
+                             int ac, JSValueConst *av) {
+    (void)_t;
+    if (ac < 1) return JS_EXCEPTION;
+    uint32_t addr;
+    if (JS_ToUint32(c, &addr, av[0])) return JS_EXCEPTION;
+    free_page(addr);
+    return JS_UNDEFINED;
+}
+
+/* kernel.pagesFree() → number of free 4 KB pages */
+static JSValue js_pages_free(JSContext *c, JSValueConst _t,
+                              int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewUint32(c, (uint32_t)memory_get_pages_free());
+}
+
+/* kernel.acpiShutdown() — power off via ACPI S5 (item 105) */
+static JSValue js_acpi_shutdown(JSContext *c, JSValueConst _t,
+                                 int _ac, JSValueConst *_av) {
+    (void)c; (void)_t; (void)_ac; (void)_av;
+    acpi_shutdown();    /* noreturn */
+    return JS_UNDEFINED;
+}
+
+/* kernel.acpiReboot() — reboot via ACPI reset / KBC (item 106) */
+static JSValue js_acpi_reboot(JSContext *c, JSValueConst _t,
+                               int _ac, JSValueConst *_av) {
+    (void)c; (void)_t; (void)_ac; (void)_av;
+    acpi_reboot();      /* noreturn */
+    return JS_UNDEFINED;
+}
+
+/* kernel.symLookup(addr) → {name,offset} — kernel symbol table (item 104) */
+static JSValue js_sym_lookup(JSContext *c, JSValueConst _t,
+                              int ac, JSValueConst *av) {
+    (void)_t;
+    if (ac < 1) return JS_EXCEPTION;
+    uint32_t addr;
+    if (JS_ToUint32(c, &addr, av[0])) return JS_EXCEPTION;
+    uint32_t off = 0;
+    const char *name = symtab_lookup(addr, &off);
+    JSValue o = JS_NewObject(c);
+    JS_SetPropertyStr(c, o, "name",   JS_NewString(c, name));
+    JS_SetPropertyStr(c, o, "offset", JS_NewUint32(c, off));
+    return o;
+}
+
+/* kernel.cmdlineGet(key) → string | null (item 4) */
+static JSValue js_cmdline_get(JSContext *c, JSValueConst _t,
+                               int ac, JSValueConst *av) {
+    (void)_t;
+    if (ac < 1) return JS_NULL;
+    const char *key = JS_ToCString(c, av[0]);
+    if (!key) return JS_NULL;
+    const char *val = cmdline_get(key);
+    JS_FreeCString(c, key);
+    return val ? JS_NewString(c, val) : JS_NULL;
+}
+
+/* kernel.cpuidInfo() → CPU feature flags object (item 8) */
+static JSValue js_cpuid_info(JSContext *c, JSValueConst _t,
+                              int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    JSValue o = JS_NewObject(c);
+    JS_SetPropertyStr(c, o, "vendor",  JS_NewString(c, cpuid_features.vendor));
+    JS_SetPropertyStr(c, o, "family",  JS_NewUint32(c, cpuid_features.family));
+    JS_SetPropertyStr(c, o, "model",   JS_NewUint32(c, cpuid_features.model));
+    JS_SetPropertyStr(c, o, "step",    JS_NewUint32(c, cpuid_features.stepping));
+    JS_SetPropertyStr(c, o, "sse",     JS_NewBool(c, cpuid_features.sse));
+    JS_SetPropertyStr(c, o, "sse2",    JS_NewBool(c, cpuid_features.sse2));
+    JS_SetPropertyStr(c, o, "sse3",    JS_NewBool(c, cpuid_features.sse3));
+    JS_SetPropertyStr(c, o, "sse41",   JS_NewBool(c, cpuid_features.sse41));
+    JS_SetPropertyStr(c, o, "sse42",   JS_NewBool(c, cpuid_features.sse42));
+    JS_SetPropertyStr(c, o, "avx",     JS_NewBool(c, cpuid_features.avx));
+    JS_SetPropertyStr(c, o, "aes",     JS_NewBool(c, cpuid_features.aes));
+    JS_SetPropertyStr(c, o, "rdrand",  JS_NewBool(c, cpuid_features.rdrand));
+    JS_SetPropertyStr(c, o, "nx",      JS_NewBool(c, cpuid_features.nx));
+    JS_SetPropertyStr(c, o, "tsc",     JS_NewBool(c, cpuid_features.tsc));
+    JS_SetPropertyStr(c, o, "mtrr",    JS_NewBool(c, cpuid_features.mtrr));
+    JS_SetPropertyStr(c, o, "apic",    JS_NewBool(c, cpuid_features.apic));
+    JS_SetPropertyStr(c, o, "htt",     JS_NewBool(c, cpuid_features.htt));
+    JS_SetPropertyStr(c, o, "lm",      JS_NewBool(c, cpuid_features.lm));
+    return o;
+}
+
+/* kernel.getTimeNs() → BigInt nanoseconds since boot via TSC (item 48) */
+static JSValue js_gettime_ns(JSContext *c, JSValueConst _t,
+                             int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    uint64_t ns = timer_gettime_ns();
+    /* Return as a regular JS number — at ~4e9 ns/sec, float64 precision is
+     * acceptable for uptime < 104 days; use BigInt if caller needs full res */
+    return JS_NewFloat64(c, (double)ns);
+}
+
+/* kernel.uptimeUs() → microseconds since boot (item 48) */
+static JSValue js_uptime_us(JSContext *c, JSValueConst _t,
+                            int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewFloat64(c, (double)timer_uptime_us());
+}
+
+/* kernel.rdrand() → one 32-bit hardware random word via RDRAND CPU instruction (item 348)
+ * Returns a Uint32.  Falls back to TSC-derived value if RDRAND is not available or fails. */
+static JSValue js_rdrand(JSContext *c, JSValueConst _t,
+                         int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    uint32_t val = 0;
+    if (cpuid_features.rdrand) {
+        /* RDRAND: retry up to 10 times if CF=0 (hardware entropy pool exhausted) */
+        int ok = 0, i;
+        for (i = 0; i < 10 && !ok; i++) {
+            __asm__ volatile (
+                "rdrand %0\n"
+                "setc   %b1\n"
+                : "=r"(val), "=q"(ok)
+                :
+                : "cc"
+            );
+        }
+        if (!ok) val = (uint32_t)timer_uptime_us(); /* TSC fallback */
+    } else {
+        val = (uint32_t)timer_uptime_us(); /* no RDRAND – TSC fallback */
+    }
+    return JS_NewUint32(c, val);
+}
+
+/* kernel.reserveRegion(base, size) → mark MMIO region used (item 40) */
+static JSValue js_reserve_region(JSContext *c, JSValueConst _t,
+                                  int argc, JSValueConst *argv) {
+    (void)_t;
+    if (argc < 2) return JS_ThrowTypeError(c, "reserveRegion(base, size)");
+    uint32_t base = 0, size = 0;
+    JS_ToUint32(c, &base, argv[0]);
+    JS_ToUint32(c, &size, argv[1]);
+    memory_reserve_region(base, size);
+    return JS_UNDEFINED;
+}
+
+/* kernel.irqSetTpr(class) → set LAPIC TPR (item 26) */
+static JSValue js_irq_set_tpr(JSContext *c, JSValueConst _t,
+                               int argc, JSValueConst *argv) {
+    (void)_t;
+    uint32_t cls = 0;
+    if (argc >= 1) JS_ToUint32(c, &cls, argv[0]);
+    irq_set_tpr((uint8_t)(cls & 0xFu));
+    return JS_UNDEFINED;
+}
+
+/* kernel.hpetInit(mmioBase) → int (item 47) */
+static JSValue js_hpet_init(JSContext *c, JSValueConst _t,
+                             int argc, JSValueConst *argv) {
+    (void)_t;
+    uint32_t base = 0;
+    if (argc >= 1) JS_ToUint32(c, &base, argv[0]);
+    return JS_NewInt32(c, hpet_init(base));
+}
+
+/* kernel.hpetRead() → number (lower 32 bits of main counter) (item 47) */
+static JSValue js_hpet_read(JSContext *c, JSValueConst _t,
+                             int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewUint32(c, hpet_read_counter32());
+}
+
+/* kernel.hpetFreq() → Hz (item 47) */
+static JSValue js_hpet_freq(JSContext *c, JSValueConst _t,
+                             int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewUint32(c, hpet_frequency());
+}
+
+/* kernel.ataIsAtapi() → 1/0/-1 (item 80) */
+static JSValue js_ata_is_atapi(JSContext *c, JSValueConst _t,
+                                int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewInt32(c, ata_is_atapi());
+}
+
+/* kernel.virtioBlkPresent() → boolean (item 81) */
+static JSValue js_virtio_blk_present(JSContext *c, JSValueConst _t,
+                                      int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewBool(c, virtio_blk_present());
+}
+
+/* kernel.virtioBlkSectors() → number (item 81) */
+static JSValue js_virtio_blk_sectors(JSContext *c, JSValueConst _t,
+                                      int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewFloat64(c, (double)virtio_blk_sector_count());
+}
+
+/* kernel.virtioGpuPresent() → boolean (item 68) */
+static JSValue js_virtio_gpu_present(JSContext *c, JSValueConst _t,
+                                      int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    return JS_NewBool(c, virtio_gpu_present());
+}
+
+/* ── APIC / IOAPIC / APIC timer (items 24, 28, 49) ──────────────────────── */
+#include "apic.h"
+
+static JSValue js_apic_init(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; apic_init(); return JS_UNDEFINED; }
+static JSValue js_apic_eoi(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; apic_eoi(); return JS_UNDEFINED; }
+static JSValue js_apic_timer_calibrate(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; apic_timer_calibrate(); return JS_UNDEFINED; }
+static JSValue js_apic_timer_start(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t ms = 10;
+    if (_ac >= 1) { double v; if (!JS_ToFloat64(c, &v, av[0])) ms = (uint32_t)v; }
+    apic_timer_start_periodic(ms); return JS_UNDEFINED; }
+static JSValue js_ioapic_init(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t base = 0xFEC00000u;
+    if (_ac >= 1) { double v; if (!JS_ToFloat64(c, &v, av[0])) base = (uint32_t)v; }
+    ioapic_init(base); return JS_UNDEFINED; }
+static JSValue js_ioapic_unmask(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t irq = 0;
+    if (_ac >= 1) { double v; if (!JS_ToFloat64(c, &v, av[0])) irq = (uint32_t)v; }
+    ioapic_unmask_irq((uint8_t)irq); return JS_UNDEFINED; }
+
+/* ── NVMe (item 82) ──────────────────────────────────────────────────────── */
+#include "nvme.h"
+
+static JSValue js_nvme_init(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewBool(c, nvme_init() == 0); }
+static JSValue js_nvme_present(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewBool(c, nvme_present()); }
+static JSValue js_nvme_enable(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewBool(c, nvme_enable() == 0); }
+
+/* ── AHCI (item 83) ──────────────────────────────────────────────────────── */
+#include "ahci.h"
+
+static JSValue js_ahci_init(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewBool(c, ahci_init() == 0); }
+static JSValue js_ahci_present(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewBool(c, ahci_present()); }
+
+/* ── Memory extensions (items 37, 38, 39, 42) ───────────────────────────── */
+static JSValue js_mem_enable_pae(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; memory_enable_pae(); return JS_UNDEFINED; }
+static JSValue js_mem_enable_nx(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; memory_enable_nx(); return JS_UNDEFINED; }
+static JSValue js_mem_tlb_flush(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t vaddr = 0;
+    if (_ac >= 1) { double v; if (!JS_ToFloat64(c, &v, av[0])) vaddr = (uint32_t)v; }
+    memory_tlb_flush_local(vaddr); return JS_UNDEFINED; }
+static JSValue js_mem_tlb_flush_all(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; memory_tlb_flush_all(); return JS_UNDEFINED; }
+static JSValue js_mem_large_page_en(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; memory_enable_large_pages(); return JS_UNDEFINED; }
+static JSValue js_mem_hotplug_add(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t base = 0, size = 0;
+    if (_ac >= 2) {
+        double b, s;
+        if (!JS_ToFloat64(c, &b, av[0])) base = (uint32_t)b;
+        if (!JS_ToFloat64(c, &s, av[1])) size = (uint32_t)s;
+    }
+    return JS_NewInt32(c, (int32_t)memory_hotplug_add_region(base, size)); }
+
+/* ── ACPI PM timer (item 52) ────────────────────────────────────────────── */
+static JSValue js_acpi_pm_timer(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewInt32(c, (int32_t)acpi_pm_timer_read()); }
+
+/* ── Framebuffer / display extras (items 69-72) ─────────────────────────── */
+static JSValue js_fb_alloc_backbuf(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewBool(c, platform_fb_alloc_backbuffer() == 0); }
+static JSValue js_fb_flip(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; platform_fb_flip(); return JS_UNDEFINED; }
+static JSValue js_vsync_wait(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; platform_vsync_wait(); return JS_UNDEFINED; }
+static JSValue js_cursor_enable(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; int en = (_ac >= 1) ? JS_ToBool(c, av[0]) : 1;
+    platform_cursor_enable(en); return JS_UNDEFINED; }
+static JSValue js_cursor_set_pos(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t col = 0, row = 0;
+    if (_ac >= 2) { double a, b;
+        if (!JS_ToFloat64(c, &a, av[0])) col = (uint32_t)a;
+        if (!JS_ToFloat64(c, &b, av[1])) row = (uint32_t)b; }
+    platform_cursor_set_pos((uint8_t)col, (uint8_t)row); return JS_UNDEFINED; }
+static JSValue js_dpms_set(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t st = 0;
+    if (_ac >= 1) { double v; if (!JS_ToFloat64(c, &v, av[0])) st = (uint32_t)v; }
+    platform_dpms_set((dpms_state_t)st); return JS_UNDEFINED; }
+
+/* ── Keyboard layout (items 60-62) ──────────────────────────────────────── */
+#include "keyboard_layout.h"
+
+static JSValue js_kb_layout_set(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; uint32_t id = 0;
+    if (_ac >= 1) { double v; if (!JS_ToFloat64(c, &v, av[0])) id = (uint32_t)v; }
+    return JS_NewBool(c, kb_layout_set((kb_layout_id_t)id) == 0); }
+static JSValue js_kb_layout_get(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewInt32(c, (int32_t)kb_layout_get()); }
+static JSValue js_kb_ime_enable(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; int en = (_ac >= 1) ? JS_ToBool(c, av[0]) : 1;
+    kb_ime_enable(en); return JS_UNDEFINED; }
+
+/* ── Selftest (item 108) ─────────────────────────────────────────────────── */
+#include "selftest.h"
+
+static JSValue js_selftest_run(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; return JS_NewInt32(c, selftest_run_all()); }
+
+/* ── kprobes (item 110) ──────────────────────────────────────────────────── */
+#include "kprobes.h"
+
+static JSValue js_kprobes_init(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; kprobes_init(); return JS_UNDEFINED; }
+static JSValue js_kprobes_dump(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av; kprobes_dump(); return JS_UNDEFINED; }
+
+/* ── Item 123: debugger statement → serial breakpoint ───────────────────── */
+/* QuickJS skips the `debugger` keyword by default.  TypeScript code that
+ * is transpiled by the JSOS build system has `debugger` replaced with a
+ * call to kernel.debugBreak() at bundle time.  This binding handles it. */
+static JSValue js_debug_break(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    platform_serial_puts("[DEBUGGER] JS debugger breakpoint — EIP on serial\n");
+    /* Print current JS context backtrace to COM1 */
+    JSValue exc = JS_GetException(c);
+    if (!JS_IsNull(exc)) {
+        JSValue stk = JS_GetPropertyStr(c, exc, "stack");
+        if (JS_IsString(stk)) {
+            const char *s = JS_ToCString(c, stk);
+            if (s) { platform_serial_puts(s); platform_serial_puts("\n"); JS_FreeCString(c, s); }
+        }
+        JS_FreeValue(c, stk);
+        JS_FreeValue(c, exc);
+    }
+    return JS_UNDEFINED;
+}
+
+/* ── Item 122: SourceMap registry (stack trace decoration) ──────────────── */
+/* Stores at most 8 registered source maps (url+content) for the stack
+ * trace formatter in the OS TypeScript layer.                               */
+#define SRCMAP_MAX 8
+static struct { char url[128]; JSValue map; } _srcmaps[SRCMAP_MAX];
+static int _srcmap_count = 0;
+
+static JSValue js_sourcemap_register(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t;
+    if (_ac < 2) return JS_NewBool(c, 0);
+    const char *url = JS_ToCString(c, av[0]);
+    if (!url) return JS_NewBool(c, 0);
+    if (_srcmap_count < SRCMAP_MAX) {
+        int i = _srcmap_count++;
+        /* Copy URL (truncate to fit) */
+        int n = 0;
+        while (url[n] && n < 127) { _srcmaps[i].url[n] = url[n]; n++; }
+        _srcmaps[i].url[n] = '\0';
+        _srcmaps[i].map = JS_DupValue(c, av[1]);
+    }
+    JS_FreeCString(c, url);
+    return JS_NewBool(c, 1);
+}
+
+static JSValue js_sourcemap_lookup(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t;
+    if (_ac < 1) return JS_NULL;
+    const char *url = JS_ToCString(c, av[0]);
+    if (!url) return JS_NULL;
+    for (int i = 0; i < _srcmap_count; i++) {
+        int match = 1;
+        for (int j = 0; _srcmaps[i].url[j] || url[j]; j++) {
+            if (_srcmaps[i].url[j] != url[j]) { match = 0; break; }
+        }
+        if (match) { JS_FreeCString(c, url); return JS_DupValue(c, _srcmaps[i].map); }
+    }
+    JS_FreeCString(c, url);
+    return JS_NULL;
+}
+
+/* ── Item 124: Remote DevTools Protocol stub ─────────────────────────────── */
+/* Stub: exposes a JSON-RPC endpoint over COM2 (0x2F8).  Real implementation
+ * would parse Chrome DevTools Protocol messages and forward to QuickJS
+ * inspector hooks.                                                          */
+static JSValue js_devtools_enable(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    platform_serial_puts("[DevTools] CDP stub enabled on COM2 (not implemented)\n");
+    return JS_NewBool(c, 0);  /* Not yet available */
+}
+
+/* ── Item 125: BigInt64Array / BigUint64Array ───────────────────────────── */
+/* QuickJS already implements BigInt64Array and BigUint64Array natively as
+ * part of the TypedArray bigint extension.  This binding just exposes a
+ * probe so TypeScript can verify availability.                              */
+static JSValue js_bigint64array_test(JSContext *c, JSValueConst _t, int _ac, JSValueConst *_av) {
+    (void)_t; (void)_ac; (void)_av;
+    /* Evaluate a quick test to see if BigInt64Array is available */
+    JSValue r = JS_Eval(c, "typeof BigInt64Array !== 'undefined'", 36,
+                        "<bigint64_test>", JS_EVAL_TYPE_GLOBAL);
+    return r;
+}
+
+/* ── Items 126-127: WASM interpreter stub ───────────────────────────────── */
+/* A minimal stub that accepts a WASM binary buffer and either interprets it
+ * (item 126: wasm3/wabt binding) or JIT-compiles it (item 127).
+ * Real implementation would integrate wasm3 or a custom WASM JIT.         */
+static JSValue js_wasm_instantiate(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t;
+    platform_serial_puts("[WASM] wasm_instantiate() stub — not yet implemented\n");
+    if (_ac < 1) return JS_ThrowTypeError(c, "Expected ArrayBuffer");
+    /* Return null to indicate failure */
+    return JS_NULL;
+}
+
+static JSValue js_wasm_jit_compile(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t;
+    platform_serial_puts("[WASM-JIT] wasm_jit_compile() stub — not yet implemented\n");
+    if (_ac < 1) return JS_ThrowTypeError(c, "Expected ArrayBuffer");
+    return JS_NULL;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * FPU / SSE CONTEXT SAVE & RESTORE — item 147
+ *
+ * C provides three thin hardware primitives; ALL scheduling policy lives in TS.
+ *
+ *   fpuAllocState()          → allocate a 512-byte 16-byte-aligned state buffer
+ *   fpuSave(physAddr)        → FXSAVE to the buffer (returns bool success)
+ *   fpuRestore(physAddr)     → FXRSTOR from the buffer (returns bool success)
+ *
+ * FXSAVE/FXRSTOR require the target address to be 16-byte aligned.
+ * alloc_page() returns a 4096-byte-aligned physical page, so alignment is
+ * always satisfied.  Only the first 512 bytes of the page are used.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static JSValue js_fpu_alloc_state(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t; (void)_ac; (void)av;
+    /* alloc_page() returns physical page number; each page is 4 KB = 16-byte aligned */
+    uint32_t page = alloc_page();
+    if (page == (uint32_t)-1) return JS_NewInt32(c, 0);   /* 0 = OOM sentinel */
+    /* Zero the 512-byte FXSAVE area so FXRSTOR finds a valid initial state */
+    uint8_t *buf = (uint8_t *)(uintptr_t)(page * 4096);
+    for (int i = 0; i < 512; i++) buf[i] = 0;
+    return JS_NewInt32(c, (int32_t)(page * 4096));
+}
+
+static JSValue js_fpu_save(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t;
+    if (_ac < 1) return JS_NewBool(c, 0);
+    uint32_t addr;
+    if (JS_ToUint32(c, &addr, av[0])) return JS_EXCEPTION;
+    if (!addr || (addr & 0xF)) return JS_NewBool(c, 0);    /* must be 16-byte aligned */
+    __asm__ volatile("fxsave (%0)" :: "r"((void *)(uintptr_t)addr) : "memory");
+    return JS_NewBool(c, 1);
+}
+
+static JSValue js_fpu_restore(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+    (void)_t;
+    if (_ac < 1) return JS_NewBool(c, 0);
+    uint32_t addr;
+    if (JS_ToUint32(c, &addr, av[0])) return JS_EXCEPTION;
+    if (!addr || (addr & 0xF)) return JS_NewBool(c, 0);    /* must be 16-byte aligned */
+    __asm__ volatile("fxrstor (%0)" :: "r"((void *)(uintptr_t)addr) : "memory");
+    return JS_NewBool(c, 1);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * MODULE LOADER — item 118 (filesystem import()) + item 119 (@jsos/* pkgs)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* JS-registered callback: (path: string) => string | null
+ * Registered by the TS OS once the VFS is ready, via kernel.setModuleReader() */
+static JSValue _module_fs_read_cb; /* initialised to JS_UNDEFINED in quickjs_initialize */
+
+/* Built-in @jsos/ packages that forward to the matching sys.* sub-objects
+ * already present on globalThis after the OS has booted (item 119). */
+static const struct { const char *name; const char *src; } _jsos_builtins[] = {
+    { "@jsos/net",     "export default globalThis.sys?.net;"     },
+    { "@jsos/fs",      "export default globalThis.sys?.fs;"      },
+    { "@jsos/proc",    "export default globalThis.sys?.proc;"    },
+    { "@jsos/ui",      "export default globalThis.sys?.ui;"      },
+    { "@jsos/ipc",     "export default globalThis.sys?.ipc;"     },
+    { "@jsos/storage", "export default globalThis.sys?.storage;" },
+    { "@jsos/crypto",  "export default globalThis.sys?.crypto;"  },
+    { "@jsos/http",    "export default globalThis.sys?.http;"    },
+    { NULL, NULL }
+};
+
+/* Normalize module specifier: resolve relative paths against the importing
+ * module's directory.  @jsos/ and absolute paths pass through unchanged. */
+static char *_module_normalize(JSContext *c,
+                                const char *base, const char *name,
+                                void *opaque __attribute__((unused)))
+{
+    /* @jsos/ built-in packages — return unchanged */
+    if (name[0] == '@') return js_strdup(c, name);
+    /* Absolute paths — return unchanged */
+    if (name[0] == '/') return js_strdup(c, name);
+    /* Relative specifiers — join with importing module's directory */
+    if (base && name[0] == '.') {
+        const char *last_slash = NULL;
+        const char *p = base;
+        while (*p) { if (*p == '/') last_slash = p; p++; }
+        if (last_slash) {
+            size_t dir_len = (size_t)(last_slash - base) + 1; /* include '/' */
+            size_t nm_len  = strlen(name);
+            char  *out     = js_malloc(c, dir_len + nm_len + 1);
+            if (!out) return NULL;
+            memcpy(out, base, dir_len);
+            memcpy(out + dir_len, name, nm_len + 1);
+            return out;
+        }
+    }
+    return js_strdup(c, name);
+}
+
+/* Load a module by its normalised name.  Priority:
+ *  1. @jsos/* built-in packages (item 119)
+ *  2. Filesystem source via registered JS reader callback (item 118) */
+static JSModuleDef *_module_load(JSContext *c, const char *name,
+                                  void *opaque __attribute__((unused)))
+{
+    const char *src = NULL;
+
+    /* 1. Check @jsos/ built-in packages */
+    for (int i = 0; _jsos_builtins[i].name; i++) {
+        if (strcmp(name, _jsos_builtins[i].name) == 0) {
+            src = _jsos_builtins[i].src;
+            break;
+        }
+    }
+
+    /* 2. Filesystem path via JS-registered reader (item 118) */
+    const char *fs_cstr = NULL;
+    JSValue     fs_ret  = JS_UNDEFINED;
+    if (!src && !JS_IsUndefined(_module_fs_read_cb)) {
+        JSValue arg = JS_NewString(c, name);
+        fs_ret = JS_Call(c, _module_fs_read_cb, JS_UNDEFINED, 1, &arg);
+        JS_FreeValue(c, arg);
+        if (!JS_IsException(fs_ret) && JS_IsString(fs_ret)) {
+            fs_cstr = JS_ToCString(c, fs_ret);
+            src = fs_cstr;
+        }
+    }
+
+    if (!src) {
+        if (!JS_IsUndefined(fs_ret)) JS_FreeValue(c, fs_ret);
+        JS_ThrowReferenceError(c, "cannot load module '%s'", name);
+        return NULL;
+    }
+
+    /* Compile module source — compile-only; runtime evaluates on demand */
+    JSValue compiled = JS_Eval(c, src, strlen(src), name,
+                               JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    if (fs_cstr) JS_FreeCString(c, fs_cstr);
+    JS_FreeValue(c, fs_ret);
+
+    if (JS_IsException(compiled)) return NULL;
+
+    /* Extract raw pointer — do NOT JS_FreeValue; runtime now owns this def */
+    JSModuleDef *m = JS_VALUE_GET_PTR(compiled);
+    return m;
+}
+
+/* kernel.setModuleReader(fn: (path: string) => string | null)
+ * Called by the TS OS after the VFS is ready.  fn must return the UTF-8
+ * source text for the given path, or null if the file does not exist. */
+static JSValue js_set_module_reader(JSContext *c,
+                                     JSValueConst this_val __attribute__((unused)),
+                                     int argc, JSValueConst *argv)
+{
+    if (argc < 1 || !JS_IsFunction(c, argv[0]))
+        return JS_ThrowTypeError(c, "setModuleReader: expected a function");
+    if (!JS_IsUndefined(_module_fs_read_cb))
+        JS_FreeValue(c, _module_fs_read_cb);
+    _module_fs_read_cb = JS_DupValue(c, argv[0]);
+    return JS_UNDEFINED;
+}
+
 static const JSCFunctionListEntry js_kernel_funcs[] = {
     /* VGA raw access */
     JS_CFUNC_DEF("vgaPut",        4, js_vga_put),
@@ -1465,6 +4202,7 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("sleep",     1, js_sleep),
     /* Memory */
     JS_CFUNC_DEF("getMemoryInfo", 0, js_mem_info),
+    JS_CFUNC_DEF("heapStats",    0, js_heap_stats),
     /* Port I/O */
     JS_CFUNC_DEF("inb",  1, js_inb),
     JS_CFUNC_DEF("outb", 2, js_outb),
@@ -1473,14 +4211,23 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("callNativeI", 4, js_call_native_i),
     JS_CFUNC_DEF("readMem8",    1, js_read_mem8),
     JS_CFUNC_DEF("writeMem8",   2, js_write_mem8),
+    /* Step 2: Physical memory bulk access */
+    JS_CFUNC_DEF("readPhysMem",  2, js_read_phys_mem),
+    JS_CFUNC_DEF("writePhysMem", 2, js_write_phys_mem),
+    /* Step 3: QuickJS struct offsets probe */
+    JS_CFUNC_DEF("qjsOffsets",   0, js_qjs_offsets),
     /* System */
     JS_CFUNC_DEF("halt",   0, js_halt),
     JS_CFUNC_DEF("reboot", 0, js_reboot),
+    JS_CFUNC_DEF("gc",     0, js_gc),
     /* Serial */
     JS_CFUNC_DEF("serialPut",     1, js_serial_put),
     JS_CFUNC_DEF("serialGetchar", 0, js_serial_getchar),
     /* Eval */
-    JS_CFUNC_DEF("eval",   1, js_eval),
+    JS_CFUNC_DEF("eval",         1, js_eval),
+    JS_CFUNC_DEF("evalGuarded",  1, js_eval_guarded),
+    JS_CFUNC_DEF("callGuarded",  1, js_call_guarded),
+    JS_CFUNC_DEF("guardedRun",   1, js_guarded_run),
     /* ATA block device */
     JS_CFUNC_DEF("ataPresent",     0, js_ata_present),
     JS_CFUNC_DEF("ataSectorCount", 0, js_ata_sector_count),
@@ -1488,7 +4235,8 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("ataWrite",       3, js_ata_write),
     /* Framebuffer (Phase 3) */
     JS_CFUNC_DEF("fbInfo",       0, js_fb_info),
-    JS_CFUNC_DEF("fbBlit",       5, js_fb_blit),
+    JS_CFUNC_DEF("fbBlit",         5, js_fb_blit),
+    JS_CFUNC_DEF("fbBlitStrided",  8, js_fb_blit_strided),
     /* Volatile ASM execution */
     JS_CFUNC_DEF("volatileAsm",  1, js_volatile_asm),
     /* Mouse (Phase 3) */
@@ -1504,6 +4252,7 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("registerSchedulerHook", 1, js_register_scheduler_hook),
     JS_CFUNC_DEF("yield",                 0, js_yield),
     JS_CFUNC_DEF("schedTick",             0, js_sched_tick),
+    JS_CFUNC_DEF("drainJobs",             0, js_drain_jobs),
     JS_CFUNC_DEF("tssSetESP0",            1, js_tss_set_esp0),
     /* Process primitives (Phase 6) */
     JS_CFUNC_DEF("cloneAddressSpace",  0, js_clone_address_space),
@@ -1534,6 +4283,118 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("sharedBufferOpen",    1, js_shared_buf_open),
     JS_CFUNC_DEF("sharedBufferRelease", 1, js_shared_buf_release),
     JS_CFUNC_DEF("sharedBufferSize",    1, js_shared_buf_size),
+    /* JIT compiler primitives (Phase 11) */
+    JS_CFUNC_DEF("jitAlloc",     1, js_jit_alloc),
+    JS_CFUNC_DEF("jitWrite",     2, js_jit_write),
+    JS_CFUNC_DEF("jitCallI",     5, js_jit_call_i),
+    JS_CFUNC_DEF("jitCallI8",    9, js_jit_call_i8),
+    JS_CFUNC_DEF("jitCallF4",    5, js_jit_call_f),
+    JS_CFUNC_DEF("jitUsedBytes",   0, js_jit_used_bytes),
+    JS_CFUNC_DEF("jitMainReset",   0, js_jit_main_reset),
+    JS_CFUNC_DEF("physAddrOf",   1, js_physaddr_of),
+    JS_CFUNC_DEF("jitHelperAddrs", 0, js_jit_get_helper_addrs),
+    /* Step 5: QJS JIT hook + per-process JIT management */
+    JS_CFUNC_DEF("setJITHook",    1, js_set_jit_hook),
+    JS_CFUNC_DEF("setJITNative",  2, js_set_jit_native),
+    JS_CFUNC_DEF("procPendingJIT",1, js_proc_pending_jit),
+    JS_CFUNC_DEF("jitProcAlloc",  2, js_jit_proc_alloc),
+    /* Phase A/B: render surface + child runtime infrastructure */
+    JS_CFUNC_DEF("getProcRenderBuffer",    1, js_get_proc_render_buf),
+    JS_CFUNC_DEF("procSetDimensions",      3, js_proc_set_dimensions),
+    JS_CFUNC_DEF("registerChildFSBridge",  1, js_register_child_fs_bridge),
+    JS_CFUNC_DEF("procSendEvent",          2, js_proc_send_event),
+    JS_CFUNC_DEF("procDequeueWindowCommand", 1, js_proc_dequeue_window_cmd),
+    JS_CFUNC_DEF("serviceTimers",          1, js_service_timers),
+    /* New subsystem bindings (items 8, 4, 33, 34, 46, 50, 104, 105, 106, 118-127) */
+    JS_CFUNC_DEF("tscHz",         0, js_tsc_hz),
+    JS_CFUNC_DEF("rtcRead",       0, js_rtc_read),
+    JS_CFUNC_DEF("setWallClock",  1, js_set_wall_clock),   /* item 51 NTP */
+    JS_CFUNC_DEF("getWallClock",  0, js_get_wall_clock),   /* item 51 NTP */
+    JS_CFUNC_DEF("allocPage",     0, js_alloc_page),
+    JS_CFUNC_DEF("freePage",      1, js_free_page),
+    JS_CFUNC_DEF("pagesFree",     0, js_pages_free),
+    JS_CFUNC_DEF("acpiShutdown",  0, js_acpi_shutdown),
+    JS_CFUNC_DEF("acpiReboot",    0, js_acpi_reboot),
+    JS_CFUNC_DEF("symLookup",     1, js_sym_lookup),
+    JS_CFUNC_DEF("cmdlineGet",          1, js_cmdline_get),
+    JS_CFUNC_DEF("cpuidInfo",           0, js_cpuid_info),
+    /* High-resolution time (item 48) */
+    JS_CFUNC_DEF("getTimeNs",           0, js_gettime_ns),
+    JS_CFUNC_DEF("uptimeUs",            0, js_uptime_us),
+    /* MMIO region reservation (item 40) */
+    JS_CFUNC_DEF("reserveRegion",       2, js_reserve_region),
+    /* LAPIC Task Priority Register (item 26) */
+    JS_CFUNC_DEF("irqSetTpr",           1, js_irq_set_tpr),
+    /* HPET (item 47) */
+    JS_CFUNC_DEF("hpetInit",            1, js_hpet_init),
+    JS_CFUNC_DEF("hpetRead",            0, js_hpet_read),
+    JS_CFUNC_DEF("hpetFreq",            0, js_hpet_freq),
+    /* ATAPI (item 80) */
+    JS_CFUNC_DEF("ataIsAtapi",          0, js_ata_is_atapi),
+    /* VirtIO-BLK (item 81) */
+    JS_CFUNC_DEF("virtioBlkPresent",    0, js_virtio_blk_present),
+    JS_CFUNC_DEF("virtioBlkSectors",    0, js_virtio_blk_sectors),
+    /* VirtIO-GPU (item 68) */
+    JS_CFUNC_DEF("virtioGpuPresent",    0, js_virtio_gpu_present),
+    /* APIC / IOAPIC / APIC timer (items 24, 28, 49) */
+    JS_CFUNC_DEF("apicInit",            0, js_apic_init),
+    JS_CFUNC_DEF("apicEoi",             0, js_apic_eoi),
+    JS_CFUNC_DEF("apicTimerCalibrate",  0, js_apic_timer_calibrate),
+    JS_CFUNC_DEF("apicTimerStart",      1, js_apic_timer_start),
+    JS_CFUNC_DEF("ioapicInit",          1, js_ioapic_init),
+    JS_CFUNC_DEF("ioapicUnmask",        1, js_ioapic_unmask),
+    /* NVMe (item 82) */
+    JS_CFUNC_DEF("nvmeInit",            0, js_nvme_init),
+    JS_CFUNC_DEF("nvmePresent",         0, js_nvme_present),
+    JS_CFUNC_DEF("nvmeEnable",          0, js_nvme_enable),
+    /* AHCI (item 83) */
+    JS_CFUNC_DEF("ahciInit",            0, js_ahci_init),
+    JS_CFUNC_DEF("ahciPresent",         0, js_ahci_present),
+    /* Memory extensions (items 37, 38, 39, 42, 44) */
+    JS_CFUNC_DEF("memoryEnablePae",     0, js_mem_enable_pae),
+    JS_CFUNC_DEF("memoryEnableNx",      0, js_mem_enable_nx),
+    JS_CFUNC_DEF("memoryTlbFlush",      1, js_mem_tlb_flush),
+    JS_CFUNC_DEF("memoryTlbFlushAll",   0, js_mem_tlb_flush_all),
+    JS_CFUNC_DEF("memoryEnableLargePages", 0, js_mem_large_page_en),
+    JS_CFUNC_DEF("memoryHotplugAdd",    2, js_mem_hotplug_add),
+    /* ACPI PM timer (item 52) */
+    JS_CFUNC_DEF("acpiPmTimer",         0, js_acpi_pm_timer),
+    /* Display extras (items 69-72) */
+    JS_CFUNC_DEF("fbAllocBackbuffer",   0, js_fb_alloc_backbuf),
+    JS_CFUNC_DEF("fbFlip",              0, js_fb_flip),
+    JS_CFUNC_DEF("vsyncWait",           0, js_vsync_wait),
+    JS_CFUNC_DEF("cursorEnable",        1, js_cursor_enable),
+    JS_CFUNC_DEF("cursorSetPos",        2, js_cursor_set_pos),
+    JS_CFUNC_DEF("dpmsSet",             1, js_dpms_set),
+    /* Keyboard layout (items 60-62) */
+    JS_CFUNC_DEF("kbLayoutSet",         1, js_kb_layout_set),
+    JS_CFUNC_DEF("kbLayoutGet",         0, js_kb_layout_get),
+    JS_CFUNC_DEF("kbImeEnable",         1, js_kb_ime_enable),
+    /* Selftest (item 108) */
+    JS_CFUNC_DEF("selftestRun",         0, js_selftest_run),
+    /* kprobes (item 110) */
+    JS_CFUNC_DEF("kprobesInit",         0, js_kprobes_init),
+    JS_CFUNC_DEF("kprobesDump",         0, js_kprobes_dump),
+    /* debugger → serial (item 123) */
+    JS_CFUNC_DEF("debugBreak",          0, js_debug_break),
+    /* SourceMap registry (item 122) */
+    JS_CFUNC_DEF("sourceMapRegister",   2, js_sourcemap_register),
+    JS_CFUNC_DEF("sourceMapLookup",     1, js_sourcemap_lookup),
+    /* Remote DevTools stub (item 124) */
+    JS_CFUNC_DEF("devToolsEnable",      0, js_devtools_enable),
+    /* BigInt64Array availability probe (item 125) */
+    JS_CFUNC_DEF("bigInt64ArrayTest",   0, js_bigint64array_test),
+    /* WASM stubs (items 126-127) */
+    JS_CFUNC_DEF("wasmInstantiate",     1, js_wasm_instantiate),
+    JS_CFUNC_DEF("wasmJitCompile",      1, js_wasm_jit_compile),
+    /* Module loader registration (items 118, 119) */
+    JS_CFUNC_DEF("setModuleReader",     1, js_set_module_reader),
+    /* FPU/SSE context save/restore (item 147) */
+    JS_CFUNC_DEF("fpuAllocState",       0, js_fpu_alloc_state),
+    JS_CFUNC_DEF("fpuSave",             1, js_fpu_save),
+    JS_CFUNC_DEF("fpuRestore",          1, js_fpu_restore),
+    /* Hardware RDRAND instruction (item 348) */
+    JS_CFUNC_DEF("rdrand",              0, js_rdrand),
 };
 
 /*  Initialization  */
@@ -1541,20 +4402,57 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
 int quickjs_initialize(void) {
     /* Probe ATA before starting QuickJS */
     ata_initialize();
-    platform_boot_print(ata_present() ? "ATA disk detected\n"
-                                      : "[ATA] No drive\n");
+    if (ata_present()) {
+        ata_enable_irq();   /* switch to IRQ14-driven mode (item 78) */
+        platform_boot_print("[ATA] IRQ-driven mode enabled\n");
+    } else {
+        platform_boot_print("[ATA] No drive\n");
+    }
 
-    rt = JS_NewRuntime();
+    rt = JS_NewRuntime2(&jsos_malloc_funcs, NULL);
     if (!rt) return -1;
 
-    JS_SetMemoryLimit(rt, 50 * 1024 * 1024);  /* 50 MB — Phase 3 needs space for framebuffer */
-    JS_SetMaxStackSize(rt, 256 * 1024);
+    JS_SetMemoryLimit(rt, 512u * 1024u * 1024u); /* 512 MB — main runtime: JS bundle + DOM + net stack + JIT */
+    JS_SetGCThreshold(rt, 128u * 1024u * 1024u); /* GC at 128 MB to avoid hitting the cap */
+    JS_SetMaxStackSize(rt, 4 * 1024 * 1024);      /* 4 MB stack — Google Fonts loader recurses > 512 KB */
+    /* Note: 2b13cc6 had 512 KB — doubled to 2 MB, then Google font IIFE still
+     * overflowed at ~1.6 MB, so raised to 4 MB.  Child processes keep 512 KB
+     * since they run simpler workloads. */
+
+    /* Wire dynamic import() module loader (items 118 + 119) */
+    JS_SetModuleLoaderFunc(rt, _module_normalize, _module_load, NULL);
+
+    /* ── Item 120: SharedArrayBuffer via JS_SetSharedArrayBufferFunctions ─
+     * Single-threaded OS: alloc/free use the QuickJS runtime allocator;
+     * dup is a no-op (no reference counting needed).                      */
+    {
+        static const JSSharedArrayBufferFunctions _sab_fns = {
+            /* sab_alloc/free/dup are resolved at link time in C99/C11 via
+             * a thin wrapper because the rt pointer is not yet available
+             * at static init time.  We rely on the callback receiving
+             * rt itself as the opaque pointer.                            */
+            .sab_alloc  = NULL,   /* QuickJS uses fallback js_malloc when NULL */
+            .sab_free   = NULL,
+            .sab_dup    = NULL,
+            .sab_opaque = NULL,
+        };
+        JS_SetSharedArrayBufferFunctions(rt, &_sab_fns);
+    }
+
+    /* ── Item 121: Atomics.wait() — declare single-threaded can_block ─── */
+    JS_SetCanBlock(rt, 1);
 
     ctx = JS_NewContext(rt);
     if (!ctx) { JS_FreeRuntime(rt); rt = NULL; return -1; }
 
     /* Phase 5: initialise scheduler hook slot + TSS data structure */
-    _scheduler_hook = JS_UNDEFINED;
+    _scheduler_hook      = JS_UNDEFINED;
+    _fs_bridge_obj       = JS_UNDEFINED;
+    _module_fs_read_cb   = JS_UNDEFINED;  /* module loader reader (items 118/119) */
+    /* Step 5: JIT hook globals */
+    _jit_ts_callback = JS_UNDEFINED;
+    _in_jit_hook     = 0;
+    memset(_jit_proc_pending, 0, sizeof(_jit_proc_pending));
     platform_tss_init();
 
     JSValue global = JS_GetGlobalObject(ctx);
@@ -1611,9 +4509,11 @@ int quickjs_initialize(void) {
 
     JS_SetPropertyStr(ctx, global, "kernel", kobj);
 
+    /* Phase 4.1: inject Date.now() using sub-ms uptimeUs (TSC) when available,
+     * falling back to 1 ms PIT resolution on older builds. */
     const char *stub =
         "var console={log:function(){},error:function(){},warn:function(){},clear:function(){}};"
-        "Date.now=function(){return kernel.getUptime();};";
+        "Date.now=function(){return kernel.uptimeUs?kernel.uptimeUs()/1000:kernel.getUptime();};";
     JSValue init = JS_Eval(ctx, stub, strlen(stub), "<init>", JS_EVAL_TYPE_GLOBAL);
     JS_FreeValue(ctx, init);
     JS_FreeValue(ctx, global);
@@ -1622,6 +4522,35 @@ int quickjs_initialize(void) {
 
 int quickjs_run_os(void) {
     if (!ctx) return -1;
+
+    /* ── Level-2 global fault recovery ──────────────────────────────────────
+     * This setjmp stays on the C stack for the entire OS lifetime (JS_Eval
+     * below runs the TypeScript event loop and never returns).  If a CPU
+     * fault occurs with _js_fault_active == 0 (e.g. QJS native dispatch
+     * after a callGuarded longjmp recovery), the ISR longjmps here instead
+     * of halting the OS.  We log the event and enter a safe idle loop.
+     *
+     * IMPORTANT: after a Level-2 recovery the ENTIRE TypeScript event loop
+     * is gone (its C stack frames were above the main JS_Eval, which was
+     * below our setjmp).  We cannot call ANY JavaScript — the scheduler hook,
+     * event listeners, rendering callbacks — all reference closures that
+     * captured alloca'd variables on the now-abandoned stack.  Calling them
+     * dereferences freed stack memory → guaranteed fault loop.
+     * The only safe action is to idle. */
+    extern jmp_buf       _js_global_fault_buf;
+    extern volatile int  _js_global_fault_active;
+    _js_global_fault_active = 1;
+    if (setjmp(_js_global_fault_buf) != 0) {
+        /* Secondary fault recovery — the JS world is completely gone.
+         * Do NOT try to call back into JavaScript.  Just idle forever. */
+        _js_fault_active = 0;
+        _js_in_page_eval = 0;
+        _js_global_fault_active = 0;
+        __asm__ volatile("sti");
+        platform_serial_puts("[kernel] GLOBAL fault recovery — JS state lost, entering idle\n");
+        for (;;) __asm__ volatile("hlt");
+    }
+
     JSValue result = JS_Eval(ctx, embedded_js_code, strlen(embedded_js_code),
                              "jsos.js", JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(result)) {

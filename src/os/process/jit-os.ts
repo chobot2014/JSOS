@@ -1,0 +1,1383 @@
+/**
+ * jit-os.ts — JIT-compiled OS kernel hot-paths (integer tier)
+ *
+ * Companion to jit-canvas.ts.  Provides native x86-32 versions of the
+ * integer-heavy OS primitives that are called on every packet, every disk
+ * block, and every memory operation.
+ *
+ * ─── Two-tier JIT architecture ────────────────────────────────────────────────
+ *
+ *   Tier 1 — QJSJITHook (automatic, global)
+ *     The QuickJS JIT hook fires for *every* JS function in the entire OS
+ *     after 100 calls — scheduler, net stack, filesystem, all of it.
+ *     No code changes needed; everything gets compiled eventually.
+ *
+ *   Tier 2 — JIT.compile() / JITProfiler.wrap() (explicit, zero warmup)
+ *     For loops whose shape is always "integer math over flat memory" we
+ *     compile at module load time so the very first call runs native.
+ *     This is what jit-canvas.ts does for pixel operations, and what this
+ *     file does for network, memory, and storage hot-paths.
+ *
+ * ─── Exported operations ──────────────────────────────────────────────────────
+ *
+ *   JITChecksum
+ *     compute(physAddr, len)      — RFC 1071 Internet checksum over physmem
+ *     computeBuf(ab)              — same but accepts an ArrayBuffer (auto physAddrOf)
+ *
+ *   JITMem
+ *     fill8(physAddr, val, len)   — memset (byte granularity)
+ *     fill32(physAddr, val, len)  — memset (dword granularity, len in dwords)
+ *     copy8(dst, src, len)        — memmove (byte granularity)
+ *     copy32(dst, src, len)       — memmove (dword granularity)
+ *     compare(a, b, len)          — memcmp → 0 if equal, non-zero otherwise
+ *
+ *   JITCRC32
+ *     update(physAddr, len, crc)  — software CRC-32 (Ethernet/ZIP/FAT) over physmem
+ *     table                       — pre-computed 256-entry CRC table (ArrayBuffer)
+ *
+ *   JITOSInit
+ *     init()                      — compile all of the above at boot; must be called once.
+ *     stats()                     — how many compiled, bytes used
+ *
+ * All functions silently fall back to TypeScript if JIT is unavailable
+ * (e.g. in unit-test environments without a kernel).
+ */
+
+import { JIT } from './jit.js';
+
+declare var kernel: any;
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  JIT source strings
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * RFC 1071 Internet checksum over a flat byte buffer in physical memory.
+ * Returns the 16-bit one's-complement checksum (in the low 16 bits of EAX).
+ *
+ * Algorithm (2-byte words, big-endian):
+ *   sum = Σ word_i;  while(sum>>16) sum = (sum&0xffff)+(sum>>16);  return ~sum & 0xffff
+ */
+const _SRC_CHECKSUM = `
+function checksum(physAddr, len) {
+  var sum = 0;
+  var i = 0;
+  var n = len - 1;
+  while (i < n) {
+    var hi = mem8[physAddr + i] & 0xff;
+    var lo = mem8[physAddr + i + 1] & 0xff;
+    sum = sum + ((hi << 8) | lo);
+    i = i + 2;
+  }
+  if (len & 1) {
+    sum = sum + ((mem8[physAddr + len - 1] & 0xff) << 8);
+  }
+  var carry = sum >> 16;
+  while (carry) {
+    sum = (sum & 0xffff) + carry;
+    carry = sum >> 16;
+  }
+  return (~sum) & 0xffff;
+}
+`;
+
+/** Fill len bytes at physAddr with value (byte write). */
+const _SRC_FILL8 = `
+function fill8(physAddr, val, len) {
+  var i = 0;
+  var v = val & 0xff;
+  while (i < len) {
+    mem8[physAddr + i] = v;
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/** Fill len dwords at physAddr with value (32-bit write). */
+const _SRC_FILL32 = `
+function fill32(physAddr, val, len) {
+  var i = 0;
+  while (i < len) {
+    mem32[physAddr + i * 4] = val;
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/** Copy len bytes from src to dst (non-overlapping). */
+const _SRC_COPY8 = `
+function copy8(dst, src, len) {
+  var i = 0;
+  while (i < len) {
+    mem8[dst + i] = mem8[src + i];
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/** Copy len dwords from src to dst (non-overlapping). */
+const _SRC_COPY32 = `
+function copy32(dst, src, len) {
+  var i = 0;
+  while (i < len) {
+    mem32[dst + i * 4] = mem32[src + i * 4];
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/** memcmp: returns 0 if len bytes at a == b, else first differing byte difference. */
+const _SRC_COMPARE = `
+function compare(a, b, len) {
+  var i = 0;
+  while (i < len) {
+    var da = mem8[a + i] & 0xff;
+    var db = mem8[b + i] & 0xff;
+    if (da !== db) { return da - db; }
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * CRC-32 (ISO 3309 / Ethernet FCS).
+ * tableAddr = physical address of the 256×4-byte CRC table.
+ * crc        = running CRC, pass 0xFFFFFFFF for first block.
+ * Returns updated CRC (caller must XOR with 0xFFFFFFFF at the end).
+ */
+const _SRC_CRC32 = `
+function crc32(physAddr, len, tableAddr, crc) {
+  var i = 0;
+  while (i < len) {
+    var b = mem8[physAddr + i] & 0xff;
+    var idx = (crc ^ b) & 0xff;
+    crc = mem32[tableAddr + idx * 4] ^ ((crc >>> 8) & 0x00ffffff);
+    i = i + 1;
+  }
+  return crc;
+}
+`;
+
+/**
+ * Byte-by-byte compare of two null-terminated strings in physical memory.
+ * strcmp8(aAddr, bAddr, maxLen) → <0 / 0 / >0 (like C strcmp).
+ * Stops at the first differing byte or either null terminator.
+ */
+const _SRC_STRCMP = `
+function strcmp8(aAddr, bAddr, maxLen) {
+  var i = 0;
+  while (i < maxLen) {
+    var ca = mem8[aAddr + i] & 0xff;
+    var cb = mem8[bAddr + i] & 0xff;
+    if (ca !== cb) { return ca - cb; }
+    if (ca === 0) { return 0; }
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * Search for byte `val` in physical memory starting at `physAddr`.
+ * memchr8(physAddr, val, len) → address of first match or 0.
+ */
+const _SRC_MEMCHR = `
+function memchr8(physAddr, val, len) {
+  var b = val & 0xff;
+  var i = 0;
+  while (i < len) {
+    if ((mem8[physAddr + i] & 0xff) === b) { return physAddr + i; }
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * FNV-1a 32-bit hash of `len` bytes at `physAddr`.
+ * fnv1a32(physAddr, len) → uint32 hash.
+ * Used for fast hash-table keying in VFS path lookups.
+ */
+const _SRC_FNV1A32 = `
+function fnv1a32(physAddr, len) {
+  var hash = -2128831035;
+  var i = 0;
+  while (i < len) {
+    hash = (hash ^ (mem8[physAddr + i] & 0xff)) | 0;
+    hash = ((hash * 16777619) | 0);
+    i = i + 1;
+  }
+  return hash;
+}
+`;
+
+/** XOR len bytes from src into dst — AES-GCM CTR-mode decryption, ChaCha20, HKDF XOR. */
+const _SRC_XOR_BUF = `
+function xorBuf(dst, src, len) {
+  var i = 0;
+  while (i < len) {
+    mem8[dst + i] = (mem8[dst + i] ^ mem8[src + i]) & 0xff;
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/** Store a big-endian uint32 at physAddr — net packet builder, TLS record header writer. */
+const _SRC_PACK_BE32 = `
+function packBE32(physAddr, val) {
+  mem8[physAddr]     = (val >> 24) & 0xff;
+  mem8[physAddr + 1] = (val >> 16) & 0xff;
+  mem8[physAddr + 2] = (val >>  8) & 0xff;
+  mem8[physAddr + 3] =  val        & 0xff;
+  return 0;
+}
+`;
+
+/** Load a big-endian uint32 from physAddr — net packet parser, IP/TCP field read. */
+const _SRC_UNPACK_BE32 = `
+function unpackBE32(physAddr) {
+  return ((mem8[physAddr] & 0xff) << 24) |
+         ((mem8[physAddr + 1] & 0xff) << 16) |
+         ((mem8[physAddr + 2] & 0xff) << 8) |
+          (mem8[physAddr + 3] & 0xff);
+}
+`;
+
+/** Load a big-endian uint16 from physAddr — TCP/IP header field (port, length, checksum). */
+const _SRC_UNPACK_BE16 = `
+function unpackBE16(physAddr) {
+  return ((mem8[physAddr] & 0xff) << 8) | (mem8[physAddr + 1] & 0xff);
+}
+`;
+
+/**
+ * LZ77 match copy — hot inner loop of DEFLATE inflate and LZ4 decompress.
+ * Byte-by-byte to handle overlapping back-references correctly.
+ */
+const _SRC_LZ_COPY_MATCH = `
+function lzCopyMatch(dst, src, len) {
+  var i = 0;
+  while (i < len) {
+    mem8[dst + i] = mem8[src + i] & 0xff;
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/** ASCII lowercase a physmem buffer in-place — HTTP/1.1 header name normalization. */
+const _SRC_TO_LOWER8 = `
+function toLower8(physAddr, len) {
+  var i = 0;
+  while (i < len) {
+    var c = mem8[physAddr + i] & 0xff;
+    if (c >= 65) {
+      if (c <= 90) {
+        mem8[physAddr + i] = c + 32;
+      }
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * Scan for CRLF (\r\n, bytes 13+10) in a physmem buffer.
+ * Returns offset of the \r or len if not found.
+ * Called on every HTTP response header line.
+ */
+const _SRC_SCAN_CRLF = `
+function scanCRLF(physAddr, offset, len) {
+  var i = offset;
+  var n = len - 1;
+  while (i < n) {
+    if ((mem8[physAddr + i] & 0xff) === 13) {
+      if ((mem8[physAddr + i + 1] & 0xff) === 10) {
+        return i;
+      }
+    }
+    i = i + 1;
+  }
+  return len;
+}
+`;
+
+/** Sum all bytes in a physmem region — ICMP auxiliary checksum, IP options scanner. */
+const _SRC_SUM_BUF = `
+function sumBuf(physAddr, len) {
+  var sum = 0;
+  var i = 0;
+  while (i < len) {
+    sum = sum + (mem8[physAddr + i] & 0xff);
+    i = i + 1;
+  }
+  return sum;
+}
+`;
+
+/** Clamp x to [lo, hi] — layout engine, CSS calc, audio sample clamping. */
+const _SRC_CLAMP32 = `
+function clamp32(x, lo, hi) {
+  if (x < lo) { return lo; }
+  if (x > hi) { return hi; }
+  return x;
+}
+`;
+
+/**
+ * Population count — number of set bits in an int32.
+ * Kernighan-Knuth bit-trick, O(1).
+ * Used by the bitmap block allocator (FAT free-cluster bitmap, inode bitmap).
+ */
+const _SRC_POP_COUNT32 = `
+function popCount32(x) {
+  var v = x;
+  v = v - ((v >>> 1) & 0x55555555);
+  v = (v & 0x33333333) + ((v >>> 2) & 0x33333333);
+  v = (v + (v >>> 4)) & 0x0f0f0f0f;
+  v = Math.imul(v, 0x01010101) >>> 24;
+  return v & 0x3f;
+}
+`;
+
+/**
+ * strlen — find NUL terminator in physmem, up to maxLen bytes.
+ * Returns the number of non-NUL bytes found (i.e. the string length), or maxLen.
+ * Heavily used by HTTP header parsing and path lookup.
+ */
+const _SRC_STRLEN8 = `
+function strlen8(physAddr, maxLen) {
+  var i = 0;
+  while (i < maxLen) {
+    if (mem8[physAddr + i] === 0) { return i; }
+    i = i + 1;
+  }
+  return maxLen;
+}
+`;
+
+/**
+ * byteSwap32 — in-place big-endian ↔ little-endian conversion of `count` uint32s
+ * at physAddr.  Used by the network stack (IPv4 header fields are big-endian)
+ * and by AES key expansion.
+ */
+const _SRC_BYTE_SWAP32 = `
+function byteSwap32(physAddr, count) {
+  var i = 0;
+  while (i < count) {
+    var a = physAddr + i * 4;
+    var b0 = mem8[a]     & 0xff;
+    var b1 = mem8[a + 1] & 0xff;
+    var b2 = mem8[a + 2] & 0xff;
+    var b3 = mem8[a + 3] & 0xff;
+    mem8[a]     = b3;
+    mem8[a + 1] = b2;
+    mem8[a + 2] = b1;
+    mem8[a + 3] = b0;
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * countByte8 — count occurrences of byte `b` in a physmem region.
+ * Used by HTTP parsers (count '\n' to know how many headers exist),
+ * and by the text renderer (count space characters for word-wrap).
+ */
+const _SRC_COUNT_BYTE8 = `
+function countByte8(physAddr, len, b) {
+  var n = 0;
+  var i = 0;
+  while (i < len) {
+    if ((mem8[physAddr + i] & 0xff) === b) { n = n + 1; }
+    i = i + 1;
+  }
+  return n;
+}
+`;
+
+/**
+ * minU8 — find the smallest byte value in a physmem region.
+ * Used by image processing (finding darkest pixel) and codec range checks.
+ */
+const _SRC_MIN_U8 = `
+function minU8(physAddr, len) {
+  var m = 255;
+  var i = 0;
+  while (i < len) {
+    var v = mem8[physAddr + i] & 0xff;
+    if (v < m) { m = v; }
+    i = i + 1;
+  }
+  return m;
+}
+`;
+
+/**
+ * maxU8 — find the largest byte value in a physmem region.
+ * Symmetric with minU8; used for codec range checks and gradient fills.
+ */
+const _SRC_MAX_U8 = `
+function maxU8(physAddr, len) {
+  var m = 0;
+  var i = 0;
+  while (i < len) {
+    var v = mem8[physAddr + i] & 0xff;
+    if (v > m) { m = v; }
+    i = i + 1;
+  }
+  return m;
+}
+`;
+
+/**
+ * diffOffset — find the first position where two physmem regions differ.
+ * Returns the offset [0, len), or len if they are identical.
+ * Used by dirty-region detection in the compositor and frame-buffer diff.
+ */
+const _SRC_DIFF_OFFSET = `
+function diffOffset(addrA, addrB, len) {
+  var i = 0;
+  while (i < len) {
+    if (mem8[addrA + i] !== mem8[addrB + i]) { return i; }
+    i = i + 1;
+  }
+  return len;
+}
+`;
+
+/**
+ * AES block encrypt — full SubBytes/ShiftRows/MixColumns/AddRoundKey
+ * performed in physmem.  The block (16 bytes at blockAddr) is encrypted
+ * in-place using expanded key (at ekAddr) and S-box table (at sboxAddr).
+ * nr = number of rounds (10 for AES-128, 14 for AES-256).
+ *
+ * MixColumns uses branchless xtime:
+ *   xtime(x) = ((x << 1) ^ ((0 - ((x >> 7) & 1)) & 0x1b)) & 0xff
+ *   gmul(2,x) = xtime(x)
+ *   gmul(3,x) = xtime(x) ^ x
+ *
+ * Hot for every TLS record (called once per 16-byte block in GCM-CTR mode).
+ */
+const _SRC_AES_BLOCK = `
+function aesBlock(sboxAddr, ekAddr, blockAddr, nr) {
+  var i = 0;
+  while (i < 16) {
+    mem8[blockAddr + i] = mem8[blockAddr + i] ^ mem8[ekAddr + i];
+    i = i + 1;
+  }
+  var rnd = 1;
+  while (rnd <= nr) {
+    i = 0;
+    while (i < 16) {
+      mem8[blockAddr + i] = mem8[sboxAddr + (mem8[blockAddr + i] & 0xff)];
+      i = i + 1;
+    }
+    var t1 = mem8[blockAddr + 1];
+    mem8[blockAddr + 1] = mem8[blockAddr + 5];
+    mem8[blockAddr + 5] = mem8[blockAddr + 9];
+    mem8[blockAddr + 9] = mem8[blockAddr + 13];
+    mem8[blockAddr + 13] = t1;
+    var t2 = mem8[blockAddr + 2];
+    var t6 = mem8[blockAddr + 6];
+    mem8[blockAddr + 2] = mem8[blockAddr + 10];
+    mem8[blockAddr + 6] = mem8[blockAddr + 14];
+    mem8[blockAddr + 10] = t2;
+    mem8[blockAddr + 14] = t6;
+    var t3 = mem8[blockAddr + 3];
+    mem8[blockAddr + 3] = mem8[blockAddr + 15];
+    mem8[blockAddr + 15] = mem8[blockAddr + 11];
+    mem8[blockAddr + 11] = mem8[blockAddr + 7];
+    mem8[blockAddr + 7] = t3;
+    if (rnd < nr) {
+      var c = 0;
+      while (c < 4) {
+        var off = blockAddr + c * 4;
+        var a0 = mem8[off] & 0xff;
+        var a1 = mem8[off + 1] & 0xff;
+        var a2 = mem8[off + 2] & 0xff;
+        var a3 = mem8[off + 3] & 0xff;
+        var x0 = ((a0 << 1) ^ ((0 - ((a0 >> 7) & 1)) & 0x1b)) & 0xff;
+        var x1 = ((a1 << 1) ^ ((0 - ((a1 >> 7) & 1)) & 0x1b)) & 0xff;
+        var x2 = ((a2 << 1) ^ ((0 - ((a2 >> 7) & 1)) & 0x1b)) & 0xff;
+        var x3 = ((a3 << 1) ^ ((0 - ((a3 >> 7) & 1)) & 0x1b)) & 0xff;
+        mem8[off] = (x0 ^ x1 ^ a1 ^ a2 ^ a3) & 0xff;
+        mem8[off + 1] = (a0 ^ x1 ^ x2 ^ a2 ^ a3) & 0xff;
+        mem8[off + 2] = (a0 ^ a1 ^ x2 ^ x3 ^ a3) & 0xff;
+        mem8[off + 3] = (x0 ^ a0 ^ a1 ^ a2 ^ x3) & 0xff;
+        c = c + 1;
+      }
+    }
+    var rkOff = rnd * 16;
+    i = 0;
+    while (i < 16) {
+      mem8[blockAddr + i] = mem8[blockAddr + i] ^ mem8[ekAddr + rkOff + i];
+      i = i + 1;
+    }
+    rnd = rnd + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * SHA-256 block compression function.
+ * Reads h[0..7] and W[0..63] from physmem, extends W[16..63] in-place,
+ * runs 64 rounds, then accumulates the result back into h.
+ * "kAddr" must point to the 64-entry 256-byte K constant table.
+ */
+const _SRC_SHA256_BLOCK = `
+function sha256Block(hAddr, wAddr, kAddr) {
+  var i = 16;
+  while (i < 64) {
+    var w15 = mem32[wAddr + (i - 15) * 4];
+    var w2  = mem32[wAddr + (i -  2) * 4];
+    var s0 = ((w15 >>> 7) | (w15 << 25)) ^ ((w15 >>> 18) | (w15 << 14)) ^ (w15 >>> 3);
+    var s1 = ((w2  >>> 17) | (w2  << 15)) ^ ((w2  >>> 19) | (w2  << 13)) ^ (w2  >>> 10);
+    mem32[wAddr + i * 4] = (mem32[wAddr + (i - 16) * 4] + s0 + mem32[wAddr + (i - 7) * 4] + s1) | 0;
+    i = i + 1;
+  }
+  var a  = mem32[hAddr];
+  var b  = mem32[hAddr +  4];
+  var c  = mem32[hAddr +  8];
+  var d  = mem32[hAddr + 12];
+  var e  = mem32[hAddr + 16];
+  var f  = mem32[hAddr + 20];
+  var g  = mem32[hAddr + 24];
+  var hh = mem32[hAddr + 28];
+  var j = 0;
+  while (j < 64) {
+    var S1  = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+    var ch  = (e & f) ^ (~e & g);
+    var t1  = (hh + S1 + ch + mem32[kAddr + j * 4] + mem32[wAddr + j * 4]) | 0;
+    var S0  = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+    var maj = (a & b) ^ (a & c) ^ (b & c);
+    var t2  = (S0 + maj) | 0;
+    hh = g; g = f; f = e; e = (d + t1) | 0;
+    d = c; c = b; b = a; a = (t1 + t2) | 0;
+    j = j + 1;
+  }
+  mem32[hAddr]      = (mem32[hAddr]      + a)  | 0;
+  mem32[hAddr +  4] = (mem32[hAddr +  4] + b)  | 0;
+  mem32[hAddr +  8] = (mem32[hAddr +  8] + c)  | 0;
+  mem32[hAddr + 12] = (mem32[hAddr + 12] + d)  | 0;
+  mem32[hAddr + 16] = (mem32[hAddr + 16] + e)  | 0;
+  mem32[hAddr + 20] = (mem32[hAddr + 20] + f)  | 0;
+  mem32[hAddr + 24] = (mem32[hAddr + 24] + g)  | 0;
+  mem32[hAddr + 28] = (mem32[hAddr + 28] + hh) | 0;
+  return 0;
+}
+`;
+
+/**
+ * ChaCha20 block function (RFC 7539 §2.1).
+ * stateAddr — physmem address of 16-word initial state (64 bytes).
+ * outAddr   — physmem address of 64-byte output scratch (also used as
+ *             working copy during the 20 rounds; ends with byte output).
+ * rndTabAddr — physmem address of 32-byte QR index table (bytes: a,b,c,d × 8).
+ */
+const _SRC_CHACHA20_BLOCK = `
+function chacha20Block(stateAddr, outAddr, rndTabAddr) {
+  var i = 0;
+  while (i < 16) {
+    mem32[outAddr + i * 4] = mem32[stateAddr + i * 4];
+    i = i + 1;
+  }
+  var round = 0;
+  while (round < 10) {
+    var qr = 0;
+    while (qr < 8) {
+      var ia = mem8[rndTabAddr + qr * 4];
+      var ib = mem8[rndTabAddr + qr * 4 + 1];
+      var ic = mem8[rndTabAddr + qr * 4 + 2];
+      var id = mem8[rndTabAddr + qr * 4 + 3];
+      var sa = mem32[outAddr + ia * 4];
+      var sb = mem32[outAddr + ib * 4];
+      var sc = mem32[outAddr + ic * 4];
+      var sd = mem32[outAddr + id * 4];
+      sa = (sa + sb) | 0; sd = sd ^ sa; sd = (sd << 16) | (sd >>> 16);
+      sc = (sc + sd) | 0; sb = sb ^ sc; sb = (sb << 12) | (sb >>> 20);
+      sa = (sa + sb) | 0; sd = sd ^ sa; sd = (sd <<  8) | (sd >>> 24);
+      sc = (sc + sd) | 0; sb = sb ^ sc; sb = (sb <<  7) | (sb >>> 25);
+      mem32[outAddr + ia * 4] = sa;
+      mem32[outAddr + ib * 4] = sb;
+      mem32[outAddr + ic * 4] = sc;
+      mem32[outAddr + id * 4] = sd;
+      qr = qr + 1;
+    }
+    round = round + 1;
+  }
+  i = 0;
+  while (i < 16) {
+    var w = (mem32[outAddr + i * 4] + mem32[stateAddr + i * 4]) | 0;
+    mem8[outAddr + i * 4]     =  w         & 0xff;
+    mem8[outAddr + i * 4 + 1] = (w >>>  8) & 0xff;
+    mem8[outAddr + i * 4 + 2] = (w >>> 16) & 0xff;
+    mem8[outAddr + i * 4 + 3] = (w >>> 24) & 0xff;
+    i = i + 1;
+  }
+  return 0;
+}
+`;
+
+/**
+ * Adler-32 checksum over a physmem region (RFC 1950 §2).
+ * s1/s2 are initial accumulator values (use 1/0 for a fresh hash).
+ * Returns (s2 << 16) | s1.
+ * ADLER_MOD = 65521 is the largest prime < 2^16.
+ */
+const _SRC_ADLER32 = `
+function adler32(physAddr, len, s1, s2) {
+  var ADLER_MOD = 65521;
+  var a = s1 & 0xffff;
+  var b = s2 & 0xffff;
+  var i = 0;
+  while (i < len) {
+    a = a + (mem8[physAddr + i] & 0xff);
+    if (a >= ADLER_MOD) a = a - ADLER_MOD;
+    b = b + a;
+    if (b >= ADLER_MOD) b = b - ADLER_MOD;
+    i = i + 1;
+  }
+  return (b << 16) | a;
+}
+`;
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  CRC-32 table (256 × uint32)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function _buildCRC32Table(): Uint32Array {
+  var table = new Uint32Array(256);
+  for (var n = 0; n < 256; n++) {
+    var c = n >>> 0;
+    for (var k = 0; k < 8; k++) {
+      if (c & 1) c = 0xEDB88320 ^ (c >>> 1);
+      else       c = c >>> 1;
+    }
+    table[n] = c;
+  }
+  return table;
+}
+
+const _crc32TableData = _buildCRC32Table();
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TypeScript fallbacks (correct, zero startup cost)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function _tsChecksum(data: number[], offset: number = 0, length?: number): number {
+  var len = (length !== undefined) ? length : data.length - offset;
+  var sum = 0;
+  for (var i = 0; i < len - 1; i += 2)
+    sum += ((data[offset + i] & 0xff) << 8) | (data[offset + i + 1] & 0xff);
+  if (len & 1) sum += (data[offset + len - 1] & 0xff) << 8;
+  while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+  return (~sum) & 0xffff;
+}
+
+function _tsChecksumBuf(ab: ArrayBuffer, offset: number = 0, length?: number): number {
+  var v = new DataView(ab);
+  var len = (length !== undefined) ? length : ab.byteLength - offset;
+  var sum = 0;
+  for (var i = 0; i < len - 1; i += 2)
+    sum += (v.getUint8(offset + i) << 8) | v.getUint8(offset + i + 1);
+  if (len & 1) sum += v.getUint8(offset + len - 1) << 8;
+  while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+  return (~sum) & 0xffff;
+}
+
+function _tsCRC32(data: number[], offset: number, length: number, crc: number = 0xFFFFFFFF): number {
+  var c = crc >>> 0;
+  for (var i = 0; i < length; i++) {
+    var b = data[offset + i] & 0xff;
+    c = _crc32TableData[(c ^ b) & 0xff] ^ (c >>> 8);
+  }
+  return c;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Compiled native function handles (null = JIT not yet initialised or unavailable)
+// ─────────────────────────────────────────────────────────────────────────────
+
+var _nativChecksum:  ((...a: number[]) => number) | null = null;
+var _nativFill8:     ((...a: number[]) => number) | null = null;
+var _nativFill32:    ((...a: number[]) => number) | null = null;
+var _nativCopy8:     ((...a: number[]) => number) | null = null;
+var _nativCopy32:    ((...a: number[]) => number) | null = null;
+var _nativCompare:   ((...a: number[]) => number) | null = null;
+var _nativCRC32:     ((...a: number[]) => number) | null = null;
+var _nativStrcmp:    ((...a: number[]) => number) | null = null;
+var _nativMemchr:    ((...a: number[]) => number) | null = null;
+var _nativFNV1A32:   ((...a: number[]) => number) | null = null;
+var _nativXorBuf:    ((...a: number[]) => number) | null = null;
+var _nativPackBE32:  ((...a: number[]) => number) | null = null;
+var _nativUnpackBE32:((...a: number[]) => number) | null = null;
+var _nativUnpackBE16:((...a: number[]) => number) | null = null;
+var _nativLzCopy:    ((...a: number[]) => number) | null = null;
+var _nativToLower8:  ((...a: number[]) => number) | null = null;
+var _nativScanCRLF:  ((...a: number[]) => number) | null = null;
+var _nativSumBuf:    ((...a: number[]) => number) | null = null;
+var _nativClamp32:   ((...a: number[]) => number) | null = null;
+var _nativPopCount:     ((...a: number[]) => number) | null = null;
+var _nativSHA256Block:  ((...a: number[]) => number) | null = null;
+var _nativChaCha20Block:((...a: number[]) => number) | null = null;
+var _nativAdler32:      ((...a: number[]) => number) | null = null;
+var _nativStrlen8:      ((...a: number[]) => number) | null = null;
+var _nativByteSwap32:   ((...a: number[]) => number) | null = null;
+var _nativCountByte8:   ((...a: number[]) => number) | null = null;
+var _nativMinU8:        ((...a: number[]) => number) | null = null;
+var _nativMaxU8:        ((...a: number[]) => number) | null = null;
+var _nativDiffOffset:   ((...a: number[]) => number) | null = null;
+var _nativAESBlock:     ((...a: number[]) => number) | null = null;
+
+/** Physical address of the CRC-32 table once copied to a shared kernel buffer. */
+var _crc32TablePhys: number = 0;
+
+// AES S-box (256 bytes) — same values as crypto.ts, stored in a typed array
+// for physmem access by the JIT kernel.
+const _aesSboxData = new Uint8Array([
+  0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+  0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+  0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+  0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+  0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+  0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+  0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+  0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+  0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+  0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+  0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+  0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+  0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+  0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+  0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+  0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16,
+]);
+/** Physical address of AES S-box in shared physmem. */
+var _aesSboxPhys: number = 0;
+
+// Scratch buffers for JITAES.encryptBlock() — block (16 bytes) + key (240 bytes max)
+const _aesBlockBuf = new Uint8Array(16);
+const _aesKeyBuf   = new Uint8Array(240);
+var _aesBlockPhys: number = 0;
+var _aesKeyPhys:   number = 0;
+/** Reference-cache the last expanded key array to avoid re-copying. */
+var _aesLastEk: number[] | null = null;
+
+// SHA-256 K constants (64 × uint32, big-endian values as per FIPS 180-4)
+function _buildSHA256KTable(): Uint32Array {
+  return new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ]);
+}
+const _sha256KData = _buildSHA256KTable();
+/** Physical address of SHA-256 K table in shared physmem. */
+var _sha256KPhys: number = 0;
+
+// ChaCha20 quarter-round index table: 8 sets of (a,b,c,d) byte indices
+// Column rounds: (0,4,8,12),(1,5,9,13),(2,6,10,14),(3,7,11,15)
+// Diagonal rounds: (0,5,10,15),(1,6,11,12),(2,7,8,13),(3,4,9,14)
+const _chacha20QRIndexTab = new Uint8Array([
+  0,  4,  8, 12,
+  1,  5,  9, 13,
+  2,  6, 10, 14,
+  3,  7, 11, 15,
+  0,  5, 10, 15,
+  1,  6, 11, 12,
+  2,  7,  8, 13,
+  3,  4,  9, 14,
+]);
+/** Physical address of ChaCha20 QR index table in shared physmem. */
+var _chacha20QRTabPhys: number = 0;
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Public API
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * RFC 1071 Internet checksum.
+ * Fast path:  uses JIT-compiled native code over an ArrayBuffer (zero copy).
+ * Slow path:  falls back to TypeScript over a number[] (always works).
+ */
+export const JITChecksum = {
+  /**
+   * Compute checksum over a flat physical memory region.
+   * physAddr must have been returned by kernel.physAddrOf() or from jitAlloc.
+   */
+  compute(physAddr: number, len: number): number {
+    if (_nativChecksum) return _nativChecksum(physAddr, len);
+    // No native — build a temp array (should be rare after init())
+    var bytes: number[] = [];
+    for (var i = 0; i < len; i++) bytes.push(kernel.readMem8(physAddr + i));
+    return _tsChecksum(bytes);
+  },
+
+  /**
+   * Compute checksum over an ArrayBuffer.
+   * Uses kernel.physAddrOf() to get the flat physical address, then calls
+   * the native JIT checksum — no copy of the data.
+   */
+  computeBuf(ab: ArrayBuffer, offset: number = 0, length?: number): number {
+    if (_nativChecksum && typeof kernel !== 'undefined' && kernel.physAddrOf) {
+      var phys = kernel.physAddrOf(ab);
+      if (phys) {
+        var len = (length !== undefined) ? length : ab.byteLength - offset;
+        return _nativChecksum(phys + offset, len);
+      }
+    }
+    return _tsChecksumBuf(ab, offset, length);
+  },
+
+  /**
+   * Compute checksum over a number[] (existing net stack API, unmodified).
+   * Automatically upgrades to a fast ArrayBuffer-backed path when possible.
+   */
+  computeArray(data: number[], offset: number = 0, length?: number): number {
+    var len = (length !== undefined) ? length : data.length - offset;
+    if (_nativChecksum && typeof kernel !== 'undefined' && kernel.physAddrOf) {
+      // Copy into a shared ArrayBuffer once, then call JIT native.
+      var ab = new Uint8Array(len);
+      for (var i = 0; i < len; i++) ab[i] = data[offset + i];
+      var phys = kernel.physAddrOf(ab.buffer);
+      if (phys) return _nativChecksum(phys, len);
+    }
+    return _tsChecksum(data, offset, length);
+  },
+};
+
+/**
+ * Physical memory fill / copy / compare — JIT-compiled.
+ * These are called by the canvas, VMM, and any code that handles raw
+ * physical memory ranges.
+ */
+export const JITMem = {
+  /** Fill `len` bytes at physAddr with value (byte granularity). */
+  fill8(physAddr: number, val: number, len: number): void {
+    if (_nativFill8) { _nativFill8(physAddr, val, len); return; }
+    for (var i = 0; i < len; i++) kernel.writeMem8(physAddr + i, val & 0xff);
+  },
+
+  /** Fill `len` 32-bit dwords at physAddr with value. */
+  fill32(physAddr: number, val: number, len: number): void {
+    if (_nativFill32) { _nativFill32(physAddr, val, len); return; }
+    for (var i = 0; i < len; i++) {
+      var a = physAddr + i * 4;
+      kernel.writeMem8(a,     (val)       & 0xff);
+      kernel.writeMem8(a + 1, (val >> 8)  & 0xff);
+      kernel.writeMem8(a + 2, (val >> 16) & 0xff);
+      kernel.writeMem8(a + 3, (val >> 24) & 0xff);
+    }
+  },
+
+  /** Copy `len` bytes from src to dst (non-overlapping physical ranges). */
+  copy8(dst: number, src: number, len: number): void {
+    if (_nativCopy8) { _nativCopy8(dst, src, len); return; }
+    for (var i = 0; i < len; i++)
+      kernel.writeMem8(dst + i, kernel.readMem8(src + i));
+  },
+
+  /** Copy `len` dwords from src to dst (non-overlapping physical ranges). */
+  copy32(dst: number, src: number, len: number): void {
+    if (_nativCopy32) { _nativCopy32(dst, src, len); return; }
+    for (var i = 0; i < len; i++) {
+      var s = src + i * 4; var d = dst + i * 4;
+      for (var b = 0; b < 4; b++) kernel.writeMem8(d + b, kernel.readMem8(s + b));
+    }
+  },
+
+  /**
+   * Compare `len` bytes at physical addresses a and b.
+   * Returns 0 if equal, non-zero otherwise.
+   */
+  compare(a: number, b: number, len: number): number {
+    if (_nativCompare) return _nativCompare(a, b, len);
+    for (var i = 0; i < len; i++) {
+      var diff = kernel.readMem8(a + i) - kernel.readMem8(b + i);
+      if (diff !== 0) return diff;
+    }
+    return 0;
+  },
+};
+
+/**
+ * CRC-32 (IEEE 802.3 / Ethernet / ZIP / FAT).
+ * init() must be called before these functions (to write the table to physmem).
+ */
+export const JITCRC32 = {
+  /** Update a running CRC with `length` bytes from a number[] at offset. */
+  update(data: number[], offset: number, length: number, crc: number = 0xFFFFFFFF): number {
+    if (_nativCRC32 && _crc32TablePhys) {
+      // Copy bytes to a temp ArrayBuffer, then call JIT native
+      var ab = new Uint8Array(length);
+      for (var i = 0; i < length; i++) ab[i] = data[offset + i];
+      var phys = typeof kernel !== 'undefined' && kernel.physAddrOf
+        ? kernel.physAddrOf(ab.buffer) : 0;
+      if (phys) return _nativCRC32(phys, length, _crc32TablePhys, crc >>> 0);
+    }
+    return _tsCRC32(data, offset, length, crc);
+  },
+
+  /** Update a running CRC over an ArrayBuffer region. */
+  updateBuf(ab: ArrayBuffer, offset: number, length: number, crc: number = 0xFFFFFFFF): number {
+    if (_nativCRC32 && _crc32TablePhys && typeof kernel !== 'undefined' && kernel.physAddrOf) {
+      var phys = kernel.physAddrOf(ab);
+      if (phys) return _nativCRC32(phys + offset, length, _crc32TablePhys, crc >>> 0);
+    }
+    var v = new DataView(ab);
+    var c = crc >>> 0;
+    for (var i = 0; i < length; i++) {
+      var b = v.getUint8(offset + i);
+      c = _crc32TableData[(c ^ b) & 0xff] ^ (c >>> 8);
+    }
+    return c;
+  },
+
+  /** Finalise CRC (XOR with 0xFFFFFFFF). */
+  finish(crc: number): number { return (crc ^ 0xFFFFFFFF) >>> 0; },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  JITString — string/byte-search primitives over physical memory
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * String / byte-search operations JIT-compiled to native x86-32.
+ * All functions degrade gracefully to TypeScript when JIT is unavailable.
+ *
+ * Physical addresses are used throughout because kernel strings live in
+ * raw memory not managed by the JS GC.  Use kernel.physAddrOf(ab) to obtain
+ * the physical address of an ArrayBuffer if needed.
+ */
+export const JITString = {
+  /**
+   * Compare two null-terminated byte strings in physical memory.
+   * strcmp8(aPhys, bPhys, maxLen) → negative / 0 / positive  (C strcmp semantics).
+   */
+  strcmp8(aPhys: number, bPhys: number, maxLen: number): number {
+    if (_nativStrcmp) return _nativStrcmp(aPhys, bPhys, maxLen);
+    // TypeScript fallback
+    for (let i = 0; i < maxLen; i++) {
+      const raw = typeof kernel !== 'undefined'
+        ? kernel.readPhysMem(aPhys + i, 2) : null;
+      if (!raw) break;
+      const v = new DataView(raw);
+      const ca = v.getUint8(0), cb = v.getUint8(1); // can't read b independently here
+      // For TS fallback, use readPhysMem with 1 byte each
+      const ra = typeof kernel !== 'undefined' ? kernel.readPhysMem(aPhys + i, 1) : null;
+      const rb = typeof kernel !== 'undefined' ? kernel.readPhysMem(bPhys + i, 1) : null;
+      if (!ra || !rb) break;
+      const cA = new DataView(ra).getUint8(0);
+      const cB = new DataView(rb).getUint8(0);
+      if (cA !== cB) return cA - cB;
+      if (cA === 0) return 0;
+    }
+    return 0;
+  },
+
+  /**
+   * Search for byte `val` in physical memory.
+   * memchr8(physAddr, val, len) → physical address of first match or 0 if not found.
+   */
+  memchr8(physAddr: number, val: number, len: number): number {
+    if (_nativMemchr) return _nativMemchr(physAddr, val & 0xFF, len);
+    // TypeScript fallback
+    const b = val & 0xFF;
+    const raw = typeof kernel !== 'undefined' ? kernel.readPhysMem(physAddr, len) : null;
+    if (!raw) return 0;
+    const v = new Uint8Array(raw);
+    for (let i = 0; i < len; i++) if (v[i] === b) return physAddr + i;
+    return 0;
+  },
+
+  /**
+   * FNV-1a 32-bit hash of `len` bytes at `physAddr`.
+   * fnv1a32(physAddr, len) → uint32 hash value.
+   * Useful for fast string key hashing in VFS path caches.
+   */
+  fnv1a32(physAddr: number, len: number): number {
+    if (_nativFNV1A32) return _nativFNV1A32(physAddr, len) >>> 0;
+    // TypeScript fallback
+    let hash = 0x811c9dc5;
+    const raw = typeof kernel !== 'undefined' ? kernel.readPhysMem(physAddr, len) : null;
+    if (!raw) return hash >>> 0;
+    const v = new Uint8Array(raw);
+    for (let i = 0; i < len; i++) {
+      hash ^= v[i];
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash;
+  },
+
+  /** True when string ops are JIT-compiled to native code. */
+  isNative(): boolean { return _nativStrcmp !== null; },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  JITOps — general-purpose OS hot-paths (net, fs, layout, math)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * General-purpose JIT-compiled operations.
+ * All functions fall back gracefully to TypeScript when JIT is unavailable.
+ */
+export const JITOps = {
+  /** XOR src into dst, len bytes (AES-GCM CTR, ChaCha20 keystream, HKDF XOR). */
+  xorBuf(dst: number, src: number, len: number): void {
+    if (_nativXorBuf) { _nativXorBuf(dst, src, len); return; }
+    for (var i = 0; i < len; i++) kernel.writeMem8(dst + i, (kernel.readMem8(dst + i) ^ kernel.readMem8(src + i)) & 0xff);
+  },
+
+  /** Store big-endian uint32 at physAddr (net packet builder). */
+  packBE32(physAddr: number, val: number): void {
+    if (_nativPackBE32) { _nativPackBE32(physAddr, val); return; }
+    kernel.writeMem8(physAddr,     (val >> 24) & 0xff);
+    kernel.writeMem8(physAddr + 1, (val >> 16) & 0xff);
+    kernel.writeMem8(physAddr + 2, (val >>  8) & 0xff);
+    kernel.writeMem8(physAddr + 3,  val        & 0xff);
+  },
+
+  /** Load big-endian uint32 from physAddr (net packet parser). */
+  unpackBE32(physAddr: number): number {
+    if (_nativUnpackBE32) return _nativUnpackBE32(physAddr);
+    return ((kernel.readMem8(physAddr)     << 24) |
+            (kernel.readMem8(physAddr + 1) << 16) |
+            (kernel.readMem8(physAddr + 2) <<  8) |
+             kernel.readMem8(physAddr + 3)) >>> 0;
+  },
+
+  /** Load big-endian uint16 from physAddr (TCP/IP header fields). */
+  unpackBE16(physAddr: number): number {
+    if (_nativUnpackBE16) return _nativUnpackBE16(physAddr);
+    return ((kernel.readMem8(physAddr) << 8) | kernel.readMem8(physAddr + 1)) & 0xffff;
+  },
+
+  /** LZ77 match copy — hot inner loop of DEFLATE inflate / LZ4 decompress. */
+  lzCopyMatch(dst: number, src: number, len: number): void {
+    if (_nativLzCopy) { _nativLzCopy(dst, src, len); return; }
+    for (var i = 0; i < len; i++) kernel.writeMem8(dst + i, kernel.readMem8(src + i));
+  },
+
+  /** ASCII lowercase buffer in-place (HTTP header name normalization). */
+  toLower8(physAddr: number, len: number): void {
+    if (_nativToLower8) { _nativToLower8(physAddr, len); return; }
+    for (var i = 0; i < len; i++) {
+      var c = kernel.readMem8(physAddr + i);
+      if (c >= 65 && c <= 90) kernel.writeMem8(physAddr + i, c + 32);
+    }
+  },
+
+  /** Scan for CRLF in physmem. Returns offset of \r or len. */
+  scanCRLF(physAddr: number, offset: number, len: number): number {
+    if (_nativScanCRLF) return _nativScanCRLF(physAddr, offset, len);
+    for (var i = offset; i < len - 1; i++)
+      if (kernel.readMem8(physAddr + i) === 13 && kernel.readMem8(physAddr + i + 1) === 10) return i;
+    return len;
+  },
+
+  /** Sum all bytes in physmem region. */
+  sumBuf(physAddr: number, len: number): number {
+    if (_nativSumBuf) return _nativSumBuf(physAddr, len);
+    var s = 0; for (var i = 0; i < len; i++) s += kernel.readMem8(physAddr + i) & 0xff; return s;
+  },
+
+  /** Clamp x to [lo, hi]. */
+  clamp32(x: number, lo: number, hi: number): number {
+    if (_nativClamp32) return _nativClamp32(x, lo, hi);
+    return x < lo ? lo : x > hi ? hi : x;
+  },
+
+  /** Population count (number of set bits) of a 32-bit integer. */
+  popCount32(x: number): number {
+    if (_nativPopCount) return _nativPopCount(x);
+    var v = x >>> 0;
+    v = v - ((v >> 1) & 0x55555555);
+    v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
+    v = (v + (v >> 4)) & 0x0f0f0f0f;
+    return Math.imul(v, 0x01010101) >>> 24;
+  },
+
+  /** True when all JITOps are compiled to native code. */
+  isNative(): boolean { return _nativXorBuf !== null; },
+};
+
+/** Physmem-addressed crypto primitives compiled to native x86-32. */
+export const JITCrypto = {
+  /**
+   * SHA-256 block compression — reads/writes physmem directly.
+   * hAddr  : 32 bytes  — 8 × uint32 hash state (a..h), updated in-place.
+   * wAddr  : 256 bytes — 64 × uint32 message schedule (W[0..15] pre-filled;
+   *                      W[16..63] extended by the kernel).
+   * Requires JITOSKernels.init() to have been called first.
+   * Returns true if the native path was taken.
+   */
+  sha256Block(hAddr: number, wAddr: number): boolean {
+    if (_nativSHA256Block && _sha256KPhys) {
+      _nativSHA256Block(hAddr, wAddr, _sha256KPhys);
+      return true;
+    }
+    return false;
+  },
+
+  /**
+   * ChaCha20 64-byte block — reads initial state from physmem, writes
+   * serialised 64-byte output to physmem.
+   * stateAddr : 64 bytes — 16 × uint32 initial state (little-endian).
+   * outAddr   : 64 bytes — scratch + output (bytes on return).
+   * Returns true if the native path was taken.
+   */
+  chacha20Block(stateAddr: number, outAddr: number): boolean {
+    if (_nativChaCha20Block && _chacha20QRTabPhys) {
+      _nativChaCha20Block(stateAddr, outAddr, _chacha20QRTabPhys);
+      return true;
+    }
+    return false;
+  },
+
+  /**
+   * Adler-32 checksum over a physmem region.
+   * s1In/s2In are running accumulators (1/0 for a fresh hash).
+   * Returns (s2 << 16) | s1 packed result.
+   */
+  adler32(physAddr: number, len: number, s1In: number, s2In: number): number {
+    if (_nativAdler32) return _nativAdler32(physAddr, len, s1In, s2In);
+    var a = s1In & 0xffff; var b = s2In & 0xffff;
+    for (var i = 0; i < len; i++) {
+      a = (a + (kernel.readMem8(physAddr + i) & 0xff)) % 65521;
+      b = (b + a) % 65521;
+    }
+    return (b << 16) | a;
+  },
+
+  /** True when all crypto JIT kernels are compiled and physmem tables ready. */
+  isNative(): boolean { return _nativSHA256Block !== null && _sha256KPhys !== 0; },
+};
+
+/**
+ * AES block cipher — JIT-compiled SubBytes/ShiftRows/MixColumns/AddRoundKey.
+ *
+ * Provides a high-level `encryptBlock()` API that accepts JS arrays and handles
+ * physmem copy in/out transparently.  The expanded key is reference-cached so
+ * repeated calls with the same key object skip the 176/240-byte copy.
+ *
+ * Hot for every TLS record — called once per 16-byte block in GCM-CTR mode.
+ * A typical 16 KB TLS record = 1024 calls.
+ */
+export const JITAES = {
+  /**
+   * AES block encrypt (SubBytes + ShiftRows + MixColumns + AddRoundKey).
+   * block : 16-byte input (not modified).
+   * ek    : expanded key (176 bytes for AES-128, 240 for AES-256).
+   * Returns encrypted 16-byte result.
+   * Falls back to pure TypeScript when JIT is unavailable.
+   */
+  encryptBlock(block: number[], ek: number[]): number[] | null {
+    if (!_nativAESBlock || !_aesSboxPhys || !_aesBlockPhys || !_aesKeyPhys) return null;
+    // Copy expanded key only if it changed (reference equality = session reuse)
+    if (ek !== _aesLastEk) {
+      _aesLastEk = ek;
+      for (var i = 0; i < ek.length; i++) _aesKeyBuf[i] = ek[i];
+    }
+    // Copy input block
+    for (var i = 0; i < 16; i++) _aesBlockBuf[i] = block[i];
+    // Call JIT kernel (encrypts in-place at _aesBlockPhys)
+    var nr = (ek.length >> 4) - 1;  // 10 for AES-128, 14 for AES-256
+    _nativAESBlock(_aesSboxPhys, _aesKeyPhys, _aesBlockPhys, nr);
+    // Read result
+    var out: number[] = new Array(16);
+    for (var i = 0; i < 16; i++) out[i] = _aesBlockBuf[i];
+    return out;
+  },
+
+  /** True when AES JIT kernel is compiled and physmem tables ready. */
+  isNative(): boolean { return _nativAESBlock !== null && _aesSboxPhys !== 0; },
+};
+
+/** General-purpose physmem utility kernels compiled to native x86-32. */
+export const JITBufOps = {
+  /** Find NUL terminator; returns length (≤ maxLen) of null-terminated string at physAddr. */
+  strlen8(physAddr: number, maxLen: number): number {
+    if (_nativStrlen8) return _nativStrlen8(physAddr, maxLen);
+    for (var i = 0; i < maxLen; i++) if (kernel.readMem8(physAddr + i) === 0) return i;
+    return maxLen;
+  },
+  /** In-place byte-swap (big↔little endian) of `count` uint32s at physAddr. */
+  byteSwap32(physAddr: number, count: number): void {
+    if (_nativByteSwap32) { _nativByteSwap32(physAddr, count); return; }
+    for (var i = 0; i < count; i++) {
+      var a = physAddr + i * 4;
+      var b0 = kernel.readMem8(a); var b3 = kernel.readMem8(a + 3);
+      var b1 = kernel.readMem8(a + 1); var b2 = kernel.readMem8(a + 2);
+      kernel.writeMem8(a, b3); kernel.writeMem8(a + 1, b2);
+      kernel.writeMem8(a + 2, b1); kernel.writeMem8(a + 3, b0);
+    }
+  },
+  /** Count occurrences of byte `b` in a physmem region. */
+  countByte8(physAddr: number, len: number, b: number): number {
+    if (_nativCountByte8) return _nativCountByte8(physAddr, len, b);
+    var n = 0; for (var i = 0; i < len; i++) if (kernel.readMem8(physAddr + i) === (b & 0xff)) n++;
+    return n;
+  },
+  /** Minimum byte value in region. */
+  minU8(physAddr: number, len: number): number {
+    if (_nativMinU8) return _nativMinU8(physAddr, len);
+    var m = 255; for (var i = 0; i < len; i++) { var v = kernel.readMem8(physAddr + i); if (v < m) m = v; } return m;
+  },
+  /** Maximum byte value in region. */
+  maxU8(physAddr: number, len: number): number {
+    if (_nativMaxU8) return _nativMaxU8(physAddr, len);
+    var m = 0; for (var i = 0; i < len; i++) { var v = kernel.readMem8(physAddr + i); if (v > m) m = v; } return m;
+  },
+  /** First offset where two physmem regions differ, or len if equal. */
+  diffOffset(addrA: number, addrB: number, len: number): number {
+    if (_nativDiffOffset) return _nativDiffOffset(addrA, addrB, len);
+    for (var i = 0; i < len; i++) if (kernel.readMem8(addrA + i) !== kernel.readMem8(addrB + i)) return i;
+    return len;
+  },
+  isNative(): boolean { return _nativStrlen8 !== null; },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Boot initialisation
+// ─────────────────────────────────────────────────────────────────────────────
+
+var _initDone   = false;
+var _initStats  = { compiled: 0, bytes: 0 };
+
+export const JITOSKernels = {
+  /**
+   * Compile all OS JIT kernels.  Called once at boot from main.ts (after QJSJITHook.install).
+   * Safe to call multiple times (idempotent).
+   */
+  init(): void {
+    if (_initDone) return;
+    _initDone = true;
+
+    if (!JIT.available()) {
+      if (typeof kernel !== 'undefined')
+        kernel.serialPut('[jit-os] kernel.jitAlloc not available — using TS fallbacks\n');
+      return;
+    }
+
+    function tryCompile(src: string, label: string): ((...a: number[]) => number) | null {
+      var fn = JIT.compile(src);
+      if (fn) {
+        _initStats.compiled++;
+        _initStats.bytes = JIT.stats().poolUsed;
+      } else {
+        kernel.serialPut('[jit-os] compile failed: ' + label + '\n');
+      }
+      return fn;
+    }
+
+    _nativChecksum = tryCompile(_SRC_CHECKSUM, 'checksum');
+    _nativFill8    = tryCompile(_SRC_FILL8,    'fill8');
+    _nativFill32   = tryCompile(_SRC_FILL32,   'fill32');
+    _nativCopy8    = tryCompile(_SRC_COPY8,    'copy8');
+    _nativCopy32   = tryCompile(_SRC_COPY32,   'copy32');
+    _nativCompare  = tryCompile(_SRC_COMPARE,  'compare');
+    _nativCRC32    = tryCompile(_SRC_CRC32,    'crc32');
+    _nativStrcmp   = tryCompile(_SRC_STRCMP,   'strcmp8');
+    _nativMemchr   = tryCompile(_SRC_MEMCHR,   'memchr8');
+    _nativFNV1A32    = tryCompile(_SRC_FNV1A32,       'fnv1a32');
+    _nativXorBuf     = tryCompile(_SRC_XOR_BUF,        'xorBuf');
+    _nativPackBE32   = tryCompile(_SRC_PACK_BE32,      'packBE32');
+    _nativUnpackBE32 = tryCompile(_SRC_UNPACK_BE32,    'unpackBE32');
+    _nativUnpackBE16 = tryCompile(_SRC_UNPACK_BE16,    'unpackBE16');
+    _nativLzCopy     = tryCompile(_SRC_LZ_COPY_MATCH,  'lzCopyMatch');
+    _nativToLower8   = tryCompile(_SRC_TO_LOWER8,      'toLower8');
+    _nativScanCRLF   = tryCompile(_SRC_SCAN_CRLF,      'scanCRLF');
+    _nativSumBuf     = tryCompile(_SRC_SUM_BUF,        'sumBuf');
+    _nativClamp32    = tryCompile(_SRC_CLAMP32,        'clamp32');
+    _nativPopCount      = tryCompile(_SRC_POP_COUNT32,    'popCount32');
+    _nativSHA256Block   = tryCompile(_SRC_SHA256_BLOCK,   'sha256Block');
+    _nativChaCha20Block = tryCompile(_SRC_CHACHA20_BLOCK, 'chacha20Block');
+    _nativAdler32       = tryCompile(_SRC_ADLER32,        'adler32');
+    _nativStrlen8        = tryCompile(_SRC_STRLEN8,        'strlen8');
+    _nativByteSwap32     = tryCompile(_SRC_BYTE_SWAP32,    'byteSwap32');
+    _nativCountByte8     = tryCompile(_SRC_COUNT_BYTE8,    'countByte8');
+    _nativMinU8          = tryCompile(_SRC_MIN_U8,         'minU8');
+    _nativMaxU8          = tryCompile(_SRC_MAX_U8,         'maxU8');
+    _nativDiffOffset     = tryCompile(_SRC_DIFF_OFFSET,    'diffOffset');
+    _nativAESBlock       = tryCompile(_SRC_AES_BLOCK,      'aesBlock');
+
+    // Write the CRC table into a shared ArrayBuffer so JIT native can access it
+    if (_nativCRC32) {
+      var tableAB = _crc32TableData.buffer;  // already a 1 KB ArrayBuffer
+      var phys = kernel.physAddrOf ? kernel.physAddrOf(tableAB) : 0;
+      if (phys) {
+        _crc32TablePhys = phys;
+      } else {
+        // physAddrOf unavailable (old kernel) — disable JIT CRC
+        _nativCRC32 = null;
+      }
+    }
+
+    // Wire SHA-256 K table into physmem
+    if (_nativSHA256Block) {
+      var sha256KAB = _sha256KData.buffer;
+      var sha256KPhys = kernel.physAddrOf ? kernel.physAddrOf(sha256KAB) : 0;
+      if (sha256KPhys) {
+        _sha256KPhys = sha256KPhys;
+      } else {
+        _nativSHA256Block = null;  // no physAddrOf — fall back to TS
+      }
+    }
+
+    // Wire ChaCha20 QR index table into physmem
+    if (_nativChaCha20Block) {
+      var qrTabAB = _chacha20QRIndexTab.buffer;
+      var qrTabPhys = kernel.physAddrOf ? kernel.physAddrOf(qrTabAB) : 0;
+      if (qrTabPhys) {
+        _chacha20QRTabPhys = qrTabPhys;
+      } else {
+        _nativChaCha20Block = null;  // no physAddrOf — fall back to TS
+      }
+    }
+
+    // Wire AES S-box, block scratch, and key scratch into physmem
+    if (_nativAESBlock) {
+      var sboxAB = _aesSboxData.buffer;
+      var sboxPhys = kernel.physAddrOf ? kernel.physAddrOf(sboxAB) : 0;
+      var blockPhys = kernel.physAddrOf ? kernel.physAddrOf(_aesBlockBuf.buffer) : 0;
+      var keyPhys   = kernel.physAddrOf ? kernel.physAddrOf(_aesKeyBuf.buffer) : 0;
+      if (sboxPhys && blockPhys && keyPhys) {
+        _aesSboxPhys  = sboxPhys;
+        _aesBlockPhys = blockPhys;
+        _aesKeyPhys   = keyPhys;
+      } else {
+        _nativAESBlock = null;  // no physAddrOf — fall back to TS
+      }
+    }
+
+    kernel.serialPut('[jit-os] ' + _initStats.compiled + ' OS kernels compiled (' +
+                     ((JIT.stats().poolUsed / 1024) | 0) + ' KB pool used)\n');
+  },
+
+  stats(): { compiled: number; poolUsedKB: number; checksumNative: boolean;
+             memFillNative: boolean; crc32Native: boolean; stringNative: boolean } {
+    return {
+      compiled:         _initStats.compiled,
+      poolUsedKB:       (JIT.stats().poolUsed / 1024) | 0,
+      checksumNative:   _nativChecksum !== null,
+      memFillNative:    _nativFill8    !== null,
+      crc32Native:      _nativCRC32    !== null,
+      stringNative:     _nativStrcmp   !== null,
+    };
+  },
+};

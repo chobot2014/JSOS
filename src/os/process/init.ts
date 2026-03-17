@@ -29,12 +29,16 @@ export interface Service {
 }
 
 export interface ServiceInstance {
-  service: Service;
-  pid?: number;
-  state: ServiceState;
-  startTime?: number;
-  exitCode?: number;
-  restarts: number;
+  service:      Service;
+  pid?:         number;
+  state:        ServiceState;
+  startTime?:   number;
+  exitCode?:    number;
+  restarts:     number;
+  /** Current exponential-backoff delay before next respawn (ms). Starts at 1 000 ms. */
+  backoffMs:    number;
+  /** Uptime (ms) at which a pending respawn should fire. -1 = no pending respawn. */
+  nextRespawn:  number;
 }
 
 export class InitSystem {
@@ -63,8 +67,10 @@ export class InitSystem {
     this.services.set(service.name, service);
     this.serviceInstances.set(service.name, {
       service,
-      state: 'stopped',
-      restarts: 0
+      state:       'stopped',
+      restarts:    0,
+      backoffMs:   1000,
+      nextRespawn: -1,
     });
   }
 
@@ -103,6 +109,18 @@ export class InitSystem {
       instance.pid = startResult.value;
       instance.state = 'running';
       instance.startTime = kernel.getUptime();
+      // Reset backoff on successful start (item 718)
+      instance.backoffMs   = 1000;
+      instance.nextRespawn = -1;
+
+      // [Item 724] Write service start event to /var/log/<name>.log
+      try {
+        const logPath = '/var/log/' + serviceName + '.log';
+        const ts = '[' + Math.round(instance.startTime / 1000) + 's] ';
+        const k = kernel as any;
+        const existing = k.exists?.(logPath) ? (k.readFile?.(logPath) || '') : '';
+        k.writeFile?.(logPath, existing + ts + 'started pid=' + instance.pid + '\n');
+      } catch (_) { /* ignore log failures */ }
 
       return { success: true };
     } catch (error) {
@@ -160,9 +178,27 @@ export class InitSystem {
       } else if (newLevel === 6) {
         this.reboot();
       } else {
-        // Start services with runlevel <= target
+        // [Item 723] Start services in parallel batches grouped by startPriority
+        // Collect services to start, sorted by priority
+        const toStart: Array<{ name: string; priority: number }> = [];
         for (const [name, instance] of this.serviceInstances) {
           if (instance.service.runlevel <= newLevel && instance.state === 'stopped') {
+            toStart.push({ name, priority: instance.service.startPriority });
+          }
+        }
+        toStart.sort((a, b) => a.priority - b.priority);
+
+        // Start each priority group as a "parallel" batch
+        let i = 0;
+        while (i < toStart.length) {
+          const currentPriority = toStart[i].priority;
+          const batch: string[] = [];
+          while (i < toStart.length && toStart[i].priority === currentPriority) {
+            batch.push(toStart[i].name);
+            i++;
+          }
+          kernel.serialPut('[init] batch priority=' + currentPriority + ' count=' + batch.length + '\n');
+          for (const name of batch) {
             this.startService(name);
           }
         }
@@ -222,8 +258,58 @@ export class InitSystem {
    * Initialize system (called during boot, synchronous)
    */
   initialize(): void {
+    // Item 717: read extra service definitions from /etc/init/*.json
+    this.loadServicesFromDir('/etc/init');
     // Register and start all services up to runlevel 3 (full multi-user)
     this.changeRunlevel(3);
+  }
+
+  /**
+   * Item 717: Load service definitions from a directory of JSON files.
+   * Each file should contain a JSON object matching the Service interface.
+   * Silently skips files that cannot be parsed or have missing required fields.
+   */
+  loadServicesFromDir(dirPath: string): void {
+    try {
+      var fsObj: any = (globalThis as any).fs;
+      if (!fsObj) return;
+      if (!fsObj.isDirectory(dirPath)) return;
+      var entries: Array<{ name: string; type: string }> = fsObj.ls(dirPath) || [];
+      for (var i = 0; i < entries.length; i++) {
+        var entry = entries[i];
+        if (entry.type !== 'file') continue;
+        if (!entry.name.endsWith('.json')) continue;
+        var filePath = dirPath.replace(/\/$/, '') + '/' + entry.name;
+        var raw = fsObj.readFile(filePath);
+        if (!raw) continue;
+        try {
+          var def: any = JSON.parse(raw);
+          if (!def.name || !def.executable) continue;
+          var svc: Service = {
+            name:             def.name,
+            description:      def.description || '',
+            executable:       def.executable,
+            args:             def.args || [],
+            runlevel:         (def.runlevel !== undefined ? def.runlevel : 3) as RunLevel,
+            dependencies:     def.dependencies || [],
+            startPriority:    def.startPriority !== undefined ? def.startPriority : 50,
+            stopPriority:     def.stopPriority  !== undefined ? def.stopPriority  : 50,
+            restartPolicy:    def.restartPolicy || 'no',
+            environment:      def.environment || {},
+            workingDirectory: def.workingDirectory || '/',
+            user:             def.user  || 'root',
+            group:            def.group || 'root',
+          };
+          // Only register if not already registered (hardcoded services take priority)
+          if (!this.services.has(svc.name)) {
+            this.registerService(svc);
+            kernel.serialPut('[init] loaded service ' + svc.name + ' from ' + filePath + '\n');
+          }
+        } catch (_) {
+          kernel.serialPut('[init] warn: could not parse ' + filePath + '\n');
+        }
+      }
+    } catch (_) { /* /etc/init not accessible early in boot — ignore */ }
   }
 
   /**
@@ -318,6 +404,224 @@ export class InitSystem {
   getCurrentRunlevel(): RunLevel {
     return this.currentRunlevel;
   }
+
+  // ── Respawn with backoff (item 718) ────────────────────────────────────────
+
+  /** Maximum respawn backoff: 60 s (60 000 ms). */
+  private static readonly MAX_BACKOFF_MS = 60_000;
+
+  /**
+   * Call this whenever a service process exits.
+   * If the restart policy warrants it, schedules a respawn after the
+   * current backoff delay, then doubles the delay (up to MAX_BACKOFF_MS).
+   *
+   * @param serviceName  Name of the service that exited.
+   * @param exitCode     Exit code (0 = clean exit, !0 = crash/error).
+   */
+  handleExit(serviceName: string, exitCode: number): void {
+    var instance = this.serviceInstances.get(serviceName);
+    if (!instance) return;
+
+    instance.state    = 'failed';
+    instance.exitCode = exitCode;
+    instance.pid      = undefined;
+
+    var policy = instance.service.restartPolicy;
+    var shouldRespawn =
+      policy === 'always' ||
+      (policy === 'on-failure' && exitCode !== 0);
+
+    if (!shouldRespawn) {
+      instance.state = 'stopped';
+      return;
+    }
+
+    // Schedule respawn
+    instance.nextRespawn = kernel.getUptime() + instance.backoffMs;
+    kernel.serialPut(
+      '[init] service ' + serviceName + ' exited (code=' + exitCode + '),' +
+      ' respawning in ' + instance.backoffMs + ' ms\n'
+    );
+
+    // Double backoff for next crash, capped at MAX_BACKOFF_MS
+    instance.backoffMs = Math.min(instance.backoffMs * 2, InitSystem.MAX_BACKOFF_MS);
+    instance.restarts++;
+  }
+
+  /**
+   * Called from the kernel timer tick (e.g. every 100 ms).
+   * Fires any pending respawns whose delay has elapsed.
+   *
+   * @param nowMs  Current uptime in milliseconds (kernel.getUptime()).
+   */
+  tick(nowMs: number): void {
+    for (var [name, inst] of this.serviceInstances) {
+      if (inst.nextRespawn < 0 || nowMs < inst.nextRespawn) continue;
+
+      inst.nextRespawn = -1;
+      kernel.serialPut('[init] respawning ' + name + ' (attempt ' + inst.restarts + ')\n');
+
+      var result = this.startService(name);
+      if (!result.success) {
+        // startService failed — schedule another attempt with current backoff
+        kernel.serialPut('[init] respawn of ' + name + ' failed: ' + (result.error || '?') + '\n');
+        inst.state      = 'failed';
+        inst.nextRespawn = nowMs + inst.backoffMs;
+        inst.backoffMs   = Math.min(inst.backoffMs * 2, InitSystem.MAX_BACKOFF_MS);
+      }
+    }
+  }
 }
 
 export const init = new InitSystem();
+
+// ── Socket Activation — Item 725s ────────────────────────────────────────────
+
+/** A socket-activation descriptor registered with the SocketActivator. */
+export interface SocketActivationEntry {
+  /** Service name to launch when a connection arrives. */
+  service: string;
+  /** Port or path the socket listens on (e.g. 80, '/run/syslog.sock'). */
+  address: number | string;
+  /** Protocol: 'tcp' | 'udp' | 'unix'. */
+  proto: 'tcp' | 'udp' | 'unix';
+  /** True once the service has been started and the socket passed-through. */
+  activated: boolean;
+}
+
+/**
+ * [Item 725s] SocketActivator — lazy service startup à la systemd socket
+ * activation.  A socket is opened and listened on by init; when the first
+ * connection arrives the target service is started and the file descriptor
+ * is passed to it via the SD_LISTEN_FDS protocol.
+ *
+ * In JSOS the activation is simulated: the first call to `accept(address)`
+ * triggers `init.startService(entry.service)` and marks the entry activated.
+ */
+export class SocketActivator {
+  private _entries: Map<string, SocketActivationEntry> = new Map();
+
+  /** Register a socket-activation entry.
+   *  `key` is typically `"service@address"`. */
+  register(entry: SocketActivationEntry): void {
+    var key = entry.service + '@' + entry.address;
+    this._entries.set(key, { ...entry, activated: false });
+  }
+
+  /** Unregister an entry. */
+  unregister(service: string, address: number | string): void {
+    this._entries.delete(service + '@' + address);
+  }
+
+  /**
+   * Simulate an incoming connection on `address`.
+   * If an unactivated entry matches, start the service and mark it activated.
+   * Returns true when a service was started.
+   */
+  accept(address: number | string): boolean {
+    for (var entry of Array.from(this._entries.values())) {
+      if (entry.address === address && !entry.activated) {
+        var result = init.startService(entry.service);
+        entry.activated = result.success;
+        if (result.success) {
+          kernel.serialPut('[socket-activation] started ' + entry.service + ' on ' + address + '\n');
+        }
+        return result.success;
+      }
+    }
+    return false;
+  }
+
+  /** List all registered activation entries. */
+  list(): SocketActivationEntry[] {
+    return Array.from(this._entries.values());
+  }
+
+  /** Reset activation flag (service was stopped, re-arm the socket). */
+  rearm(service: string, address: number | string): void {
+    var e = this._entries.get(service + '@' + address);
+    if (e) e.activated = false;
+  }
+}
+
+export const socketActivator = new SocketActivator();
+
+// ── JSOS Service Bus — Item 726s ─────────────────────────────────────────────
+
+/** A typed message on the service bus. */
+export interface ServiceBusMessage<T = unknown> {
+  /** Source service/component name. */
+  from: string;
+  /** Topic (e.g. 'network.up', 'user.login'). */
+  topic: string;
+  /** Payload — any JSON-serializable value. */
+  payload: T;
+  /** Monotonic timestamp (ms since boot). */
+  ts: number;
+}
+
+/** Subscription handle returned by `serviceBus.subscribe()`. */
+export interface ServiceBusSubscription {
+  id: number;
+  topic: string;
+  cancel(): void;
+}
+
+/**
+ * [Item 726s] ServiceBus — intra-OS pub/sub message bus.
+ *
+ *  Services publish typed events (`serviceBus.publish(topic, payload)`) and
+ *  subscribe to events from other services.  This decouples components: e.g.
+ *  the network stack publishes 'network.up' and the DHCP client subscribes.
+ *
+ *  Topics support simple wildcard matching: 'net.*' matches 'net.up',
+ *  'net.down', 'net.error', etc.
+ */
+export class ServiceBus {
+  private _subs: Array<{ id: number; pattern: string; handler: (msg: ServiceBusMessage) => void }> = [];
+  private _nextId = 1;
+  private _epoch: number = Date.now();
+
+  /** Subscribe to `pattern`; returns a handle with a `cancel()` method. */
+  subscribe<T = unknown>(
+    pattern: string,
+    handler: (msg: ServiceBusMessage<T>) => void,
+  ): ServiceBusSubscription {
+    var id = this._nextId++;
+    this._subs.push({ id, pattern, handler: handler as (msg: ServiceBusMessage) => void });
+    var bus = this;
+    return {
+      id, topic: pattern,
+      cancel() { bus._subs = bus._subs.filter(function(s) { return s.id !== id; }); },
+    };
+  }
+
+  /** Publish a message on `topic` from `from`. */
+  publish<T = unknown>(from: string, topic: string, payload: T): void {
+    var msg: ServiceBusMessage<T> = { from, topic, payload, ts: Date.now() - this._epoch };
+    for (var i = 0; i < this._subs.length; i++) {
+      if (this._matches(topic, this._subs[i].pattern)) {
+        try { this._subs[i].handler(msg as ServiceBusMessage); }
+        catch (e) { /* never let a subscriber crash the bus */ }
+      }
+    }
+  }
+
+  /** Return all current subscriber patterns (for diagnostics). */
+  subscriptions(): Array<{ id: number; pattern: string }> {
+    return this._subs.map(function(s) { return { id: s.id, pattern: s.pattern }; });
+  }
+
+  /** Simple glob match: '*' matches any segment, '**' matches any sub-path. */
+  private _matches(topic: string, pattern: string): boolean {
+    if (pattern === '*' || pattern === '**') return true;
+    if (pattern === topic) return true;
+    // Convert pattern to regex: 'net.*' → /^net\.[^.]+$/
+    var re = new RegExp(
+      '^' + pattern.replace(/\./g, '\\.').replace(/\*\*\\\./g, '(?:.+\\.)?').replace(/\*/g, '[^.]+') + '$'
+    );
+    return re.test(topic);
+  }
+}
+
+export const serviceBus = new ServiceBus();

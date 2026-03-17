@@ -9,6 +9,7 @@
  */
 
 import { net } from './net.js';
+import { threadManager } from '../process/threads.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -213,4 +214,84 @@ export function dhcpDiscover(): DHCPConfig | null {
   });
 
   return config;
+}
+
+/**
+ * Non-blocking DHCP Discover → Offer → Request → ACK via the coroutine
+ * scheduler.  Returns immediately; `callback` fires once the exchange
+ * completes (or on timeout).  The WM event loop drives progress through
+ * kernel.yield() / threadManager.tick() each frame — no spinning.
+ */
+export function dhcpDiscoverAsync(callback: (config: DHCPConfig | null) => void): void {
+  var mac  = macToBytes(net.mac);
+  var xid  = (kernel.getTicks() * 0x9e3779b9) >>> 0;
+
+  type DState = 'discover' | 'offer' | 'request' | 'ack' | 'done';
+  var state: DState = 'discover';
+  var deadline = 0;
+  var savedOffer: DHCPResponse | null = null;
+
+  net.openUDPInbox(DHCP_CLIENT_PORT);
+
+  threadManager.runCoroutine('dhcpcd', function(): 'done' | 'pending' {
+    if (state === 'discover') {
+      var disc = buildDHCP(xid, DHCP_DISCOVER, mac, null, null);
+      net.sendUDPRaw(DHCP_CLIENT_PORT, '255.255.255.255', DHCP_SERVER_PORT, disc);
+      deadline = kernel.getTicks() + 500;   // 5 s
+      state = 'offer';
+      return 'pending';
+    }
+
+    if (state === 'offer') {
+      if (net.nicReady) net.pollNIC();
+      var pkt = net.recvUDPRawNB(DHCP_CLIENT_PORT);
+      if (pkt) {
+        var offer = parseDHCP(pkt.data);
+        if (offer && offer.msgType === DHCP_OFFER) {
+          savedOffer = offer;
+          var req = buildDHCP(xid, DHCP_REQUEST, mac, offer.yiaddr, offer.serverID);
+          net.sendUDPRaw(DHCP_CLIENT_PORT, '255.255.255.255', DHCP_SERVER_PORT, req);
+          deadline = kernel.getTicks() + 500;
+          state = 'ack';
+          return 'pending';
+        }
+      }
+      if (kernel.getTicks() > deadline) {
+        net.udpRxMap.delete(DHCP_CLIENT_PORT);
+        callback(null);
+        return 'done';
+      }
+      return 'pending';
+    }
+
+    if (state === 'ack') {
+      if (net.nicReady) net.pollNIC();
+      var pkt2 = net.recvUDPRawNB(DHCP_CLIENT_PORT);
+      if (pkt2) {
+        var ack = parseDHCP(pkt2.data);
+        if (ack && ack.msgType === DHCP_ACK) {
+          var o = savedOffer!;
+          var config: DHCPConfig = {
+            ip:      ack.yiaddr  || o.yiaddr,
+            mask:    ack.mask    || o.mask,
+            gateway: ack.gateway || o.gateway,
+            dns:     ack.dns     || o.dns,
+          };
+          net.configure({ ip: config.ip, mask: config.mask,
+                          gateway: config.gateway, dns: config.dns });
+          net.udpRxMap.delete(DHCP_CLIENT_PORT);
+          callback(config);
+          return 'done';
+        }
+      }
+      if (kernel.getTicks() > deadline) {
+        net.udpRxMap.delete(DHCP_CLIENT_PORT);
+        callback(null);
+        return 'done';
+      }
+      return 'pending';
+    }
+
+    return 'done';
+  });
 }

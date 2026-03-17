@@ -25,8 +25,10 @@
 #define PS2_CMD_WRITE_AUX    0xD4
 
 /* Mouse command bytes */
-#define MOUSE_SET_DEFAULTS   0xF6
-#define MOUSE_ENABLE_REPORT  0xF4
+#define MOUSE_SET_DEFAULTS     0xF6
+#define MOUSE_ENABLE_REPORT    0xF4
+#define MOUSE_SET_SAMPLE_RATE  0xF3  /* next byte = rate */
+#define MOUSE_GET_DEVICE_ID    0xF2
 
 /* Circular packet queue */
 #define QUEUE_SIZE 32
@@ -35,9 +37,10 @@ static mouse_packet_t _queue[QUEUE_SIZE];
 static volatile int   _head = 0;
 static volatile int   _tail = 0;
 
-/* Accumulate partial 3-byte PS/2 packet */
-static uint8_t  _raw[3];
+/* Accumulate partial PS/2 packet (3 bytes; 4 bytes when IntelliMouse scroll active) */
+static uint8_t  _raw[4];
 static volatile int _byte_idx = 0;
+static int _scroll_enabled = 0;   /* 1 once IntelliMouse scroll wheel confirmed */
 
 /* ── PS/2 helpers ────────────────────────────────────────────────────────── */
 
@@ -78,7 +81,8 @@ void mouse_irq_handler(void) {
 
     _raw[_byte_idx++] = byte;
 
-    if (_byte_idx == 3) {
+    int expected = _scroll_enabled ? 4 : 3;
+    if (_byte_idx == expected) {
         _byte_idx = 0;
 
         uint8_t flags = _raw[0];
@@ -101,6 +105,14 @@ void mouse_irq_handler(void) {
         int dy = (int)_raw[2];
         if (flags & 0x20) dy |= ~0xFF;   /* sign-extend */
         pkt.dy = (int8_t)(-dy);           /* invert Y for screen coords */
+
+        /* Scroll wheel — IntelliMouse 4th byte (signed 4-bit in bits 3:0) */
+        if (_scroll_enabled) {
+            uint8_t z = _raw[3] & 0x0F;
+            pkt.scroll = (z & 0x08) ? (int8_t)(z | 0xF0) : (int8_t)z;
+        } else {
+            pkt.scroll = 0;
+        }
 
         int next_tail = (_tail + 1) % QUEUE_SIZE;
         if (next_tail != _head) {         /* not full */
@@ -132,10 +144,24 @@ void mouse_initialize(void) {
     ps2_wait_write();
     outb(PS2_DATA, ccb);
 
-    /* Set defaults and enable packet streaming */
+    /* Set defaults */
     mouse_write(MOUSE_SET_DEFAULTS);
     mouse_read_byte(); /* ACK */
 
+    /* IntelliMouse scroll wheel enable: magic sample-rate sequence 200→100→80
+     * then query device ID.  If response is 0x03 the wheel is available.
+     * Reference: https://wiki.osdev.org/PS/2_Mouse#Scroll_Wheel */
+    mouse_write(MOUSE_SET_SAMPLE_RATE); mouse_read_byte(); /* ACK */
+    mouse_write(200);                   mouse_read_byte(); /* ACK */
+    mouse_write(MOUSE_SET_SAMPLE_RATE); mouse_read_byte(); /* ACK */
+    mouse_write(100);                   mouse_read_byte(); /* ACK */
+    mouse_write(MOUSE_SET_SAMPLE_RATE); mouse_read_byte(); /* ACK */
+    mouse_write(80);                    mouse_read_byte(); /* ACK */
+    mouse_write(MOUSE_GET_DEVICE_ID);   mouse_read_byte(); /* ACK */
+    uint8_t dev_id = mouse_read_byte();
+    _scroll_enabled = (dev_id == 0x03) ? 1 : 0;
+
+    /* Enable packet streaming */
     mouse_write(MOUSE_ENABLE_REPORT);
     mouse_read_byte(); /* ACK */
 

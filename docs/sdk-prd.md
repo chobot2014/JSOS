@@ -30,7 +30,7 @@ All items are implementable in `src/os/core/sdk.ts` (or small helper files impor
 | `os.system.screenWidth / screenHeight` | ✅ Done |
 | `os.process.spawn / list / all / kill / SIG / setAlgorithm / getAlgorithm` | ✅ Done |
 | `os.ipc` (pipes, signals, message queues) | ✅ Done (exposed as `os.ipc`) |
-| `os.users.whoami / login / logout / list / create` | ✅ Done |
+| `os.users` (full UserManager re-exported: whoami, login, logout, su, isRoot, listUsers, listGroups, addUser, removeUser, passwd, getUser, getGroup, idString) | ✅ Implemented in `users.ts`; partially exposed — see §3.X |
 | `os.clipboard.read / write` | ✅ Done |
 | `os.wm.available / openWindow / closeWindow / focus / getWindows / getFocused / markDirty / screenWidth / screenHeight` | ✅ Done |
 | `os.fetchAsync` | ✅ Done |
@@ -110,20 +110,33 @@ os.path.relative(from: string, to: string): string
 **Problem:** `os.fs` has no `stat`, `rename`, `append`, or `copy`. You can't build a file manager that shows file sizes, rename a file, or append logs.
 
 ```typescript
-os.fs.stat(path: string): { size: number; isDir: boolean; mtime: number } | null
-// mtime = kernel ticks at last write (best effort)
+os.fs.stat(path: string): { size: number; isDir: boolean; created: number; mtime: number; permissions: string } | null
+// mtime = kernel uptime ms at last write; wraps fs.stat() which already exists
 
 os.fs.rename(from: string, to: string): boolean
-// returns false if source not found or dest parent doesn't exist
+// returns false if source not found; wraps fs.mv() which already exists
 
 os.fs.append(path: string, data: string): boolean
-// creates if not present; appends otherwise
+// creates if not present; wraps fs.appendFile() which already exists
 
 os.fs.copy(src: string, dst: string): boolean
-// copies file only (not recursive); returns false if src not found
+// copies file only (not recursive); wraps fs.cp() which already exists
 
 os.fs.isDir(path: string): boolean
-// convenience: stat(path)?.isDir ?? false
+// wraps fs.isDirectory() which already exists
+
+os.fs.isFile(path: string): boolean
+// wraps fs.isFile() which already exists — tells you explicitly it's a file, not a dir
+
+os.fs.find(basePath: string, pattern: string): string[]
+// glob-style recursive search using * wildcard; wraps fs.find() which already exists
+// os.fs.find('/bin', '*.js') → ['/bin/hello.js', '/bin/top.js', ...]
+
+os.fs.rmrf(path: string): boolean
+// recursive remove — removes non-empty directories; NOT currently in filesystem.ts, needs implementation
+
+os.fs.resolve(path: string): string
+// resolves relative/~ paths against cwd; wraps fs.resolvePath() which already exists
 
 os.fs.readLines(path: string): string[] | null
 // convenience: read(path)?.split('\n') ?? null
@@ -138,11 +151,47 @@ os.fs.writeJSON(path: string, value: unknown, pretty?: boolean): boolean
 // JSON.stringify; returns write result
 ```
 
+**Note:** `stat`, `rename`, `append`, `copy`, `isDir`, `isFile`, `find`, and `resolve` all wrap methods that **already exist** in `src/os/fs/filesystem.ts` — they just need to be wired into the SDK. Only `rmrf` requires new implementation.
+
 **Note:** `stat` requires the underlying `VirtualFS.stat()` to be wired up. Currently `fs.list()` returns `{ name, type, size? }` entries — `stat` should derive from that where possible.
 
 ---
 
-#### 3.4 `os.env` — Environment variables
+#### 3.4 `os.users` — Complete user management surface
+
+**Problem:** `os.users` currently passes through the raw `UserManager` instance but the SDK docs only mention `whoami/login/logout`. The full API already exists in `users.ts` — it just needs to be properly typed and documented in the SDK. Apps like a settings panel or a multi-user shell need all of it.
+
+```typescript
+// Already implemented in users.ts — just needs clean SDK typing:
+
+os.users.whoami(): { uid: number; gid: number; name: string; displayName: string; home: string; shell: string }
+os.users.login(name: string, password: string): boolean
+os.users.logout(): void
+os.users.su(nameOrUid: string | number): boolean   // only root can su freely
+os.users.isRoot(): boolean
+
+os.users.list(): User[]    // all non-system users (uid < 65534)
+os.users.listGroups(): Group[]
+os.users.getUser(nameOrUid: string | number): User | null
+os.users.getGroup(nameOrGid: string | number): Group | null
+os.users.getGroupsForUser(name: string): Group[]
+
+os.users.addUser(
+  name: string,
+  password: string,
+  opts?: { displayName?: string; home?: string; shell?: string; uid?: number; gid?: number }
+): User | null
+os.users.removeUser(name: string): boolean   // cannot remove root
+os.users.passwd(name: string, newPassword: string): boolean
+
+os.users.idString(user?: User): string   // 'uid=1000(user) gid=1000(users) groups=...'
+```
+
+**Implementation:** Zero new code. Just expose the existing `UserManager` methods with typed wrappers.
+
+---
+
+#### 3.5 `os.env` — Environment variables
 
 **Problem:** There is no environment variable system. Apps hardcode paths and configuration. `PATH`, `HOME`, `USER`, `TERM`, `EDITOR` all need to exist somewhere.
 
@@ -174,7 +223,49 @@ SHELL=/bin/repl
 
 ---
 
-#### 3.5 `os.prefs` — Per-app persistent preferences
+#### 3.6-prev `os.sync` — Mutex, Condvar, Semaphore
+
+**Problem:** `src/os/process/sync.ts` has a complete, working `Mutex`, `Condvar`, and `Semaphore` implementation — but it is **not imported or exported from the SDK at all**. Any app doing coordinated async work with coroutines has no access to these primitives.
+
+**Implementation:** Import from `sync.ts` and re-export via SDK.
+
+```typescript
+// All three classes already exist in sync.ts:
+
+class Mutex {
+  lock(): void        // blocks (cooperative) until acquired
+  unlock(): void
+  tryLock(): boolean  // non-blocking; returns false if already held
+  isLocked(): boolean
+}
+
+class Condvar {
+  wait(mutex: Mutex): void   // atomically releases mutex and waits
+  signal(): void             // wake one waiter
+  broadcast(): void          // wake all waiters
+}
+
+class Semaphore {
+  constructor(initial: number)
+  acquire(): void     // decrement; blocks if count is 0
+  release(): void     // increment; wakes a waiter if any
+  tryAcquire(): boolean
+  get count(): number
+}
+
+// Exposed via SDK:
+export { Mutex, Condvar, Semaphore } from '../process/sync.js';
+// Also available as:
+os.sync.Mutex
+os.sync.Condvar
+os.sync.Semaphore
+```
+
+**Note:** These are cooperative, not preemptive — `lock()` only blocks in a cooperative scheduler sense (it yields to other coroutines). This is correct for JSOS's single-JS-thread model.
+
+---
+
+#### 3.6 `os.prefs` — Per-app persistent preferences
 
 **Problem:** Apps that need to persist settings (theme, font size, last-open file, …) must manually manage JSON files. There is no namespacing, no default merging, no change notification.
 
@@ -203,7 +294,33 @@ prefs.set('showHidden', true);
 The current `os.prefs` (unscoped) uses the calling window's title, or `'global'` outside a window.
 
 ---
+#### 3.7-prev `os.process.JSProcess` — Advanced IPC surface
 
+**Problem:** `JSProcess` is exported from the SDK but `evalSlice` and the shared-memory API (`sharedBufferCreate`/`sharedBufferOpen`) are not documented. These are critical for smooth multi-process apps — without `evalSlice`, a misbehaving child process blocks the entire WM frame.
+
+```typescript
+// Already on JSProcess, just needs SDK documentation:
+
+// Time-limited eval — NEVER use plain eval() for CPU-bound code:
+proc.evalSlice(code: string, maxMs?: number): { status: 'done' | 'timeout' | 'error'; result: string }
+// If the child takes > maxMs, it's interrupted and you call evalSlice again next frame.
+// Typical pattern: p.evalSlice('step()', 5)  →  ≤5 ms per frame, 60fps mouse stays smooth
+
+// Zero-copy shared memory between parent and child:
+// kernel.sharedBufferCreate(bytes) → id
+// kernel.sharedBufferOpen(id)      → ArrayBuffer (same physical RAM, no serialization)
+// Expose via os.process:
+os.process.sharedBuffer.create(bytes: number): number   // returns buffer id
+os.process.sharedBuffer.open(id: number): ArrayBuffer   // map into current runtime
+os.process.sharedBuffer.free(id: number): void
+
+// Message callback sugar (already on JSProcess, just worth documenting):
+proc.onMessage(cb: (msg: any) => void): JSProcess   // chainable
+proc.offMessage(cb: (msg: any) => void): JSProcess
+proc.recvAll(): any[]      // drain entire outbox at once
+```
+
+---
 #### 3.6 `os.apps` — App registry and launcher
 
 **Problem:** There is no standard app registry. The REPL's `open` command has a hardcoded switch statement. There is no way to install a third-party app or discover what's installed.
@@ -229,7 +346,7 @@ os.apps.isRegistered(name: string): boolean
 
 ---
 
-#### 3.7 `os.wm` — Missing window management calls
+#### 3.8 `os.wm` — Missing window management calls + context menus
 
 **Problem:** The `WindowManager` class already implements `minimiseWindow`, `_toggleMaximise`, `setTitle`, and move/resize logic — but none of these are exposed in the SDK.
 
@@ -244,6 +361,23 @@ os.wm.move(id: number, x: number, y: number): void
 os.wm.resize(id: number, width: number, height: number): void
 os.wm.bringToFront(id: number): void   // already in WM as focusWindow; alias
 os.wm.setCloseable(id: number, closeable: boolean): void
+
+// Context menus — rendered by WM as a floating layer, no new window needed:
+interface MenuItem {
+  label:      string;
+  action?:    () => void;
+  disabled?:  boolean;
+  separator?: boolean;    // if true, renders a dividing line; other fields ignored
+  children?:  MenuItem[]; // submenu
+}
+
+os.wm.showContextMenu(x: number, y: number, items: MenuItem[]): void
+// Opens a context menu at (x, y) in screen coordinates.
+// Auto-closes on item selection, click-away, or Escape.
+
+os.wm.showMenuBar(winId: number, menus: Array<{ label: string; items: MenuItem[] }>): void
+// Attaches a persistent menu bar to a window, drawn inside its title-bar area.
+// When a label is clicked the WM drops down the item list automatically.
 ```
 
 ---

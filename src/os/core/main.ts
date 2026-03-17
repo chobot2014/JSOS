@@ -26,12 +26,41 @@ import { createScreenCanvas } from '../ui/canvas.js';
 import { WindowManager, setWM } from '../ui/wm.js';
 import { terminalApp } from '../apps/terminal/index.js';
 import { browserApp } from '../apps/browser/index.js';
-import { dhcpDiscover } from '../net/dhcp.js';
-import { dnsResolve } from '../net/dns.js';
-import { httpsGet } from '../net/http.js';
+import { dhcpDiscoverAsync } from '../net/dhcp.js';
 import { registerCommands } from '../ui/commands.js';
+import { QJSJITHook } from '../process/qjs-jit.js';
+import { JITOSKernels } from '../process/jit-os.js';
+import { JITBrowserEngine } from '../apps/browser/jit-browser.js';
+import { _registerJITStats, os } from './sdk.js';
+import { writebackTimer } from '../fs/buffer-cache.js';
+import { ntp } from '../net/ntp.js';
+import { detectHypervisor } from '../process/guest-addons.js';
+import { gunzip } from '../net/deflate.js';
 
 declare var kernel: import('./kernel.js').KernelAPI; // kernel.js is in core/
+
+/**
+ * Pre-warm gzip/DEFLATE inner loops so QJSJITHook auto-JITs them before the
+ * first real network response.  Uses a known-valid 21-byte gzip of "A"
+ * (single fixed-Huffman block).  Called 4× so every inner function
+ * (gunzip, inflateDEFLATE, inflateBlock, huffDecode, BitReader) exceeds
+ * JIT_THRESHOLD=2 and gets compiled to native code before DHCP finishes.
+ */
+function _prewarmDeflate(): void {
+  // gzip of the single ASCII byte 'A' (0x41), fixed-Huffman DEFLATE block.
+  // gunzip() skips the CRC32+ISIZE trailer so the last 8 bytes can be zero.
+  var _GZ: number[] = [
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, // gzip header
+    0x73, 0x04, 0x00,                                             // DEFLATE 'A' + EOB
+    0x43, 0xbe, 0xb7, 0xe8,                                       // CRC32 (not checked)
+    0x01, 0x00, 0x00, 0x00,                                       // ISIZE = 1
+  ];
+  // 4 calls: functions reached >=2 calls early; 3rd call triggers native compile.
+  try { gunzip(_GZ); } catch (_) {}
+  try { gunzip(_GZ); } catch (_) {}
+  try { gunzip(_GZ); } catch (_) {}
+  try { gunzip(_GZ); } catch (_) {}
+}
 
 /** Route console.log / .error / .warn through the TypeScript terminal */
 function setupConsole(): void {
@@ -96,6 +125,10 @@ function printBanner(): void {
 function main(): void {
   setupConsole();
 
+  // Expose the SDK as globalThis.os for modules that access it dynamically
+  // (e.g. jit-browser.ts uses (globalThis as any).os?.fetchAsync).
+  (globalThis as any).os = os;
+
   // Mount virtual filesystems before any code reads them
   fs.mountVFS('/proc', procFS);
   fs.mountVFS('/dev',  devFSMount);  // Phase 6: /dev device nodes
@@ -133,6 +166,10 @@ function main(): void {
 
   registerCommands(globalThis as any);
   printBanner();
+
+  // ── Phase 3.5: Hypervisor / guest-addons detection ─────────────────────
+  var hvInfo = detectHypervisor();
+  kernel.serialPut('[hypervisor] detected: ' + hvInfo.hypervisor + '\n');
 
   // ── Phase 4: Physical memory manager + hardware paging ───────────────────
   physAlloc.init();
@@ -194,6 +231,9 @@ function main(): void {
   kernel.serialPut('POSIX layer ready: devFS mounted, FDTable wired, syscalls active\n');
 
   // ── Phase 7: Real networking ────────────────────────────────────────────── //
+  // Detect and init the NIC immediately (fast — just reads MAC address).
+  // DHCP discovery runs later as a non-blocking background coroutine so the
+  // WM / browser start without waiting for a DHCP server (fixes boot freeze).
   function formatMac(b: number[]): string {
     var parts: string[] = [];
     for (var i = 0; i < 6; i++) {
@@ -207,50 +247,13 @@ function main(): void {
   if (nicOk) {
     var pciAddr = kernel.netPciAddr();
     kernel.serialPut('virtio-net found at PCI ' + pciAddr + '\n');
-
-    // Wire hardware MAC into the net stack
     net.initNIC();
     var macBytes = kernel.netMacAddress();
     kernel.serialPut('MAC: ' + formatMac(macBytes) + '\n');
-
-    // DHCP
-    var dhcpConf = dhcpDiscover();
-    if (dhcpConf) {
-      kernel.serialPut('DHCP: acquired ' + dhcpConf.ip + '/24 gw ' + dhcpConf.gateway + '\n');
-
-      // DNS
-      var exampleIP = dnsResolve('example.com');
-      if (exampleIP) {
-        kernel.serialPut('DNS: resolved example.com \u2192 ' + exampleIP + '\n');
-
-        // TCP connect test
-        var tcpTestSock = net.createSocket('tcp');
-        var tcpOk = net.connect(tcpTestSock, exampleIP, 80);
-        kernel.serialPut('TCP connect to ' + exampleIP + ':80: ' +
-                          (tcpOk ? 'OK' : 'FAIL') + '\n');
-        if (tcpOk) net.close(tcpTestSock);
-
-        // HTTPS / TLS 1.3 test
-        var httpsResult = httpsGet('example.com', exampleIP, 443, '/');
-        kernel.serialPut('TLS handshake: ' +
-                          (httpsResult.tlsOk ? 'OK' : 'FAIL') + '\n');
-        if (httpsResult.tlsOk && httpsResult.response) {
-          kernel.serialPut('HTTPS GET /: ' + httpsResult.response.status +
-                            ' OK (received ' + httpsResult.response.body.length +
-                            ' bytes)\n');
-        } else if (httpsResult.tlsOk) {
-          kernel.serialPut('HTTPS GET /: no response\n');
-        }
-      } else {
-        kernel.serialPut('DNS: resolution failed (no internet?)\n');
-      }
-    } else {
-      kernel.serialPut('DHCP: no offer received\n');
-    }
+    kernel.serialPut('[net] NIC ready — DHCP will run in background\n');
   } else {
     kernel.serialPut('virtio-net: not present\n');
   }
-  kernel.serialPut('Socket test suite: PASS\n');
 
   // ── Phase 3: Framebuffer / WM ────────────────────────────────────────────
   var fbInfo = kernel.fbInfo();
@@ -262,15 +265,72 @@ function main(): void {
       var wmInst = new WindowManager(screen);
       setWM(wmInst);
 
+      // Register the child-process FS bridge so child runtimes spawned via
+      // wm.launchApp() / os.wm.launchApp() can perform file I/O via the main
+      // runtime's filesystem implementation (in-memory VFS + FAT32/FAT16).
+      kernel.registerChildFSBridge({
+        readFile:  function(path: string) { return fs.readFile(path); },
+        writeFile: function(path: string, data: string) { return fs.writeFile(path, data); },
+        readDir:   function(path: string) {
+          var entries = fs.ls(path);
+          return JSON.stringify(entries ? (entries as any[]).map(function(e: any) { return e.name; }) : []);
+        },
+        exists:    function(path: string) { return fs.readFile(path) !== null || fs.ls(path) !== null; },
+        stat:      function(path: string) { var s = fs.stat(path); return s ? JSON.stringify(s) : null; },
+      });
+
+      // Step 11: Install the QJS bytecode JIT compiler.
+      // The hook fires from QuickJS's call dispatch when a function becomes hot
+      // (call_count >= 100).  Requires JSOS_JIT_HOOK + Step-5 quickjs.c patch;
+      // kernel.setJITHook() is a no-op on unpatched builds so this is safe either way.
+      var qjsJit = new QJSJITHook();
+      qjsJit.install();
+      (globalThis as any).__qjsJit = qjsJit;
+
+      // Tier-2 JIT: compile OS integer kernels (checksum, memcpy, CRC-32, etc.)
+      // at module-load time so they run native from the very first call.
+      JITOSKernels.init();
+
+      // Tier-2 JIT: compile browser engine hot-paths (string hash, canvas clear,
+      // CSS int parse, composite row, text width, HTML scan) so the browser
+      // renders pages at native speed from the very first page load.
+      JITBrowserEngine.init();
+
+      // Pre-warm the gzip/DEFLATE pipeline so the first HTTP response is fast.
+      // This runs gunzip() 4x on a tiny synthetic payload, causing QJSJITHook
+      // to compile huffDecode/inflateBlock/BitReader to native before DHCP fires.
+      _prewarmDeflate();
+      kernel.serialPut('[boot] deflate pipeline pre-warmed\n');
+
+      // Register JIT stats providers so os.system.jitStats() returns live data.
+      _registerJITStats(qjsJit, () => JITOSKernels.stats());
+
+      // ── Background network bootstrap (non-blocking) ────────────────────
+      // DHCP runs as a coroutine driven by kernel.yield() in the WM loop.
+      // The browser uses os.fetchAsync which is also coroutine-based, so
+      // it will naturally wait until the stack has an IP before succeeding.
+      if (nicOk) {
+        dhcpDiscoverAsync(function(conf) {
+          if (conf) {
+            kernel.serialPut('[net] DHCP ok: ' + conf.ip + ' gw ' + conf.gateway + '\n');
+            ntp.startPeriodicSync();
+            // Navigate the browser to google.com now that the network stack has an IP.
+            browserApp.navigate('https://www.google.com/');
+          } else {
+            kernel.serialPut('[net] DHCP: no offer — no network\n');
+          }
+        });
+      }
+
       // ── Phase 9: JSOS Native Browser ──────────────────────────────────────
       // Launch the JSOS native TypeScript browser.  Written 100% in TypeScript
       // — no Chromium, no external runtimes.  Uses the JSOS DNS + HTTP/HTTPS
       // stack for real network requests and renders HTML on the WM canvas.
-      wmInst.createWindow({
+      var browserWin = wmInst.createWindow({
         title:     'Browser',
-        x: 20, y: 20,
-        width:  Math.min(screen.width  - 40, 1024),
-        height: Math.min(screen.height - 80, 700),
+        x: 0, y: 0,
+        width:  screen.width,
+        height: screen.height - 50,
         app:    browserApp,
         closeable: true,
       });
@@ -298,6 +358,10 @@ function main(): void {
         closeable: false,
       });
 
+      // Focus the browser window so it renders on top of the terminal
+      wmInst.focusWindow(browserWin.id);
+      wmInst.bringToFront(browserWin.id);
+
       kernel.serialPut('Window manager started\n');
       kernel.serialPut('Terminal app launched\n');
       kernel.serialPut('REPL ready (windowed mode)\n');
@@ -306,10 +370,91 @@ function main(): void {
       // kernel.yield() wakes any sleeping JS processes before input/render.
       // kernel.sleep() uses 'hlt' so the CPU is truly idle between frames
       // instead of burning 100% on a spin-wait.
-      for (;;) {
+      var _guardedRun = typeof (kernel as any).guardedRun === 'function'
+        ? (kernel as any).guardedRun.bind(kernel)
+        : null;
+      // Minimal event loop: ALL JS logic is inside guardedRun so that any
+      // #PF / #GP during a frame is caught.  No complex code between
+      // guardedRun calls — only kernel.sleep(8) which is a trivial C call.
+      // _tickChildProcs now auto-destroys faulting children, so the same
+      // corrupt child won't be re-ticked on the next frame.
+      var _wasActive = false;
+      var _tickFn = function() {
         kernel.yield();          // cooperative scheduler tick — unblock sleeping threads
-        wmInst.tick();           // poll input, render, composite, flip
-        kernel.sleep(16);        // halt CPU until next ~2 timer ticks (~20 ms)
+        try { _wasActive = wmInst.tick(); } catch(e) { kernel.serialPut('[tick] wm error: ' + String(e).slice(0, 100) + '\n'); }
+        try { init.tick(kernel.getUptime()); } catch(e) { kernel.serialPut('[tick] init error: ' + String(e).slice(0, 100) + '\n'); }
+        try { writebackTimer.tick(kernel.getTicks()); } catch(e) { kernel.serialPut('[tick] wb error: ' + String(e).slice(0, 100) + '\n'); }
+      };
+      // Fault storm detection: if guardedRun returns -1 (CPU fault) more than
+      // _FAULT_THRESHOLD consecutive times, we assume a coroutine is stuck in a
+      // crash loop.  Clear all pending coroutines to break the cycle so the OS
+      // can continue operating.  The threshold is low (3) so recovery is fast.
+      var _consecutiveFaults = 0;
+      var _FAULT_THRESHOLD = 5;
+      var _faultStormCount = 0;     // how many fault storms we've seen this page
+      var _faultCooldownUntil = 0;  // skip ticks until this uptime
+      var _idleCount = 0;
+      for (;;) {
+        // Cooldown: after a fault storm, skip event loop ticks for 500ms to let
+        // the system stabilize (GC finishes, corrupted pointers settle).
+        if (_faultCooldownUntil > 0) {
+          var _ut = kernel.getUptime();
+          if (_ut < _faultCooldownUntil) {
+            kernel.sleep(10);
+            continue;
+          }
+          _faultCooldownUntil = 0;
+        }
+        if (_guardedRun) {
+          var _gr = _guardedRun(_tickFn);
+          if (_gr === -1) {
+            _consecutiveFaults++;
+            // Accelerated fault storm: if heap corruption is confirmed,
+            // skip the remaining consecutive-fault countdown — the same
+            // corrupted function pointer will fault every frame anyway.
+            if (_consecutiveFaults < _FAULT_THRESHOLD) {
+              try {
+                var _fhs = (kernel as any).heapStats();
+                if (_fhs && _fhs.headViolations > 0) {
+                  kernel.serialPut('[main] heap violations detected (' + _fhs.headViolations + ') — accelerating fault storm\n');
+                  _consecutiveFaults = _FAULT_THRESHOLD;
+                }
+              } catch(_) {}
+            }
+            if (_consecutiveFaults >= _FAULT_THRESHOLD) {
+              _faultStormCount++;
+              kernel.serialPut('[main] fault storm #' + _faultStormCount + ' (' + _consecutiveFaults + ' consecutive faults) — clearing coroutines\n');
+              threadManager.clearCoroutines();
+              // Reload the browser page to flush any corrupted QJS heap objects
+              // (child buffer overflow can corrupt main runtime QJS objects;
+              //  reloading creates fresh layout lines and DOM objects).
+              // Only reload once — avoid infinite navigate loop.
+              if (_faultStormCount <= 1) {
+                try {
+                  var _reloadUrl = browserApp.currentUrl();
+                  if (_reloadUrl && _reloadUrl !== 'about:blank' && _reloadUrl !== 'about:jsos') {
+                    kernel.serialPut('[main] fault storm — reloading browser: ' + _reloadUrl + '\n');
+                    browserApp.navigate(_reloadUrl);
+                  }
+                } catch (_fre) {}
+              }
+              _consecutiveFaults = 0;
+              // Cooldown: pause event loop for 500ms so any pending GC /
+              // free operations that touch corrupted metadata can settle.
+              _faultCooldownUntil = kernel.getUptime() + 500;
+            }
+          } else {
+            _consecutiveFaults = 0;
+          }
+        } else {
+          try { _tickFn(); } catch (_) {}
+        }
+        // Adaptive sleep: 1ms when active (fast poll), ramp to 4ms when idle.
+        // Reset idle count on real activity (input, dirty windows, coroutines).
+        if (_consecutiveFaults > 0) { kernel.sleep(2); _idleCount = 0; }
+        else if (_wasActive) { kernel.sleep(1); _idleCount = 0; }
+        else if (_idleCount < 4) { kernel.sleep(1); _idleCount++; }
+        else { kernel.sleep(4); }
       }
     }
   }
