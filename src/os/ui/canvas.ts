@@ -837,6 +837,22 @@ export class Canvas {
     var cols = Math.min(srcW, this.width  - dx);
     var rows = Math.min(srcH, this.height - dy);
     if (cols <= 0 || rows <= 0) return;
+    // JIT fast-path: Porter-Duff source-over via native x86-32 code.
+    // alpha=256 makes compositeOver use the source pixel's own alpha channel.
+    if (_ensureJIT()) {
+      var dstBase = this.bufPhysAddr();
+      var srcBase = JITCanvas.physAddr(src.buffer as ArrayBuffer);
+      if (dstBase && srcBase) {
+        for (var row = 0; row < rows; row++) {
+          var dstY = dy + row;
+          if (dstY < 0 || dstY >= this.height) continue;
+          var srcOff = row * srcW;
+          var dstOff = dstY * this.width + dx;
+          JITCanvas.compositeOver(dstBase + dstOff * 4, srcBase + srcOff * 4, cols, 256);
+        }
+        return;
+      }
+    }
     var buf = this._buf;
     var w = this.width;
     for (var row = 0; row < rows; row++) {

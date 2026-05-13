@@ -1,0 +1,26 @@
+{
+  "entries": [
+    "./crypto.ts",
+    "./sort.ts",
+    "./compress.ts",
+    "./render.ts",
+    "./memory-ops.ts"
+  ],
+  "options": {
+    "target": "release",
+    "optimizeLevel": 3,
+    "shrinkLevel": 0,
+    "converge": false,
+    "noAssert": true,
+    "runtime": "stub",
+    "exportRuntime": false,
+    "use": "abort=~lib/wasi/index/abort"
+  },
+  "targets": {
+    "release": {
+      "optimizeLevel": 3,
+      "shrinkLevel": 0,
+      "noAssert": true
+    }
+  }
+}

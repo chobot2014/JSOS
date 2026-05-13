@@ -27,6 +27,7 @@ extern volatile int  _js_fault_vector;
 extern volatile int  _js_in_page_eval;
 #include "virtio_net.h"
 #include "jit.h"
+#include "wasm_runtime.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -4001,23 +4002,114 @@ static JSValue js_bigint64array_test(JSContext *c, JSValueConst _t, int _ac, JSV
     return r;
 }
 
-/* ── Items 126-127: WASM interpreter stub ───────────────────────────────── */
-/* A minimal stub that accepts a WASM binary buffer and either interprets it
- * (item 126: wasm3/wabt binding) or JIT-compiles it (item 127).
- * Real implementation would integrate wasm3 or a custom WASM JIT.         */
-static JSValue js_wasm_instantiate(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+/* ── Items 126-127: WASM runtime (interpreter + x86-32 JIT) ─────────────── */
+
+/*
+ * kernel.wasmInstantiate(arrayBuffer) → {id, memAddr, memSize, exports} | null
+ *
+ * Parses a WASM MVP binary and returns a live instance handle.  The returned
+ * object contains:
+ *   id       — numeric slot (0–3); pass to wasmJitCompile / wasmCall
+ *   memAddr  — physical address of the 1 MB linear memory slab
+ *   memSize  — byte length of linear memory (always WASM_MEM_SIZE)
+ *   exports  — [{name, funcIdx, paramCount}] for all exported functions
+ */
+static JSValue js_wasm_instantiate(JSContext *c, JSValueConst _t, int _ac,
+                                    JSValueConst *av) {
     (void)_t;
-    platform_serial_puts("[WASM] wasm_instantiate() stub — not yet implemented\n");
-    if (_ac < 1) return JS_ThrowTypeError(c, "Expected ArrayBuffer");
-    /* Return null to indicate failure */
-    return JS_NULL;
+    if (_ac < 1) return JS_ThrowTypeError(c, "wasmInstantiate: expected ArrayBuffer");
+
+    size_t bin_len = 0;
+    uint8_t *bin = JS_GetArrayBuffer(c, &bin_len, av[0]);
+    if (!bin || bin_len < 8)
+        return JS_ThrowTypeError(c, "wasmInstantiate: invalid ArrayBuffer");
+
+    int id = wasm_instantiate(bin, (uint32_t)bin_len);
+    if (id < 0) return JS_NULL;
+
+    JSValue obj = JS_NewObject(c);
+    JS_SetPropertyStr(c, obj, "id", JS_NewInt32(c, id));
+
+    /* Expose linear memory as a zero-copy ArrayBuffer */
+    uint32_t mem_size = 0;
+    uint8_t *mem_ptr  = wasm_get_memory(id, &mem_size);
+    if (mem_ptr) {
+        JS_SetPropertyStr(c, obj, "memAddr",
+            JS_NewUint32(c, (uint32_t)(uintptr_t)mem_ptr));
+        JS_SetPropertyStr(c, obj, "memSize", JS_NewUint32(c, mem_size));
+        /* Expose linear memory as a zero-copy ArrayBuffer (BSS, never heap-freed) */
+        JSValue mab = JS_NewArrayBuffer(c, mem_ptr, mem_size, _sbuf_no_free, NULL, 0);
+        JS_SetPropertyStr(c, obj, "memory", mab);
+    } else {
+        JS_SetPropertyStr(c, obj, "memAddr", JS_NewInt32(c, 0));
+        JS_SetPropertyStr(c, obj, "memSize", JS_NewInt32(c, 0));
+        JS_SetPropertyStr(c, obj, "memory", JS_NULL);
+    }
+
+    /* Build exports array: [{name, funcIdx, paramCount}] */
+    JSValue exports_arr = JS_NewArray(c);
+    int n_exports = wasm_export_count(id);
+    for (int i = 0; i < n_exports; i++) {
+        char name[64]; uint32_t fidx = 0;
+        if (!wasm_export_info(id, i, name, &fidx)) continue;
+        JSValue ex = JS_NewObject(c);
+        JS_SetPropertyStr(c, ex, "name",       JS_NewString(c, name));
+        JS_SetPropertyStr(c, ex, "funcIdx",    JS_NewUint32(c, fidx));
+        JS_SetPropertyStr(c, ex, "paramCount",
+            JS_NewInt32(c, wasm_func_param_count(id, fidx)));
+        JS_SetPropertyUint32(c, exports_arr, (uint32_t)i, ex);
+        JS_FreeValue(c, ex);
+    }
+    JS_SetPropertyStr(c, obj, "exports", exports_arr);
+    return obj;
 }
 
-static JSValue js_wasm_jit_compile(JSContext *c, JSValueConst _t, int _ac, JSValueConst *av) {
+/*
+ * kernel.wasmJitCompile(id, funcIdx) → nativeAddr (uint32) or 0 on failure.
+ *
+ * JIT-compiles the specified WASM function to x86-32 machine code.
+ * After success the function can be called via kernel.jitCallI(nativeAddr, ...).
+ * Only i32-only functions are supported by the JIT; others fall back to
+ * kernel.wasmCall().
+ */
+static JSValue js_wasm_jit_compile(JSContext *c, JSValueConst _t, int _ac,
+                                    JSValueConst *av) {
     (void)_t;
-    platform_serial_puts("[WASM-JIT] wasm_jit_compile() stub — not yet implemented\n");
-    if (_ac < 1) return JS_ThrowTypeError(c, "Expected ArrayBuffer");
-    return JS_NULL;
+    if (_ac < 2) return JS_NewUint32(c, 0);
+    int32_t id = 0; uint32_t fidx = 0;
+    JS_ToInt32(c,  &id,   av[0]);
+    JS_ToUint32(c, &fidx, av[1]);
+    uint32_t addr = wasm_jit_compile(id, fidx);
+    return JS_NewUint32(c, addr);
+}
+
+/*
+ * kernel.wasmCall(id, funcIdx, a0, a1, a2, a3) → int32 result.
+ * Interprets a WASM function (fallback when JIT is unavailable or unsupported).
+ */
+static JSValue js_wasm_call(JSContext *c, JSValueConst _t, int _ac,
+                             JSValueConst *av) {
+    (void)_t;
+    if (_ac < 2) return JS_NewInt32(c, 0);
+    int32_t id = 0; uint32_t fidx = 0;
+    JS_ToInt32(c,  &id,   av[0]);
+    JS_ToUint32(c, &fidx, av[1]);
+    int32_t args[4] = {0, 0, 0, 0};
+    int nargs = _ac - 2; if (nargs > 4) nargs = 4;
+    for (int i = 0; i < nargs; i++) JS_ToInt32(c, &args[i], av[2 + i]);
+    return JS_NewInt32(c, wasm_call(id, fidx, args, nargs));
+}
+
+/*
+ * kernel.wasmFree(id) — release an instance slot.
+ */
+static JSValue js_wasm_free(JSContext *c, JSValueConst _t, int _ac,
+                             JSValueConst *av) {
+    (void)c; (void)_t;
+    if (_ac < 1) return JS_UNDEFINED;
+    int32_t id = 0; JS_ToInt32(c, &id, av[0]);
+    wasm_free(id);
+    return JS_UNDEFINED;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -4384,9 +4476,11 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("devToolsEnable",      0, js_devtools_enable),
     /* BigInt64Array availability probe (item 125) */
     JS_CFUNC_DEF("bigInt64ArrayTest",   0, js_bigint64array_test),
-    /* WASM stubs (items 126-127) */
+    /* WASM runtime (items 126-127 + wasmCall / wasmFree extensions) */
     JS_CFUNC_DEF("wasmInstantiate",     1, js_wasm_instantiate),
-    JS_CFUNC_DEF("wasmJitCompile",      1, js_wasm_jit_compile),
+    JS_CFUNC_DEF("wasmJitCompile",      2, js_wasm_jit_compile),
+    JS_CFUNC_DEF("wasmCall",            6, js_wasm_call),
+    JS_CFUNC_DEF("wasmFree",            1, js_wasm_free),
     /* Module loader registration (items 118, 119) */
     JS_CFUNC_DEF("setModuleReader",     1, js_set_module_reader),
     /* FPU/SSE context save/restore (item 147) */

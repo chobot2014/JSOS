@@ -31,6 +31,7 @@ import { registerCommands } from '../ui/commands.js';
 import { QJSJITHook } from '../process/qjs-jit.js';
 import { JITOSKernels } from '../process/jit-os.js';
 import { JITBrowserEngine } from '../apps/browser/jit-browser.js';
+import { initWasmModules } from '../process/wasm-loader.js';
 import { _registerJITStats, os } from './sdk.js';
 import { writebackTimer } from '../fs/buffer-cache.js';
 import { ntp } from '../net/ntp.js';
@@ -163,6 +164,11 @@ function main(): void {
   init.initialize();   // registers and starts services up to runlevel 3
   kernel.serialPut('OS kernel started\n');
   kernel.serialPut('Init system ready\n');
+
+  // ── WASM hot-path modules (crypto, sort, compress, render, memory-ops) ───
+  // Decodes embedded base64 blobs, instantiates 4 kernel WASM slots, and
+  // JIT-compiles all i32 exports to native x86-32 code.
+  initWasmModules();
 
   registerCommands(globalThis as any);
   printBanner();
