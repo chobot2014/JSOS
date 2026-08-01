@@ -1,0 +1,712 @@
+/**
+ * cache.ts — Browser performance caches
+ *
+ * Provides module-level singleton caches that survive across re-renders
+ * but are cleared on navigation:
+ *
+ *  textMeasureCache      — text width memoisation
+ *  computedStyleCache    — per-element CSS computed style (generation-based)
+ *  imageBitmapCache      — URLs → decoded RGBA pixel arrays
+ *  layoutResultCache     — content fingerprint → LayoutResult
+ *  cssRuleBuckets        — O(1) selector pre-indexing by tag/class/id
+ *  objectPool            — reusable RenderedSpan / RenderedLine objects
+ *  ArrayBufferPool       — fixed-size recycled ArrayBuffers for network I/O
+ */
+
+import type { CSSRule, CSSProps } from './stylesheet.js';
+import type { RenderedLine, RenderedSpan } from './types.js';
+import { CHAR_W } from './constants.js';
+
+// ── Text Measurement Cache ──────────────────────────────────────────────────
+//
+// Maps `"${text}|${fontScale}"` → pixel width.
+// Text width for our fixed-width font = text.length × CHAR_W × fontScale.
+// The cache avoids the repeated multiply/float operations that hot layout paths
+// invoke thousands of times per page render.
+
+var _textWidthCache = new Map<string, number>();
+var _textWidthHits  = 0;
+var _textWidthTotal = 0;
+
+/** Return the pixel width of `text` at `fontScale` (default 1). Cached. */
+export function measureTextWidth(text: string, fontScale = 1): number {
+  _textWidthTotal++;
+  var key = text + '|' + fontScale;
+  var cached = _textWidthCache.get(key);
+  if (cached !== undefined) { _textWidthHits++; return cached; }
+  var w = text.length * CHAR_W * fontScale;
+  // Evict if cache is too large (> 8192 entries)
+  if (_textWidthCache.size > 8192) _textWidthCache.clear();
+  _textWidthCache.set(key, w);
+  return w;
+}
+
+/** Flush the text measurement cache (call on navigation or font change). */
+export function flushTextCache(): void {
+  _textWidthCache.clear();
+  _textWidthHits = 0;
+  _textWidthTotal = 0;
+}
+
+/** Return hit-rate stats for debugging. */
+export function textCacheStats(): { hits: number; total: number; hitRate: number } {
+  return {
+    hits:    _textWidthHits,
+    total:   _textWidthTotal,
+    hitRate: _textWidthTotal > 0 ? _textWidthHits / _textWidthTotal : 0,
+  };
+}
+
+// ── Glyph Metrics Cache ─────────────────────────────────────────────────────
+//
+// Maps `"${fontFamily}|${fontSize}|${fontWeight}"` → { ascent, descent, lineGap }
+// For our fixed bitmap font this is constant, but the cache future-proofs outright
+// pixel-font switching and satisfies ctx.measureText() calls from page scripts.
+
+interface FontMetrics { ascent: number; descent: number; lineGap: number; }
+var _fontMetricsCache = new Map<string, FontMetrics>();
+
+export function getFontMetrics(family: string, size: number, weight: string): FontMetrics {
+  var key = family + '|' + size + '|' + weight;
+  var hit = _fontMetricsCache.get(key);
+  if (hit) return hit;
+  // Default values for our 8×12 bitmap font at scale 1
+  var scale  = Math.round(size / 12) || 1;
+  var result: FontMetrics = { ascent: 10 * scale, descent: 2 * scale, lineGap: 2 * scale };
+  _fontMetricsCache.set(key, result);
+  return result;
+}
+
+// ── Computed Style Cache ────────────────────────────────────────────────────
+//
+// Per-element style computation is expensive (requires walking all CSS rules).
+// We cache the result keyed by (elementId, generationStamp).  The generation
+// counter is bumped whenever the page's stylesheet or any element's class/style
+// attribute changes.
+
+var _styleGeneration = 0;
+
+/** Increment the generation whenever any style source changes. */
+export function bumpStyleGeneration(): void { _styleGeneration++; }
+
+/** Current CSS style generation. */
+export function currentStyleGeneration(): number { return _styleGeneration; }
+
+interface StyleCacheEntry {
+  gen:   number;
+  value: Record<string, string>;
+}
+
+var _styleCache = new Map<string, StyleCacheEntry>();
+var _styleCacheHits  = 0;
+var _styleCacheTotal = 0;
+
+/**
+ * Return a cached computed style object for the given element key + generation,
+ * or null if the entry is stale or missing.
+ */
+export function getCachedStyle(key: string): Record<string, string> | null {
+  _styleCacheTotal++;
+  var entry = _styleCache.get(key);
+  if (entry && entry.gen === _styleGeneration) { _styleCacheHits++; return entry.value; }
+  return null;
+}
+
+/** Store a computed style in the cache. */
+export function setCachedStyle(key: string, value: Record<string, string>): void {
+  if (_styleCache.size > 4096) _styleCache.clear();
+  _styleCache.set(key, { gen: _styleGeneration, value });
+}
+
+/** Flush the style cache (e.g., after navigation). */
+export function flushStyleCache(): void {
+  _styleCache.clear();
+  _styleGeneration = 0;
+  _styleCacheHits  = 0;
+  _styleCacheTotal = 0;
+}
+
+// ── Image Bitmap Cache ──────────────────────────────────────────────────────
+//
+// Decoded RGBA pixel arrays keyed by source URL.
+// Avoids re-decoding the same JPEG/PNG on every render frame.
+// The cache also stores a scaled copy at (destW, destH) so resize operations
+// don't repeat.
+
+interface BitmapEntry {
+  w:    number;
+  h:    number;
+  data: Uint32Array;
+}
+
+interface ScaledEntry {
+  w:    number;
+  h:    number;
+  data: Uint32Array;
+}
+
+interface ImageEntry {
+  original: BitmapEntry | null;
+  // scaled copies keyed by "w×h"
+  scaled: Map<string, ScaledEntry>;
+}
+
+var _imageCache = new Map<string, ImageEntry>();
+
+/** Store the decoded original bitmap for a URL. */
+export function storeImageBitmap(url: string, w: number, h: number, data: Uint32Array): void {
+  var entry = _imageCache.get(url);
+  if (!entry) { entry = { original: null, scaled: new Map() }; _imageCache.set(url, entry); }
+  entry.original = { w, h, data };
+}
+
+/** Retrieve the decoded original bitmap, or null if not cached. */
+export function getImageBitmap(url: string): BitmapEntry | null {
+  return _imageCache.get(url)?.original ?? null;
+}
+
+/** Store a scaled copy. */
+export function storeScaledImage(url: string, destW: number, destH: number, data: Uint32Array): void {
+  var entry = _imageCache.get(url);
+  if (!entry) { entry = { original: null, scaled: new Map() }; _imageCache.set(url, entry); }
+  entry.scaled.set(destW + 'x' + destH, { w: destW, h: destH, data });
+}
+
+/** Retrieve a pre-scaled copy, or null. */
+export function getScaledImage(url: string, destW: number, destH: number): Uint32Array | null {
+  return _imageCache.get(url)?.scaled.get(destW + 'x' + destH)?.data ?? null;
+}
+
+/** Flush image cache on navigation. */
+export function flushImageCache(): void { _imageCache.clear(); }
+
+// ── Layout Result Cache ─────────────────────────────────────────────────────
+//
+// Cache full LayoutResult objects keyed by a fingerprint string that combines
+// the page's content hash and viewport width.  The fingerprint is built from
+// a fast hash of the rendered node types + text lengths + CSS fingerprint.
+
+import type { LayoutResult } from './types.js';
+
+var _layoutCache = new Map<string, LayoutResult>();
+var _layoutHits  = 0;
+var _layoutTotal = 0;
+
+export function getLayoutCache(key: string): LayoutResult | null {
+  _layoutTotal++;
+  var cached = _layoutCache.get(key);
+  if (cached) { _layoutHits++; return cached; }
+  return null;
+}
+
+export function setLayoutCache(key: string, result: LayoutResult): void {
+  if (_layoutCache.size > 32) _layoutCache.clear();  // keep only recent viewports
+  _layoutCache.set(key, result);
+}
+
+export function flushLayoutCache(): void {
+  _layoutCache.clear();
+  _layoutHits  = 0;
+  _layoutTotal = 0;
+}
+
+/**
+ * Build a fast fingerprint for a list of nodes and a viewport width.
+ * Not a cryptographic hash — just good enough to detect content changes.
+ */
+export function layoutFingerprint(nodes: ReadonlyArray<{ type: string; spans: ReadonlyArray<{ text: string }> }>, contentW: number): string {
+  var h = contentW;
+  for (var i = 0; i < nodes.length; i++) {
+    var nd = nodes[i];
+    h = (h * 31 + nd.type.length) | 0;
+    for (var j = 0; j < nd.spans.length; j++) {
+      h = (h * 31 + nd.spans[j].text.length) | 0;
+    }
+  }
+  return h.toString(16);
+}
+
+// ── Per-block layout sub-cache (item 2.3 — incremental layout) ─────────────
+// Maps a per-block fingerprint to the array of RenderedLine[] that block
+// produced.  When a block's content + container width are identical to the
+// previous frame, the cached lines are reused (only y-offsets are patched).
+// This avoids re-running word-wrap / flex / grid for unchanged blocks.
+
+export interface BlockLayoutCache {
+  lines: any[];       // RenderedLine[] produced by this block
+  widgets: any[];     // PositionedWidget[] produced by this block
+  totalH: number;     // total height consumed by this block
+}
+
+var _blockLayoutCache = new Map<string, BlockLayoutCache>();
+
+export function getBlockLayoutCache(key: string): BlockLayoutCache | null {
+  return _blockLayoutCache.get(key) ?? null;
+}
+
+export function setBlockLayoutCache(key: string, result: BlockLayoutCache): void {
+  if (_blockLayoutCache.size > 256) _blockLayoutCache.clear();
+  _blockLayoutCache.set(key, result);
+}
+
+export function flushBlockLayoutCache(): void {
+  _blockLayoutCache.clear();
+}
+
+/** Fast hash for a single RenderNode block. */
+export function blockFingerprint(nd: { type: string; spans: ReadonlyArray<{ text: string }> }, width: number): string {
+  var h = width;
+  h = (h * 31 + nd.type.charCodeAt(0)) | 0;
+  for (var j = 0; j < nd.spans.length; j++) {
+    var t = nd.spans[j].text;
+    h = (h * 31 + t.length) | 0;
+    if (t.length > 0) h = (h * 31 + t.charCodeAt(0)) | 0;
+    if (t.length > 3) h = (h * 31 + t.charCodeAt(t.length - 1)) | 0;
+  }
+  return h.toString(16);
+}
+
+// ── CSS Rule Index (O(1) selector pre-bucketing) ────────────────────────────
+//
+// When the stylesheet is loaded, rules are indexed into three hash maps:
+//   • tagBuckets:   tag name → CSSRule[]
+//   • classBuckets: first class → CSSRule[]
+//   • idBuckets:    id → CSSRule[]
+//   • universalRules: rules with only * or pseudo-class selectors
+//
+// matchingRules() returns the union of relevant buckets + universal rules,
+// eliminating rules that cannot possibly match before any actual selector
+// matching is done.  For a typical page this reduces work by 70–90%.
+
+export interface RuleIndex {
+  tagBuckets:     Map<string, CSSRule[]>;
+  classBuckets:   Map<string, CSSRule[]>;
+  idBuckets:      Map<string, CSSRule[]>;
+  universalRules: CSSRule[];
+  contentRules:   CSSRule[];   // rules with props.content set (for ::before/::after)
+  /** All class names referenced in ANY CSS selector — used to filter
+   *  cache keys: classes not in this set are irrelevant to CSS matching
+   *  and can be stripped from cache keys for better hit rate. */
+  cssClassSet:    Set<string>;
+  /** Pre-merged props from universal rules that unconditionally match every element
+   *  (simple `*` selectors with no pseudos/attrs).  Applied at the start of
+   *  computeElementStyle, removed from universalRules to avoid redundant iteration. */
+  alwaysMatchProps: CSSProps | null;
+  /** Number of always-matching universal rules removed from universalRules. */
+  alwaysMatchCount: number;
+}
+
+/** Build a RuleIndex from a list of CSSRule objects. */
+export function buildRuleIndex(rules: CSSRule[]): RuleIndex {
+  var tagBuckets    = new Map<string, CSSRule[]>();
+  var classBuckets  = new Map<string, CSSRule[]>();
+  var idBuckets     = new Map<string, CSSRule[]>();
+  var universalRules: CSSRule[] = [];
+
+  function bucket<K>(map: Map<K, CSSRule[]>, key: K, rule: CSSRule): void {
+    var arr = map.get(key);
+    if (!arr) { arr = []; map.set(key, arr); }
+    arr.push(rule);
+  }
+
+  for (var ri = 0; ri < rules.length; ri++) {
+    var rule = rules[ri];
+    rule.order = ri;  // stamp source order for O(1) cascade ordering (avoids indexOf O(n²))
+    // Skip state-only rules (:hover/:focus/:active) — they never match during
+    // static layout, so adding them to buckets wastes iterations in candidateRules
+    // and the matching loop.  _stateOnly is set by buildSheetIndex before this call.
+    if (rule._stateOnly) continue;
+    var placed = false;
+
+    // Fast-path: if parsedSels are available, use them directly (no regex)
+    if (rule.parsedSels && rule.parsedSels.length > 0) {
+      for (var psi = 0; psi < rule.parsedSels.length; psi++) {
+        var psels = rule.parsedSels[psi];
+        var pc    = psels && psels.compounds[0];  // rightmost compound (subject element)
+        if (!pc) continue;
+        // Prefer ID > class > tag for bucket selection (most specific first)
+        if (pc.ids.length > 0) {
+          bucket(idBuckets, pc.ids[0], rule); placed = true; continue;
+        }
+        if (pc.classes.length > 0) {
+          bucket(classBuckets, pc.classes[0], rule); placed = true; continue;
+        }
+        if (pc.tag && pc.tag !== '*') {
+          bucket(tagBuckets, pc.tag, rule); placed = true; continue;
+        }
+        // Universal / pseudo / attr only — try to sub-bucket by pseudo-class
+        // before falling through to universalRules (checked against every element).
+        if (!placed) {
+          var _subBucketed = false;
+          for (var _pi = 0; _pi < pc.pseudos.length && !_subBucketed; _pi++) {
+            var _pn = pc.pseudos[_pi]!.name;
+            if (_pn === 'root') {
+              bucket(tagBuckets, 'html', rule); _subBucketed = true;
+            } else if (_pn === 'link' || _pn === 'any-link') {
+              bucket(tagBuckets, 'a', rule); _subBucketed = true;
+            } else if (_pn === 'visited') {
+              // :visited is always a conservative miss — discard rule entirely
+              _subBucketed = true;
+            }
+          }
+          if (_subBucketed) { placed = true; } else { universalRules.push(rule); placed = true; }
+        }
+      }
+      if (!placed) universalRules.push(rule);
+      continue;  // handled via parsedSels; skip the string-regex path below
+    }
+
+    // Fallback: string-based bucketing (for rules without parsedSels)
+    for (var si = 0; si < rule.sels.length; si++) {
+      var sel = rule.sels[si].trim();
+      // Rightmost compound part
+      var parts = sel.split(/\s+|(?=[.#[])|\s*[>+~]\s*/g);
+      var last  = parts[parts.length - 1] ?? '';
+
+      // ID selector?
+      var idM = last.match(/#([^.#[\s:]+)/);
+      if (idM) { bucket(idBuckets, idM[1], rule); placed = true; continue; }
+
+      // Class selector?
+      var clM = last.match(/\.([^.#[\s:]+)/);
+      if (clM) { bucket(classBuckets, clM[1], rule); placed = true; continue; }
+
+      // Tag selector?
+      var tagM = last.match(/^[a-zA-Z][a-zA-Z0-9-]*/);
+      if (tagM && tagM[0] !== '*') { bucket(tagBuckets, tagM[0].toLowerCase(), rule); placed = true; continue; }
+
+      // Universal / attribute / pseudo-class only
+      if (!placed) universalRules.push(rule);
+      placed = true;
+    }
+    if (!placed) universalRules.push(rule);
+  }
+
+  // Collect rules that have content property (for getPseudoContent fast-skip)
+  var contentRules: CSSRule[] = [];
+  for (var ci = 0; ci < rules.length; ci++) {
+    if (rules[ci]!.props.content) contentRules.push(rules[ci]!);
+  }
+
+  // Collect class names from the RIGHTMOST compound of each CSS selector.
+  // Only rightmost-compound classes affect which rules match the ELEMENT itself
+  // (non-rightmost classes are ancestor-matching context, which is already not
+  // captured in the cache key).  Using only rightmost classes dramatically
+  // reduces cache key uniqueness, improving hit rate.
+  // Also include classes from :not/:is/:where pseudo-class arguments (they
+  // test the current element, not ancestors).
+  var cssClassSet = new Set<string>();
+  for (var _cci = 0; _cci < rules.length; _cci++) {
+    var _ccr = rules[_cci]!;
+    if (_ccr.parsedSels) {
+      for (var _csi = 0; _csi < _ccr.parsedSels.length; _csi++) {
+        var _cps = _ccr.parsedSels[_csi]!;
+        // compounds[0] is the rightmost compound (the subject element)
+        var _cpc = _cps.compounds[0];
+        if (_cpc) {
+          for (var _cli = 0; _cli < _cpc.classes.length; _cli++) cssClassSet.add(_cpc.classes[_cli]!);
+          // Also collect from :not/:is/:where argument selectors (test current element)
+          for (var _cxi = 0; _cxi < _cpc.pseudos.length; _cxi++) {
+            var _cpx = _cpc.pseudos[_cxi]!;
+            if (_cpx.argParsed) {
+              for (var _cai = 0; _cai < _cpx.argParsed.length; _cai++) {
+                var _cap = _cpx.argParsed[_cai]!;
+                for (var _cak = 0; _cak < _cap.classes.length; _cak++) cssClassSet.add(_cap.classes[_cak]!);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return { tagBuckets, classBuckets, idBuckets, universalRules, contentRules, cssClassSet, alwaysMatchProps: null, alwaysMatchCount: 0 };
+}
+
+/**
+ * Return the candidate rules for an element with the given tag, id, and classes.
+ * Uses a numeric stamp to deduplicate rules that appear in multiple buckets,
+ * avoiding Set allocation on every call.
+ */
+var _candidateStamp = 0;
+// Reusable buffer — avoids allocating a new CSSRule[] per candidateRules call.
+// Safe because computeElementStyle consumes the result synchronously before
+// the next call.
+var _candidateBuf: CSSRule[] = [];
+var _candidateLen = 0;
+export function candidateRules(
+  index: RuleIndex,
+  tag:   string,
+  id:    string,
+  cls:   string[],
+): CSSRule[] {
+  var stamp = ++_candidateStamp;
+  _candidateLen = 0;
+
+  var tagRules = index.tagBuckets.get(tag);
+  if (tagRules) {
+    for (var i = 0; i < tagRules.length; i++) {
+      var r = tagRules[i]!;
+      if (r._stamp !== stamp) { r._stamp = stamp; _candidateBuf[_candidateLen++] = r; }
+    }
+  }
+  if (id) {
+    var idRules = index.idBuckets.get(id);
+    if (idRules) {
+      for (var i = 0; i < idRules.length; i++) {
+        var r = idRules[i]!;
+        if (r._stamp !== stamp) { r._stamp = stamp; _candidateBuf[_candidateLen++] = r; }
+      }
+    }
+  }
+  for (var ci = 0; ci < cls.length; ci++) {
+    var clRules = index.classBuckets.get(cls[ci]!);
+    if (clRules) {
+      for (var i = 0; i < clRules.length; i++) {
+        var r = clRules[i]!;
+        if (r._stamp !== stamp) { r._stamp = stamp; _candidateBuf[_candidateLen++] = r; }
+      }
+    }
+  }
+  var uniRules = index.universalRules;
+  for (var i = 0; i < uniRules.length; i++) {
+    var r = uniRules[i]!;
+    if (r._stamp !== stamp) { r._stamp = stamp; _candidateBuf[_candidateLen++] = r; }
+  }
+
+  // Truncate to exact length so caller can iterate with .length
+  _candidateBuf.length = _candidateLen;
+  return _candidateBuf;
+}
+
+// ── RenderedLine / RenderedSpan Object Pool ─────────────────────────────────
+//
+// Avoids creating thousands of short-lived objects per render frame.
+// The pool is purged on navigation.
+
+var _spanPool:  RenderedSpan[] = [];
+var _linePool:  RenderedLine[] = [];
+var _spansOut   = 0;
+var _linesOut   = 0;
+
+export function acquireSpan(x: number, text: string, color: number): RenderedSpan {
+  _spansOut++;
+  if (_spanPool.length > 0) {
+    var s = _spanPool.pop()!;
+    s.x = x; s.text = text; s.color = color;
+    s.href = undefined; s.bold = undefined; s.del = undefined;
+    s.mark = undefined; s.codeBg = undefined; s.underline = undefined;
+    s.searchHit = undefined; s.hitIdx = undefined; s.fontScale = undefined;
+    s.elId = undefined;
+    return s;
+  }
+  return { x, text, color };
+}
+
+export function releaseSpans(spans: RenderedSpan[]): void {
+  for (var i = 0; i < spans.length; i++) { _spansOut--; _spanPool.push(spans[i]); }
+  spans.length = 0;
+  if (_spanPool.length > 2048) _spanPool.length = 1024;  // trim
+}
+
+export function acquireLine(y: number, lineH: number): RenderedLine {
+  _linesOut++;
+  if (_linePool.length > 0) {
+    var l = _linePool.pop()!;
+    l.y = y; l.lineH = lineH; l.nodes = [];
+    l.preBg = undefined; l.quoteBg = undefined; l.quoteBar = undefined;
+    l.hrLine = undefined; l.bgColor = undefined;
+    return l;
+  }
+  return { y, nodes: [], lineH };
+}
+
+export function releaseLines(lines: RenderedLine[]): void {
+  for (var i = 0; i < lines.length; i++) {
+    releaseSpans(lines[i].nodes as RenderedSpan[]);
+    _linesOut--;
+    _linePool.push(lines[i]);
+  }
+  lines.length = 0;
+  if (_linePool.length > 1024) _linePool.length = 512;  // trim
+}
+
+// ── ArrayBuffer Pool ─────────────────────────────────────────────────────────
+//
+// Recycles fixed-size buffers for network I/O to avoid GC pressure from
+// thousands of per-packet byte allocations.
+
+const POOL_SIZES = [4096, 65536, 1048576] as const;
+type PoolSize = typeof POOL_SIZES[number];
+
+var _bufPool = new Map<number, ArrayBuffer[]>([
+  [4096, []], [65536, []], [1048576, []],
+]);
+
+export function acquireBuffer(minSize: number): ArrayBuffer {
+  for (var i = 0; i < POOL_SIZES.length; i++) {
+    var sz = POOL_SIZES[i];
+    if (sz >= minSize) {
+      var pool = _bufPool.get(sz)!;
+      if (pool.length > 0) return pool.pop()!;
+      return new ArrayBuffer(sz);
+    }
+  }
+  return new ArrayBuffer(minSize);
+}
+
+export function releaseBuffer(buf: ArrayBuffer): void {
+  var sz = buf.byteLength as PoolSize;
+  var pool = _bufPool.get(sz);
+  if (pool && pool.length < 16) pool.push(buf);
+}
+
+// ── Pool stats ────────────────────────────────────────────────────────────────
+
+export function cacheStats(): Record<string, unknown> {
+  return {
+    textCache:    textCacheStats(),
+    layoutCache:  { hits: _layoutHits, total: _layoutTotal },
+    styleCache:   { hits: _styleCacheHits, total: _styleCacheTotal },
+    imageCache:   { entries: _imageCache.size },
+    spanPool:     { pooled: _spanPool.length, outstanding: _spansOut },
+    linePool:     { pooled: _linePool.length, outstanding: _linesOut },
+  };
+}
+
+// ── Flush all caches on page navigation ──────────────────────────────────────
+
+export function flushAllCaches(): void {
+  flushTextCache();
+  flushStyleCache();
+  flushImageCache();
+  flushLayoutCache();
+  _spanPool.length = 0;
+  _linePool.length = 0;
+  _spansOut = 0;
+  _linesOut = 0;
+  flushStyleDirtyTracker();
+  _fslReadQueue.length = 0;
+  _fslWriteQueue.length = 0;
+}
+
+// ── StyleDirtyTracker ─────────────────────────────────────────────────────────
+//
+// Item 892: Style recalc — dirty-mark only elements whose computed style
+// actually changes; batch before layout pass.
+//
+// A dirty element id is tracked in a Set.  After any style mutation
+// (class change, attribute change, inline style mutation), the element is
+// marked dirty.  Before layout, `flushStyleDirty()` recomputes styles only
+// for dirty elements and bumps `_styleGeneration`.
+
+var _dirtyElements  = new Set<string>();  // element IDs (or unique keys)
+var _containBodies  = new Set<string>();  // IDs of contain:layout boundaries (item 893)
+
+/** Mark an element as needing style recalc. */
+export function markStyleDirty(elementKey: string): void {
+  _dirtyElements.add(elementKey);
+}
+
+/** Mark an element as a `contain: layout` boundary (item 893). */
+export function markContainLayout(elementKey: string): void {
+  _containBodies.add(elementKey);
+}
+
+/** Unmark a contain boundary. */
+export function unmarkContainLayout(elementKey: string): void {
+  _containBodies.delete(elementKey);
+}
+
+/**
+ * Return true if `elementKey` is inside a `contain:layout` boundary.
+ * Dirty-propagation stops at the boundary (item 893).
+ */
+export function isContainLayoutBoundary(elementKey: string): boolean {
+  return _containBodies.has(elementKey);
+}
+
+/**
+ * Flush all dirty style entries — invalidate their cache entries so the next
+ * `getComputedStyle` call recomputes fresh values.
+ * Returns the number of elements that were recalculated.
+ */
+export function flushStyleDirty(): number {
+  if (_dirtyElements.size === 0) return 0;
+  var count = 0;
+  _dirtyElements.forEach(key => {
+    // Invalidate cached style for this element by deleting its entry
+    _styleCache.delete(key);
+    count++;
+  });
+  _dirtyElements.clear();
+  // Bump generation so any consumers that check the gen will recompute
+  bumpStyleGeneration();
+  return count;
+}
+
+/** Clear all dirty tracking state (on navigation). */
+export function flushStyleDirtyTracker(): void {
+  _dirtyElements.clear();
+  _containBodies.clear();
+}
+
+/** How many elements are pending style recalc. */
+export function pendingStyleRecalcCount(): number { return _dirtyElements.size; }
+
+// ── FSL Batcher ───────────────────────────────────────────────────────────────
+//
+// Item 894: Avoid Forced Synchronous Layout (FSL) — batch all DOM reads
+// before any DOM writes per frame.
+//
+// Callers queue reads and writes; `flushFSL()` runs reads first, then writes.
+// This prevents the browser from interleaving layout-invalidating writes with
+// layout-requiring reads (the FSL anti-pattern).
+
+type VoidCallback = () => void;
+
+var _fslReadQueue:  VoidCallback[] = [];
+var _fslWriteQueue: VoidCallback[] = [];
+var _fslInFlush = false;
+
+/**
+ * Schedule a DOM read callback for the next FSL flush.
+ * Will execute before any queued writes.
+ */
+export function scheduleRead(cb: VoidCallback): void {
+  if (_fslInFlush) { cb(); return; }  // already in flush — run immediately
+  _fslReadQueue.push(cb);
+}
+
+/**
+ * Schedule a DOM write callback for the next FSL flush.
+ * Will execute after all queued reads.
+ */
+export function scheduleWrite(cb: VoidCallback): void {
+  if (_fslInFlush) { _fslWriteQueue.push(cb); return; }
+  _fslWriteQueue.push(cb);
+}
+
+/**
+ * Flush all queued reads then all queued writes.
+ * Call once per frame before the layout pass.
+ */
+export function flushFSL(): void {
+  _fslInFlush = true;
+  // Phase 1: all reads
+  var readers = _fslReadQueue.splice(0);
+  for (var i = 0; i < readers.length; i++) {
+    try { readers[i](); } catch (_) {}
+  }
+  // Phase 2: all writes (may queue more reads — those run next frame)
+  var writers = _fslWriteQueue.splice(0);
+  for (var j = 0; j < writers.length; j++) {
+    try { writers[j](); } catch (_) {}
+  }
+  _fslInFlush = false;
+}
+
+/** How many pending reads/writes are queued. */
+export function fslQueueDepth(): { reads: number; writes: number } {
+  return { reads: _fslReadQueue.length, writes: _fslWriteQueue.length };
+}

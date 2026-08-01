@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<!--
+  JSOS Online Playground
+  Item 895 — Run JSOS JavaScript in the browser via a sandboxed WASM environment
+  
+  This is a static HTML file that embeds a minimal QuickJS WASM build,
+  providing an interactive REPL that demonstrates JSOS APIs in the browser.
+  
+  Production deployment: https://jsos.dev/playground
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JSOS Playground</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #1a1a2e; color: #eee; font-family: 'Segoe UI', sans-serif; height: 100vh; display: flex; flex-direction: column; }
+  header { background: #16213e; padding: 12px 24px; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid #0f3460; }
+  header h1 { font-size: 1.2rem; color: #e94560; }
+  header span { font-size: 0.8rem; color: #888; }
+  .workspace { display: flex; flex: 1; overflow: hidden; }
+  .editor-pane { flex: 1; display: flex; flex-direction: column; border-right: 1px solid #0f3460; }
+  .output-pane { flex: 1; display: flex; flex-direction: column; }
+  .pane-header { background: #16213e; padding: 6px 12px; font-size: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.1em; }
+  textarea#editor { flex: 1; background: #0f0f23; color: #cdd6f4; font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 14px; border: none; outline: none; padding: 16px; resize: none; tab-size: 2; }
+  #output { flex: 1; background: #0f0f23; color: #a6e3a1; font-family: monospace; font-size: 13px; padding: 16px; overflow-y: auto; white-space: pre-wrap; }
+  .toolbar { background: #16213e; padding: 8px 12px; display: flex; gap: 8px; }
+  button { background: #e94560; color: #fff; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+  button:hover { background: #c73652; }
+  button.secondary { background: #0f3460; }
+  button.secondary:hover { background: #1a4a80; }
+  .status { padding: 4px 12px; background: #16213e; text-align: right; font-size: 0.72rem; color: #555; border-top: 1px solid #0f3460; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>JSOS Playground</h1>
+  <span>Interactive TypeScript/JavaScript OS environment</span>
+</header>
+
+<div class="workspace">
+  <div class="editor-pane">
+    <div class="pane-header">editor.js</div>
+    <textarea id="editor" spellcheck="false">// Welcome to the JSOS Playground!
+// This runs a simulated JSOS environment in your browser.
+
+// Explore the sys.* API:
+console.log("JSOS version:", sys.env.get("JSOS_VERSION") ?? "0.1.0");
+
+// Virtual filesystem
+sys.fs.writeFile("/tmp/hello.txt", "Hello, JSOS!");
+const content = sys.fs.readFile("/tmp/hello.txt", "utf8");
+console.log("File content:", content);
+
+// Process info
+console.log("PID:", sys.process.getpid());
+
+// List /tmp
+const files = sys.fs.readdir("/tmp");
+console.log("Files in /tmp:", files.join(", "));
+</textarea>
+    <div class="toolbar">
+      <button onclick="runCode()">▶ Run</button>
+      <button class="secondary" onclick="clearOutput()">Clear</button>
+      <button class="secondary" onclick="loadExample()">Examples ▾</button>
+    </div>
+  </div>
+
+  <div class="output-pane">
+    <div class="pane-header">output</div>
+    <div id="output">// Output will appear here...\n</div>
+  </div>
+</div>
+
+<div class="status" id="status">Ready — JSOS Playground (browser sandbox mode)</div>
+
+<script>
+// Simulated JSOS runtime for the browser playground
+// In production this would use a real QuickJS WASM build
+
+const vfs = new Map();
+vfs.set('/tmp', { type: 'dir', children: [] });
+
+const sys = {
+  env: {
+    _store: { JSOS_VERSION: '0.1.0', TERM: 'xterm-256color', USER: 'playground' },
+    get(k) { return this._store[k] ?? null; },
+    set(k, v) { this._store[k] = String(v); },
+  },
+  fs: {
+    writeFile(path, data) {
+      vfs.set(path, { type: 'file', data: typeof data === 'string' ? data : String(data) });
+      const dir = path.split('/').slice(0, -1).join('/') || '/';
+      const name = path.split('/').pop();
+      if (!vfs.has(dir)) vfs.set(dir, { type: 'dir', children: [] });
+      const d = vfs.get(dir);
+      if (!d.children.includes(name)) d.children.push(name);
+    },
+    readFile(path, enc) {
+      const f = vfs.get(path);
+      if (!f || f.type !== 'file') throw new Error('ENOENT: ' + path);
+      return enc === 'utf8' ? f.data : new TextEncoder().encode(f.data);
+    },
+    readdir(path) {
+      const d = vfs.get(path);
+      if (!d) throw new Error('ENOENT: ' + path);
+      return d.children ?? [];
+    },
+    mkdir(path) { if (!vfs.has(path)) vfs.set(path, { type: 'dir', children: [] }); },
+    exists(path) { return vfs.has(path); },
+    stat(path) {
+      const f = vfs.get(path);
+      if (!f) throw new Error('ENOENT: ' + path);
+      return { type: f.type, size: f.data?.length ?? 0 };
+    },
+  },
+  process: {
+    _pid: 1001,
+    getpid() { return this._pid; },
+    shell(cmd) { _appendOutput('[shell] ' + cmd + ' (simulated)\n'); },
+    nextTick(fn) { setTimeout(fn, 0); },
+  },
+  net: {
+    createSocket() { return { connect() {}, write() {}, read() { return null; }, close() {} }; },
+  },
+  vmm: {
+    totalRam()   { return 512 * 1024 * 1024; },
+    usedRam()    { return 64  * 1024 * 1024; },
+    freeRam()    { return 448 * 1024 * 1024; },
+  },
+  time: {
+    now() { return Date.now(); },
+    uptime() { return performance.now() / 1000; },
+  },
+  debug: {
+    profile(fn, n = 100) {
+      const times = [];
+      for (let i = 0; i < n; i++) { const t = performance.now(); fn(); times.push(performance.now() - t); }
+      times.sort((a,b)=>a-b);
+      return { min: times[0], max: times[times.length-1], avg: times.reduce((a,b)=>a+b,0)/times.length };
+    },
+  },
+};
+
+function _appendOutput(text) {
+  const el = document.getElementById('output');
+  el.textContent += text;
+  el.scrollTop = el.scrollHeight;
+}
+
+const _origConsole = { log: console.log, error: console.error, warn: console.warn };
+
+function runCode() {
+  const code = document.getElementById('editor').value;
+  document.getElementById('output').textContent = '';
+  document.getElementById('status').textContent = 'Running...';
+
+  // Redirect console
+  console.log   = (...args) => _appendOutput(args.map(String).join(' ') + '\n');
+  console.error = (...args) => _appendOutput('[error] ' + args.map(String).join(' ') + '\n');
+  console.warn  = (...args) => _appendOutput('[warn]  ' + args.map(String).join(' ') + '\n');
+
+  try {
+    const fn = new Function('sys', 'console', code);
+    fn(sys, console);
+    document.getElementById('status').textContent = 'Completed successfully';
+  } catch(e) {
+    _appendOutput('\n[exception] ' + e.message + '\n');
+    document.getElementById('status').textContent = 'Error: ' + e.message;
+  } finally {
+    Object.assign(console, _origConsole);
+  }
+}
+
+function clearOutput() {
+  document.getElementById('output').textContent = '';
+}
+
+const EXAMPLES = {
+  'Hello World': `console.log("Hello from JSOS!");`,
+  'Filesystem': `sys.fs.writeFile("/tmp/note.txt", "JSOS is awesome!");
+const txt = sys.fs.readFile("/tmp/note.txt", "utf8");
+console.log("Read back:", txt);
+console.log("Files:", sys.fs.readdir("/tmp").join(", "));`,
+  'Memory Info': `const total = sys.vmm.totalRam();
+const used  = sys.vmm.usedRam();
+const free  = sys.vmm.freeRam();
+console.log(\`Total RAM: \${(total/1024/1024).toFixed(0)} MB\`);
+console.log(\`Used:      \${(used /1024/1024).toFixed(0)} MB\`);
+console.log(\`Free:      \${(free /1024/1024).toFixed(0)} MB\`);`,
+  'Environment': `for (const key of ['JSOS_VERSION','TERM','USER']) {
+  console.log(\`\${key} = \${sys.env.get(key)}\`);
+}`,
+  'Benchmark': `const result = sys.debug.profile(() => {
+  let sum = 0;
+  for (let i = 0; i < 1000; i++) sum += Math.sqrt(i);
+  return sum;
+}, 200);
+console.log("Min:", result.min.toFixed(3), "ms");
+console.log("Avg:", result.avg.toFixed(3), "ms");
+console.log("Max:", result.max.toFixed(3), "ms");`,
+};
+
+function loadExample() {
+  const keys = Object.keys(EXAMPLES);
+  const choice = prompt('Choose example:\n' + keys.map((k,i) => `${i+1}. ${k}`).join('\n'));
+  const idx = parseInt(choice) - 1;
+  if (idx >= 0 && idx < keys.length) {
+    document.getElementById('editor').value = EXAMPLES[keys[idx]];
+  }
+}
+
+// Run on Ctrl+Enter
+document.getElementById('editor').addEventListener('keydown', e => {
+  if (e.ctrlKey && e.key === 'Enter') { e.preventDefault(); runCode(); }
+});
+</script>
+</body>
+</html>

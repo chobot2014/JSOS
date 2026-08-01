@@ -79,6 +79,11 @@ if ($Headless) {
     Write-Host "Running headless for ${Timeout}s (serial output below)..." -ForegroundColor Cyan
     Write-Host "==================" -ForegroundColor Cyan
 
+    # Always start with a clean log so previous runs don't pollute output
+    New-Item -ItemType Directory -Path "test-output" -Force | Out-Null
+    Remove-Item "test-output\serial.log"  -ErrorAction SilentlyContinue
+    Remove-Item "test-output\qemu-err.log" -ErrorAction SilentlyContinue
+
     $proc = Start-Process -FilePath $qemuExe -ArgumentList @(
         "-cdrom", "build/jsos.iso",
         "-drive", "file=build/disk.img,format=raw,media=disk",
@@ -91,17 +96,44 @@ if ($Headless) {
         "-device", "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on"
     ) -NoNewWindow -PassThru -RedirectStandardError "test-output\qemu-err.log"
 
+    # Stream only NEW lines by tracking how many lines we've already printed
+    $linesShown = 0
     $deadline = (Get-Date).AddSeconds($Timeout)
     while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds 300
         if (Test-Path "test-output\serial.log") {
-            Get-Content "test-output\serial.log" -Tail 5 2>$null
+            $all = Get-Content "test-output\serial.log" -ErrorAction SilentlyContinue
+            if ($all -and $all.Count -gt $linesShown) {
+                $newLines = $all[$linesShown..($all.Count - 1)]
+                foreach ($line in $newLines) { Write-Host $line }
+                $linesShown = $all.Count
+            }
+        }
+    }
+
+    # Flush any remaining lines after process exits
+    if (Test-Path "test-output\serial.log") {
+        $all = Get-Content "test-output\serial.log" -ErrorAction SilentlyContinue
+        if ($all -and $all.Count -gt $linesShown) {
+            $newLines = $all[$linesShown..($all.Count - 1)]
+            foreach ($line in $newLines) { Write-Host $line }
         }
     }
 
     if (-not $proc.HasExited) {
         $proc.Kill()
         Write-Host "`n[Timeout after ${Timeout}s - QEMU killed]" -ForegroundColor Yellow
+    } elseif ($proc.ExitCode -ne $null -and $proc.ExitCode -ne 0) {
+        Write-Host "`n[QEMU exited with code $($proc.ExitCode) - possible crash]" -ForegroundColor Red
+    }
+
+    # Check for JS fatal errors
+    if (Test-Path "test-output\serial.log") {
+        $fatal = Select-String -Path "test-output\serial.log" -Pattern "JSOS FATAL" -ErrorAction SilentlyContinue
+        if ($fatal) {
+            Write-Host "`n*** JS FATAL ERRORS DETECTED ***" -ForegroundColor Red
+            $fatal | ForEach-Object { Write-Host $_.Line -ForegroundColor Red }
+        }
     }
 
     Write-Host "==================" -ForegroundColor Cyan
@@ -116,12 +148,23 @@ if ($Headless) {
     Write-Host "Press Alt+Ctrl+2 then type 'quit' to exit QEMU" -ForegroundColor Yellow
     Write-Host "==================" -ForegroundColor Green
 
+    New-Item -ItemType Directory -Path "test-output" -Force | Out-Null
+    Remove-Item "test-output\serial.log" -ErrorAction SilentlyContinue
+
     & $qemuExe `
         -cdrom "build/jsos.iso" `
         -drive "file=build/disk.img,format=raw,media=disk" `
         -boot order=d `
         -m 4G `
         -no-reboot `
+        -display sdl `
+        -vga std `
+        -serial "file:test-output/serial.log" `
         -netdev "user,id=n0" `
         -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on"
+
+    if (Test-Path "test-output\serial.log") {
+        Write-Host "`nSerial log:" -ForegroundColor DarkGray
+        Get-Content "test-output\serial.log" | Select-Object -Last 20 | ForEach-Object { Write-Host $_ }
+    }
 }

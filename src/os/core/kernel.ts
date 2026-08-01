@@ -86,6 +86,12 @@ export interface KernelAPI {
   getTicks(): number;
   getUptime(): number;   /* milliseconds since boot */
   sleep(ms: number): void;
+  /** TSC ticks per second (calibrated against PIT at boot). 0 before calibration. (item 46) */
+  tscHz?(): number;
+  /** Microseconds since boot via calibrated TSC; falls back to PIT ms if TSC unavailable. (item 48) */
+  uptimeUs?(): number;
+  /** Nanoseconds since boot as a JS number (BigInt on kernel side, unwrapped here). (item 48) */
+  getTimeNs?(): number;
 
   //  Memory 
   getMemoryInfo(): MemoryInfo;
@@ -103,6 +109,13 @@ export interface KernelAPI {
   readMem8(addr: number): number;
   /** Write one byte to a physical memory address */
   writeMem8(addr: number, value: number): void;
+  /**
+   * Bulk-read `length` bytes from physical address `addr`.
+   * Returns an ArrayBuffer copy (max 1 MB), or null on failure.
+   */
+  readPhysMem(addr: number, length: number): ArrayBuffer | null;
+  /** Bulk-write an ArrayBuffer to a physical address. */
+  writePhysMem(addr: number, data: ArrayBuffer): void;
 
   //  System 
   halt(): void;
@@ -148,6 +161,14 @@ export interface KernelAPI {
   fbBlit(pixels: ArrayBuffer | number[], x: number, y: number, w: number, h: number): void;
 
   /**
+   * Strided blit: copy a sub-rectangle from a larger source buffer to the
+   * framebuffer without allocating a temporary buffer.
+   * srcStride = full width of source buffer in pixels (not bytes).
+   */
+  fbBlitStrided(buffer: ArrayBuffer, srcStride: number, srcX: number, srcY: number,
+                dstX: number, dstY: number, w: number, h: number): void;
+
+  /**
    * Inject and execute raw x86 machine code.
    * hexBytes: space/comma-separated hex bytes, e.g. "B8 2A 00 00 00 C3" (mov eax,42; ret).
    * Runs as a cdecl void→uint32_t function in ring-0; returns the EAX result.
@@ -166,6 +187,13 @@ export interface KernelAPI {
    * resets the counter to zero.  Use this to decide when to call yield().
    */
   schedTick(): number;
+  /**
+   * Drain all pending QuickJS Promise microtasks (JS jobs) for the main runtime.
+   * Must be called periodically from the JS event loop so that Promise .then()
+   * and async/await callbacks fire correctly.
+   * Returns the count of jobs that were executed.
+   */
+  drainJobs(): number;
 
   // ─ Mouse (Phase 3) ───────────────────────────────────────────────────────
   /**
@@ -311,6 +339,253 @@ export interface KernelAPI {
   sharedBufferRelease(id: number): void;
   /** Returns the byte size allocated for a shared buffer slot, or 0. */
   sharedBufferSize(id: number): number;
+
+  // ─ JIT compiler primitives (Phase 11) ─────────────────────────────────────
+  /**
+   * Allocate `size` bytes of execute+read+write memory from the 256 KB JIT pool.
+   * Allocations are 16-byte aligned. Returns a physical address (uint32), or 0 on failure.
+   * There is no free — pool is bump-allocated. Max single allocation: 64 KB.
+   */
+  jitAlloc(size: number): number;
+  /**
+   * Copy machine code bytes into a JIT allocation.
+   * `addr` must have been returned by jitAlloc().
+   * `bytes` may be a plain number[] or an ArrayBuffer (fast path, zero memcpy overhead).
+   */
+  jitWrite(addr: number, bytes: number[] | ArrayBuffer): void;
+  /**
+   * Call a JIT-compiled cdecl function at `addr` with up to 4 int32 arguments.
+   * Returns the int32 result (EAX). Pass 0 for unused arguments.
+   * WARNING: executes kernel-mode machine code with no sandboxing.
+   */
+  jitCallI(addr: number, a0?: number, a1?: number, a2?: number, a3?: number): number;
+  /**
+   * Call a JIT-compiled cdecl function at `addr` with up to 8 int32 arguments.
+   * Required for functions with 5–8 parameters (e.g. fillRect, blitAlphaRect).
+   * Returns the int32 result (EAX). Pass 0 for unused arguments.
+   */
+  jitCallI8(addr: number,
+    a0?: number, a1?: number, a2?: number, a3?: number,
+    a4?: number, a5?: number, a6?: number, a7?: number): number;
+  /**
+   * Call a JIT-compiled float64 function at `addr` (x87 double-cdecl ABI).
+   * Produced by FloatJITCompiler. All args and return value are IEEE-754 doubles.
+   * Use QJSJITHook.getFloatAddr(bcAddr) to obtain the native address.
+   */
+  jitCallF4(addr: number, a0?: number, a1?: number, a2?: number, a3?: number): number;
+  /**
+   * Returns the number of bytes currently consumed in the 8 MB main JIT pool.
+   * Useful for budget checks and debugging.  Pool capacity = 8,388,608 bytes.
+   */
+  jitUsedBytes(): number;
+  /**
+   * Reset the main JIT pool bump pointer to zero, reclaiming all 8 MB.
+   * The TypeScript QJSJITHook is responsible for clearing all live
+   * jit_native_ptr fields before calling this (to prevent stale call targets).
+   * Returns the number of bytes reclaimed.
+   */
+  jitMainReset(): number;
+  /**
+   * Return the physical (linear) address of a JS ArrayBuffer's backing store.
+   * QuickJS uses reference-counting (not a moving GC), so the pointer is stable
+   * for the buffer's lifetime.  Returns 0 if the value is not an ArrayBuffer.
+   *
+   * JSOS-specific: allows JIT-compiled native code to read/write TypedArray data
+   * (canvas pixel buffers, audio, etc.) without a copy.
+   */
+  physAddrOf(ab: ArrayBuffer): number;
+  /**
+   * Return uint32 physical addresses of C helper functions callable from JIT'd x86 code.
+   * The returned addresses can be loaded into ECX and invoked via `CALL ECX` (cdecl).
+   * - `getPropI32`: jit_js_getprop_i32(obj_ptr: uint32, atom: uint32) → int32
+   * - `setPropI32`: jit_js_setprop_i32(obj_ptr: uint32, atom: uint32, val: int32)
+   * - `callFn`:    jit_js_call_fn(fn_ptr: uint32, a0..a3: int32, argc: int32) → int32
+   */
+  jitHelperAddrs(): { getPropI32: number; setPropI32: number; callFn: number };
+
+  // ─ Step 3: QuickJS internal struct offsets ─────────────────────────────────
+  /**
+   * Returns a frozen object describing the byte offsets of fields in the
+   * JSFunctionBytecode struct used by the JSOS-patched QuickJS build.
+   * Used by QJSBytecodeReader in qjs-jit.ts to interpret live GC objects.
+   */
+  qjsOffsets(): {
+    gcHeaderSize: number;  /** size of GCObjectHeader prefix                   */
+    objShape:     number;  /** offset of JSShape* field                        */
+    objSize:      number;  /** offset of proto JSValue (8-byte pair on 32-bit) */
+    callCount:    number;  /** offset of call_count uint32 (Step-5 field)      */
+    jitNativePtr: number;  /** offset of jit_native_ptr void* (Step-5 field)   */
+    bcBuf:        number;  /** offset of byte_code_buf uint8*                  */
+    bcLen:        number;  /** offset of byte_code_len int                     */
+    funcName:     number;  /** offset of func_name JSAtom                      */
+    argCount:     number;  /** offset of arg_count uint16                      */
+    varCount:     number;  /** offset of var_count uint16                      */
+    stackSize:    number;  /** offset of stack_size uint16                     */
+    cpoolPtr:     number;  /** offset of cpool JSValue*                        */
+    cpoolCount:   number;  /** offset of cpool_count uint16                    */
+    structSize:   number;  /** total sizeof(JSFunctionBytecode)                */
+  };
+
+  // ─ Step 5: QJS JIT hook + per-process JIT management ──────────────────────
+  /**
+   * Install the TypeScript JIT compiler callback.
+   * callback(bcAddr, spAddr, argc) → 1 if native code was installed, else 0.
+   */
+  setJITHook(callback: (bcAddr: number, spAddr: number, argc: number) => number): void;
+  /**
+   * Write `nativeAddr` into the jit_native_ptr field of the JSFunctionBytecode
+   * at `bcAddr` so QuickJS dispatches the compiled version on the next call.
+   */
+  setJITNative(bcAddr: number, nativeAddr: number): void;
+  /**
+   * Return and consume the next pending JIT compilation address for child
+   * process `id`.  Returns 0 if no compilation is pending.
+   */
+  procPendingJIT(id: number): number;
+  /**
+   * Allocate `size` bytes from the per-process 512 KB JIT slab for child `id`.
+   * Returns the physical address of the allocation, or 0 on failure.
+   */
+  jitProcAlloc(id: number, size: number): number;
+
+  // ─ FPU / SSE context save & restore (item 147) ───────────────────────────
+  /**
+   * Allocate a 512-byte, 16-byte-aligned physical buffer for FXSAVE/FXRSTOR.
+   * Returns the physical address, or 0 on OOM.
+   * The caller must keep this address alive for the lifetime of the process.
+   */
+  fpuAllocState(): number;
+  /**
+   * Execute `FXSAVE` into the 512-byte buffer at `physAddr`.
+   * `physAddr` must be 16-byte aligned (returned by `fpuAllocState()`).
+   * Returns `true` on success, `false` if the address is invalid/unaligned.
+   */
+  fpuSave(physAddr: number): boolean;
+  /**
+   * Execute `FXRSTOR` from the 512-byte buffer at `physAddr`.
+   * `physAddr` must be 16-byte aligned (returned by `fpuAllocState()`).
+   * Returns `true` on success, `false` if the address is invalid/unaligned.
+   */
+  fpuRestore(physAddr: number): boolean;
+
+  // Phase A/B: child process render surface + infrastructure
+
+  /** Return a view of the BSS render slab for child process `id` (width×height×4 bytes). */
+  getProcRenderBuffer(id: number): ArrayBuffer;
+
+  /** Set the render surface dimensions for child process `id` (call before procEval). */
+  procSetDimensions(id: number, w: number, h: number): void;
+
+  /**
+   * Register the TypeScript FS bridge object so child runtimes can perform
+   * file I/O via the main-runtime's filesystem implementation.
+   */
+  registerChildFSBridge(bridge: {
+    readFile(path: string): string | null;
+    writeFile(path: string, content: string): boolean;
+    readDir(path: string): string;   // JSON array of names
+    exists(path: string): boolean;
+    stat(path: string): string | null; // JSON object or null
+  }): void;
+
+  /** JSON-encode `ev` and push it into the child's event queue. */
+  procSendEvent(id: number, ev: object): void;
+
+  /** Dequeue the next window-management command from child process `id`. */
+  procDequeueWindowCommand(id: number): { type: string; [k: string]: any } | null;
+
+  /** Fire any expired timers for child process `id` (call after procTick). */
+  serviceTimers(id: number): void;
+
+  // ─ Disk I/O (item 177) ────────────────────────────────────────────────────
+  /**
+   * Read a 512-byte sector from disk `diskId` at sector number `sectorNo`.
+   * Returns a Uint8Array of length 512, or an empty Uint8Array on error.
+   * diskId: 0 = primary ATA (same as ataRead), 1 = secondary, etc.
+   */
+  readDiskSector(diskId: number, sectorNo: number): Uint8Array;
+
+  // ─ Initramfs (item 168) ───────────────────────────────────────────────────
+  /**
+   * Return the embedded CPIO initramfs image as an ArrayBuffer, or null if
+   * no initramfs was embedded in the kernel binary.
+   */
+  getInitramfs(): ArrayBuffer | null;
+
+  // ─ Zero-copy NIC DMA (item 922) ──────────────────────────────────────────
+  /**
+   * Register `buffer` as a DMA target for connection `connFd`.
+   * Returns an opaque NIC handle used by nicDmaRecv / nicDmaUnregister.
+   */
+  nicDmaRegister(connFd: number, buffer: ArrayBuffer): number;
+  /**
+   * Receive data into the previously registered DMA buffer.
+   * Returns the number of bytes received, or 0 if no data is available.
+   */
+  nicDmaRecv(nicHandle: number): number;
+  /** Unregister the DMA buffer for `nicHandle`. */
+  nicDmaUnregister(nicHandle: number): void;
+
+  // ─ TCP primitives (item 924 / 932) ────────────────────────────────────────
+  /**
+   * Send `data` on connection `connFd`.
+   * Zero-copy path: an ArrayBuffer is passed directly to the kernel TX ring.
+   */
+  tcpSend(connFd: number, data: ArrayBuffer): void;
+  /**
+   * Open a new TCP connection to `host:port`.
+   * `https` = true wraps in TLS.
+   * Returns a connection file descriptor (>= 0) or -1 on failure.
+   * Non-blocking: caller should poll or await completion via event.
+   */
+  tcpConnect(host: string, port: number, https: boolean): number;
+
+  // ─ Idle scheduler (item 932) ─────────────────────────────────────────────
+  /**
+   * Schedule `fn` to run the next time the system is idle (no runnable processes).
+   * The callback is called at most once; re-register to run again.
+   */
+  scheduleIdle(fn: () => void): void;
+
+  // ─ Hardware RNG (item 348) ───────────────────────────────────────────────
+  /**
+   * Read one 32-bit hardware-random word via the RDRAND CPU instruction.
+   * Retries up to 10 times (Intel recommendation); falls back to a TSC-derived
+   * value if RDRAND is unavailable or exhausted.
+   * @returns Unsigned 32-bit integer in range [0, 2^32 − 1].
+   */
+  rdrand(): number;
+
+  // ─ Audio hardware drivers (items 825–827) ────────────────────────────────
+  /** AC97: set sample rate. */
+  ac97SetRate?(hz: number): void;
+  /** AC97: set master volume (0-100). */
+  ac97SetVolume?(vol: number): void;
+  /** AC97: DMA write — `ptr` is an ArrayBuffer, `len` is byte length. */
+  ac97WriteBuffer?(ptr: ArrayBuffer, len: number): void;
+  /** Intel HDA: open a PCM output stream. Returns stream ID or -1. */
+  hdaOpenStream?(sampleRate: number, channels: number, bitsPerSample: number): number;
+  /** Intel HDA: write PCM data to an open stream. */
+  hdaWriteStream?(streamId: number, ptr: ArrayBuffer, len: number): void;
+  /** Intel HDA: close an open stream. */
+  hdaCloseStream?(streamId: number): void;
+  /** Virtio-sound: open a PCM output stream. Returns stream ID or -1. */
+  virtioSoundOpen?(sampleRate: number, channels: number): number;
+  /** Virtio-sound: write PCM data to a stream. */
+  virtioSoundWrite?(streamId: number, ptr: ArrayBuffer, len: number): void;
+  /** Virtio-sound: close a stream. */
+  virtioSoundClose?(streamId: number): void;
+
+  // ─ Real-time clock / wall clock (NTP items) ──────────────────────────────
+  /**
+   * Read the hardware RTC.
+   * Returns `{ unix: number }` where `unix` is Unix epoch seconds, or null if unavailable.
+   */
+  rtcRead?(): { unix: number } | null;
+  /** Set the OS wall-clock epoch (Unix seconds). */
+  setWallClock?(epoch: number): void;
+  /** Get the OS wall-clock epoch (Unix seconds, tracking from last NTP sync or RTC). */
+  getWallClock?(): number;
 
   //  Constants 
   colors: KernelColors;

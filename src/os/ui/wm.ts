@@ -1,4 +1,4 @@
-/**
+﻿/**
  * JSOS Window Manager — Phase 3
  *
  * All window layout, z-order, event routing, drag, resize, and compositing
@@ -16,6 +16,13 @@ import { Canvas, Colors, defaultFont, createScreenCanvas, type PixelColor } from
 import { net } from '../net/net.js';
 import { threadManager } from '../process/threads.js';
 import { scheduler } from '../process/scheduler.js';
+import { _serviceChildJIT, clearChildJITForProc } from '../process/qjs-jit.js';
+import { systemProfiler } from '../process/optimizer.js';
+import { globalGC } from '../process/gc.js';
+import { SyscallPolicy, registerPolicy, unregisterPolicy } from '../core/syscall-policy.js';
+
+// GC tick counter — incremented each WM frame, passed to globalGC.tick()
+let _wmGCTick = 0;
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -64,6 +71,99 @@ export interface App {
   onBlur?(): void;
   /** Called when the window content area is resized. */
   onResize?(width: number, height: number): void;
+  /** Per-frame logic tick, called BEFORE composite (separate from render). */
+  tick?(): void;
+}
+
+// ── AppManifest ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Descriptor passed to `wm.launchApp()` to spawn a sandboxed child JS process
+ * in a managed window.  The child runtime receives a BSS-backed render surface
+ * and a set of kernel APIs sufficient for a typical GUI application.
+ */
+export interface AppManifest {
+  /** Application identifier (used for singleInstance checks). */
+  name: string;
+  /** Window title bar text. */
+  title: string;
+  /** Content area width in pixels (excluding title bar). */
+  width: number;
+  /** Content area height in pixels (excluding title bar). */
+  height: number;
+  /** JavaScript/TypeScript source code to evaluate in the child runtime. */
+  code: string;
+  /** If true, launching a second instance is a no-op (not yet enforced). */
+  singleInstance?: boolean;
+}
+
+// ── ChildProcApp ─────────────────────────────────────────────────────────────
+
+/**
+ * App implementation for sandboxed child JS processes.
+ *
+ * Lifecycle:
+ *   - `render()` copies the child’s BSS render slab into the window canvas each frame.
+ *   - `onKey` / `onMouse` forward events into the child’s event queue.
+ *   - `onUnmount` destroys the child runtime when the window is closed.
+ *
+ * The `procId` field is public so `WindowManager._findWindowByProc()` can locate the
+ * owning window given only the process id.
+ */
+export class ChildProcApp implements App {
+  readonly name = 'child-proc';
+  /** QuickJS child process slot (0–7). */
+  readonly procId: number;
+  private readonly _w: number;
+  private readonly _h: number;
+  /** Cached Uint32Array view — avoids allocating a new view every frame. */
+  private _cachedBuf: ArrayBuffer | null = null;
+  private _cachedView: Uint32Array | null = null;
+  /** Dirty flag — set by renderReady command, cleared after render copies buffer. */
+  _renderDirty: boolean = true; // true initially so first frame always renders
+
+  constructor(procId: number, w: number, h: number) {
+    this.procId = procId;
+    this._w = w;
+    this._h = h;
+  }
+
+  onMount(_win: WMWindow): void { /* nothing */ }
+
+  onUnmount(): void {
+    unregisterPolicy(this.procId);
+    kernel.procDestroy(this.procId);
+  }
+
+  onKey(ev: KeyEvent): void {
+    kernel.procSendEvent(this.procId, ev);
+  }
+
+  onMouse(ev: MouseEvent): void {
+    kernel.procSendEvent(this.procId, ev);
+  }
+
+  onFocus(): void {
+    kernel.procSendEvent(this.procId, { type: 'focus' });
+  }
+
+  onBlur(): void {
+    kernel.procSendEvent(this.procId, { type: 'blur' });
+  }
+
+  render(canvas: Canvas): boolean {
+    if (!this._renderDirty) return false;
+    var buf = kernel.getProcRenderBuffer(this.procId);
+    if (!buf) return false;
+    this._renderDirty = false;
+    // Cache Uint32Array view — only recreate when the underlying ArrayBuffer changes
+    if (buf !== this._cachedBuf) {
+      this._cachedBuf = buf;
+      this._cachedView = new Uint32Array(buf);
+    }
+    canvas.blitFromView(this._cachedView!, 0, 0, 0, 0, this._w, this._h, this._w);
+    return true;
+  }
 }
 
 // ── Window ─────────────────────────────────────────────────────────────────
@@ -79,7 +179,22 @@ export interface WMWindow {
   minimised: boolean;
   maximised: boolean;
   closeable: boolean;
+  /** Alpha 0–255. 255 = fully opaque (default). 0 = hidden. */
+  opacity: number;
   app: App;
+  /** Set when the app threw an uncaught exception during render/input.
+   *  A crash overlay is drawn and clicking the window content restarts the app. */
+  _crashed?: boolean;
+  /** Short description of the crash reason. */
+  _crashMsg?: string;
+}
+
+/** Context menu item. */
+export interface MenuItem {
+  label: string;
+  action?: () => void;
+  disabled?: boolean;
+  separator?: boolean;
 }
 
 // ── Cursor sprite (8×8 arrow) ─────────────────────────────────────────────
@@ -132,8 +247,19 @@ export class WindowManager {
   private _prevButtons = 0;
 
   // Dirty tracking — skip composite+flip when nothing has changed
-  private _wmDirty     = true;   // set on cursor move, input, drag, clock change
+  private _wmDirty      = true;  // set on drag, resize, window ops, clock change
+  private _cursorDirty  = false; // set only on cursor movement (enables fast path)
   private _lastClockMin = -1;    // track minute for clock redraw
+  // Reusable array for dirty window indices (avoids per-frame allocation)
+  private _dirtyIdxBuf: number[] = [];
+
+  // Cursor save-under — 11×19 pixels saved from screen behind the sprite.
+  // Lets the fast cursor path restore the background and redraw only the
+  // cursor rect without re-compositing the entire desktop.
+  private _cursorSaveUnder = new Uint32Array(CURSOR_W * CURSOR_H);
+  private _cursorSaveX     = 0;
+  private _cursorSaveY     = 0;
+  private _cursorSaveValid = false;
 
   // Title-bar drag
   private _dragging: number | null = null;
@@ -153,6 +279,22 @@ export class WindowManager {
   // Mouse capture — app window that receives all events while button is held
   private _mouseCapture: number | null = null;
   private _clipboard: string = '';
+
+  // Cursor shape
+  private _cursorShape: string = 'default';
+
+  // Modal: id of the topmost modal window (null = no modal active)
+  private _modalWinId: number | null = null;
+
+  // Context menu state
+  private _contextMenu: { x: number; y: number; items: MenuItem[] } | null = null;
+
+  // ── [Item 755] Toast notification queue ───────────────────────────────────
+  private _toasts: Array<{ msg: string; bg: number; expires: number }> = [];
+
+  // Proc IDs that apps manage themselves (e.g. browser child runtimes)
+  // WM will skip these in _tickChildProcs to avoid double-ticking.
+  private _appManagedProcs = new Set<number>();
 
   constructor(screen: Canvas) {
     this._screen  = screen;
@@ -189,13 +331,19 @@ export class WindowManager {
       minimised: false,
       maximised: false,
       closeable: (opts.closeable !== false),
+      opacity:   255,
       app:       opts.app,
     };
 
     this._windows.push(win);
     this._focused = win.id;
-    opts.app.onMount(win);
-    if (opts.app.onFocus) opts.app.onFocus();
+    try { opts.app.onMount(win); } catch (me) {
+      win._crashed = true;
+      var mmsg = ''; try { mmsg = (me instanceof Error) ? me.message : String(me); } catch (_) {}
+      win._crashMsg = ('onMount failed: ' + mmsg).substring(0, 80);
+      kernel.serialPut('[WM] onMount crash for "' + opts.title + '": ' + win._crashMsg + '\n');
+    }
+    if (opts.app.onFocus) { try { opts.app.onFocus(); } catch (_) {} }
     return win;
   }
 
@@ -207,13 +355,13 @@ export class WindowManager {
         // Notify old focused app
         if (prevId !== null) {
           var prev = this._findWindow(prevId);
-          if (prev && prev.app.onBlur) prev.app.onBlur();
+          if (prev && prev.app.onBlur) { try { prev.app.onBlur(); } catch (_) {} }
         }
         this._focused = id;
         // Move to top of stack
         var win = this._windows.splice(i, 1)[0];
         this._windows.push(win);
-        if (win.app.onFocus) win.app.onFocus();
+        if (win.app.onFocus) { try { win.app.onFocus(); } catch (_) {} }
         this._wmDirty = true;
         return;
       }
@@ -224,7 +372,7 @@ export class WindowManager {
     for (var i = 0; i < this._windows.length; i++) {
       var win = this._windows[i];
       if (win.id === id) {
-        win.app.onUnmount();
+        try { win.app.onUnmount(); } catch (_) {}
         this._windows.splice(i, 1);
         if (this._focused    === id) {
           this._focused = this._windows.length > 0
@@ -234,7 +382,90 @@ export class WindowManager {
         if (this._mouseCapture === id) this._mouseCapture = null;
         if (this._dragging     === id) this._dragging     = null;
         if (this._resizing     === id) this._resizing     = null;
+        if (this._modalWinId   === id) this._modalWinId   = null;
         return;
+      }
+    }
+  }
+
+  /**
+   * Launch a sandboxed child JS process in a managed window.
+   *
+   * Steps:
+   *   1. Allocate a QuickJS process slot with `kernel.procCreate()`.
+   *   2. Tell the C layer the render surface dimensions.
+   *   3. Open a WM window backed by a `ChildProcApp` proxy.
+   *   4. Evaluate the app code inside the child runtime.
+   *
+   * @returns The child process id (0–7), or -1 on failure.
+   */
+  launchApp(manifest: AppManifest): number {
+    var procId = kernel.procCreate();
+    if (procId < 0) { return -1; }
+    // Register a 'standard' syscall policy for the child process
+    registerPolicy(procId, new SyscallPolicy('standard', procId));
+    kernel.procSetDimensions(procId, manifest.width, manifest.height);
+    this.createWindow({
+      title:     manifest.title,
+      x:         20,
+      y:         20,
+      width:     manifest.width,
+      height:    manifest.height,
+      app:       new ChildProcApp(procId, manifest.width, manifest.height),
+      closeable: manifest.singleInstance !== true,
+    });
+    kernel.procEval(procId, manifest.code);
+    return procId;
+  }
+
+  // ── Child-process window helpers ────────────────────────────────────────────
+
+  /** Find the WM window that owns the given child process, or null. */
+  private _findWindowByProc(procId: number): WMWindow | null {
+    for (var i = 0; i < this._windows.length; i++) {
+      var w = this._windows[i];
+      if (w.app instanceof ChildProcApp && w.app.procId === procId) return w;
+    }
+    return null;
+  }
+
+  /** Close the window associated with a child process (triggers onUnmount → procDestroy). */
+  private _closeWindowByProc(procId: number): void {
+    var win = this._findWindowByProc(procId);
+    if (win) this.closeWindow(win.id);
+  }
+
+  /**
+   * Drain the window-command queue for a child process and apply each command
+   * to its owning window.  Called every frame from `_tickChildProcs()`.
+   *
+   * Supported command types:
+   *   { type: 'setTitle', title: string }       — update window title bar
+   *   { type: 'close' }                          — close the window
+   *   { type: 'renderReady' }                    — mark WM dirty (trigger composite)
+   */
+  private _processWindowCommands(procId: number): void {
+    var cmd: { type: string; [k: string]: any } | null;
+    while ((cmd = kernel.procDequeueWindowCommand(procId)) !== null) {
+      switch (cmd.type) {
+        case 'setTitle': {
+          var w = this._findWindowByProc(procId);
+          if (w) { w.title = cmd.title; this._wmDirty = true; }
+          break;
+        }
+        case 'close':
+          this._closeWindowByProc(procId);
+          break;
+        case 'renderReady':
+          // Set per-app dirty flag so ChildProcApp.render() only copies when new content exists
+          var rw = this._findWindowByProc(procId);
+          if (rw && rw.app instanceof ChildProcApp) {
+            (rw.app as ChildProcApp)._renderDirty = true;
+          }
+          this._wmDirty = true;
+          break;
+        default:
+          break;
       }
     }
   }
@@ -242,7 +473,7 @@ export class WindowManager {
   minimiseWindow(id: number): void {
     var win = this._findWindow(id);
     if (!win || win.minimised) return;
-    if (win.app.onBlur) win.app.onBlur();
+    if (win.app.onBlur) { try { win.app.onBlur(); } catch (_) {} }
     win.minimised = true;
     if (this._mouseCapture === id) this._mouseCapture = null;
     if (this._dragging     === id) this._dragging     = null;
@@ -255,7 +486,7 @@ export class WindowManager {
         }
       }
       this._focused = next ? next.id : null;
-      if (next && next.app.onFocus) next.app.onFocus();
+      if (next && next.app.onFocus) { try { next.app.onFocus(); } catch (_) {} }
     }
     this._wmDirty = true;
   }
@@ -268,10 +499,148 @@ export class WindowManager {
     this._wmDirty = true;
   }
 
+  /** Public wrapper — maximise if normal, restore if already maximised. */
+  maximiseWindow(id: number): void {
+    var win = this._findWindow(id);
+    if (!win) return;
+    this._toggleMaximise(win);
+    this._wmDirty = true;
+  }
+
+  /** Update the title bar text of a window. */
+  setTitle(id: number, title: string): void {
+    var win = this._findWindow(id);
+    if (!win) return;
+    win.title = title;
+    this._wmDirty = true;
+  }
+
+  /** Move a window to (x, y). */
+  moveWindow(id: number, x: number, y: number): void {
+    var win = this._findWindow(id);
+    if (!win || win.maximised) return;
+    win.x = x; win.y = y;
+    this._wmDirty = true;
+  }
+
+  /** Resize a window's content area. */
+  resizeWindow(id: number, w: number, h: number): void {
+    var win = this._findWindow(id);
+    if (!win || win.maximised) return;
+    w = Math.max(MIN_WIN_W, w);
+    h = Math.max(MIN_WIN_H, h);
+    win.width  = w;
+    win.height = h + TITLE_H;
+    win.canvas = new Canvas(w, h);
+    if (win.app.onResize) win.app.onResize(w, h);
+    this._wmDirty = true;
+  }
+
+  /** Bring a window to the top of the z-order without changing keyboard focus. */
+  bringToFront(id: number): void {
+    for (var i = 0; i < this._windows.length; i++) {
+      if (this._windows[i].id === id) {
+        var win = this._windows.splice(i, 1)[0];
+        this._windows.push(win);
+        this._wmDirty = true;
+        return;
+      }
+    }
+  }
+
+  /** Allow or disallow the user from closing a window via the X button. */
+  setCloseable(id: number, closeable: boolean): void {
+    var win = this._findWindow(id);
+    if (!win) return;
+    win.closeable = closeable;
+    this._wmDirty = true;
+  }
+
+  /** Set per-window opacity (0 = invisible, 255 = fully opaque). */
+  setWindowOpacity(id: number, opacity: number): void {
+    var win = this._findWindow(id);
+    if (!win) return;
+    win.opacity = Math.max(0, Math.min(255, opacity));
+    this._wmDirty = true;
+  }
+
+  /** Change the cursor shape. */
+  setCursorShape(shape: string): void {
+    this._cursorShape = shape;
+    this._wmDirty = true;
+  }
+
+  /** Taskbar height in pixels. */
+  get taskbarH(): number { return TASKBAR_H; }
+
+  /**
+   * Open a modal window.  While it is open all input is directed exclusively to it.
+   * When the modal window is closed, normal input routing resumes.
+   */
+  openModal(opts: {
+    title: string;
+    app: App;
+    width: number;
+    height: number;
+  }): WMWindow {
+    var win = this.createWindow({ ...opts, closeable: true });
+    this._modalWinId = win.id;
+    return win;
+  }
+
+  /**
+   * Show a right-click context menu at (x, y).
+   * Dismissed when an item is activated, or the user clicks elsewhere.
+   */
+  showContextMenu(x: number, y: number, items: MenuItem[]): void {
+    this._contextMenu = { x, y, items: items.slice() };
+    this._wmDirty = true;
+  }
+
+  /** Dismiss the active context menu without firing any action. */
+  dismissContextMenu(): void {
+    if (this._contextMenu) { this._contextMenu = null; this._wmDirty = true; }
+  }
+
   // ── Clipboard ──────────────────────────────────────────────────────────
 
   getClipboard(): string { return this._clipboard; }
   setClipboard(text: string): void { this._clipboard = text; this._wmDirty = true; }
+
+  // -- [Item 755] Toast notification methods --
+    showToast(msg, durationMs, bgColor) {
+    var dur = durationMs || 3000;
+    var bg  = bgColor || 0xFF1A3A6A;
+    var exp = kernel.getTicks() + Math.round(dur / 10);
+    this._toasts.push({ msg: msg, bg: bg, expires: exp });
+    this._wmDirty = true;
+  }
+  _pruneToasts() {
+    var now = kernel.getTicks();
+    var ts = this._toasts;
+    var next = [];
+    for (var ti = 0; ti < ts.length; ti++) { if (ts[ti].expires > now) next.push(ts[ti]); }
+    this._toasts = next;
+  }
+  _drawToasts() {
+    this._pruneToasts();
+    if (this._toasts.length === 0) return;
+    var s = this._screen;
+    var PAD = 6, H = 22, W = 240;
+    var barY = s.height - TASKBAR_H;
+    var baseY = barY - PAD;
+    for (var i = this._toasts.length - 1; i >= 0; i--) {
+      var t = this._toasts[i];
+      baseY -= H + 2;
+      var tx = s.width - W - PAD;
+      s.fillRect(tx, baseY, W, H, t.bg);
+      s.drawRect(tx, baseY, W, H, Colors.WHITE);
+      var label = t.msg.length > 29 ? t.msg.substring(0, 28) + '\u2026' : t.msg;
+      s.drawText(tx + PAD, baseY + PAD, label, Colors.WHITE);
+    }
+    this._wmDirty = true;
+  }
+
 
   // ── Query ──────────────────────────────────────────────────────────────
 
@@ -283,16 +652,85 @@ export class WindowManager {
   }
 
   // ── Per-frame tick ─────────────────────────────────────────────────────
+  // Time-budgeted: input + render always run; background work (TCP, profiler,
+  // GC) is skipped when the frame has already exceeded ~20ms (2 PIT ticks).
+  // JIT compilation is deferred to frames that are running under budget.
 
-  tick(): void {
+  tick(): boolean {
+    var _t0 = kernel.getTicks();
+    var _activity = false;
     this._pollInput();
-    this._tickChildProcs();
-    scheduler.tick();                 // process-level accounting, signals, time-slice
-    threadManager.tickCoroutines();   // cooperative fetch / async coroutines
+
+    // ── Cursor fast blit — runs BEFORE any app render ──────────────────────
+    if (this._cursorDirty && this._cursorSaveValid) {
+      this._restoreCursorSaveUnder();
+      this._saveCursorUnder();
+      this._drawCursor();
+      this._screen.flip();
+      this._cursorDirty = false;
+      _activity = true;
+    }
+
+    // ── App logic ticks — separate from render, runs BEFORE composite ───────
+    for (var _ati = 0; _ati < this._windows.length; _ati++) {
+      var _aw = this._windows[_ati];
+      if (!_aw.minimised && !_aw._crashed && _aw.app.tick) {
+        try { _aw.app.tick(); } catch(_) {}
+      }
+    }
+
+    // ── Child processes — budget-gated ──────────────────────────────────────
+    this._tickChildProcs(_t0);
+    scheduler.tick();
+
+    // ── Coroutines (fetch, DHCP, etc.) — budget-gated ──────────────────────
+    threadManager.tickCoroutines(_t0);
+    if (threadManager.hasCoroutines()) _activity = true;
+
+    // ── Low-priority subsystems — skip when frame budget exhausted ──────────
+    var _elapsed = kernel.getTicks() - _t0;
+    if (_elapsed < 2) net.tcpTick();
+    if (_elapsed < 2) systemProfiler.tick();
+    // GC: run at reduced frequency (every 4th frame) to free frame budget
+    if ((_wmGCTick & 3) === 0) {
+      try { globalGC.tick(_wmGCTick); } catch (_) {}
+    }
+    _wmGCTick++;
+
     this._composite();
+    if (this._wmDirty || this._cursorDirty) _activity = true;
+    return _activity;
   }
   /** Mark the WM as needing a repaint (call from app code or external events). */
   markDirty(): void { this._wmDirty = true; }
+
+  /**
+   * Lightweight cursor-only pump: read mouse packets, update cursor position,
+   * and redraw the cursor sprite without dispatching events.
+   * Safe to call from anywhere (e.g., during long synchronous operations like
+   * HTML/CSS parsing) to keep the cursor visually responsive.
+   */
+  pumpCursor(): void {
+    for (var _pi = 0; _pi < 8; _pi++) {
+      var pkt = kernel.readMouse();
+      if (!pkt) break;
+      this._cursorX = Math.max(0, Math.min(this._screen.width  - 1, this._cursorX + pkt.dx));
+      this._cursorY = Math.max(0, Math.min(this._screen.height - 1, this._cursorY + pkt.dy));
+      this._cursorDirty = true;
+    }
+    if (this._cursorDirty && this._cursorSaveValid) {
+      this._restoreCursorSaveUnder();
+      this._saveCursorUnder();
+      this._drawCursor();
+      this._screen.flip();
+      this._cursorDirty = false;
+    }
+  }
+
+  /** Register a proc ID as app-managed (WM will skip it in _tickChildProcs). */
+  registerManagedProc(id: number): void { this._appManagedProcs.add(id); }
+  /** Unregister a managed proc ID. */
+  unregisterManagedProc(id: number): void { this._appManagedProcs.delete(id); }
 
   /**
    * Pump every live child JS process each frame.
@@ -300,11 +738,41 @@ export class WindowManager {
    * without any user code needing to manually call p.tick().
    * Guard: skip the kernel.procList() allocation entirely when no children exist.
    */
-  private _tickChildProcs(): void {
+  private _tickChildProcs(_t0: number): void {
     var list = kernel.procList();
     if (list.length === 0) return;
     for (var i = 0; i < list.length; i++) {
-      kernel.procTick(list[i].id);
+      var id = list[i].id;
+      // Skip procs managed by apps (e.g. browser child runtimes) — they tick themselves
+      if (this._appManagedProcs.has(id)) continue;
+      try {
+        var _tickResult = kernel.procTick(id);
+        // procTick returns -1 on hardware fault; only then destroy
+        if (_tickResult < 0) {
+          kernel.serialPut('[wm] child proc ' + id + ' HW fault in procTick — destroying\n');
+          try { kernel.procDestroy(id); } catch(_) {}
+          try { clearChildJITForProc(id); } catch(_) {}
+          continue;
+        }
+      } catch(e1) {
+        kernel.serialPut('[wm] procTick(' + id + ') threw: ' + String(e1).slice(0, 120) + '\n');
+        continue;
+      }
+      try { kernel.serviceTimers(id); } catch(e2) {
+        kernel.serialPut('[wm] serviceTimers(' + id + ') threw: ' + String(e2).slice(0, 120) + '\n');
+      }
+      try {
+        /* Defer JIT compilation when frame is already over budget (~20ms) */
+        if (kernel.getTicks() - _t0 < 2) {
+          var pendingBC = kernel.procPendingJIT(id);
+          if (pendingBC !== 0) { _serviceChildJIT(id, pendingBC); }
+        }
+      } catch(e3) {
+        kernel.serialPut('[wm] JIT(' + id + ') threw: ' + String(e3).slice(0, 120) + '\n');
+      }
+      try { this._processWindowCommands(id); } catch(e4) {
+        kernel.serialPut('[wm] processCmd(' + id + ') threw: ' + String(e4).slice(0, 120) + '\n');
+      }
     }
   }
   // ── Input dispatch ─────────────────────────────────────────────────────
@@ -320,7 +788,7 @@ export class WindowManager {
       this._cursorY = Math.max(0, Math.min(this._screen.height - 1, this._cursorY + pkt.dy));
       var cx = this._cursorX;
       var cy = this._cursorY;
-      if (cx !== prevX || cy !== prevY) this._wmDirty = true;
+      if (cx !== prevX || cy !== prevY) this._cursorDirty = true;
 
       var btn1     = pkt.buttons & 1;
       var prevBtn1 = this._prevButtons & 1;
@@ -346,7 +814,16 @@ export class WindowManager {
         } else if (!prevBtn1) {
           var consumed = false;
 
-          // 1. Taskbar button click?
+          // 0. Context-menu click?
+          if (this._contextMenu) {
+            var hitItem = this._hitContextMenuItem(cx, cy);
+            if (hitItem && !hitItem.disabled && hitItem.action) hitItem.action();
+            this._contextMenu = null;
+            this._wmDirty = true;
+            consumed = true;
+          }
+
+          if (!consumed) {
           var barY = this._screen.height - TASKBAR_H;
           if (cy >= barY) {
             var btnX = 58;
@@ -421,7 +898,9 @@ export class WindowManager {
               }
             }
           }
-        }
+          } // end if (!consumed) — outer context-menu guard
+
+        } // end else if (!prevBtn1) — new-mouse-down handler
 
       } else {
         // ── Button released ──────────────────────────────────────────────────
@@ -464,17 +943,38 @@ export class WindowManager {
           if      (btn1 && !prevBtn1)  evType = 'down';
           else if (!btn1 && prevBtn1)  evType = 'up';
           else                         evType = 'move';
-          try {
-            dispWin.app.onMouse({
-              x:       cx - dispWin.x,
-              y:       cy - (dispWin.y + TITLE_H),
-              dx:      cx - prevX,
-              dy:      cy - prevY,
-              buttons: pkt.buttons,
-              type:    evType,
-            });
-          } catch (_e) {}
-          if (evType !== 'move') this._wmDirty = true;
+
+          if (dispWin._crashed) {
+            // Any click (mouse-up) on a crashed window → restart the app
+            if (evType === 'up') {
+              dispWin._crashed  = false;
+              dispWin._crashMsg = undefined;
+              try { dispWin.app.onMount(dispWin); } catch (re) {
+                dispWin._crashed = true;
+                var reMsg = '';
+                try { reMsg = (re instanceof Error) ? re.message : String(re); } catch (_r) { reMsg = 'Restart failed'; }
+                dispWin._crashMsg = ('Restart failed: ' + reMsg).substring(0, 80);
+              }
+              this._wmDirty = true;
+            }
+          } else {
+            try {
+              dispWin.app.onMouse({
+                x:       cx - dispWin.x,
+                y:       cy - (dispWin.y + TITLE_H),
+                dx:      cx - prevX,
+                dy:      cy - prevY,
+                buttons: pkt.buttons,
+                type:    evType,
+              });
+            } catch (me) {
+              dispWin._crashed = true;
+              var meMsg = '';
+              try { meMsg = (me instanceof Error) ? me.message : String(me); } catch (_m) { meMsg = 'Unknown'; }
+              dispWin._crashMsg = meMsg.length > 80 ? meMsg.substring(0, 77) + '...' : meMsg;
+            }
+            if (evType !== 'move') this._wmDirty = true;
+          }
         }
       } else {
         this._mouseCapture = null;
@@ -485,12 +985,26 @@ export class WindowManager {
 
     // ── Drain keyboard to focused window ──────────────────────────────────────
     var focused = this.getFocused();
+    // If a modal is active, redirect all keyboard input to the modal window
+    if (this._modalWinId !== null) {
+      var modalWin = this._findWindow(this._modalWinId);
+      if (modalWin) focused = modalWin;
+    }
     if (focused) {
       for (var k = 0; k < 32; k++) {
         var raw = kernel.readKeyEx();
         if (!raw) break;
-        try { focused.app.onKey(this._makeKeyEvent(raw)); } catch (_e) {}
-        this._wmDirty = true;
+        if (!focused._crashed) {
+          try { focused.app.onKey(this._makeKeyEvent(raw)); } catch (ke) {
+            focused._crashed = true;
+            var keMsg = '';
+            try { keMsg = (ke instanceof Error) ? ke.message : String(ke); } catch (_k) { keMsg = 'Unknown error'; }
+            focused._crashMsg = keMsg.length > 80 ? keMsg.substring(0, 77) + '...' : keMsg;
+            this._wmDirty = true;  // only structural dirty on crash overlay
+          }
+        }
+        // Don't set _wmDirty — app.render() will return true if content changed,
+        // triggering the fast partial composite instead of the expensive full path.
       }
     } else {
       // Still drain the queue even when no window is focused
@@ -573,87 +1087,242 @@ export class WindowManager {
   private _composite(): void {
     var s = this._screen;
 
-    // Check clock — dirty on minute boundary
+    // Check clock — redraw taskbar only on minute boundary (not full composite)
     var ticks = kernel.getTicks();
     var mins = Math.floor(ticks / 6000) % 60;
-    if (mins !== this._lastClockMin) { this._lastClockMin = mins; this._wmDirty = true; }
+    var _clockChanged = false;
+    if (mins !== this._lastClockMin) { this._lastClockMin = mins; _clockChanged = true; }
 
-    // Let apps render; if any redrew OR WM has pending changes, do a full composite.
-    var anyDirty = this._wmDirty;
+    // Let apps render; track content dirty separately from cursor dirty so we
+    // can use the cheap cursor-only fast path when only the mouse has moved.
+    var anyContentDirty = this._wmDirty;
+    var dirtyWinIdxs = this._dirtyIdxBuf;
+    dirtyWinIdxs.length = 0;  // reuse array, avoid per-frame allocation
     for (var ai = 0; ai < this._windows.length; ai++) {
       var wi = this._windows[ai];
       if (!wi.minimised) {
-        try { if (wi.app.render(wi.canvas)) anyDirty = true; } catch (_e) {}
+        if (wi._crashed) {
+          // Crashed: keep last canvas frame but ensure the overlay is drawn
+          anyContentDirty = true;
+        } else {
+          try {
+            if (wi.app.render(wi.canvas)) {
+              anyContentDirty = true;
+              dirtyWinIdxs.push(ai);
+            }
+          } catch (err) {
+            wi._crashed = true;
+            var eMsg = '';
+            try { eMsg = (err instanceof Error) ? err.message : String(err); } catch (_) { eMsg = 'Unknown error'; }
+            wi._crashMsg = eMsg.length > 80 ? eMsg.substring(0, 77) + '...' : eMsg;
+            anyContentDirty = true;
+          }
+        }
       }
     }
 
-    if (!anyDirty) return;   // ★ nothing changed — skip expensive composite+flip
-    this._wmDirty = false;
+    if (!anyContentDirty && !this._cursorDirty && !_clockChanged) return; // ★ truly nothing changed
+
+    // ── Clock-only update: redraw just the taskbar and partial flip ─────────
+    if (!anyContentDirty && !this._cursorDirty && _clockChanged) {
+      this._drawTaskbar();
+      var _barY = s.height - TASKBAR_H;
+      this._saveCursorUnder();
+      this._drawCursor();
+      this._cursorSaveValid = true;
+      s.flipRegion(0, _barY, s.width, TASKBAR_H);
+      return;
+    }
+
+    // ── FAST PATH: content-only dirty (no structural WM changes) ───────────
+    // When _wmDirty is false, window positions/sizes/z-order haven't changed.
+    // We only need to re-blit the dirty windows' canvas content areas and do
+    // partial flips — skipping the expensive full clear + all-windows redraw.
+    if (!this._wmDirty && dirtyWinIdxs.length > 0 && this._modalWinId === null) {
+      // Invalidate cursor save-under since we'll overwrite screen pixels
+      this._cursorSaveValid = false;
+
+      for (var dii = 0; dii < dirtyWinIdxs.length; dii++) {
+        var dIdx = dirtyWinIdxs[dii];
+        var dw = this._windows[dIdx];
+        // Re-blit dirty window's content canvas into the screen buffer
+        var contentH = dw.height - TITLE_H;
+        var blitW = Math.min(dw.width, dw.canvas.width);
+        var blitH = Math.min(contentH, dw.canvas.height);
+        if (dw.opacity >= 255) {
+          s.blit(dw.canvas, 0, 0, dw.x, dw.y + TITLE_H, blitW, blitH);
+        } else {
+          s.blitAlpha(dw.canvas, 0, 0, dw.x, dw.y + TITLE_H, blitW, blitH, dw.opacity);
+        }
+
+        // Re-blit any windows ABOVE this one that overlap its content area
+        // (their content is unchanged but must be composited on top)
+        for (var oi = dIdx + 1; oi < this._windows.length; oi++) {
+          var ow = this._windows[oi];
+          if (ow.minimised || ow.opacity === 0) continue;
+          // Check overlap between dirty window rect and other window rect
+          var ox1 = Math.max(dw.x, ow.x);
+          var oy1 = Math.max(dw.y + TITLE_H, ow.y);
+          var ox2 = Math.min(dw.x + dw.width, ow.x + ow.width);
+          var oy2 = Math.min(dw.y + dw.height, ow.y + ow.height);
+          if (ox1 < ox2 && oy1 < oy2) {
+            // Overlapping: re-blit the higher window's entire content
+            var owCH = ow.height - TITLE_H;
+            var owBW = Math.min(ow.width, ow.canvas.width);
+            var owBH = Math.min(owCH, ow.canvas.height);
+            if (ow.opacity >= 255) {
+              s.blit(ow.canvas, 0, 0, ow.x, ow.y + TITLE_H, owBW, owBH);
+            } else {
+              s.blitAlpha(ow.canvas, 0, 0, ow.x, ow.y + TITLE_H, owBW, owBH, ow.opacity);
+            }
+          }
+        }
+      }
+
+      // Redraw cursor and partial flip for dirty regions
+      this._saveCursorUnder();
+      this._drawCursor();
+      this._cursorSaveValid = true;
+      this._cursorDirty   = false;
+
+      // Partial flip: blit only the dirty windows' screen rects to framebuffer
+      for (var dii = 0; dii < dirtyWinIdxs.length; dii++) {
+        var dw = this._windows[dirtyWinIdxs[dii]];
+        s.flipRegion(dw.x, dw.y, dw.width, dw.height);
+      }
+      // If clock changed too, refresh taskbar in this fast path
+      if (_clockChanged) {
+        this._drawTaskbar();
+        s.flipRegion(0, s.height - TASKBAR_H, s.width, TASKBAR_H);
+      }
+      return; // skip full composite
+    }
+
+    // The cursor fast blit is handled in tick() before this method is called,
+    // so _cursorDirty is normally already false here.  Clear both dirty flags
+    // and proceed with the full composite.
+    this._wmDirty       = false;
+    this._cursorDirty   = false;
+    this._cursorSaveValid = false; // will be rebuilt at end of full composite
 
     // 1. Desktop background
     s.clear(Colors.DESKTOP_BG);
 
     // 2. Draw windows bottom-to-top
+    //    When a modal is active: draw all non-modal windows first, then apply
+    //    the dim overlay, then draw the modal window on top.
+    var modalWin: WMWindow | null = null;
+    if (this._modalWinId !== null) {
+      for (var ii = 0; ii < this._windows.length; ii++) {
+        if (this._windows[ii].id === this._modalWinId) { modalWin = this._windows[ii]; break; }
+      }
+    }
+
+    var drawOneWindow = this._drawOneWindow.bind(this, s);
+
     for (var i = 0; i < this._windows.length; i++) {
       var win = this._windows[i];
-      if (win.minimised) continue;
+      if (win.id === this._modalWinId) continue; // modal drawn last
+      drawOneWindow(win);
+    }
 
-      var focused = (win.id === this._focused);
-
-      // Title bar
-      s.fillRect(win.x, win.y, win.width, TITLE_H,
-                 focused ? FOCUSED_TITLE_COLOR : TITLE_COLOR);
-      // Title text (truncate to avoid overlapping buttons)
-      var maxTitleChars = Math.floor((win.width - 58) / 8);
-      var title = win.title.length > maxTitleChars
-        ? win.title.substring(0, maxTitleChars)
-        : win.title;
-      s.drawText(win.x + 6, win.y + 5, title, Colors.WHITE);
-
-      // Title bar buttons (right→left: close, max, min)
-      var bb = win.x + win.width;
-      // Close
-      if (win.closeable) {
-        s.fillRect(bb - 18, win.y + 4, BTN_W, TITLE_H - 8, 0xFFCC3333);
-        s.drawText(bb - 14, win.y + 6, 'X', Colors.WHITE);
+    // Apply dim overlay after all non-modal windows, before modal
+    if (modalWin !== null) {
+      var buf = s.getBuffer();
+      var screenH = s.height - TASKBAR_H;
+      // Dim entire screen in one pass with stride-4 skip (halve brightness)
+      var totalPx = screenH * s.width;
+      for (var pidx = 0; pidx < totalPx; pidx++) {
+        buf[pidx] = ((buf[pidx] >> 1) & 0x7F7F7F7F) | 0xFF000000;
       }
-      // Maximise
-      s.fillRect(bb - 34, win.y + 4, BTN_W, TITLE_H - 8, focused ? 0xFF226622 : 0xFF1A441A);
-      s.drawText(bb - 31, win.y + 6, win.maximised ? '\u25a4' : '\u25a1', Colors.LIGHT_GREY);
-      // Minimise
-      s.fillRect(bb - 50, win.y + 4, BTN_W, TITLE_H - 8, focused ? 0xFF664422 : 0xFF442D17);
-      s.drawText(bb - 47, win.y + 6, '_', Colors.LIGHT_GREY);
-
-      // Content area
-      s.fillRect(win.x, win.y + TITLE_H, win.width, win.height - TITLE_H, 0xFF111111);
-
-      // Blit window canvas (clamped to actual canvas dimensions to handle mid-resize)
-      var contentH = win.height - TITLE_H;
-      var blitW = Math.min(win.width, win.canvas.width);
-      var blitH = Math.min(contentH, win.canvas.height);
-      s.blit(win.canvas, 0, 0, win.x, win.y + TITLE_H, blitW, blitH);
-
-      // Resize grip: three diagonal lines at bottom-right
-      var gx = win.x + win.width - 1;
-      var gy = win.y + win.height - 1;
-      var gc = focused ? 0xFF6688AA : 0xFF445566;
-      s.drawLine(gx - 8, gy, gx, gy - 8, gc);
-      s.drawLine(gx - 5, gy, gx, gy - 5, gc);
-      s.drawLine(gx - 2, gy, gx, gy - 2, gc);
-
-      // Window border
-      s.drawRect(win.x, win.y, win.width, win.height,
-                 focused ? 0xFF5599CC : 0xFF445566);
+      drawOneWindow(modalWin);
     }
 
     // 3. Taskbar
     this._drawTaskbar();
 
-    // 4. Mouse cursor
-    this._drawCursor();
+    // 4. Context menu (above taskbar if present)
+    if (this._contextMenu) {
+      this._drawContextMenu();
+    }
 
-    // 5. Flip to framebuffer
+    // 5. Mouse cursor — save the pixels beneath the sprite first so the
+    //    fast cursor path can restore them without a full re-composite.
+    this._saveCursorUnder();
+    this._drawCursor();
+    this._cursorSaveValid = true;
+
+    // 6. Flip to framebuffer
     s.flip();
+  }
+
+  /** Draw a single window (title bar, content, optional crash overlay, resize grip, border). */
+  private _drawOneWindow(s: Canvas, win: WMWindow): void {
+    if (win.minimised) return;
+    if (win.opacity === 0) return;
+    var focused = (win.id === this._focused);
+
+    // Title bar
+    s.fillRect(win.x, win.y, win.width, TITLE_H,
+               win._crashed ? 0xFF7A1111 :
+               focused ? FOCUSED_TITLE_COLOR : TITLE_COLOR);
+    var maxTitleChars = Math.floor((win.width - 58) / 8);
+    var rawTitle = win._crashed ? '\u26A0 ' + win.title + ' (crashed)' : win.title;
+    var title = rawTitle.length > maxTitleChars
+      ? rawTitle.substring(0, maxTitleChars)
+      : rawTitle;
+    s.drawText(win.x + 6, win.y + 5, title, Colors.WHITE);
+
+    // Title bar buttons (right→left: close, max, min)
+    var bb = win.x + win.width;
+    if (win.closeable) {
+      s.fillRect(bb - 18, win.y + 4, BTN_W, TITLE_H - 8, 0xFFCC3333);
+      s.drawText(bb - 14, win.y + 6, 'X', Colors.WHITE);
+    }
+    s.fillRect(bb - 34, win.y + 4, BTN_W, TITLE_H - 8, focused ? 0xFF226622 : 0xFF1A441A);
+    s.drawText(bb - 31, win.y + 6, win.maximised ? '\u25a4' : '\u25a1', Colors.LIGHT_GREY);
+    s.fillRect(bb - 50, win.y + 4, BTN_W, TITLE_H - 8, focused ? 0xFF664422 : 0xFF442D17);
+    s.drawText(bb - 47, win.y + 6, '_', Colors.LIGHT_GREY);
+
+    // Content area
+    s.fillRect(win.x, win.y + TITLE_H, win.width, win.height - TITLE_H, 0xFF111111);
+
+    var contentH = win.height - TITLE_H;
+    var blitW = Math.min(win.width, win.canvas.width);
+    var blitH = Math.min(contentH, win.canvas.height);
+    if (win.opacity >= 255) {
+      s.blit(win.canvas, 0, 0, win.x, win.y + TITLE_H, blitW, blitH);
+    } else {
+      s.blitAlpha(win.canvas, 0, 0, win.x, win.y + TITLE_H, blitW, blitH, win.opacity);
+    }
+
+    if (win._crashed) {
+      var cox = win.x;
+      var coy = win.y + TITLE_H;
+      var cow = win.width;
+      var coh = win.height - TITLE_H;
+      s.fillRect(cox, coy, cow, coh, 0xC0200000);
+      s.drawText(cox + 10, coy + 10, '\u26A0  App Crashed', Colors.WHITE);
+      var errLine0 = (win._crashMsg || 'Uncaught exception').substring(0, Math.floor((cow - 20) / 8));
+      s.drawText(cox + 10, coy + 26, errLine0, 0xFFFF9988);
+      var rbW = cow - 20;  var rbH = 20;
+      var rbX = cox + 10;  var rbY = coy + coh - 30;
+      s.fillRect(rbX, rbY, rbW, rbH, 0xFF1A2B3A);
+      s.drawRect(rbX, rbY, rbW, rbH, 0xFF4488BB);
+      s.drawText(rbX + Math.max(2, (rbW - 160) >> 1), rbY + 6, 'Click here to Restart', Colors.LIGHT_GREY);
+    }
+
+    // Resize grip
+    var gx = win.x + win.width - 1;
+    var gy = win.y + win.height - 1;
+    var gc = focused ? 0xFF6688AA : 0xFF445566;
+    s.drawLine(gx - 8, gy, gx, gy - 8, gc);
+    s.drawLine(gx - 5, gy, gx, gy - 5, gc);
+    s.drawLine(gx - 2, gy, gx, gy - 2, gc);
+
+    // Window border
+    s.drawRect(win.x, win.y, win.width, win.height,
+               focused ? 0xFF5599CC : 0xFF445566);
   }
 
   private _drawTaskbar(): void {
@@ -684,7 +1353,7 @@ export class WindowManager {
 
     // Clock (ticks-based): crude HH:MM
     var ticks = kernel.getTicks();
-    var totalSecs = Math.floor(ticks / 100);
+    var totalSecs = Math.floor(ticks / 1000);
     var mins = Math.floor(totalSecs / 60) % 60;
     var hours = Math.floor(totalSecs / 3600) % 24;
     var hh = (hours < 10 ? '0' : '') + hours;
@@ -692,24 +1361,111 @@ export class WindowManager {
     s.drawText(s.width - 50, barY + 9, hh + ':' + mm, Colors.LIGHT_GREY);
   }
 
-  private _drawCursor(): void {
-    // Write directly into the screen buffer — avoids 209 individual setPixel()
-    // calls (each with a bounds-check + _bgra() call) per frame.
+  // ── Cursor save-under helpers ─────────────────────────────────────────────
+  // Save the CURSOR_W × CURSOR_H region of the screen buffer that sits behind
+  // the cursor sprite.  Called at the end of a full composite so the fast
+  // cursor path can restore it without touching any window canvas.
+
+  private _saveCursorUnder(): void {
     var buf = this._screen.getBuffer();
     var sw  = this._screen.width;
     var sh  = this._screen.height;
-    var BLACK = 0xFF000000;   // same bit pattern as Canvas._bgra(Colors.BLACK)
-    var WHITE = 0xFFFFFFFF;   // same bit pattern as Canvas._bgra(Colors.WHITE)
+    var cx  = this._cursorX;
+    var cy  = this._cursorY;
+    var k   = 0;
     for (var row = 0; row < CURSOR_H; row++) {
-      var py = this._cursorY + row;
-      if (py < 0 || py >= sh) continue;
-      var rowBase = py * sw;
+      var py = cy + row;
+      var rowBase = (py >= 0 && py < sh) ? py * sw : -1;
+      for (var col = 0; col < CURSOR_W; col++) {
+        var px = cx + col;
+        this._cursorSaveUnder[k++] = (rowBase >= 0 && px >= 0 && px < sw)
+          ? buf[rowBase + px] : 0;
+      }
+    }
+    this._cursorSaveX = cx;
+    this._cursorSaveY = cy;
+  }
+
+  private _restoreCursorSaveUnder(): void {
+    var buf = this._screen.getBuffer();
+    var sw  = this._screen.width;
+    var sh  = this._screen.height;
+    var cx  = this._cursorSaveX;
+    var cy  = this._cursorSaveY;
+    var k   = 0;
+    for (var row = 0; row < CURSOR_H; row++) {
+      var py = cy + row;
+      var rowBase = (py >= 0 && py < sh) ? py * sw : -1;
+      for (var col = 0; col < CURSOR_W; col++) {
+        var px = cx + col;
+        if (rowBase >= 0 && px >= 0 && px < sw)
+          buf[rowBase + px] = this._cursorSaveUnder[k];
+        k++;
+      }
+    }
+  }
+
+  private _drawCursor(): void {
+    if (this._cursorShape === 'none') return;
+
+    var buf = this._screen.getBuffer();
+    var sw  = this._screen.width;
+    var sh  = this._screen.height;
+    var cx  = this._cursorX;
+    var cy  = this._cursorY;
+    var BLACK = 0xFF000000;
+    var WHITE = 0xFFFFFFFF;
+
+    if (this._cursorShape === 'crosshair') {
+      // Simple 9×9 crosshair
+      for (var i = -4; i <= 4; i++) {
+        if (i === 0) continue;
+        var px = cx + i, py = cy;
+        if (px >= 0 && px < sw && py >= 0 && py < sh) buf[py * sw + px] = WHITE;
+        px = cx; py = cy + i;
+        if (px >= 0 && px < sw && py >= 0 && py < sh) buf[py * sw + px] = WHITE;
+      }
+      if (cx >= 0 && cx < sw && cy >= 0 && cy < sh) buf[cy * sw + cx] = BLACK;
+      return;
+    }
+
+    if (this._cursorShape === 'text') {
+      // I-beam: vertical bar with serifs
+      var ibH = 14, ibY = cy - ibH / 2;
+      for (var iy = 0; iy < ibH; iy++) {
+        var py2 = Math.floor(ibY + iy);
+        if (py2 < 0 || py2 >= sh) continue;
+        if (iy === 0 || iy === ibH - 1) {
+          // serifs
+          for (var ix = -2; ix <= 2; ix++) {
+            var px2 = cx + ix;
+            if (px2 >= 0 && px2 < sw) buf[py2 * sw + px2] = WHITE;
+          }
+        } else {
+          if (cx >= 0 && cx < sw) buf[py2 * sw + cx] = WHITE;
+        }
+      }
+      return;
+    }
+
+    if (this._cursorShape === 'pointer') {
+      // Simple pointing hand (hollow) — reuse arrow but offset slightly
+      // Fall through to default arrow for now
+    }
+
+    // Default / resize cursors: use the arrow sprite
+    // Write directly into the screen buffer — avoids 209 individual setPixel()
+    // calls (each with a bounds-check + _bgra() call) per frame.
+    for (var row = 0; row < CURSOR_H; row++) {
+      var py3 = cy + row;
+      if (py3 < 0 || py3 >= sh) continue;
+      var rowBase = py3 * sw;
       for (var col = 0; col < CURSOR_W; col++) {
         var v = CURSOR_PIXELS[row * CURSOR_W + col];
         if (v === 0) continue;
-        var px = this._cursorX + col;
-        if (px < 0 || px >= sw) continue;
-        buf[rowBase + px] = v === 1 ? BLACK : WHITE;
+        var px3 = cx + col;
+        if (px3 < 0 || px3 >= sw) continue;
+        buf[rowBase + px3] = v === 1 ? BLACK : WHITE;
       }
     }
   }
@@ -722,6 +1478,67 @@ export class WindowManager {
     }
     return undefined;
   }
+
+  private _drawContextMenu(): void {
+    var cm = this._contextMenu!;
+    var s  = this._screen;
+    var ITEM_H = 16;
+    var PAD    = 6;
+    var W      = 140;
+
+    // Calculate height (separator = 5px, normal item = ITEM_H)
+    var totalH = PAD;
+    for (var k = 0; k < cm.items.length; k++) {
+      totalH += cm.items[k].separator ? 5 : ITEM_H;
+    }
+    totalH += PAD;
+
+    // Clamp to screen
+    var mx = Math.min(cm.x, s.width  - W   - 2);
+    var my = Math.min(cm.y, s.height - totalH - 2);
+
+    // Background + border
+    s.fillRect(mx, my, W, totalH, 0xFF2A2A3A);
+    s.drawRect(mx, my, W, totalH, 0xFF5599CC);
+
+    var cy = my + PAD;
+    for (var i = 0; i < cm.items.length; i++) {
+      var item = cm.items[i];
+      if (item.separator) {
+        s.fillRect(mx + 4, cy + 2, W - 8, 1, 0xFF445566);
+        cy += 5;
+        continue;
+      }
+      // Hover highlight: item under cursor?
+      var cx2 = this._cursorX, cy2 = this._cursorY;
+      var hover = cx2 >= mx && cx2 < mx + W && cy2 >= cy && cy2 < cy + ITEM_H;
+      if (hover && !item.disabled) s.fillRect(mx + 1, cy, W - 2, ITEM_H, 0xFF2255AA);
+      s.drawText(mx + 8, cy + 4, item.label,
+                 item.disabled ? 0xFF667788 : Colors.WHITE);
+      cy += ITEM_H;
+    }
+  }
+
+  private _hitContextMenuItem(cx: number, cy: number): MenuItem | null {
+    var cm = this._contextMenu;
+    if (!cm) return null;
+    var ITEM_H = 16, PAD = 6, W = 140;
+    var totalH = PAD;
+    for (var k = 0; k < cm.items.length; k++) {
+      totalH += cm.items[k].separator ? 5 : ITEM_H;
+    }
+    totalH += PAD;
+    var mx = Math.min(cm.x, this._screen.width  - W   - 2);
+    var my = Math.min(cm.y, this._screen.height - totalH - 2);
+    var iy = my + PAD;
+    for (var i = 0; i < cm.items.length; i++) {
+      var item = cm.items[i];
+      if (item.separator) { iy += 5; continue; }
+      if (cx >= mx && cx < mx + W && cy >= iy && cy < iy + ITEM_H) return item;
+      iy += ITEM_H;
+    }
+    return null;
+  }
 }
 
 /** Singleton WM instance — created by main.ts after framebuffer detection. */
@@ -731,3 +1548,1142 @@ export function getWM(): WindowManager {
   if (!wm) throw new Error('WindowManager not yet initialised');
   return wm;
 }
+
+/**
+ * Module-level cursor pump — keeps mouse cursor alive during long synchronous
+ * work (HTML parse, CSS parse, layout).  Safe to call from any module.
+ */
+export function pumpCursor(): void {
+  if (wm) wm.pumpCursor();
+}
+
+// ================================================================================
+// [Item 757] Theme System — colour scheme management
+// [Item 758] Dark Mode support
+// ================================================================================
+
+/**
+ * A theme defines the colour palette used throughout the JSOS desktop.
+ * All colours are ARGB 32-bit values matching the PixelColor format used
+ * by the Canvas API.
+ */
+export interface OSTheme {
+  name:        string;
+  desktopBg:   number;  // desktop background
+  taskbarBg:   number;  // taskbar background
+  titleBg:     number;  // inactive title bar
+  titleFocused:number;  // active/focused title bar
+  windowBg:    number;  // window content area background
+  border:      number;  // window border
+  accentColor: number;  // highlights and focus rings
+  textPrimary: number;  // main text (ARGB)
+  textDim:     number;  // secondary / dim text
+  darkMode:    boolean;
+}
+
+/** Built-in light theme. */
+export const THEME_LIGHT: OSTheme = {
+  name:         'Light',
+  desktopBg:    0xFF3A7AC4,
+  taskbarBg:    0xFF1A2B3C,
+  titleBg:      0xFF3A4A5A,
+  titleFocused: 0xFF2A5F8F,
+  windowBg:     0xFFF0F0F0,
+  border:       0xFF5599CC,
+  accentColor:  0xFF3399FF,
+  textPrimary:  0xFFFFFFFF,
+  textDim:      0xFF888888,
+  darkMode:     false,
+};
+
+/** Built-in dark theme (default). */
+export const THEME_DARK: OSTheme = {
+  name:         'Dark',
+  desktopBg:    0xFF1A2533,
+  taskbarBg:    0xFF0A0E14,
+  titleBg:      0xFF1E2A38,
+  titleFocused: 0xFF1E3A5F,
+  windowBg:     0xFF111111,
+  border:       0xFF334455,
+  accentColor:  0xFF2255AA,
+  textPrimary:  0xFFFFFFFF,
+  textDim:      0xFF556677,
+  darkMode:     true,
+};
+
+/** Solarized dark theme. */
+export const THEME_SOLARIZED: OSTheme = {
+  name:         'Solarized Dark',
+  desktopBg:    0xFF002B36,
+  taskbarBg:    0xFF073642,
+  titleBg:      0xFF073642,
+  titleFocused: 0xFF268BD2,
+  windowBg:     0xFF002B36,
+  border:       0xFF586E75,
+  accentColor:  0xFF268BD2,
+  textPrimary:  0xFFEEE8D5,
+  textDim:      0xFF657B83,
+  darkMode:     true,
+};
+
+/** High-contrast accessibility theme. */
+export const THEME_HIGH_CONTRAST: OSTheme = {
+  name:         'High Contrast',
+  desktopBg:    0xFF000000,
+  taskbarBg:    0xFF000000,
+  titleBg:      0xFF000000,
+  titleFocused: 0xFF0000FF,
+  windowBg:     0xFF000000,
+  border:       0xFFFFFF00,
+  accentColor:  0xFF00FF00,
+  textPrimary:  0xFFFFFFFF,
+  textDim:      0xFFCCCCCC,
+  darkMode:     true,
+};
+
+/** All built-in themes by name. */
+export const BUILTIN_THEMES: Record<string, OSTheme> = {
+  dark:          THEME_DARK,
+  light:         THEME_LIGHT,
+  solarized:     THEME_SOLARIZED,
+  'high-contrast': THEME_HIGH_CONTRAST,
+};
+
+/**
+ * [Item 757 / 758] ThemeManager — central colour-scheme and dark-mode registry.
+ *
+ * Usage:
+ *   themeManager.setTheme('solarized');
+ *   themeManager.setDarkMode(true);
+ *   var t = themeManager.current;   // OSTheme
+ */
+export class ThemeManager {
+  private _current: OSTheme = THEME_DARK;
+  private _custom = new Map<string, OSTheme>();
+
+  /** The active theme. */
+  get current(): OSTheme { return this._current; }
+
+  /** True if the current theme has darkMode=true. */
+  get isDark(): boolean { return this._current.darkMode; }
+
+  /**
+   * Switch to a named built-in or user-registered theme.
+   * Returns the new theme, or null if the name was not found.
+   */
+  setTheme(name: string): OSTheme | null {
+    var t: OSTheme | undefined =
+      this._custom.get(name) ?? BUILTIN_THEMES[name.toLowerCase()];
+    if (!t) return null;
+    this._current = t;
+    if (wm) wm.markDirty();
+    return t;
+  }
+
+  /**
+   * [Item 758] Toggle dark/light mode.
+   * Switches between THEME_DARK and THEME_LIGHT while preserving the
+   * user's custom base if they have one.
+   */
+  setDarkMode(dark: boolean): void {
+    if (this._current.darkMode === dark) return;
+    if (dark) {
+      this.setTheme('dark');
+    } else {
+      this.setTheme('light');
+    }
+  }
+
+  /** Register a custom theme (can be retrieved by name later). */
+  register(theme: OSTheme): void {
+    this._custom.set(theme.name.toLowerCase(), theme);
+  }
+
+  /** Create a custom theme from a partial set of overrides. */
+  customize(name: string, overrides: Partial<OSTheme>): OSTheme {
+    var base = this._current;
+    var t: OSTheme = Object.assign({}, base, overrides, { name });
+    this.register(t);
+    return t;
+  }
+
+  /** List all available theme names (built-in + custom). */
+  listThemes(): string[] {
+    var names = Object.keys(BUILTIN_THEMES);
+    this._custom.forEach(function(_v, k) { names.push(k); });
+    return names;
+  }
+}
+
+/** Singleton ThemeManager instance. */
+export const themeManager = new ThemeManager();
+
+// ── [Item 761] Clipboard ──────────────────────────────────────────────────────
+
+/**
+ * In-OS clipboard: stores text and typed data blobs.
+ */
+export class Clipboard {
+  private _text: string = '';
+  private _html: string = '';
+  private _custom: Map<string, any> = new Map();
+  private _listeners: Array<() => void> = [];
+
+  /** Write text to the clipboard. */
+  writeText(text: string): void {
+    this._text = text;
+    this._html = '';
+    this._custom.clear();
+    this._fire();
+  }
+
+  /** Read text from the clipboard. */
+  readText(): string { return this._text; }
+
+  /** Write HTML to the clipboard (also sets text). */
+  writeHTML(html: string, text?: string): void {
+    this._html = html;
+    this._text = text ?? html.replace(/<[^>]+>/g, '');
+    this._fire();
+  }
+
+  readHTML(): string { return this._html; }
+
+  /** Write arbitrary typed data. */
+  write(type: string, data: any): void {
+    this._custom.set(type, data);
+    this._fire();
+  }
+
+  read(type: string): any { return this._custom.get(type); }
+
+  has(type: string): boolean { return this._custom.has(type); }
+
+  clear(): void {
+    this._text = '';
+    this._html = '';
+    this._custom.clear();
+    this._fire();
+  }
+
+  /** Subscribe to clipboard change events. */
+  on(cb: () => void): () => void {
+    this._listeners.push(cb);
+    return () => { this._listeners = this._listeners.filter(function(l) { return l !== cb; }); };
+  }
+
+  private _fire(): void {
+    this._listeners.forEach(function(fn) { try { fn(); } catch (_) {} });
+  }
+}
+
+export const clipboard = new Clipboard();
+
+// ── [Item 762] Screen Lock / Screensaver ──────────────────────────────────────
+
+export interface ScreensaverConfig {
+  timeoutMs: number;   /** Idle ms before screensaver activates */
+  lockOnBlank: boolean;
+  message: string;
+}
+
+export class ScreenLock {
+  private _locked: boolean = false;
+  private _lastActivity: number = 0;
+  private _config: ScreensaverConfig = { timeoutMs: 300_000, lockOnBlank: true, message: 'JSOS — Press any key to unlock' };
+  private _pin: string = '';
+  private _timer: any = null;
+  private _onLock: Array<() => void> = [];
+  private _onUnlock: Array<() => void> = [];
+
+  constructor() { this._lastActivity = Date.now(); }
+
+  configure(cfg: Partial<ScreensaverConfig>): void {
+    Object.assign(this._config, cfg);
+  }
+
+  setPin(pin: string): void { this._pin = pin; }
+
+  /** Notify that user activity occurred (resets idle timer). */
+  activity(): void {
+    this._lastActivity = Date.now();
+    if (this._locked) return; // still locked until unlock()
+    this._resetTimer();
+  }
+
+  /** Lock the screen immediately. */
+  lock(): void {
+    if (this._locked) return;
+    this._locked = true;
+    if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+    this._onLock.forEach(function(fn) { try { fn(); } catch (_) {} });
+  }
+
+  /** Attempt to unlock with optional PIN. Returns true on success. */
+  unlock(pin?: string): boolean {
+    if (!this._locked) return true;
+    if (this._pin && pin !== this._pin) return false;
+    this._locked = false;
+    this._resetTimer();
+    this._onUnlock.forEach(function(fn) { try { fn(); } catch (_) {} });
+    return true;
+  }
+
+  get isLocked(): boolean { return this._locked; }
+
+  get idleMs(): number { return Date.now() - this._lastActivity; }
+
+  onLock(fn: () => void): void { this._onLock.push(fn); }
+  onUnlock(fn: () => void): void { this._onUnlock.push(fn); }
+
+  private _resetTimer(): void {
+    if (this._timer) clearTimeout(this._timer);
+    const self = this;
+    this._timer = setTimeout(function() {
+      if (self._config.lockOnBlank) self.lock();
+    }, this._config.timeoutMs);
+  }
+}
+
+export const screenLock = new ScreenLock();
+
+// ── [Item 765] Window animations ──────────────────────────────────────────────
+
+export type AnimationType = 'fade-in' | 'fade-out' | 'slide-in' | 'slide-out' | 'scale-in' | 'scale-out' | 'bounce';
+
+export interface AnimationOptions {
+  type: AnimationType;
+  durationMs?: number;  /** default 200ms */
+  easing?: 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out';
+  onComplete?: () => void;
+}
+
+export interface AnimationFrame {
+  alpha: number;   /** 0–1 */
+  scaleX: number;  /** 0–1 */
+  scaleY: number;
+  offsetX: number; /** pixels */
+  offsetY: number;
+}
+
+/** Compute a single animation frame (t = 0..1 normalised). */
+function _ease(t: number, easing: string): number {
+  switch (easing) {
+    case 'ease-in':     return t * t;
+    case 'ease-out':    return 1 - (1 - t) * (1 - t);
+    case 'ease-in-out': return t < 0.5 ? 2 * t * t : 1 - (1 - t) * (1 - t) * 2;
+    default:            return t; // linear
+  }
+}
+
+export class WindowAnimator {
+  private _active: Map<number, { opts: AnimationOptions; start: number; winId: number }> = new Map();
+  private _counter: number = 0;
+
+  /**
+   * [Item 765] Start an animation on the given windowId.
+   * Returns an animation handle (cancel with cancel(handle)).
+   */
+  start(winId: number, opts: AnimationOptions): number {
+    var id = ++this._counter;
+    this._active.set(id, { opts, start: Date.now(), winId });
+    return id;
+  }
+
+  /** Cancel a running animation. */
+  cancel(handle: number): void { this._active.delete(handle); }
+
+  /**
+   * Compute frame for a given animation handle.
+   * Call this each render tick; returns null when the animation is complete.
+   */
+  frame(handle: number): AnimationFrame | null {
+    var entry = this._active.get(handle);
+    if (!entry) return null;
+    var elapsed = Date.now() - entry.start;
+    var dur = entry.opts.durationMs ?? 200;
+    var raw = Math.min(elapsed / dur, 1);
+    var t = _ease(raw, entry.opts.easing ?? 'ease-out');
+    var f: AnimationFrame;
+    switch (entry.opts.type) {
+      case 'fade-in':    f = { alpha: t, scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 }; break;
+      case 'fade-out':   f = { alpha: 1 - t, scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 }; break;
+      case 'scale-in':   f = { alpha: t, scaleX: t, scaleY: t, offsetX: 0, offsetY: 0 }; break;
+      case 'scale-out':  f = { alpha: 1 - t, scaleX: 1 - t, scaleY: 1 - t, offsetX: 0, offsetY: 0 }; break;
+      case 'slide-in':   f = { alpha: 1, scaleX: 1, scaleY: 1, offsetX: 0, offsetY: (1 - t) * 60 }; break;
+      case 'slide-out':  f = { alpha: 1 - t, scaleX: 1, scaleY: 1, offsetX: 0, offsetY: t * 60 }; break;
+      case 'bounce': {
+        var bounce = Math.abs(Math.sin(t * Math.PI * 2.5)) * (1 - t);
+        f = { alpha: 1, scaleX: 1, scaleY: 1, offsetX: 0, offsetY: -bounce * 20 };
+        break;
+      }
+      default:  f = { alpha: 1, scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 };
+    }
+    if (raw >= 1) {
+      this._active.delete(handle);
+      if (entry.opts.onComplete) try { entry.opts.onComplete(); } catch (_) {}
+    }
+    return f;
+  }
+
+  /** Check if an animation is still running. */
+  isRunning(handle: number): boolean { return this._active.has(handle); }
+
+  /** List all active animation window IDs. */
+  activeWindows(): number[] {
+    var ids: number[] = [];
+    this._active.forEach(function(e) { ids.push(e.winId); });
+    return ids;
+  }
+}
+
+export const windowAnimator = new WindowAnimator();
+
+// ── [Item 746] Desktop Wallpaper ──────────────────────────────────────────────
+
+export type WallpaperMode = 'solid' | 'gradient' | 'pattern' | 'image';
+
+export interface WallpaperConfig {
+  mode: WallpaperMode;
+  color?: number;              /** ARGB — for solid */
+  gradientFrom?: number;
+  gradientTo?: number;
+  gradientAngle?: number;      /** degrees, default 135 */
+  pattern?: 'dots' | 'grid' | 'stripes' | 'noise';
+  patternColor?: number;
+  imageData?: number[];        /** raw ARGB pixel data */
+  imageWidth?: number;
+  imageHeight?: number;
+  imageScale?: 'stretch' | 'fit' | 'fill' | 'center' | 'tile';
+}
+
+export class WallpaperManager {
+  private _config: WallpaperConfig = { mode: 'gradient', gradientFrom: 0xFF1A1A2E, gradientTo: 0xFF16213E, gradientAngle: 135 };
+
+  /** [Item 746] Set the desktop wallpaper configuration. */
+  set(cfg: WallpaperConfig): void {
+    this._config = cfg;
+    // Mark WM dirty so it repaints the desktop background
+    if (wm) (wm as any).markDirty();
+  }
+
+  get(): WallpaperConfig { return this._config; }
+
+  /** Render wallpaper into a pixel buffer (width × height ARGB array). */
+  render(buf: Uint32Array, w: number, h: number): void {
+    var cfg = this._config;
+    if (cfg.mode === 'solid') {
+      buf.fill(cfg.color ?? 0xFF1A1A2E);
+    } else if (cfg.mode === 'gradient') {
+      var from = cfg.gradientFrom ?? 0xFF1A1A2E;
+      var to   = cfg.gradientTo   ?? 0xFF16213E;
+      var ang  = (cfg.gradientAngle ?? 135) * Math.PI / 180;
+      var cos  = Math.cos(ang); var sin = Math.sin(ang);
+      for (var y = 0; y < h; y++) {
+        for (var x = 0; x < w; x++) {
+          var t = Math.max(0, Math.min(1, (x * cos + y * sin) / (w * Math.abs(cos) + h * Math.abs(sin))));
+          var r = ((from >> 16 & 0xFF) * (1 - t) + (to >> 16 & 0xFF) * t) | 0;
+          var g = ((from >>  8 & 0xFF) * (1 - t) + (to >>  8 & 0xFF) * t) | 0;
+          var b = ((from       & 0xFF) * (1 - t) + (to       & 0xFF) * t) | 0;
+          buf[y * w + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
+        }
+      }
+    } else if (cfg.mode === 'pattern') {
+      var bg  = cfg.color        ?? 0xFF1A1A2E;
+      var pc  = cfg.patternColor ?? 0xFF2A2A4E;
+      buf.fill(bg);
+      for (var py = 0; py < h; py++) {
+        for (var px = 0; px < w; px++) {
+          var draw = false;
+          if (cfg.pattern === 'grid')    draw = (px % 32 === 0) || (py % 32 === 0);
+          else if (cfg.pattern === 'dots')  draw = (px % 24 === 12) && (py % 24 === 12);
+          else if (cfg.pattern === 'stripes') draw = ((px + py) % 32 < 4);
+          else if (cfg.pattern === 'noise')   draw = (Math.sin(px * 0.31) * Math.cos(py * 0.29) > 0.9);
+          if (draw) buf[py * w + px] = pc;
+        }
+      }
+    } else if (cfg.mode === 'image' && cfg.imageData && cfg.imageWidth && cfg.imageHeight) {
+      var iw = cfg.imageWidth, ih = cfg.imageHeight;
+      var scale = cfg.imageScale ?? 'fill';
+      for (var iy = 0; iy < h; iy++) {
+        for (var ix = 0; ix < w; ix++) {
+          var sx: number, sy: number;
+          if (scale === 'tile') { sx = ix % iw; sy = iy % ih; }
+          else if (scale === 'stretch') { sx = (ix * iw / w) | 0; sy = (iy * ih / h) | 0; }
+          else if (scale === 'center') {
+            sx = ix - (w - iw) / 2 | 0; sy = iy - (h - ih) / 2 | 0;
+            if (sx < 0 || sx >= iw || sy < 0 || sy >= ih) { buf[iy * w + ix] = cfg.color ?? 0xFF000000; continue; }
+          } else { // fill/fit fallback
+            var rr = Math.min(w / iw, h / ih); sx = (ix / rr) | 0; sy = (iy / rr) | 0;
+            if (sx >= iw || sy >= ih) { buf[iy * w + ix] = cfg.color ?? 0xFF000000; continue; }
+          }
+          buf[iy * w + ix] = cfg.imageData[sy * iw + sx] ?? 0xFF000000;
+        }
+      }
+    } else {
+      buf.fill(0xFF1A1A2E);
+    }
+  }
+}
+
+export const wallpaperManager = new WallpaperManager();
+
+// ── [Item 748] System Tray ────────────────────────────────────────────────────
+
+export interface TrayIcon {
+  id: string;
+  /** Unicode char or short ASCII label displayed in tray */
+  icon: string;
+  tooltip?: string;
+  color?: number;  /** ARGB */
+  onClick?: () => void;
+  onRightClick?: () => void;
+  badge?: string;  /** Short badge text (e.g. notification count) */
+}
+
+export class SystemTray {
+  private _icons: Map<string, TrayIcon> = new Map();
+  private _onChange: Array<() => void> = [];
+
+  /** [Item 748] Register a tray icon. */
+  register(icon: TrayIcon): void {
+    this._icons.set(icon.id, icon);
+    this._notify();
+    if (wm) (wm as any).markDirty();
+  }
+
+  /** Remove a tray icon. */
+  unregister(id: string): void {
+    this._icons.delete(id);
+    this._notify();
+    if (wm) (wm as any).markDirty();
+  }
+
+  /** Update an existing tray icon. */
+  update(id: string, updates: Partial<TrayIcon>): void {
+    var icon = this._icons.get(id);
+    if (!icon) return;
+    Object.assign(icon, updates);
+    this._notify();
+    if (wm) (wm as any).markDirty();
+  }
+
+  /** Set badge text on a tray icon (e.g. unread count). */
+  setBadge(id: string, badge: string): void { this.update(id, { badge }); }
+
+  list(): TrayIcon[] {
+    var arr: TrayIcon[] = [];
+    this._icons.forEach(function(v) { arr.push(v); });
+    return arr;
+  }
+
+  get(id: string): TrayIcon | undefined { return this._icons.get(id); }
+
+  onClick(id: string): void {
+    var icon = this._icons.get(id);
+    if (icon?.onClick) try { icon.onClick(); } catch (_) {}
+  }
+
+  onRightClick(id: string): void {
+    var icon = this._icons.get(id);
+    if (icon?.onRightClick) try { icon.onRightClick(); } catch (_) {}
+  }
+
+  onChange(fn: () => void): void { this._onChange.push(fn); }
+
+  private _notify(): void {
+    this._onChange.forEach(function(fn) { try { fn(); } catch (_) {} });
+  }
+}
+
+export const systemTray = new SystemTray();
+
+// ── [Item 751] Window Snap (Aero Snap) ────────────────────────────────────────
+
+export type SnapZone = 'left-half' | 'right-half' | 'top-half' | 'bottom-half'
+                     | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
+                     | 'maximize' | 'restore';
+
+export interface SnapGeometry { x: number; y: number; w: number; h: number; }
+
+export class WindowSnap {
+  private _taskbarHeight: number = 28;
+  private _snapThreshold: number = 20; /** pixels from edge before snap activates */
+
+  setTaskbarHeight(h: number): void { this._taskbarHeight = h; }
+  setSnapThreshold(px: number): void { this._snapThreshold = px; }
+
+  /**
+   * [Item 751] Compute snap geometry for a window being dragged to position (mouseX, mouseY).
+   * Returns null if not near a snap zone.
+   */
+  detectZone(mouseX: number, mouseY: number, screenW: number, screenH: number): SnapZone | null {
+    var th = this._snapThreshold;
+    var tb = this._taskbarHeight;
+    var usableH = screenH - tb;
+    var nearLeft  = mouseX <= th;
+    var nearRight = mouseX >= screenW - th;
+    var nearTop   = mouseY <= th;
+    var nearBot   = mouseY >= usableH - th;
+    if (nearLeft && nearTop)  return 'top-left';
+    if (nearRight && nearTop) return 'top-right';
+    if (nearLeft && nearBot)  return 'bottom-left';
+    if (nearRight && nearBot) return 'bottom-right';
+    if (nearLeft)   return 'left-half';
+    if (nearRight)  return 'right-half';
+    if (nearTop)    return 'maximize';
+    if (nearBot)    return 'bottom-half';
+    return null;
+  }
+
+  /** Compute pixel geometry for a snap zone on a given screen. */
+  geometry(zone: SnapZone, screenW: number, screenH: number): SnapGeometry {
+    var tb = this._taskbarHeight;
+    var uh = screenH - tb;
+    var hw = (screenW / 2) | 0;
+    var hh = (uh / 2) | 0;
+    switch (zone) {
+      case 'left-half':    return { x: 0,  y: 0,  w: hw,        h: uh };
+      case 'right-half':   return { x: hw, y: 0,  w: screenW - hw, h: uh };
+      case 'top-half':     return { x: 0,  y: 0,  w: screenW,   h: hh };
+      case 'bottom-half':  return { x: 0,  y: hh, w: screenW,   h: uh - hh };
+      case 'top-left':     return { x: 0,  y: 0,  w: hw,        h: hh };
+      case 'top-right':    return { x: hw, y: 0,  w: screenW - hw, h: hh };
+      case 'bottom-left':  return { x: 0,  y: hh, w: hw,        h: uh - hh };
+      case 'bottom-right': return { x: hw, y: hh, w: screenW - hw, h: uh - hh };
+      case 'maximize':     return { x: 0,  y: 0,  w: screenW,   h: uh };
+      case 'restore':      return { x: 80, y: 50, w: 640,       h: 400 };
+    }
+  }
+
+  /** Apply a snap zone to a window via the WindowManager. */
+  snapWindow(winId: number, zone: SnapZone, screenW: number, screenH: number): boolean {
+    if (!wm) return false;
+    var g = this.geometry(zone, screenW, screenH);
+    (wm as any).moveWindow(winId, g.x, g.y);
+    (wm as any).resizeWindow(winId, g.w, g.h);
+    return true;
+  }
+}
+
+export const windowSnap = new WindowSnap();
+
+// ── [Item 766] Virtual Desktops ───────────────────────────────────────────────
+
+export interface VirtualDesktop {
+  id: number;
+  name: string;
+  windows: number[];   /** window IDs on this desktop */
+}
+
+export class VirtualDesktopManager {
+  private _desktops: VirtualDesktop[] = [
+    { id: 1, name: 'Desktop 1', windows: [] },
+  ];
+  private _current: number = 1;
+  private _nextId: number = 2;
+  private _onChange: Array<() => void> = [];
+
+  /** [Item 766] Switch to virtual desktop by id. */
+  switchTo(id: number): boolean {
+    var dt = this._desktops.find(function(d) { return d.id === id; });
+    if (!dt) return false;
+    this._current = id;
+    this._onChange.forEach(function(fn) { try { fn(); } catch (_) {} });
+    if (wm) (wm as any).markDirty();
+    return true;
+  }
+
+  /** Switch to next desktop, wrapping around. */
+  next(): void {
+    var idx = this._desktops.findIndex(function(d) { return d.id === this._current; }, this);
+    var next = this._desktops[(idx + 1) % this._desktops.length];
+    this.switchTo(next.id);
+  }
+
+  /** Switch to previous desktop, wrapping around. */
+  prev(): void {
+    var idx = this._desktops.findIndex(function(d) { return d.id === this._current; }, this);
+    var prev = this._desktops[(idx - 1 + this._desktops.length) % this._desktops.length];
+    this.switchTo(prev.id);
+  }
+
+  /** Create a new virtual desktop. */
+  create(name?: string): VirtualDesktop {
+    var id = this._nextId++;
+    var dt: VirtualDesktop = { id, name: name ?? ('Desktop ' + id), windows: [] };
+    this._desktops.push(dt);
+    this._onChange.forEach(function(fn) { try { fn(); } catch (_) {} });
+    return dt;
+  }
+
+  /** Remove a desktop (moves its windows to desktop 1). */
+  remove(id: number): boolean {
+    if (id === 1) return false; // can't remove first desktop
+    var idx = this._desktops.findIndex(function(d) { return d.id === id; });
+    if (idx === -1) return false;
+    var dt = this._desktops[idx];
+    var first = this._desktops[0];
+    dt.windows.forEach(function(wid) { first.windows.push(wid); });
+    this._desktops.splice(idx, 1);
+    if (this._current === id) this._current = 1;
+    this._onChange.forEach(function(fn) { try { fn(); } catch (_) {} });
+    return true;
+  }
+
+  /** Rename a desktop. */
+  rename(id: number, name: string): void {
+    var dt = this._desktops.find(function(d) { return d.id === id; });
+    if (dt) { dt.name = name; this._onChange.forEach(function(fn) { try { fn(); } catch (_) {} }); }
+  }
+
+  /** Move a window to a specific desktop. */
+  moveWindow(winId: number, toId: number): boolean {
+    var target = this._desktops.find(function(d) { return d.id === toId; });
+    if (!target) return false;
+    this._desktops.forEach(function(d) {
+      d.windows = d.windows.filter(function(w) { return w !== winId; });
+    });
+    target.windows.push(winId);
+    return true;
+  }
+
+  /** Assign a window to the current desktop. */
+  addWindow(winId: number): void { this.moveWindow(winId, this._current); }
+
+  list(): VirtualDesktop[] { return this._desktops.slice(); }
+
+  get current(): number { return this._current; }
+
+  onChange(fn: () => void): void { this._onChange.push(fn); }
+}
+
+export const virtualDesktops = new VirtualDesktopManager();
+
+// ── [Item 752] Application Launcher / Start Menu ─────────────────────────────
+
+export interface AppEntry {
+  id: string;
+  name: string;
+  icon: string;        /** Unicode char or string */
+  category: string;
+  description?: string;
+  launch: () => void;
+}
+
+export class AppLauncher {
+  private _apps: Map<string, AppEntry> = new Map();
+  private _recent: string[] = [];      /** most recently launched app IDs */
+  private _maxRecent: number = 10;
+  private _open: boolean = false;
+  private _onChange: Array<() => void> = [];
+
+  /** [Item 752] Register an application in the launcher. */
+  register(app: AppEntry): void {
+    this._apps.set(app.id, app);
+    this._notify();
+  }
+
+  unregister(id: string): void {
+    this._apps.delete(id);
+    this._notify();
+  }
+
+  /** Launch an app by id. */
+  launch(id: string): boolean {
+    var app = this._apps.get(id);
+    if (!app) return false;
+    this._recent = [id, ...this._recent.filter(function(r) { return r !== id; })].slice(0, this._maxRecent);
+    try { app.launch(); } catch (_) {}
+    this.close();
+    return true;
+  }
+
+  /** Search apps by name or category. */
+  search(query: string): AppEntry[] {
+    var q = query.toLowerCase();
+    var results: AppEntry[] = [];
+    this._apps.forEach(function(app) {
+      if (app.name.toLowerCase().includes(q) ||
+          app.category.toLowerCase().includes(q) ||
+          (app.description && app.description.toLowerCase().includes(q))) {
+        results.push(app);
+      }
+    });
+    return results;
+  }
+
+  /** Get apps sorted by category. */
+  byCategory(): Record<string, AppEntry[]> {
+    var out: Record<string, AppEntry[]> = {};
+    this._apps.forEach(function(app) {
+      if (!out[app.category]) out[app.category] = [];
+      out[app.category].push(app);
+    });
+    return out;
+  }
+
+  /** Get recently launched apps. */
+  recentApps(): AppEntry[] {
+    return this._recent.map((id) => this._apps.get(id)).filter(Boolean) as AppEntry[];
+  }
+
+  /** Open the launcher UI. */
+  show(): void { this._open = true; this._notify(); if (wm) (wm as any).markDirty(); }
+
+  /** Close the launcher UI. */
+  close(): void { this._open = false; this._notify(); if (wm) (wm as any).markDirty(); }
+
+  toggle(): void { if (this._open) this.close(); else this.show(); }
+
+  get isOpen(): boolean { return this._open; }
+
+  list(): AppEntry[] {
+    var arr: AppEntry[] = [];
+    this._apps.forEach(function(a) { arr.push(a); });
+    return arr;
+  }
+
+  onChange(fn: () => void): void { this._onChange.push(fn); }
+
+  private _notify(): void {
+    this._onChange.forEach(function(fn) { try { fn(); } catch (_) {} });
+  }
+}
+
+export const appLauncher = new AppLauncher();
+// ── [Item 759] High-DPI Scaling (2× pixel ratio) ─────────────────────────────
+
+export interface HiDPIConfig {
+  devicePixelRatio: number; // default 1.0
+  logicalWidth: number;
+  logicalHeight: number;
+}
+
+export class HiDPIManager {
+  private _ratio: number = 1.0;
+  private _logicalW: number = 80;
+  private _logicalH: number = 25;
+
+  setRatio(ratio: number): void {
+    if (ratio <= 0) throw new Error('ratio must be > 0');
+    this._ratio = ratio;
+  }
+
+  get devicePixelRatio(): number { return this._ratio; }
+
+  /** Convert logical CSS pixels to physical device pixels. */
+  toPhysical(logical: number): number { return Math.round(logical * this._ratio); }
+
+  /** Convert physical pixels back to logical CSS pixels. */
+  toLogical(physical: number): number { return physical / this._ratio; }
+
+  setLogicalSize(w: number, h: number): void { this._logicalW = w; this._logicalH = h; }
+
+  get logicalWidth(): number { return this._logicalW; }
+  get logicalHeight(): number { return this._logicalH; }
+  get physicalWidth(): number { return this.toPhysical(this._logicalW); }
+  get physicalHeight(): number { return this.toPhysical(this._logicalH); }
+
+  /** Scale a pixel value from a source ratio to the current ratio. */
+  rescale(value: number, fromRatio: number): number {
+    return Math.round((value / fromRatio) * this._ratio);
+  }
+
+  config(): HiDPIConfig {
+    return { devicePixelRatio: this._ratio, logicalWidth: this._logicalW, logicalHeight: this._logicalH };
+  }
+}
+
+export const hiDPIManager = new HiDPIManager();
+
+// ── [Item 760] Drag-and-Drop Between Windows ──────────────────────────────────
+
+export interface DragPayload {
+  type: 'text' | 'file' | 'widget' | string;
+  data: string;
+  sourceWindowId?: string;
+}
+
+export interface DropTarget {
+  windowId: string;
+  onDrop(payload: DragPayload, x: number, y: number): void;
+  canAccept?(payload: DragPayload): boolean;
+}
+
+export class DragDropManager {
+  private _active: DragPayload | null = null;
+  private _sourceId: string | null = null;
+  private _targets: Map<string, DropTarget> = new Map();
+
+  /** Start a drag originating from a window. */
+  startDrag(windowId: string, payload: DragPayload): void {
+    this._active = { ...payload, sourceWindowId: windowId };
+    this._sourceId = windowId;
+  }
+
+  /** End drag; attempt drop at coordinates over windowId. */
+  endDrag(targetWindowId: string, x: number, y: number): boolean {
+    if (!this._active) return false;
+    const target = this._targets.get(targetWindowId);
+    if (!target) { this._active = null; this._sourceId = null; return false; }
+    const canDrop = target.canAccept ? target.canAccept(this._active) : true;
+    if (!canDrop) { this._active = null; this._sourceId = null; return false; }
+    try { target.onDrop(this._active, x, y); } catch (_) {}
+    this._active = null;
+    this._sourceId = null;
+    return true;
+  }
+
+  cancelDrag(): void { this._active = null; this._sourceId = null; }
+
+  registerTarget(target: DropTarget): void { this._targets.set(target.windowId, target); }
+  unregisterTarget(windowId: string): void { this._targets.delete(windowId); }
+
+  get isDragging(): boolean { return this._active !== null; }
+  get activePayload(): DragPayload | null { return this._active; }
+  get sourceWindowId(): string | null { return this._sourceId; }
+}
+
+export const dragDropManager = new DragDropManager();
+
+// ── [Item 763] Login Screen GUI ───────────────────────────────────────────────
+
+export interface LoginAttempt {
+  username: string;
+  password: string;
+}
+
+export type LoginResult = 'ok' | 'wrong-password' | 'no-user' | 'locked';
+export type LoginHandler = (attempt: LoginAttempt) => LoginResult | Promise<LoginResult>;
+
+export class LoginScreen {
+  private _visible: boolean = false;
+  private _handler: LoginHandler | null = null;
+  private _attemptsLeft: number = 5;
+  private _lockedUntil: number = 0;
+  private _onSuccess: Array<(username: string) => void> = [];
+  private _currentUser: string = '';
+  private _message: string = '';
+
+  show(): void { this._visible = true; this._message = ''; }
+  hide(): void { this._visible = false; }
+  get isVisible(): boolean { return this._visible; }
+
+  setHandler(fn: LoginHandler): void { this._handler = fn; }
+
+  onSuccess(fn: (username: string) => void): void { this._onSuccess.push(fn); }
+
+  async submit(username: string, password: string): Promise<LoginResult> {
+    const now = Date.now();
+    if (this._lockedUntil > now) {
+      this._message = `Locked. Try again in ${Math.ceil((this._lockedUntil - now) / 1000)}s`;
+      return 'locked';
+    }
+    if (!this._handler) { this._message = 'No login handler registered'; return 'wrong-password'; }
+    const result = await this._handler({ username, password });
+    if (result === 'ok') {
+      this._attemptsLeft = 5;
+      this._currentUser = username;
+      this._message = '';
+      this.hide();
+      this._onSuccess.forEach(function(fn) { try { fn(username); } catch (_) {} });
+      return 'ok';
+    }
+    this._attemptsLeft--;
+    if (this._attemptsLeft <= 0) {
+      this._lockedUntil = now + 30_000; // lock 30s
+      this._attemptsLeft = 5;
+      this._message = 'Too many failed attempts. Locked for 30s.';
+      return 'locked';
+    }
+    this._message = result === 'no-user' ? 'Unknown user' : `Wrong password (${this._attemptsLeft} attempts left)`;
+    return result;
+  }
+
+  get currentUser(): string { return this._currentUser; }
+  get message(): string { return this._message; }
+  render(): string {
+    if (!this._visible) return '';
+    return [
+      '┌────────────────────────┐',
+      '│      JSOS Login        │',
+      '│  Username: ___________  │',
+      '│  Password: ___________  │',
+      '│  [Login]   [Shutdown]   │',
+      this._message ? `│  ${this._message.padEnd(22)}│` : '│                        │',
+      '└────────────────────────┘',
+    ].join('\n');
+  }
+}
+
+export const loginScreen = new LoginScreen();
+
+// ── [Item 764] Compositing WM (GPU alpha compositing) ─────────────────────────
+
+export interface CompositorLayer {
+  windowId: string;
+  zIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  alpha: number;       // 0.0–1.0
+  buffer: Uint8Array;  // RGBA pixels (width * height * 4)
+  dirty: boolean;
+}
+
+export class CompositingWM {
+  private _layers: Map<string, CompositorLayer> = new Map();
+  private _outputW: number = 1920;
+  private _outputH: number = 1080;
+
+  setOutputSize(w: number, h: number): void { this._outputW = w; this._outputH = h; }
+
+  addLayer(layer: CompositorLayer): void { this._layers.set(layer.windowId, layer); }
+  removeLayer(windowId: string): void { this._layers.delete(windowId); }
+
+  updateBuffer(windowId: string, buffer: Uint8Array, dirty = true): void {
+    const l = this._layers.get(windowId);
+    if (!l) return;
+    l.buffer = buffer;
+    l.dirty = dirty;
+  }
+
+  setAlpha(windowId: string, alpha: number): void {
+    const l = this._layers.get(windowId);
+    if (l) l.alpha = Math.max(0, Math.min(1, alpha));
+  }
+
+  setZIndex(windowId: string, z: number): void {
+    const l = this._layers.get(windowId);
+    if (l) { l.zIndex = z; }
+  }
+
+  moveLayer(windowId: string, x: number, y: number): void {
+    const l = this._layers.get(windowId);
+    if (l) { l.x = x; l.y = y; l.dirty = true; }
+  }
+
+  /** Composite all layers into a flat RGBA output buffer (painter's algorithm). */
+  composite(): Uint8Array {
+    const out = new Uint8Array(this._outputW * this._outputH * 4);
+    const sorted = Array.from(this._layers.values()).sort(function(a, b) { return a.zIndex - b.zIndex; });
+    for (const layer of sorted) {
+      if (layer.alpha <= 0) continue;
+      for (let row = 0; row < layer.height; row++) {
+        const dstRow = layer.y + row;
+        if (dstRow < 0 || dstRow >= this._outputH) continue;
+        for (let col = 0; col < layer.width; col++) {
+          const dstCol = layer.x + col;
+          if (dstCol < 0 || dstCol >= this._outputW) continue;
+          const srcI = (row * layer.width + col) * 4;
+          const dstI = (dstRow * this._outputW + dstCol) * 4;
+          const srcA = (layer.buffer[srcI + 3] / 255) * layer.alpha;
+          const dstA = 1 - srcA;
+          out[dstI]     = Math.round(layer.buffer[srcI]     * srcA + out[dstI]     * dstA);
+          out[dstI + 1] = Math.round(layer.buffer[srcI + 1] * srcA + out[dstI + 1] * dstA);
+          out[dstI + 2] = Math.round(layer.buffer[srcI + 2] * srcA + out[dstI + 2] * dstA);
+          out[dstI + 3] = Math.min(255, out[dstI + 3] + Math.round(srcA * 255));
+        }
+      }
+      layer.dirty = false;
+    }
+    return out;
+  }
+
+  /** Return only layers that have been marked dirty. */
+  dirtyLayers(): CompositorLayer[] {
+    const res: CompositorLayer[] = [];
+    this._layers.forEach(function(l) { if (l.dirty) res.push(l); });
+    return res;
+  }
+
+  layers(): CompositorLayer[] {
+    return Array.from(this._layers.values()).sort(function(a, b) { return a.zIndex - b.zIndex; });
+  }
+}
+
+export const compositingWM = new CompositingWM();
+
+// ── [Item 684] Split-Pane Terminal ────────────────────────────────────────────
+
+export type SplitDirection = 'horizontal' | 'vertical';
+
+export interface Pane {
+  id: string;
+  terminalId: string;       // ID of the terminal tab/session in the pane
+  direction: SplitDirection | null;
+  children: [Pane, Pane] | null;
+  width: number;            // percentage (0–100)
+  height: number;           // percentage (0–100)
+  active: boolean;
+}
+
+export class SplitPaneTerminal {
+  private _root: Pane | null = null;
+  private _panes: Map<string, Pane> = new Map();
+  private _activeId: string | null = null;
+  private _nextId: number = 1;
+
+  private _mkPane(terminalId: string, w = 100, h = 100): Pane {
+    const id = 'pane-' + (this._nextId++);
+    return { id, terminalId, direction: null, children: null, width: w, height: h, active: false };
+  }
+
+  init(terminalId: string): Pane {
+    const root = this._mkPane(terminalId);
+    root.active = true;
+    this._root = root;
+    this._panes.set(root.id, root);
+    this._activeId = root.id;
+    return root;
+  }
+
+  split(paneId: string, direction: SplitDirection, newTerminalId: string): [Pane, Pane] | null {
+    const parent = this._panes.get(paneId);
+    if (!parent || parent.children) return null;
+    const half1 = this._mkPane(parent.terminalId, parent.width, parent.height);
+    const half2 = this._mkPane(newTerminalId, parent.width, parent.height);
+    parent.direction = direction;
+    parent.children = [half1, half2];
+    parent.terminalId = '';
+    this._panes.set(half1.id, half1);
+    this._panes.set(half2.id, half2);
+    return [half1, half2];
+  }
+
+  close(paneId: string): boolean {
+    const pane = this._panes.get(paneId);
+    if (!pane) return false;
+    this._panes.delete(paneId);
+    if (this._activeId === paneId) {
+      const remaining = Array.from(this._panes.values()).filter(p => !p.children);
+      this._activeId = remaining.length ? remaining[0].id : null;
+      if (this._activeId) { const a = this._panes.get(this._activeId); if (a) a.active = true; }
+    }
+    return true;
+  }
+
+  setActive(paneId: string): void {
+    if (this._activeId) {
+      const old = this._panes.get(this._activeId);
+      if (old) old.active = false;
+    }
+    this._activeId = paneId;
+    const p = this._panes.get(paneId);
+    if (p) p.active = true;
+  }
+
+  get activePane(): Pane | null { return this._activeId ? (this._panes.get(this._activeId) ?? null) : null; }
+  get root(): Pane | null { return this._root; }
+
+  /** Return leaf panes (actual terminal views). */
+  leaves(): Pane[] {
+    const res: Pane[] = [];
+    this._panes.forEach(function(p) { if (!p.children) res.push(p); });
+    return res;
+  }
+}
+
+export const splitPaneTerminal = new SplitPaneTerminal();

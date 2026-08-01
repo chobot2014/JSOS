@@ -15,6 +15,8 @@ import { elfLoader } from '../process/elf.js';
 import { signalManager } from '../process/signals.js';
 import { net } from '../net/net.js';
 import fs from '../fs/filesystem.js';
+import { SyscallPolicy, registerPolicy, getPolicy, unregisterPolicy, type PolicyProfile } from './syscall-policy.js';
+import { pledge as sandboxPledge } from '../users/sandbox.js';
 
 declare var kernel: import('./kernel.js').KernelAPI;
 
@@ -385,6 +387,42 @@ export class SystemCallInterface {
     var sock = globalFDTable.getSocket(fd);
     if (!sock) return { success: false, errno: Errno.EBADF, error: 'EBADF' };
     return { success: true, value: net.recv(sock) || '' };
+  }
+
+  // ── Sandboxing ─────────────────────────────────────────────────────────────
+
+  /**
+   * Drop privileges for the calling process.  Once pledged, the process
+   * cannot re-escalate (pledge can only narrow, never widen).
+   *
+   * @param groups  Space-separated pledge groups: "stdio rpath inet" etc.
+   */
+  pledge(groups: string): SyscallResult<void> {
+    var pid = scheduler.getpid();
+    try {
+      sandboxPledge(pid, groups, true);
+      return { success: true, value: undefined };
+    } catch (e) {
+      return { success: false, error: String(e), errno: Errno.EPERM };
+    }
+  }
+
+  /**
+   * Get the syscall policy for a process.
+   */
+  getPolicy(pid?: number): SyscallResult<{ profile: string; allowed: string[] }> {
+    var p = pid ?? scheduler.getpid();
+    var policy = getPolicy(p);
+    var allowed = (policy as unknown as { _allowed: Set<string> })['_allowed'];
+    return {
+      success: true,
+      value: {
+        profile: allowed?.has('*') ? 'privileged'
+               : !allowed?.has('net') ? (allowed?.has('fs') ? 'restricted' : 'sandbox')
+               : 'standard',
+        allowed: allowed ? Array.from(allowed) : [],
+      },
+    };
   }
 }
 

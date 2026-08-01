@@ -26,6 +26,86 @@ const C_HINT_BG  = 0xFF003A3A;
 const C_HINT_FG  = 0xFF44FFFF;
 const C_WARN_FG  = 0xFFFFCC44;
 
+// ── Syntax highlight colours ────────────────────────────────────────────────
+const C_KEYWORD  = 0xFF569CD6;  // blue  — keywords
+const C_STRING   = 0xFFCE9178;  // orange — strings
+const C_NUMBER   = 0xFFB5CEA8;  // green  — numbers
+const C_COMMENT  = 0xFF6A9955;  // green-grey — comments
+const C_PUNCT    = 0xFFD4D4D4;  // light-grey — punctuation
+const C_TYPE     = 0xFF4EC9B0;  // teal — TypeScript types
+const C_REGEX    = 0xFFD16969;  // red   — regex literals
+
+const _JS_KEYWORDS = new Set([
+  'break','case','catch','class','const','continue','debugger','default',
+  'delete','do','else','export','extends','finally','for','function',
+  'if','import','in','instanceof','let','new','null','of','return',
+  'static','super','switch','this','throw','try','typeof','undefined',
+  'var','void','while','with','yield','async','await','from','as',
+  'true','false',
+]);
+const _TS_TYPES = new Set([
+  'string','number','boolean','any','void','never','unknown','object',
+  'interface','type','enum','namespace','abstract','implements','declare',
+  'readonly','public','private','protected','override',
+]);
+
+type HSpan = { text: string; color: number };
+
+/** Returns an array of colored spans for a line of JS/TS source. */
+function _highlightJsLine(line: string): HSpan[] {
+  var res: HSpan[] = [];
+  var i = 0; var n = line.length;
+
+  function push(t: string, c: number) { if (t) res.push({ text: t, color: c }); }
+
+  while (i < n) {
+    // Single-line comment
+    if (line[i] === '/' && line[i + 1] === '/') {
+      push(line.slice(i), C_COMMENT); break;
+    }
+    // Block comment (single line portion)
+    if (line[i] === '/' && line[i + 1] === '*') {
+      var end = line.indexOf('*/', i + 2);
+      if (end < 0) { push(line.slice(i), C_COMMENT); break; }
+      else { push(line.slice(i, end + 2), C_COMMENT); i = end + 2; continue; }
+    }
+    // String literal
+    if (line[i] === '"' || line[i] === "'" || line[i] === '`') {
+      var quote = line[i]; var j = i + 1;
+      while (j < n) {
+        if (line[j] === '\\') { j += 2; continue; }
+        if (line[j] === quote) { j++; break; }
+        j++;
+      }
+      push(line.slice(i, j), C_STRING); i = j; continue;
+    }
+    // Number
+    if ((line[i] >= '0' && line[i] <= '9') ||
+        (line[i] === '.' && line[i+1] >= '0' && line[i+1] <= '9')) {
+      var nj = i;
+      if (line[nj] === '0' && (line[nj+1] === 'x' || line[nj+1] === 'X')) nj += 2;
+      while (nj < n && /[\d.xXa-fA-FnN_eE+\-]/.test(line[nj])) nj++;
+      push(line.slice(i, nj), C_NUMBER); i = nj; continue;
+    }
+    // Identifier / keyword / type
+    if (/[A-Za-z_$]/.test(line[i])) {
+      var id = ''; var ij = i;
+      while (ij < n && /[\w$]/.test(line[ij])) id += line[ij++];
+      var col = _JS_KEYWORDS.has(id) ? C_KEYWORD :
+                _TS_TYPES.has(id)    ? C_TYPE    : C_TEXT;
+      push(id, col); i = ij; continue;
+    }
+    // Punctuation / operator
+    push(line[i], C_PUNCT); i++;
+  }
+  return res;
+}
+
+/** Is this file a JS/TS file eligible for syntax highlighting? */
+function _isHighlightable(path: string): boolean {
+  return /\.(js|ts|jsx|tsx|mjs|cjs)$/i.test(path);
+}
+
 const CHAR_W = 8;
 const CHAR_H = 8;
 
@@ -222,12 +302,28 @@ export class EditorApp implements App {
         var line     = this._lines[docRow];
         var isCurRow = (docRow === this._curRow);
 
+        // Build a per-character color array (syntax highlighting)
+        var hlColors: number[];
+        if (_isHighlightable(this._savedPath)) {
+          hlColors = new Array(line.length).fill(C_TEXT);
+          var spans = _highlightJsLine(line);
+          var sc2 = 0;
+          for (var si = 0; si < spans.length; si++) {
+            var sp = spans[si];
+            for (var sk = 0; sk < sp.text.length && sc2 < line.length; sk++) {
+              hlColors[sc2++] = sp.color;
+            }
+          }
+        } else {
+          hlColors = new Array(line.length).fill(C_TEXT);
+        }
+
         for (var c = 0; c < cols && c < line.length; c++) {
           if (isCurRow && c === this._curCol) {
             canvas.fillRect(c * CHAR_W, y, CHAR_W, CHAR_H, C_CURSOR);
             defaultFont.renderChar(canvas, c * CHAR_W, y, line[c], C_BG);
           } else {
-            defaultFont.renderChar(canvas, c * CHAR_W, y, line[c], C_TEXT);
+            defaultFont.renderChar(canvas, c * CHAR_W, y, line[c], hlColors[c] ?? C_TEXT);
           }
         }
         // Cursor at/past end of line

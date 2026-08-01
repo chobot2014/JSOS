@@ -1,0 +1,32 @@
+﻿
+> jsos@0.1.0 test:windows
+> powershell -ExecutionPolicy Bypass -File test-windows.ps1
+
+Testing JSOS with QEMU on Windows...
+Using QEMU at: C:\Program Files\qemu\qemu-system-x86_64.exe
+Starting JSOS in QEMU...
+Press Ctrl+Alt+G to release mouse/keyboard from QEMU window
+Press Alt+Ctrl+2 then type 'quit' to exit QEMU
+==================
+
+Serial log:
+[LOG] [browser] _layoutPage: calling layoutNodes nodes=4 w=984
+[LOG] [browser] _layoutPage: layoutNodes done lines=11
+[LOG] [browser] _layoutPage: calling _pushLayoutRects isRerender=no
+[LOG] [browser] _layoutPage: _pushLayoutRects done
+[LOG] [browser] layoutPage in 5.082999999998719ms, total showHTML so far 3275.873999999996ms
+[fetch] h2pool miss for www.gstatic.com:443 pool=1
+[fetch] new coro id=4 stage=dns host=www.gstatic.com path=/images/branding/searchlogo/ico/favicon.ico
+[LOG] [browser] about to createPageJS, scripts: 6
+[fetch] dedup hit for www.google.com/xjs/_/ss/k=xjs.hd.ZTBjnmRHra4.L.F4.O/am=AAACCAAAAAAAAAAAEAA queued=2
+[fetch] h2pool miss for www.gstatic.com:443 pool=1
+[fetch] new coro id=5 stage=dns host=www.gstatic.com path=/og/_/ss/k=og.asy.7fEuK9p0Jfs.L.F4.O/m=ll_tdm,adcgm3,ll_fw,abld/excm=/d=1/ed=1/c
+[LOG] [browser] loading 6 script(s) for https://www.google.com/
+[LOG] [JS] child runtime created (slot 0)
+[LOG] [JS] child runtime ready
+[LOG] [JS exec] child-runtime 0.2KB (inline)
+[LOG] [JS exec] child-runtime 0.0KB (inline)
+[LOG] [JS exec] child-runtime 20.6KB (inline)
+[LOG] [JS exec] child-runtime 8.2KB (inline)
+[LOG] [JS exec] child-runtime 1.7KB (inline)
+[LOG] [JS] loadExternalScript: https://www.google.com/xjs/_/js/k=xjs.hd.en.csLK41pFOK4.2019.O/am=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA

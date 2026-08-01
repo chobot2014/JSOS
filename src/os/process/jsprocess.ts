@@ -95,6 +95,9 @@ export class JSProcess {
   readonly name: string;
   private _alive: boolean;
   private _onMessageCbs: Array<(msg: any) => void> = [];
+  /** Count of consecutive procTick faults — too many → auto-kill this child. */
+  private _tickFaultCount = 0;
+  private static readonly _TICK_FAULT_LIMIT = 3;
 
   private constructor(id: number, name: string) {
     this.id     = id;
@@ -161,6 +164,20 @@ export class JSProcess {
   tick(): number {
     if (!this._alive) return 0;
     var jobs = kernel.procTick(this.id);
+    if (jobs === -1) {
+      // procTick returned -1 → CPU fault in child runtime.
+      // The kernel recovered via longjmp, but the child's QuickJS state may
+      // be corrupt.  Count consecutive faults and auto-kill after the limit to
+      // prevent the child from causing an endless fault loop in the main WM.
+      this._tickFaultCount++;
+      (kernel as any).serialPut('[jsprocess] tick fault #' + this._tickFaultCount + ' child=' + this.id + '\n');
+      if (this._tickFaultCount >= JSProcess._TICK_FAULT_LIMIT) {
+        (kernel as any).serialPut('[jsprocess] auto-killing faulting child ' + this.id + ' after ' + this._tickFaultCount + ' faults\n');
+        this.terminate();
+      }
+      return -1;
+    }
+    this._tickFaultCount = 0;  // reset on success
     // Drain outbox and fire callbacks (only if anyone is listening)
     if (this._onMessageCbs.length > 0) {
       var msg: any;

@@ -229,6 +229,8 @@ export class Pipe {
 export class FDTable {
   private _fds: Map<number, FileDescription> = new Map();
   private _nextFd: number = 3;
+  /** Maximum number of file descriptors allowed (0 = unlimited). Set via setMaxFDs(). */
+  private _maxFDs: number = 0;
 
   constructor() {
     // Install standard descriptors
@@ -237,8 +239,17 @@ export class FDTable {
     this._fds.set(2, new TerminalDescription(false));  // stderr
   }
 
-  /** Insert a FileDescription and return its assigned fd. */
+  /** Set the maximum number of file descriptors this table may hold.
+   *  0 = no limit.  Excess existing FDs are NOT closed; future inserts will fail. */
+  setMaxFDs(max: number): void { this._maxFDs = max; }
+  get maxFDs(): number { return this._maxFDs; }
+  get openCount(): number { return this._fds.size; }
+
+  /** Insert a FileDescription and return its assigned fd, or -1 if maxFDs exceeded. */
   insert(desc: FileDescription): number {
+    if (this._maxFDs > 0 && this._fds.size >= this._maxFDs) {
+      return -1;  // EMFILE equivalent — too many open files
+    }
     var fd = this._nextFd++;
     this._fds.set(fd, desc);
     return fd;
@@ -283,6 +294,20 @@ export class FDTable {
     this._fds.forEach(function(desc, fd) { t._fds.set(fd, desc); });
     t._nextFd = this._nextFd;
     return t;
+  }
+
+  /**
+   * Close every open file descriptor in this table.
+   * Called on process exit (item 148) to flush write-back buffers, release
+   * network sockets, and free all kernel resources owned by this process.
+   */
+  closeAll(): void {
+    // Collect fds first to avoid mutating the map while iterating.
+    const fds: number[] = [];
+    this._fds.forEach((_desc, fd) => fds.push(fd));
+    for (const fd of fds) {
+      this.close(fd);
+    }
   }
 
   has(fd: number): boolean { return this._fds.has(fd); }

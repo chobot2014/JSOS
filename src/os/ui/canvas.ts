@@ -11,6 +11,15 @@
  */
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
+import { JITCanvas } from '../process/jit-canvas.js';
+
+// Lazy JIT init — called on first Canvas operation that can benefit.
+var _jitReady = false;
+function _ensureJIT(): boolean {
+  if (_jitReady) return true;
+  _jitReady = JITCanvas.init();
+  return _jitReady;
+}
 
 export type PixelColor = number; // 0xAARRGGBB
 
@@ -36,6 +45,7 @@ export const Colors = {
   TITLE_BG:    0xFF1A3A5C,
   DESKTOP_BG:  0xFF2D4F6B,
   TASKBAR_BG:  0xFF1A2B3C,
+  EDITOR_BG:   0xFF1E1E2E,  // dark blue-grey editor/terminal background
   TRANSPARENT: 0x00000000,
 };
 
@@ -276,13 +286,28 @@ export class Canvas {
   private _fb_x: number;
   private _fb_y: number;
   private _is_screen: boolean;
+  /** True when this canvas wraps an external BSS buffer (no heap alloc, flip is NOP). */
+  private _external: boolean;
 
-  constructor(width: number, height: number, fb_x = 0, fb_y = 0, is_screen = false) {
+  /** Clipping rectangle — pixels outside are not drawn.  null = no clip (full canvas). */
+  private _clip: { x1: number; y1: number; x2: number; y2: number } | null = null;
+
+  constructor(width: number, height: number, fb_x: number | ArrayBuffer = 0, fb_y = 0, is_screen = false) {
     this.width      = width;
     this.height     = height;
-    this._buf       = new Uint32Array(width * height);
-    this._fb_x      = fb_x;
-    this._fb_y      = fb_y;
+    if (fb_x instanceof ArrayBuffer) {
+      /* External-buffer mode: wrap the caller-supplied BSS slab directly.        */
+      /* Uint32Array view starts at offset 0 and covers exactly width*height px.  */
+      this._buf      = new Uint32Array(fb_x, 0, width * height);
+      this._external = true;
+      this._fb_x     = 0;
+      this._fb_y     = 0;
+    } else {
+      this._buf      = new Uint32Array(width * height);
+      this._external = false;
+      this._fb_x     = fb_x;
+      this._fb_y     = fb_y;
+    }
     this._is_screen = is_screen;
     this._buf.fill(0xFF000000); // default black
   }
@@ -302,6 +327,10 @@ export class Canvas {
 
   setPixel(x: number, y: number, color: PixelColor): void {
     if (x < 0 || x >= this.width || y < 0 || y >= this.height) return;
+    if (this._clip) {
+      var c2 = this._clip;
+      if (x < c2.x1 || x >= c2.x2 || y < c2.y1 || y >= c2.y2) return;
+    }
     this._buf[y * this.width + x] = Canvas._bgra(color);
   }
 
@@ -315,10 +344,51 @@ export class Canvas {
     return (a << 24) | (r << 16) | (g << 8) | b;
   }
 
+  // ── Clipping (item 489) ───────────────────────────────────────────────────
+
+  /**
+   * Set a rectangular clipping region.  Subsequent drawing operations are
+   * silently clipped to [x, y, x+w, y+h].  Nested clips intersect with the
+   * current clip (most-restrictive wins).
+   */
+  setClipRect(x: number, y: number, w: number, h: number): void {
+    var nx1 = Math.max(0, x);
+    var ny1 = Math.max(0, y);
+    var nx2 = Math.min(this.width,  x + w);
+    var ny2 = Math.min(this.height, y + h);
+    if (this._clip) {
+      // Intersect with existing clip
+      nx1 = Math.max(nx1, this._clip.x1);
+      ny1 = Math.max(ny1, this._clip.y1);
+      nx2 = Math.min(nx2, this._clip.x2);
+      ny2 = Math.min(ny2, this._clip.y2);
+    }
+    this._clip = { x1: nx1, y1: ny1, x2: nx2, y2: ny2 };
+  }
+
+  /** Remove the clipping region; drawing operations cover the full canvas again. */
+  clearClipRect(): void { this._clip = null; }
+
+  /** Save and return the current clip (or null).  Pair with restoreClipRect(). */
+  saveClipRect(): { x1: number; y1: number; x2: number; y2: number } | null {
+    return this._clip ? { ...this._clip } : null;
+  }
+
+  /** Restore a previously saved clip rect (pass the value from saveClipRect()). */
+  restoreClipRect(saved: { x1: number; y1: number; x2: number; y2: number } | null): void {
+    this._clip = saved;
+  }
+
   // ── Drawing primitives ────────────────────────────────────────────────
 
   clear(color: PixelColor = Colors.BLACK): void {
-    this._buf.fill(Canvas._bgra(color));
+    var c = Canvas._bgra(color);
+    // JIT fast-path: direct physical-memory fill (avoids JS array write loop)
+    if (_ensureJIT()) {
+      var fb = this.bufPhysAddr();
+      if (fb) { JITCanvas.fillBuffer(fb, c, this.width * this.height); return; }
+    }
+    this._buf.fill(c);
   }
 
   fillRect(x: number, y: number, w: number, h: number, color: PixelColor): void {
@@ -327,9 +397,24 @@ export class Canvas {
     var y1 = Math.max(y, 0);
     var x2 = Math.min(x + w, this.width);
     var y2 = Math.min(y + h, this.height);
+    // Apply clip rect if active (item 489)
+    if (this._clip) {
+      x1 = Math.max(x1, this._clip.x1);
+      y1 = Math.max(y1, this._clip.y1);
+      x2 = Math.min(x2, this._clip.x2);
+      y2 = Math.min(y2, this._clip.y2);
+    }
     var rowW = x2 - x1;
-    if (rowW <= 0) return;
-    // Use TypedArray.fill() per row — native bulk operation, far faster than
+    if (rowW <= 0 || y2 <= y1) return;
+    // JIT fast-path: direct physical-memory rectangle fill
+    if (_ensureJIT()) {
+      var fb = this.bufPhysAddr();
+      if (fb) {
+        JITCanvas.fillRect(fb, c, x1, y1, rowW, y2 - y1, this.width * 4);
+        return;
+      }
+    }
+    // TypedArray.fill() fallback — native bulk operation, far faster than
     // an explicit inner for-col loop which generates individual array writes.
     for (var row = y1; row < y2; row++) {
       var base = row * this.width + x1;
@@ -369,8 +454,216 @@ export class Canvas {
     }
   }
 
+  /**
+   * Draw text using the 8×8 bitmap font scaled by `scale` pixels per dot.
+   * scale=1 → normal 8×8; scale=2 → 16×16; scale=3 → 24×24.
+   * Optimisation: consecutive set bits in a glyph row are merged into a
+   * single fillRect call, reducing per-pixel JIT dispatch overhead by ~4×.
+   */
+  drawTextScaled(x: number, y: number, text: string, color: PixelColor, scale: number): void {
+    if (scale <= 1) { this.drawText(x, y, text, color); return; }
+    var cx = x;
+    for (var ti = 0; ti < text.length; ti++) {
+      var code = text.charCodeAt(ti);
+      if (code < 0x20 || code > 0x7E) { cx += 8 * scale; continue; }
+      var base = (code - 0x20) * 8;
+      for (var row = 0; row < 8; row++) {
+        var byte = FONT_DATA_8x8[base + row];
+        if (!byte) continue;
+        // Merge consecutive set bits into single fillRect runs
+        var col = 0;
+        while (col < 8) {
+          if (byte & (0x80 >> col)) {
+            var runStart = col;
+            while (col < 8 && (byte & (0x80 >> col))) col++;
+            // Fill the entire run as one rectangle: width = (col - runStart) * scale
+            this.fillRect(cx + runStart * scale, y + row * scale,
+                          (col - runStart) * scale, scale, color);
+          } else {
+            col++;
+          }
+        }
+      }
+      cx += 8 * scale;
+    }
+  }
+
   measureText(text: string, font = defaultFont): { width: number; height: number } {
     return font.measureText(text);
+  }
+
+  // ── Extended drawing primitives ───────────────────────────────────────
+
+  /** Filled circle using scanline approach. */
+  fillCircle(cx: number, cy: number, r: number, color: PixelColor): void {
+    for (var dy = -r; dy <= r; dy++) {
+      var dx2 = Math.floor(Math.sqrt(r * r - dy * dy));
+      this.fillRect(cx - dx2, cy + dy, 2 * dx2 + 1, 1, color);
+    }
+  }
+
+  /** Circle outline using Bresenham midpoint algorithm. */
+  drawCircle(cx: number, cy: number, r: number, color: PixelColor): void {
+    var x = 0, y = r, d = 3 - 2 * r;
+    while (y >= x) {
+      this.setPixel(cx + x, cy - y, color); this.setPixel(cx - x, cy - y, color);
+      this.setPixel(cx + x, cy + y, color); this.setPixel(cx - x, cy + y, color);
+      this.setPixel(cx + y, cy - x, color); this.setPixel(cx - y, cy - x, color);
+      this.setPixel(cx + y, cy + x, color); this.setPixel(cx - y, cy + x, color);
+      if (d < 0) d += 4 * x + 6;
+      else { d += 4 * (x - y) + 10; y--; }
+      x++;
+    }
+  }
+
+  /** Filled rounded rectangle. */
+  fillRoundRect(x: number, y: number, w: number, h: number, r: number, color: PixelColor): void {
+    r = Math.min(r, w >> 1, h >> 1);
+    // Centre horizontal slab
+    this.fillRect(x, y + r, w, h - 2 * r, color);
+    // Top + bottom slabs (between corners)
+    this.fillRect(x + r, y, w - 2 * r, r, color);
+    this.fillRect(x + r, y + h - r, w - 2 * r, r, color);
+    // Four quarter-disc corners
+    for (var row = 0; row < r; row++) {
+      var xoff = Math.floor(Math.sqrt(r * r - (r - 1 - row) * (r - 1 - row)));
+      var col = r - xoff;
+      // top-left
+      this.fillRect(x + col, y + row, xoff, 1, color);
+      // top-right
+      this.fillRect(x + w - r, y + row, xoff, 1, color);
+      // bottom-left
+      this.fillRect(x + col, y + h - 1 - row, xoff, 1, color);
+      // bottom-right
+      this.fillRect(x + w - r, y + h - 1 - row, xoff, 1, color);
+    }
+  }
+
+  /** Rounded rectangle outline. */
+  drawRoundRect(x: number, y: number, w: number, h: number, r: number, color: PixelColor): void {
+    r = Math.min(r, w >> 1, h >> 1);
+    // Straight edges
+    this.fillRect(x + r,     y,         w - 2 * r, 1, color);
+    this.fillRect(x + r,     y + h - 1, w - 2 * r, 1, color);
+    this.fillRect(x,         y + r,     1, h - 2 * r, color);
+    this.fillRect(x + w - 1, y + r,     1, h - 2 * r, color);
+    // Corner arcs via Bresenham
+    var bx = 0, by = r, bd = 3 - 2 * r;
+    while (by >= bx) {
+      // top-left
+      this.setPixel(x + r - bx, y + r - by, color);
+      this.setPixel(x + r - by, y + r - bx, color);
+      // top-right
+      this.setPixel(x + w - r - 1 + bx, y + r - by, color);
+      this.setPixel(x + w - r - 1 + by, y + r - bx, color);
+      // bottom-left
+      this.setPixel(x + r - bx, y + h - r - 1 + by, color);
+      this.setPixel(x + r - by, y + h - r - 1 + bx, color);
+      // bottom-right
+      this.setPixel(x + w - r - 1 + bx, y + h - r - 1 + by, color);
+      this.setPixel(x + w - r - 1 + by, y + h - r - 1 + bx, color);
+      if (bd < 0) bd += 4 * bx + 6;
+      else { bd += 4 * (bx - by) + 10; by--; }
+      bx++;
+    }
+  }
+
+  // ── Gradient fills ────────────────────────────────────────────────────
+
+  /** Linear gradient fill. `stops` are {stop:0..1, color} in order. Direction defaults to vertical. */
+  drawLinearGradient(
+    x: number, y: number, w: number, h: number,
+    stops: Array<{ stop: number; color: PixelColor }>,
+    direction: 'horizontal' | 'vertical' | 'diagonal' = 'vertical',
+  ): void {
+    if (stops.length === 0) return;
+    if (stops.length === 1) { this.fillRect(x, y, w, h, stops[0].color); return; }
+    var len = direction === 'horizontal' ? w : direction === 'vertical' ? h : Math.max(w, h);
+    for (var i = 0; i < len; i++) {
+      var t = len <= 1 ? 0 : i / (len - 1);
+      var c = Canvas._lerpStops(stops, t);
+      if (direction === 'horizontal') this.fillRect(x + i, y, 1, h, c);
+      else if (direction === 'vertical') this.fillRect(x, y + i, w, 1, c);
+      else { // diagonal
+        var frac = i / len;
+        var cx2 = Math.round(x + w * frac);
+        var cy2 = Math.round(y + h * frac);
+        this.setPixel(cx2, cy2, c);
+      }
+    }
+  }
+
+  /** Radial gradient fill from centre outward. `stops` are {stop:0..1, color} in order. */
+  drawRadialGradient(
+    cx: number, cy: number, r: number,
+    stops: Array<{ stop: number; color: PixelColor }>,
+  ): void {
+    if (stops.length === 0 || r <= 0) return;
+    var x0 = Math.max(0, cx - r), x1 = Math.min(this.width,  cx + r + 1);
+    var y0 = Math.max(0, cy - r), y1 = Math.min(this.height, cy + r + 1);
+    for (var py = y0; py < y1; py++) {
+      var dy2 = py - cy;
+      for (var px = x0; px < x1; px++) {
+        var dx2 = px - cx;
+        var dist = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+        if (dist > r) continue;
+        var t = dist / r;
+        this.setPixel(px, py, Canvas._lerpStops(stops, t));
+      }
+    }
+  }
+
+  private static _lerpStops(stops: Array<{ stop: number; color: PixelColor }>, t: number): PixelColor {
+    if (t <= stops[0].stop)            return stops[0].color;
+    if (t >= stops[stops.length - 1].stop) return stops[stops.length - 1].color;
+    for (var si = 0; si < stops.length - 1; si++) {
+      var s0 = stops[si], s1 = stops[si + 1];
+      if (t >= s0.stop && t <= s1.stop) {
+        var lt = (s1.stop === s0.stop) ? 0 : (t - s0.stop) / (s1.stop - s0.stop);
+        return Canvas._lerpColor(s0.color, s1.color, lt);
+      }
+    }
+    return stops[stops.length - 1].color;
+  }
+
+  private static _lerpColor(a: PixelColor, b: PixelColor, t: number): PixelColor {
+    var ia = 1 - t;
+    var aa = ((a >>> 24) & 0xFF) * ia + ((b >>> 24) & 0xFF) * t;
+    var rr = ((a >>> 16) & 0xFF) * ia + ((b >>> 16) & 0xFF) * t;
+    var gg = ((a >>>  8) & 0xFF) * ia + ((b >>>  8) & 0xFF) * t;
+    var bb = ((a >>>  0) & 0xFF) * ia + ((b >>>  0) & 0xFF) * t;
+    return ((aa & 0xFF) << 24) | ((rr & 0xFF) << 16) | ((gg & 0xFF) << 8) | (bb & 0xFF);
+  }
+
+  // ── Sprite rendering ──────────────────────────────────────────────────
+
+  /**
+   * Render an indexed-colour sprite.
+   * `pixels` is a flat row-major array of palette indices.
+   * `palette[0]` is transparent by convention (alpha=0 → skip).
+   * `scale` repeats each pixel N×N times (default 1).
+   */
+  drawSprite(
+    x: number, y: number,
+    pixels: number[], pw: number, ph: number,
+    palette: PixelColor[],
+    scale = 1,
+  ): void {
+    for (var row = 0; row < ph; row++) {
+      for (var col = 0; col < pw; col++) {
+        var idx = pixels[row * pw + col];
+        if (idx < 0 || idx >= palette.length) continue;
+        var c = palette[idx];
+        if ((c >>> 24) === 0) continue; // transparent
+        var px = x + col * scale;
+        var py = y + row * scale;
+        if (scale === 1) {
+          this.setPixel(px, py, c);
+        } else {
+          this.fillRect(px, py, scale, scale, c);
+        }
+      }
+    }
   }
 
   // ── Compositing ───────────────────────────────────────────────────────
@@ -382,6 +675,20 @@ export class Canvas {
    */
   drawGlyph(x: number, y: number, data: Uint8Array, base: number, color: PixelColor): void {
     var bgraColor = Canvas._bgra(color);   // convert ONCE, not 64 times
+    // JIT fast-path: use compiled glyphRow kernel for each row
+    if (_ensureJIT()) {
+      var fb = this.bufPhysAddr();
+      if (fb) {
+        for (var row = 0; row < 8; row++) {
+          var py = y + row;
+          if (py < 0 || py >= this.height) continue;
+          var byte = data[base + row];
+          if (!byte) continue;
+          JITCanvas.glyphRow(fb + (py * this.width + x) * 4, byte, x, this.width, bgraColor);
+        }
+        return;
+      }
+    }
     for (var row = 0; row < 8; row++) {
       var py = y + row;
       if (py < 0 || py >= this.height) continue;
@@ -401,6 +708,24 @@ export class Canvas {
 
   blit(src: Canvas, sx: number, sy: number, dx: number, dy: number,
        w: number, h: number): void {
+    // JIT fast-path: direct physical-memory row copy
+    if (_ensureJIT()) {
+      var dstBase = this.bufPhysAddr();
+      var srcBase = src.bufPhysAddr();
+      if (dstBase && srcBase) {
+        for (var row = 0; row < h; row++) {
+          var dstY = dy + row;
+          if (dstY < 0 || dstY >= this.height) continue;
+          var colStart = dx < 0 ? -dx : 0;
+          var colEnd   = (dx + w > this.width) ? (this.width - dx) : w;
+          if (colStart >= colEnd) continue;
+          var srcOff = (sy + row) * src.width + sx + colStart;
+          var dstOff = dstY * this.width + dx + colStart;
+          JITCanvas.blitRow(dstBase + dstOff * 4, srcBase + srcOff * 4, colEnd - colStart);
+        }
+        return;
+      }
+    }
     // Use TypedArray.set() per-row instead of a per-pixel loop.
     // For a 800×550 window this is ~550 bulk copies vs ~440,000 individual assignments.
     for (var row = 0; row < h; row++) {
@@ -417,6 +742,56 @@ export class Canvas {
   }
 
   /**
+   * Alpha-blended blit: composite `src` onto this canvas with the given
+   * alpha value (0=transparent, 255=opaque).  Slower than `blit()` — use
+   * only when opacity < 255.  Both buffers are BGRA so channel order matches.
+   */
+  blitAlpha(src: Canvas, sx: number, sy: number, dx: number, dy: number,
+            w: number, h: number, alpha: number): void {
+    // JIT fast-path: alpha-blend via native x86-32 code operating on physical memory.
+    // Eliminates ~6 multiplies + shifts per pixel of JS interpreter overhead.
+    if (_ensureJIT()) {
+      var dstBase = this.bufPhysAddr();
+      var srcBase = src.bufPhysAddr();
+      if (dstBase && srcBase) {
+        for (var row = 0; row < h; row++) {
+          var dstY = dy + row;
+          if (dstY < 0 || dstY >= this.height) continue;
+          var colStart = dx < 0 ? -dx : 0;
+          var colEnd   = (dx + w > this.width) ? (this.width - dx) : w;
+          if (colStart >= colEnd) continue;
+          var srcOff = (sy + row) * src.width + sx + colStart;
+          var dstOff = dstY * this.width + dx + colStart;
+          JITCanvas.blitAlphaRow(
+            dstBase + dstOff * 4, srcBase + srcOff * 4,
+            colEnd - colStart, alpha,
+          );
+        }
+        return;
+      }
+    }
+    // TypeScript fallback
+    var ia = 255 - alpha;
+    for (var row = 0; row < h; row++) {
+      var dstY = dy + row;
+      if (dstY < 0 || dstY >= this.height) continue;
+      var srcRowBase = (sy + row) * src.width + sx;
+      var dstRowBase =        dstY * this.width + dx;
+      for (var col = 0; col < w; col++) {
+        var dstX = dx + col;
+        if (dstX < 0 || dstX >= this.width) continue;
+        var sp = src._buf[srcRowBase + col];
+        var dp = this._buf[dstRowBase + col];
+        var b = (( sp        & 0xFF) * alpha + ( dp        & 0xFF) * ia) >> 8;
+        var g = (((sp >>  8) & 0xFF) * alpha + ((dp >>  8) & 0xFF) * ia) >> 8;
+        var r = (((sp >> 16) & 0xFF) * alpha + ((dp >> 16) & 0xFF) * ia) >> 8;
+        var a = (((sp >> 24) & 0xFF) * alpha + ((dp >> 24) & 0xFF) * ia) >> 8;
+        this._buf[dstRowBase + col] = (a << 24) | (r << 16) | (g << 8) | b;
+      }
+    }
+  }
+
+  /**
    * Blit external pixel data (already in canvas-native 0xAARRGGBB format) directly
    * into this canvas using Uint32Array.set() per row — zero per-pixel overhead.
    * Used by the image renderer: BMP data decoded by decodeBMP() is already in the
@@ -427,6 +802,21 @@ export class Canvas {
     var cols = Math.min(srcW, this.width  - dx);
     var rows = Math.min(srcH, this.height - dy);
     if (cols <= 0 || rows <= 0) return;
+    // JIT fast-path: use compiled blitRow kernel for each row (item 2.1)
+    if (_ensureJIT()) {
+      var dstBase = this.bufPhysAddr();
+      var srcBase = JITCanvas.physAddr(src.buffer as ArrayBuffer);
+      if (dstBase && srcBase) {
+        for (var row = 0; row < rows; row++) {
+          var dstY = dy + row;
+          if (dstY < 0 || dstY >= this.height) continue;
+          var srcOff = row * srcW;
+          var dstOff = dstY * this.width + dx;
+          JITCanvas.blitRow(dstBase + dstOff * 4, srcBase + srcOff * 4, cols);
+        }
+        return;
+      }
+    }
     for (var row = 0; row < rows; row++) {
       var dstY = dy + row;
       if (dstY < 0 || dstY >= this.height) continue;
@@ -437,14 +827,114 @@ export class Canvas {
     }
   }
 
+  /**
+   * Alpha-compositing blit from a raw Uint32Array (0xAARRGGBB) onto this
+   * canvas.  Transparent source pixels (alpha=0) leave destination unchanged;
+   * opaque ones overwrite directly; partial alpha blends normally.
+   */
+  blitPixelsAlpha(src: Uint32Array, srcW: number, srcH: number,
+                  dx: number, dy: number): void {
+    var cols = Math.min(srcW, this.width  - dx);
+    var rows = Math.min(srcH, this.height - dy);
+    if (cols <= 0 || rows <= 0) return;
+    var buf = this._buf;
+    var w = this.width;
+    for (var row = 0; row < rows; row++) {
+      var dstY = dy + row;
+      if (dstY < 0 || dstY >= this.height) continue;
+      var srcBase = row * srcW;
+      var dstBase = dstY * w + dx;
+      for (var col = 0; col < cols; col++) {
+        var sp = src[srcBase + col]!;
+        var sa = (sp >>> 24) & 0xFF;
+        if (sa === 0) continue;    // fully transparent — skip
+        if (sa === 255) { buf[dstBase + col] = sp; continue; } // opaque — overwrite
+        // Alpha blend: src over dst
+        var sr = (sp >>> 16) & 0xFF, sg = (sp >>> 8) & 0xFF, sb = sp & 0xFF;
+        var dp = buf[dstBase + col]!;
+        var dr = (dp >>> 16) & 0xFF, dg = (dp >>> 8) & 0xFF, db = dp & 0xFF;
+        var ia = 255 - sa;
+        var or = (sr * sa + dr * ia + 127) / 255 | 0;
+        var og = (sg * sa + dg * ia + 127) / 255 | 0;
+        var ob = (sb * sa + db * ia + 127) / 255 | 0;
+        buf[dstBase + col] = (0xFF000000 | (or << 16) | (og << 8) | ob) >>> 0;
+      }
+    }
+  }
+
+  /**
+   * Scroll-blit: shift the pixel buffer vertically by deltaY pixels within a
+   * sub-region [y0..y0+h).  Avoids a full repaint for scroll-only frames.
+   * The caller must repaint the newly-exposed strip afterwards.  (Item 2.2)
+   */
+  scrollBlit(deltaY: number, y0: number, regionH: number): void {
+    if (deltaY === 0 || regionH <= 0) return;
+    var w      = this.width;
+    var absDy  = Math.abs(deltaY);
+    if (absDy >= regionH) return; // entire region changes, nothing to shift
+    if (deltaY > 0) {
+      // Scrolling down: copy rows upward (bottom content moves up)
+      for (var r = 0; r < regionH - absDy; r++) {
+        var srcRow = y0 + r + absDy;
+        var dstRow = y0 + r;
+        if (srcRow >= this.height || dstRow < 0) continue;
+        this._buf.set(
+          this._buf.subarray(srcRow * w, srcRow * w + w),
+          dstRow * w,
+        );
+      }
+    } else {
+      // Scrolling up: copy rows downward (iterate from bottom)
+      for (var r = regionH - absDy - 1; r >= 0; r--) {
+        var srcRow = y0 + r;
+        var dstRow = y0 + r + absDy;
+        if (srcRow < 0 || dstRow >= this.height) continue;
+        this._buf.set(
+          this._buf.subarray(srcRow * w, srcRow * w + w),
+          dstRow * w,
+        );
+      }
+    }
+  }
+
   // ── Framebuffer output ────────────────────────────────────────────────
 
   /**
+   * [Item 905] Double-buffer vsync state.
+   * Initialised on the first flip() of the root canvas.
+   */
+  private static _dbEnabled: boolean = false;
+  private static _dbInit:    boolean = false;
+
+  private static _initDoubleBuffer(): void {
+    if (Canvas._dbInit) return;
+    Canvas._dbInit = true;
+    try {
+      // Allocate C-side back-buffer; falls back gracefully if unsupported.
+      var result = (kernel as any).fbAllocBackbuffer?.();
+      Canvas._dbEnabled = result === true || result === 1;
+    } catch (_) { Canvas._dbEnabled = false; }
+  }
+
+  /**
    * Double-buffer flip: send the entire canvas to the physical framebuffer.
-   * For the screen canvas, blits at (0,0).
-   * For sub-canvases, blits at the registered (fb_x, fb_y) offset.
+   * [Item 905] Wait for vertical blank BEFORE the blit so the write lands
+   * during the non-visible period, eliminating tearing.
+   *
+   * NOTE: fbBlit() writes directly to the physical framebuffer.  fbFlip()
+   * copies the C-side back-buffer → physical FB, which would overwrite the
+   * just-blitted frame with stale (zeroed) data and cause a black flash every
+   * frame.  fbFlip() is therefore intentionally NOT called here.
    */
   flip(): void {
+    /* External-buffer canvases are owned by the WM render slab; don't blit. */
+    if (this._external) return;
+    // Init double-buffer once on the first real flip.
+    if (!Canvas._dbInit) Canvas._initDoubleBuffer();
+    // [Item 905] Wait for vertical blank before writing to avoid tearing.
+    if (Canvas._dbEnabled) {
+      try { (kernel as any).vsyncWait?.(); } catch (_) {}
+    }
     // Zero-copy fast path: pass the Uint32Array's backing ArrayBuffer directly.
     // C side detects it via JS_GetArrayBuffer() and calls a single memcpy.
     (kernel.fbBlit as any)(this._buf.buffer, this._fb_x, this._fb_y, this.width, this.height);
@@ -452,11 +942,26 @@ export class Canvas {
 
   /**
    * Partial update — blit a sub-region of this canvas to the framebuffer.
-   * Builds a compact typed-array region copy (one pass) then hands off
-   * its backing ArrayBuffer to C for a single memcpy.
+   * Uses the strided blit path to avoid copying into a temporary buffer.
+   * Falls back to compact copy + fbBlit when strided blit is unavailable.
    */
   flipRegion(x: number, y: number, w: number, h: number): void {
-    var region = new Uint32Array(w * h);
+    // Zero-copy fast path: let C handle the stride directly
+    if ((kernel as any).fbBlitStrided) {
+      (kernel as any).fbBlitStrided(
+        this._buf.buffer, this.width,
+        x, y,
+        this._fb_x + x, this._fb_y + y,
+        w, h,
+      );
+      return;
+    }
+    // Fallback: compact copy using cached buffer to avoid per-call allocation
+    var size = w * h;
+    if (!Canvas._regionBuf || Canvas._regionBuf.length < size) {
+      Canvas._regionBuf = new Uint32Array(size);
+    }
+    var region = Canvas._regionBuf;
     for (var row = 0; row < h; row++) {
       var srcOff = (y + row) * this.width + x;
       region.set(this._buf.subarray(srcOff, srcOff + w), row * w);
@@ -464,8 +969,79 @@ export class Canvas {
     (kernel.fbBlit as any)(region.buffer, this._fb_x + x, this._fb_y + y, w, h);
   }
 
+  /** Cached region buffer for flipRegion fallback — avoids allocation per call. */
+  private static _regionBuf: Uint32Array | null = null;
+
   /** Get raw Uint32Array buffer (BGRA) for compositing without allocation */
   getBuffer(): Uint32Array { return this._buf; }
+
+  /**
+   * Copy pixels from a raw BGRA ArrayBuffer (e.g. a BSS render slab) into
+   * this canvas at destination offset (dstX, dstY).
+   *
+   * @param srcBuf    - Source ArrayBuffer containing BGRA pixels
+   * @param srcX      - X offset in source (pixels)
+   * @param srcY      - Y offset in source (pixels)
+   * @param dstX      - X offset in this canvas (pixels)
+   * @param dstY      - Y offset in this canvas (pixels)
+   * @param w         - Width of the region to copy (pixels)
+   * @param h         - Height of the region to copy (pixels)
+   * @param srcWidthPx - Row stride of the source in pixels (defaults to `w`)
+   */
+  blitFromBuffer(
+    srcBuf: ArrayBuffer, srcX: number, srcY: number,
+    dstX: number, dstY: number, w: number, h: number,
+    srcWidthPx?: number,
+  ): void {
+    this.blitFromView(new Uint32Array(srcBuf), srcX, srcY, dstX, dstY, w, h, srcWidthPx);
+  }
+
+  /**
+   * Same as blitFromBuffer but accepts a pre-built Uint32Array view,
+   * avoiding a per-call allocation when the caller caches the view.
+   */
+  blitFromView(
+    src: Uint32Array, srcX: number, srcY: number,
+    dstX: number, dstY: number, w: number, h: number,
+    srcWidthPx?: number,
+  ): void {
+    var srcStride = srcWidthPx !== undefined ? srcWidthPx : w;
+    // JIT fast-path: use REP MOVSD blitRow for each scanline
+    if (_ensureJIT()) {
+      var dstBase = this.bufPhysAddr();
+      var srcBase = JITCanvas.physAddr(src.buffer as ArrayBuffer);
+      if (dstBase && srcBase) {
+        for (var row = 0; row < h; row++) {
+          var dY = dstY + row;
+          if (dY < 0 || dY >= this.height) continue;
+          var colStart = dstX < 0 ? -dstX : 0;
+          var colEnd   = (dstX + w > this.width) ? (this.width - dstX) : w;
+          if (colStart >= colEnd) continue;
+          var srcOff = (srcY + row) * srcStride + srcX + colStart;
+          var dstOff = dY * this.width + dstX + colStart;
+          JITCanvas.blitRow(dstBase + dstOff * 4, srcBase + srcOff * 4, colEnd - colStart);
+        }
+        return;
+      }
+    }
+    for (var row = 0; row < h; row++) {
+      var dY = dstY + row;
+      if (dY < 0 || dY >= this.height) continue;
+      var colStart = dstX < 0 ? -dstX : 0;
+      var colEnd   = (dstX + w > this.width) ? (this.width - dstX) : w;
+      if (colStart >= colEnd) continue;
+      var srcOff = (srcY + row) * srcStride + srcX + colStart;
+      var dstOff = dY * this.width + dstX + colStart;
+      this._buf.set(src.subarray(srcOff, srcOff + (colEnd - colStart)), dstOff);
+    }
+  }
+
+  /**
+   * Physical address of the pixel buffer, for use with JIT-compiled operations.
+   * Returns 0 when kernel.physAddrOf is unavailable (e.g. test environments).
+   * QuickJS is a non-moving GC, so the address is stable for the buffer's lifetime.
+   */
+  bufPhysAddr(): number { return JITCanvas.physAddr(this._buf.buffer as ArrayBuffer); }
 }
 
 /**

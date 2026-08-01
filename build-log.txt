@@ -1,0 +1,1170 @@
+﻿
+> jsos@0.1.0 build
+> docker rm -f temp-jsos 2>nul & docker build -f docker/build.Dockerfile -t jsos-build . && docker create --name temp-jsos jsos-build /bin/true && if exist build\jsos.iso del /f build\jsos.iso && docker cp temp-jsos:/jsos.iso build/jsos.iso && docker rm temp-jsos
+
+temp-jsos
+node.exe : #0 building with "desktop-linux" instance using docker driver
+At C:\Program Files\nodejs\npm.ps1:29 char:3
++   & $NODE_EXE $NPM_CLI_JS $args
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (#0 building wit...g docker driver 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+#1 [internal] load build definition from build.Dockerfile
+#1 transferring dockerfile: 1.15kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/jsos-toolchain:latest
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 DONE 0.0s
+
+#5 [builder 1/8] FROM docker.io/library/jsos-toolchain:latest@sha256:a21f73fefe
+76107804eda7583f3018ae2c07fd6315a5a176ab9a1b8961450e6a
+#5 resolve docker.io/library/jsos-toolchain:latest@sha256:a21f73fefe76107804eda
+7583f3018ae2c07fd6315a5a176ab9a1b8961450e6a
+#5 resolve docker.io/library/jsos-toolchain:latest@sha256:a21f73fefe76107804eda
+7583f3018ae2c07fd6315a5a176ab9a1b8961450e6a 2.7s done
+#5 DONE 2.7s
+
+#4 [internal] load build context
+#4 transferring context: 595.72kB 0.3s done
+#4 DONE 0.3s
+
+#6 [builder 2/8] WORKDIR /workspace
+#6 CACHED
+
+#7 [builder 3/8] COPY package*.json ./
+#7 CACHED
+
+#8 [builder 4/8] RUN npm ci
+#8 CACHED
+
+#9 [builder 5/8] COPY . .
+#9 DONE 4.1s
+
+#10 [builder 6/8] RUN find . -name "*.sh" -exec sed -i 's/\r$//' {} + &&     
+chmod +x scripts/*.sh
+#10 DONE 0.4s
+
+#11 [builder 7/8] RUN npm run build:local
+#11 0.405 
+#11 0.405 > jsos@0.1.0 build:local
+#11 0.405 > npm run embed:rom && npm run build:ts && npm run embed:js && echo 
+"TypeScript build complete"
+#11 0.405 
+#11 0.496 
+#11 0.496 > jsos@0.1.0 embed:rom
+#11 0.496 > node scripts/embed-rom.js
+#11 0.496 
+#11 0.526 Generating ROM filesystem installer (romfs.ts)...
+#11 0.596   + /home/user/bible.txt  (4328.4 KB)
+#11 0.626 Done. /workspace/src/os/fs/romfs.ts written (4235.5 KB, 1 file(s) 
+embedded).
+#11 0.729 
+#11 0.729 > jsos@0.1.0 build:ts
+#11 0.729 > npm run bundle
+#11 0.729 
+#11 0.810 
+#11 0.810 > jsos@0.1.0 bundle
+#11 0.810 > node scripts/bundle-hybrid.js
+#11 0.810 
+#11 0.893 ≡ƒö¿ Bundling TypeScript for QuickJS (ES2023)...
+#11 0.896    Found 157 TypeScript files
+#11 0.896    Transforming apps/browser/advanced-css.ts...
+#11 0.978 [baseline-browser-mapping] The data in this module is over two 
+months old.  To ensure accurate Baseline data, please update: `npm i 
+baseline-browser-mapping@latest -D`
+#11 1.131    Transforming apps/browser/appearance.ts...
+#11 1.159    Transforming apps/browser/audio-element.ts...
+#11 1.177    Transforming apps/browser/browser-ext.ts...
+#11 1.200    Transforming apps/browser/cache.ts...
+#11 1.217    Transforming apps/browser/canvas2d.ts...
+#11 1.258    Transforming apps/browser/compat-polyfills.ts...
+#11 1.269    Transforming apps/browser/constants.ts...
+#11 1.276    Transforming apps/browser/css-extras.ts...
+#11 1.295    Transforming apps/browser/css.ts...
+#11 1.336    Transforming apps/browser/devtools.ts...
+#11 1.351    Transforming apps/browser/dom.ts...
+#11 1.487    Transforming apps/browser/font.ts...
+#11 1.506    Transforming apps/browser/form-validate.ts...
+#11 1.519    Transforming apps/browser/framework-polyfills.ts...
+#11 1.534    Transforming apps/browser/gradient.ts...
+#11 1.545    Transforming apps/browser/html.ts...
+#11 1.618    Transforming apps/browser/img-gif.ts...
+#11 1.634    Transforming apps/browser/img-jpeg.ts...
+#11 1.646    Transforming apps/browser/img-png.ts...
+#11 1.664    Transforming apps/browser/img-webp.ts...
+#11 1.683    Transforming apps/browser/index.ts...
+#11 1.765    Transforming apps/browser/jit-browser.ts...
+#11 1.779    Transforming apps/browser/jsruntime.ts...
+#11 2.023    Transforming apps/browser/layout-ext.ts...
+#11 2.047    Transforming apps/browser/layout.ts...
+#11 2.092    Transforming apps/browser/mathml.ts...
+#11 2.113    Transforming apps/browser/pages.ts...
+#11 2.117    Transforming apps/browser/perf.ts...
+#11 2.126    Transforming apps/browser/render.ts...
+#11 2.150    Transforming apps/browser/stylesheet.ts...
+#11 2.172    Transforming apps/browser/svg.ts...
+#11 2.217    Transforming apps/browser/types.ts...
+#11 2.229    Transforming apps/browser/utils.ts...
+#11 2.245    Transforming apps/browser/virtio-gpu.ts...
+#11 2.258    Transforming apps/browser/webplatform.ts...
+#11 2.300    Transforming apps/browser/workers.ts...
+#11 2.322    Transforming apps/calculator/index.ts...
+#11 2.331    Transforming apps/calendar/index.ts...
+#11 2.343    Transforming apps/clock/index.ts...
+#11 2.351    Transforming apps/editor/index.ts...
+#11 2.378    Transforming apps/email/index.ts...
+#11 2.390    Transforming apps/file-manager/index.ts...
+#11 2.410    Transforming apps/image-viewer/index.ts...
+#11 2.428    Transforming apps/installer/index.ts...
+#11 2.439    Transforming apps/irc/index.ts...
+#11 2.462    Transforming apps/music-player/index.ts...
+#11 2.494    Transforming apps/notes/index.ts...
+#11 2.500    Transforming apps/npm-registry/index.ts...
+#11 2.507    Transforming apps/office/index.ts...
+#11 2.526    Transforming apps/pdf-viewer/index.ts...
+#11 2.545    Transforming apps/settings/index.ts...
+#11 2.552    Transforming apps/snake/index.ts...
+#11 2.558    Transforming apps/system-monitor/index.ts...
+#11 2.570    Transforming apps/template/index.ts...
+#11 2.575    Transforming apps/terminal/index.ts...
+#11 2.586    Transforming apps/tetris/index.ts...
+#11 2.596    Transforming apps/video-player/index.ts...
+#11 2.611    Transforming audio/codecs.ts...
+#11 2.622    Transforming audio/drivers.ts...
+#11 2.627    Transforming audio/index.ts...
+#11 2.632    Transforming audio/microphone.ts...
+#11 2.638    Transforming audio/mixer.ts...
+#11 2.652    Transforming audio/mp3.ts...
+#11 2.662    Transforming audio/ogg.ts...
+#11 2.670    Transforming core/cloud-init.ts...
+#11 2.678    Transforming core/config.ts...
+#11 2.688    Transforming core/fdtable.ts...
+#11 2.701    Transforming core/kernel.ts...
+#11 2.708    Transforming core/locale.ts...
+#11 2.721    Transforming core/main.ts...
+#11 2.734    Transforming core/pkgmgr.ts...
+#11 2.775    Transforming core/sdk.ts...
+#11 2.867    Transforming core/syscall-policy.ts...
+#11 2.921    Transforming core/syscalls.ts...
+#11 2.940    Transforming core/timezone.ts...
+#11 2.951    Transforming core/widgets.ts...
+#11 2.973    Transforming fs/blockdev.ts...
+#11 2.992    Transforming fs/btrfs.ts...
+#11 3.005    Transforming fs/buffer-cache.ts...
+#11 3.023    Transforming fs/cifs.ts...
+#11 3.037    Transforming fs/dev.ts...
+#11 3.049    Transforming fs/devices.ts...
+#11 3.059    Transforming fs/ext2.ts...
+#11 3.073    Transforming fs/ext4.ts...
+#11 3.088    Transforming fs/filesystem.ts...
+#11 3.120    Transforming fs/fs-driver.ts...
+#11 3.126    Transforming fs/fscompression.ts...
+#11 3.137    Transforming fs/fsencrypt.ts...
+#11 3.152    Transforming fs/initramfs.ts...
+#11 3.158    Transforming fs/iso9660.ts...
+#11 3.168    Transforming fs/nfs.ts...
+#11 3.178    Transforming fs/overlayfs.ts...
+#11 3.187    Transforming fs/proc.ts...
+#11 3.203    Transforming fs/romfs.ts...
+#11 3.247 [BABEL] Note: The code generator has deoptimised the styling of 
+/workspace/fs/romfs.ts as it exceeds the max of 500KB.
+#11 3.264    Transforming fs/zfs.ts...
+#11 3.273    Transforming ipc/ipc.ts...
+#11 3.307    Transforming ipc/shm.ts...
+#11 3.310    Transforming net/crypto.ts...
+#11 3.342    Transforming net/deflate.ts...
+#11 3.353    Transforming net/dhcp.ts...
+#11 3.359    Transforming net/dns.ts...
+#11 3.399    Transforming net/http.ts...
+#11 3.469    Transforming net/net-perf.ts...
+#11 3.501    Transforming net/net.ts...
+#11 3.598    Transforming net/ntp.ts...
+#11 3.605    Transforming net/post-quantum.ts...
+#11 3.638    Transforming net/rsa.ts...
+#11 3.656    Transforming net/sshd.ts...
+#11 3.679    Transforming net/subtle.ts...
+#11 3.715    Transforming net/tls.ts...
+#11 3.787    Transforming net/x509.ts...
+#11 3.809    Transforming process/arch.ts...
+#11 3.815    Transforming process/asyncio.ts...
+#11 3.823    Transforming process/debugger.ts...
+#11 3.838    Transforming process/elf.ts...
+#11 3.847    Transforming process/gc.ts...
+#11 3.867    Transforming process/guest-addons.ts...
+#11 3.876    Transforming process/init.ts...
+#11 3.891    Transforming process/jit-canvas.ts...
+#11 3.894    Transforming process/jit-os.ts...
+#11 3.912    Transforming process/jit.ts...
+#11 3.950    Transforming process/jsprocess.ts...
+#11 3.957    Transforming process/kvm.ts...
+#11 3.968    Transforming process/optimizer.ts...
+#11 3.976    Transforming process/physalloc.ts...
+#11 3.981    Transforming process/process.ts...
+#11 3.988    Transforming process/pty.ts...
+#11 3.997    Transforming process/qjs-jit.ts...
+#11 4.049    Transforming process/qjs-opcodes.ts...
+#11 4.061    Transforming process/scheduler.ts...
+#11 4.075    Transforming process/secboot.ts...
+#11 4.083    Transforming process/signals.ts...
+#11 4.090    Transforming process/supervisor.ts...
+#11 4.102    Transforming process/sync.ts...
+#11 4.106    Transforming process/threads.ts...
+#11 4.116    Transforming process/vmm.ts...
+#11 4.142    Transforming sdk/build.ts...
+#11 4.150    Transforming sdk/hmr.ts...
+#11 4.179    Transforming sdk/index.ts...
+#11 4.185    Transforming storage/block.ts...
+#11 4.191    Transforming storage/fat16.ts...
+#11 4.213    Transforming storage/fat32.ts...
+#11 4.235    Transforming test/integration.ts...
+#11 4.241    Transforming test/suite.ts...
+#11 4.253    Transforming test/tcp-verify.ts...
+#11 4.262    Transforming ui/canvas.ts...
+#11 4.284    Transforming ui/commands.ts...
+#11 4.364    Transforming ui/editor.ts...
+#11 4.371    Transforming ui/repl.ts...
+#11 4.394    Transforming ui/terminal-share.ts...
+#11 4.399    Transforming ui/terminal.ts...
+#11 4.430    Transforming ui/wm.ts...
+#11 4.500    Transforming users/mac.ts...
+#11 4.512    Transforming users/sandbox.ts...
+#11 4.519    Transforming users/totp.ts...
+#11 4.531    Transforming users/users.ts...
+#11 4.559 Γ£à TypeScript ΓåÆ JavaScript transformation complete
+#11 4.559    Bundling with esbuild...
+#11 4.614 Γû▓ [WARNING] Duplicate member "fonts" in class body 
+[duplicate-class-member]
+#11 4.614 
+#11 4.614     build/temp/apps/browser/dom.js:3848:6:
+#11 4.614       3848 Γöé   get fonts() {
+#11 4.614            Γò╡       ~~~~~
+#11 4.614 
+#11 4.614   The original member "fonts" is here:
+#11 4.614 
+#11 4.614     build/temp/apps/browser/dom.js:3730:6:
+#11 4.614       3730 Γöé   get fonts() {
+#11 4.614            Γò╡       ~~~~~
+#11 4.614 
+#11 4.732 Γ£à Successfully bundled for QuickJS!
+#11 4.732    Output: /workspace/build/bundle.js
+#11 4.732    Size:   6541.96KB
+#11 4.732    Target: ES2023 (native QuickJS ΓÇö no polyfills needed!)
+#11 4.851 
+#11 4.851 > jsos@0.1.0 embed:js
+#11 4.851 > node scripts/embed-js.js
+#11 4.851 
+#11 4.875 Embedding build/bundle.js into src/kernel/embedded_js.h ...
+#11 4.983 Done. 169712 lines embedded (7239.5 KB).
+#11 4.997 TypeScript build complete
+#11 DONE 5.1s
+
+#12 [builder 8/8] RUN ./scripts/build.sh
+#12 0.265 Building JSOS...
+#12 0.266 Embedding JavaScript code...
+#12 0.287 Embedding build/bundle.js into src/kernel/embedded_js.h ...
+#12 0.387 Done. 169712 lines embedded (7239.5 KB).
+#12 0.397 Building kernel...
+#12 0.399 rm -f boot.o crt0.o irq_asm.o kernel.o quickjs_binding.o platform.o 
+memory.o syscalls.o math_impl.o irq.o keyboard.o mouse.o timer.o ata.o pci.o 
+virtio_net.o jit.o cpuid.o cmdline.o acpi.o e1000.o rtl8139.o usb.o watchdog.o 
+symtab.o kaslr.o hpet.o virtio_blk.o virtio_gpu.o apic.o nvme.o ahci.o 
+selftest.o kprobes.o keyboard_layout.o usb_hid.o gamepad.o multimon.o sd.o 
+usb_msc.o floppy.o cdc_ecm.o wifi.o pci_hotplug.o secboot.o pxe.o quickjs.o 
+libregexp.o libunicode.o cutils.o dtoa.o jsos.bin
+#12 0.401 nasm -felf32 boot.s -o boot.o
+#12 0.403 nasm -felf32 crt0.s -o crt0.o
+#12 0.405 nasm -felf32 irq_asm.s -o irq_asm.o
+#12 0.409 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c kernel.c -o kernel.o
+#12 0.437 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c quickjs_binding.c -o quickjs_binding.o
+#12 0.444 In file included from quickjs_binding.c:13:
+#12 0.444 vendor/quickjs/quickjs.h: In function '__JS_NewFloat64':
+#12 0.444 vendor/quickjs/quickjs.h:174:50: warning: unused parameter 'ctx' 
+[-Wunused-parameter]
+#12 0.444   174 | static inline JSValue __JS_NewFloat64(JSContext *ctx, double 
+d)
+#12 0.444       |                                       ~~~~~~~~~~~^~~
+#12 0.444 vendor/quickjs/quickjs.h: In function '__JS_NewShortBigInt':
+#12 0.444 vendor/quickjs/quickjs.h:210:54: warning: unused parameter 'ctx' 
+[-Wunused-parameter]
+#12 0.444   210 | static inline JSValue __JS_NewShortBigInt(JSContext *ctx, 
+int32_t d)
+#12 0.444       |                                           ~~~~~~~~~~~^~~
+#12 0.444 vendor/quickjs/quickjs.h: In function 'JS_NewBool':
+#12 0.444 vendor/quickjs/quickjs.h:554:54: warning: unused parameter 'ctx' 
+[-Wunused-parameter]
+#12 0.444   554 | static js_force_inline JSValue JS_NewBool(JSContext *ctx, 
+JS_BOOL val)
+#12 0.444       |                                           ~~~~~~~~~~~^~~
+#12 0.444 vendor/quickjs/quickjs.h: In function 'JS_NewInt32':
+#12 0.445 vendor/quickjs/quickjs.h:559:55: warning: unused parameter 'ctx' 
+[-Wunused-parameter]
+#12 0.445   559 | static js_force_inline JSValue JS_NewInt32(JSContext *ctx, 
+int32_t val)
+#12 0.445       |                                            ~~~~~~~~~~~^~~
+#12 0.445 vendor/quickjs/quickjs.h: In function 'JS_NewCatchOffset':
+#12 0.445 vendor/quickjs/quickjs.h:564:61: warning: unused parameter 'ctx' 
+[-Wunused-parameter]
+#12 0.445   564 | static js_force_inline JSValue JS_NewCatchOffset(JSContext 
+*ctx, int32_t val)
+#12 0.445       |                                                  
+~~~~~~~~~~~^~~
+#12 0.445 vendor/quickjs/quickjs.h: In function 'JS_IsBigInt':
+#12 0.445 vendor/quickjs/quickjs.h:619:46: warning: unused parameter 'ctx' 
+[-Wunused-parameter]
+#12 0.445   619 | static inline JS_BOOL JS_IsBigInt(JSContext *ctx, 
+JSValueConst v)
+#12 0.445       |                                   ~~~~~~~~~~~^~~
+#12 0.445 vendor/quickjs/quickjs.h: In function 'JS_DupValue':
+#12 0.445 vendor/quickjs/quickjs.h:700:46: warning: unused parameter 'ctx' 
+[-Wunused-parameter]
+#12 0.445   700 | static inline JSValue JS_DupValue(JSContext *ctx, 
+JSValueConst v)
+#12 0.445       |                                   ~~~~~~~~~~~^~~
+#12 0.445 vendor/quickjs/quickjs.h: In function 'JS_DupValueRT':
+#12 0.446 vendor/quickjs/quickjs.h:709:48: warning: unused parameter 'rt' 
+[-Wunused-parameter]
+#12 0.446   709 | static inline JSValue JS_DupValueRT(JSRuntime *rt, 
+JSValueConst v)
+#12 0.446       |                                     ~~~~~~~~~~~^~
+#12 0.514 quickjs_binding.c: In function 'js_vga_put':
+#12 0.514 quickjs_binding.c:173:54: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.514   173 | static JSValue js_vga_put(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.514 quickjs_binding.c: In function 'js_vga_get':
+#12 0.514 quickjs_binding.c:184:54: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.514   184 | static JSValue js_vga_get(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.514 quickjs_binding.c:184:68: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.514   184 | static JSValue js_vga_get(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.514       |                                                              
+  ~~~~^~~~
+#12 0.514 quickjs_binding.c: In function 'js_vga_draw_row':
+#12 0.514 quickjs_binding.c:191:59: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.514   191 | static JSValue js_vga_draw_row(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.514 quickjs_binding.c: In function 'js_vga_copy_row':
+#12 0.514 quickjs_binding.c:201:59: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.514   201 | static JSValue js_vga_copy_row(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.514 quickjs_binding.c:201:73: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.514   201 | static JSValue js_vga_copy_row(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.514       |                                                              
+       ~~~~^~~~
+#12 0.514 quickjs_binding.c: In function 'js_vga_fill_row':
+#12 0.514 quickjs_binding.c:209:59: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.514   209 | static JSValue js_vga_fill_row(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.514 quickjs_binding.c: In function 'js_vga_fill':
+#12 0.514 quickjs_binding.c:219:55: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.514   219 | static JSValue js_vga_fill(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.514 quickjs_binding.c: In function 'js_vga_set_cursor':
+#12 0.514 quickjs_binding.c:231:61: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.514   231 | static JSValue js_vga_set_cursor(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.514 quickjs_binding.c:231:75: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.514   231 | static JSValue js_vga_set_cursor(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.514       |                                                              
+         ~~~~^~~~
+#12 0.515 quickjs_binding.c: In function 'js_vga_hide_cursor':
+#12 0.515 quickjs_binding.c:239:46: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.515   239 | static JSValue js_vga_hide_cursor(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.515       |                                   ~~~~~~~~~~~^
+#12 0.515 quickjs_binding.c:239:62: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.515   239 | static JSValue js_vga_hide_cursor(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.515 quickjs_binding.c:239:76: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.515   239 | static JSValue js_vga_hide_cursor(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.515       |                                                              
+          ~~~~^~~~
+#12 0.515 quickjs_binding.c:239:96: warning: unused parameter 'argv' 
+[-Wunused-parameter]
+#12 0.515   239 | static JSValue js_vga_hide_cursor(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.515 quickjs_binding.c: In function 'js_vga_show_cursor':
+#12 0.515 quickjs_binding.c:242:46: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.515   242 | static JSValue js_vga_show_cursor(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.515       |                                   ~~~~~~~~~~~^
+#12 0.515 quickjs_binding.c:242:62: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.515   242 | static JSValue js_vga_show_cursor(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.515 quickjs_binding.c:242:76: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.515   242 | static JSValue js_vga_show_cursor(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.515       |                                                              
+          ~~~~^~~~
+#12 0.515 quickjs_binding.c:242:96: warning: unused parameter 'argv' 
+[-Wunused-parameter]
+#12 0.515   242 | static JSValue js_vga_show_cursor(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.515 quickjs_binding.c: In function 'js_get_screen_size':
+#12 0.515 quickjs_binding.c:246:62: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.515   246 | static JSValue js_get_screen_size(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.516 quickjs_binding.c:246:76: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.516   246 | static JSValue js_get_screen_size(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.516       |                                                              
+          ~~~~^~~~
+#12 0.516 quickjs_binding.c:246:96: warning: unused parameter 'argv' 
+[-Wunused-parameter]
+#12 0.516   246 | static JSValue js_get_screen_size(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.516 quickjs_binding.c: In function 'js_read_key':
+#12 0.516 quickjs_binding.c:260:55: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.516   260 | static JSValue js_read_key(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.517 quickjs_binding.c:260:69: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.517   260 | static JSValue js_read_key(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.517       |                                                              
+   ~~~~^~~~
+#12 0.517 quickjs_binding.c:260:89: warning: unused parameter 'argv' 
+[-Wunused-parameter]
+#12 0.517   260 | static JSValue js_read_key(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.517 quickjs_binding.c: In function 'js_read_key_ex':
+#12 0.517 quickjs_binding.c:272:58: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.517   272 | static JSValue js_read_key_ex(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.517 quickjs_binding.c:272:72: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.517   272 | static JSValue js_read_key_ex(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.517       |                                                              
+      ~~~~^~~~
+#12 0.517 quickjs_binding.c:272:92: warning: unused parameter 'argv' 
+[-Wunused-parameter]
+#12 0.517   272 | static JSValue js_read_key_ex(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.518 quickjs_binding.c: In function 'js_wait_key':
+#12 0.518 quickjs_binding.c:291:55: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.518   291 | static JSValue js_wait_key(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.518 quickjs_binding.c:291:69: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.518   291 | static JSValue js_wait_key(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.518       |                                                              
+   ~~~~^~~~
+#12 0.518 quickjs_binding.c:291:89: warning: unused parameter 'argv' 
+[-Wunused-parameter]
+#12 0.518   291 | static JSValue js_wait_key(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.518 quickjs_binding.c: In function 'js_wait_key_ex':
+#12 0.518 quickjs_binding.c:297:58: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.518   297 | static JSValue js_wait_key_ex(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.518 quickjs_binding.c:297:72: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.518   297 | static JSValue js_wait_key_ex(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.518       |                                                              
+      ~~~~^~~~
+#12 0.518 quickjs_binding.c:297:92: warning: unused parameter 'argv' 
+[-Wunused-parameter]
+#12 0.518   297 | static JSValue js_wait_key_ex(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.518 quickjs_binding.c: In function 'js_has_key':
+#12 0.518 quickjs_binding.c:318:54: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.518   318 | static JSValue js_has_key(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.518 quickjs_binding.c:318:68: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.518   318 | static JSValue js_has_key(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.518       |                                                              
+  ~~~~^~~~
+#12 0.518 quickjs_binding.c:318:88: warning: unused parameter 'argv' 
+[-Wunused-parameter]
+#12 0.518   318 | static JSValue js_has_key(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.518 quickjs_binding.c: In function 'js_get_ticks':
+#12 0.518 quickjs_binding.c:324:56: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.518   324 | static JSValue js_get_ticks(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.519 quickjs_binding.c:324:70: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.519   324 | static JSValue js_get_ticks(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.519       |                                                              
+    ~~~~^~~~
+#12 0.519 quickjs_binding.c:324:90: warning: unused parameter 'argv' 
+[-Wunused-parameter]
+#12 0.519   324 | static JSValue js_get_ticks(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.519 quickjs_binding.c: In function 'js_get_uptime':
+#12 0.519 quickjs_binding.c:327:57: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.519   327 | static JSValue js_get_uptime(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.519 quickjs_binding.c:327:71: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.519   327 | static JSValue js_get_uptime(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.519       |                                                              
+     ~~~~^~~~
+#12 0.519 quickjs_binding.c:327:91: warning: unused parameter 'argv' 
+[-Wunused-parameter]
+#12 0.519   327 | static JSValue js_get_uptime(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.519 quickjs_binding.c: In function 'js_sleep':
+#12 0.519 quickjs_binding.c:334:52: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.519   334 | static JSValue js_sleep(JSContext *c, JSValueConst this_val, 
+int argc, JSValueConst *argv) {
+#12 0.519 quickjs_binding.c:334:66: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.519   334 | static JSValue js_sleep(JSContext *c, JSValueConst this_val, 
+int argc, JSValueConst *argv) {
+#12 0.519       |                                                              
+~~~~^~~~
+#12 0.519 quickjs_binding.c: In function 'js_mem_info':
+#12 0.520 quickjs_binding.c:355:55: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.520   355 | static JSValue js_mem_info(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.520 quickjs_binding.c:355:69: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.520   355 | static JSValue js_mem_info(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.520       |                                                              
+   ~~~~^~~~
+#12 0.520 quickjs_binding.c:355:89: warning: unused parameter 'argv' 
+[-Wunused-parameter]
+#12 0.520   355 | static JSValue js_mem_info(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.520 quickjs_binding.c: In function 'js_inb':
+#12 0.520 quickjs_binding.c:367:50: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.520   367 | static JSValue js_inb(JSContext *c, JSValueConst this_val, 
+int argc, JSValueConst *argv) {
+#12 0.520 quickjs_binding.c:367:64: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.520   367 | static JSValue js_inb(JSContext *c, JSValueConst this_val, 
+int argc, JSValueConst *argv) {
+#12 0.520       |                                                            
+~~~~^~~~
+#12 0.520 quickjs_binding.c: In function 'js_outb':
+#12 0.520 quickjs_binding.c:371:51: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.520   371 | static JSValue js_outb(JSContext *c, JSValueConst this_val, 
+int argc, JSValueConst *argv) {
+#12 0.520 quickjs_binding.c:371:65: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.520   371 | static JSValue js_outb(JSContext *c, JSValueConst this_val, 
+int argc, JSValueConst *argv) {
+#12 0.520       |                                                             
+~~~~^~~~
+#12 0.520 quickjs_binding.c: In function 'js_call_native':
+#12 0.521 quickjs_binding.c:384:58: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.521   384 | static JSValue js_call_native(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.521 quickjs_binding.c:384:72: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.521   384 | static JSValue js_call_native(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.521       |                                                              
+      ~~~~^~~~
+#12 0.521 quickjs_binding.c: In function 'js_call_native_i':
+#12 0.521 quickjs_binding.c:392:60: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.521   392 | static JSValue js_call_native_i(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.521 quickjs_binding.c: In function 'js_read_mem8':
+#12 0.521 quickjs_binding.c:403:56: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.521   403 | static JSValue js_read_mem8(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.521 quickjs_binding.c:403:70: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.521   403 | static JSValue js_read_mem8(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.521       |                                                              
+    ~~~~^~~~
+#12 0.521 quickjs_binding.c: In function 'js_write_mem8':
+#12 0.521 quickjs_binding.c:409:57: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.521   409 | static JSValue js_write_mem8(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.521 quickjs_binding.c:409:71: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.521   409 | static JSValue js_write_mem8(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.521       |                                                              
+     ~~~~^~~~
+#12 0.522 quickjs_binding.c: In function 'js_halt':
+#12 0.522 quickjs_binding.c:517:35: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.522   517 | static JSValue js_halt(JSContext *c, JSValueConst this_val, 
+int argc, JSValueConst *argv) {
+#12 0.522       |                        ~~~~~~~~~~~^
+#12 0.522 quickjs_binding.c:517:51: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.522   517 | static JSValue js_halt(JSContext *c, JSValueConst this_val, 
+int argc, JSValueConst *argv) {
+#12 0.522 quickjs_binding.c:517:65: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.522   517 | static JSValue js_halt(JSContext *c, JSValueConst this_val, 
+int argc, JSValueConst *argv) {
+#12 0.522       |                                                             
+~~~~^~~~
+#12 0.522 quickjs_binding.c:517:85: warning: unused parameter 'argv' 
+[-Wunused-parameter]
+#12 0.522   517 | static JSValue js_halt(JSContext *c, JSValueConst this_val, 
+int argc, JSValueConst *argv) {
+#12 0.522 quickjs_binding.c: In function 'js_reboot':
+#12 0.522 quickjs_binding.c:521:37: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.522   521 | static JSValue js_reboot(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.522       |                          ~~~~~~~~~~~^
+#12 0.522 quickjs_binding.c:521:53: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.522   521 | static JSValue js_reboot(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.522 quickjs_binding.c:521:67: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.522   521 | static JSValue js_reboot(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.522       |                                                              
+ ~~~~^~~~
+#12 0.522 quickjs_binding.c:521:87: warning: unused parameter 'argv' 
+[-Wunused-parameter]
+#12 0.522   521 | static JSValue js_reboot(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.522 quickjs_binding.c: In function 'js_serial_put':
+#12 0.522 quickjs_binding.c:529:57: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.522   529 | static JSValue js_serial_put(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.523 quickjs_binding.c:529:71: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.523   529 | static JSValue js_serial_put(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.523       |                                                              
+     ~~~~^~~~
+#12 0.523 quickjs_binding.c: In function 'js_serial_getchar':
+#12 0.523 quickjs_binding.c:535:61: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.523   535 | static JSValue js_serial_getchar(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.523 quickjs_binding.c:535:75: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.523   535 | static JSValue js_serial_getchar(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.523       |                                                              
+         ~~~~^~~~
+#12 0.523 quickjs_binding.c:535:95: warning: unused parameter 'argv' 
+[-Wunused-parameter]
+#12 0.523   535 | static JSValue js_serial_getchar(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.523 quickjs_binding.c: In function 'js_eval':
+#12 0.523 quickjs_binding.c:541:51: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.523   541 | static JSValue js_eval(JSContext *c, JSValueConst this_val, 
+int argc, JSValueConst *argv) {
+#12 0.523 quickjs_binding.c:541:65: warning: unused parameter 'argc' 
+[-Wunused-parameter]
+#12 0.523   541 | static JSValue js_eval(JSContext *c, JSValueConst this_val, 
+int argc, JSValueConst *argv) {
+#12 0.523       |                                                             
+~~~~^~~~
+#12 0.524 quickjs_binding.c: In function 'js_eval_guarded':
+#12 0.524 quickjs_binding.c:573:59: warning: unused parameter 'this_val' 
+[-Wunused-parameter]
+#12 0.524   573 | static JSValue js_eval_guarded(JSContext *c, JSValueConst 
+this_val, int argc, JSValueConst *argv) {
+#12 0.526 quickjs_binding.c: In function 'js_flush_tlb':
+#12 0.526 quickjs_binding.c:932:40: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.526   932 | static JSValue js_flush_tlb(JSContext *c, JSValueConst 
+this_val,
+#12 0.526       |                             ~~~~~~~~~~~^
+#12 0.526 quickjs_binding.c: In function 'js_enable_paging':
+#12 0.527 quickjs_binding.c:978:44: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.527   978 | static JSValue js_enable_paging(JSContext *c, JSValueConst 
+this_val,
+#12 0.527       |                                 ~~~~~~~~~~~^
+#12 0.551 quickjs_binding.c: In function 'js_apic_init':
+#12 0.551 quickjs_binding.c:2900:40: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.551  2900 | static JSValue js_apic_init(JSContext *c, JSValueConst _t, 
+int _ac, JSValueConst *_av) {
+#12 0.551       |                             ~~~~~~~~~~~^
+#12 0.551 quickjs_binding.c: In function 'js_apic_eoi':
+#12 0.552 quickjs_binding.c:2902:39: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.552  2902 | static JSValue js_apic_eoi(JSContext *c, JSValueConst _t, 
+int _ac, JSValueConst *_av) {
+#12 0.552       |                            ~~~~~~~~~~~^
+#12 0.552 quickjs_binding.c: In function 'js_apic_timer_calibrate':
+#12 0.552 quickjs_binding.c:2904:51: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.552  2904 | static JSValue js_apic_timer_calibrate(JSContext *c, 
+JSValueConst _t, int _ac, JSValueConst *_av) {
+#12 0.552       |                                        ~~~~~~~~~~~^
+#12 0.553 quickjs_binding.c: In function 'js_mem_enable_pae':
+#12 0.554 quickjs_binding.c:2938:45: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.554  2938 | static JSValue js_mem_enable_pae(JSContext *c, JSValueConst 
+_t, int _ac, JSValueConst *_av) {
+#12 0.554       |                                  ~~~~~~~~~~~^
+#12 0.554 quickjs_binding.c: In function 'js_mem_enable_nx':
+#12 0.555 quickjs_binding.c:2940:44: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.555  2940 | static JSValue js_mem_enable_nx(JSContext *c, JSValueConst 
+_t, int _ac, JSValueConst *_av) {
+#12 0.555       |                                 ~~~~~~~~~~~^
+#12 0.555 quickjs_binding.c: In function 'js_mem_tlb_flush_all':
+#12 0.556 quickjs_binding.c:2946:48: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.556  2946 | static JSValue js_mem_tlb_flush_all(JSContext *c, 
+JSValueConst _t, int _ac, JSValueConst *_av) {
+#12 0.556       |                                     ~~~~~~~~~~~^
+#12 0.556 quickjs_binding.c: In function 'js_mem_large_page_en':
+#12 0.556 quickjs_binding.c:2948:48: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.556  2948 | static JSValue js_mem_large_page_en(JSContext *c, 
+JSValueConst _t, int _ac, JSValueConst *_av) {
+#12 0.556       |                                     ~~~~~~~~~~~^
+#12 0.557 quickjs_binding.c: In function 'js_fb_flip':
+#12 0.558 quickjs_binding.c:2966:38: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.558  2966 | static JSValue js_fb_flip(JSContext *c, JSValueConst _t, int 
+_ac, JSValueConst *_av) {
+#12 0.558       |                           ~~~~~~~~~~~^
+#12 0.558 quickjs_binding.c: In function 'js_vsync_wait':
+#12 0.558 quickjs_binding.c:2968:41: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.558  2968 | static JSValue js_vsync_wait(JSContext *c, JSValueConst _t, 
+int _ac, JSValueConst *_av) {
+#12 0.558       |                              ~~~~~~~~~~~^
+#12 0.559 quickjs_binding.c: In function 'js_kprobes_init':
+#12 0.560 quickjs_binding.c:3006:43: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.560  3006 | static JSValue js_kprobes_init(JSContext *c, JSValueConst 
+_t, int _ac, JSValueConst *_av) {
+#12 0.560       |                                ~~~~~~~~~~~^
+#12 0.560 quickjs_binding.c: In function 'js_kprobes_dump':
+#12 0.560 quickjs_binding.c:3008:43: warning: unused parameter 'c' 
+[-Wunused-parameter]
+#12 0.560  3008 | static JSValue js_kprobes_dump(JSContext *c, JSValueConst 
+_t, int _ac, JSValueConst *_av) {
+#12 0.560       |                                ~~~~~~~~~~~^
+#12 0.562 quickjs_binding.c: In function 'js_wasm_instantiate':
+#12 0.562 quickjs_binding.c:3098:90: warning: unused parameter 'av' 
+[-Wunused-parameter]
+#12 0.562  3098 | static JSValue js_wasm_instantiate(JSContext *c, 
+JSValueConst _t, int _ac, JSValueConst *av) {
+#12 0.563 quickjs_binding.c: In function 'js_wasm_jit_compile':
+#12 0.563 quickjs_binding.c:3106:90: warning: unused parameter 'av' 
+[-Wunused-parameter]
+#12 0.563  3106 | static JSValue js_wasm_jit_compile(JSContext *c, 
+JSValueConst _t, int _ac, JSValueConst *av) {
+#12 0.565 quickjs_binding.c: At top level:
+#12 0.565 quickjs_binding.c:3159:68: warning: "/*" within comment [-Wcomment]
+#12 0.565  3159 |  * MODULE LOADER ΓÇö item 118 (filesystem import()) + item 
+119 (@jsos/* pkgs)
+#12 0.565       |                                                              
+       
+#12 0.566 quickjs_binding.c:3209:13: warning: "/*" within comment [-Wcomment]
+#12 0.566  3209 |  *  1. @jsos/* built-in packages (item 119)
+#12 0.566       |              
+#12 1.369 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c platform.c -o platform.o
+#12 1.486 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c memory.c -o memory.o
+#12 1.598 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c syscalls.c -o syscalls.o
+#12 1.645 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c math_impl.c -o math_impl.o
+#12 1.781 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c irq.c -o irq.o
+#12 1.788 irq.c: In function 'exception_dispatch':
+#12 1.788 irq.c:114:32: warning: taking address of packed member of 'struct 
+<anonymous>' may result in an unaligned pointer value 
+[-Waddress-of-packed-member]
+#12 1.788   114 |         if (kprobes_bp_handler(&f->eip, &f->eflags)) return;
+#12 1.788       |                                ^~~~~~~
+#12 1.788 irq.c:114:41: warning: taking address of packed member of 'struct 
+<anonymous>' may result in an unaligned pointer value 
+[-Waddress-of-packed-member]
+#12 1.788   114 |         if (kprobes_bp_handler(&f->eip, &f->eflags)) return;
+#12 1.788       |                                         ^~~~~~~~~~
+#12 1.788 irq.c:119:40: warning: taking address of packed member of 'struct 
+<anonymous>' may result in an unaligned pointer value 
+[-Waddress-of-packed-member]
+#12 1.788   119 |         if (kprobes_db_handler(f->eip, &f->eflags)) return;
+#12 1.788       |                                        ^~~~~~~~~~
+#12 1.895 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c keyboard.c -o keyboard.o
+#12 1.946 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c mouse.c -o mouse.o
+#12 1.986 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c timer.c -o timer.o
+#12 2.033 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c ata.c -o ata.o
+#12 2.114 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c pci.c -o pci.o
+#12 2.183 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c virtio_net.c -o virtio_net.o
+#12 2.192 virtio_net.c:24:13: warning: '_dbg_hex16' defined but not used 
+[-Wunused-function]
+#12 2.192    24 | static void _dbg_hex16(const char *label, uint16_t val) {
+#12 2.192       |             ^~~~~~~~~~
+#12 2.222 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c jit.c -o jit.o
+#12 2.257 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c cpuid.c -o cpuid.o
+#12 2.279 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c cmdline.c -o cmdline.o
+#12 2.318 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c acpi.c -o acpi.o
+#12 2.335 acpi.c: In function 'acpi_init':
+#12 2.335 acpi.c:146:36: warning: array subscript 0 is outside array bounds of 
+'uint16_t[0]' {aka 'short unsigned int[]'} [-Warray-bounds=]
+#12 2.335   146 |         uint32_t ebda = (uint32_t)(*(uint16_t *)0x40Eu) << 4;
+#12 2.335       |                                   ~^~~~~~~~~~~~~~~~~~~~
+#12 2.335 cc1: note: source object is likely at address zero
+#12 2.360 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c e1000.c -o e1000.o
+#12 2.390 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c rtl8139.c -o rtl8139.o
+#12 2.425 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c usb.c -o usb.o
+#12 2.452 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c watchdog.c -o watchdog.o
+#12 2.469 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c symtab.c -o symtab.o
+#12 2.488 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c kaslr.c -o kaslr.o
+#12 2.502 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c hpet.c -o hpet.o
+#12 2.534 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c virtio_blk.c -o virtio_blk.o
+#12 2.566 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c virtio_gpu.c -o virtio_gpu.o
+#12 2.608 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c apic.c -o apic.o
+#12 2.651 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c nvme.c -o nvme.o
+#12 2.695 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c ahci.c -o ahci.o
+#12 2.701 ahci.c: In function 'ahci_init':
+#12 2.701 ahci.c:64:21: warning: braces around scalar initializer
+#12 2.701    64 |                     {0,0,0,0,0,0}, 0, 0 };
+#12 2.701       |                     ^
+#12 2.701 ahci.c:64:21: note: (near initialization for 'pdev.class_code')
+#12 2.701 ahci.c:64:24: warning: excess elements in scalar initializer
+#12 2.701    64 |                     {0,0,0,0,0,0}, 0, 0 };
+#12 2.701       |                        ^
+#12 2.701 ahci.c:64:24: note: (near initialization for 'pdev.class_code')
+#12 2.701 ahci.c:64:26: warning: excess elements in scalar initializer
+#12 2.701    64 |                     {0,0,0,0,0,0}, 0, 0 };
+#12 2.701       |                          ^
+#12 2.701 ahci.c:64:26: note: (near initialization for 'pdev.class_code')
+#12 2.701 ahci.c:64:28: warning: excess elements in scalar initializer
+#12 2.701    64 |                     {0,0,0,0,0,0}, 0, 0 };
+#12 2.701       |                            ^
+#12 2.701 ahci.c:64:28: note: (near initialization for 'pdev.class_code')
+#12 2.701 ahci.c:64:30: warning: excess elements in scalar initializer
+#12 2.701    64 |                     {0,0,0,0,0,0}, 0, 0 };
+#12 2.701       |                              ^
+#12 2.701 ahci.c:64:30: note: (near initialization for 'pdev.class_code')
+#12 2.701 ahci.c:64:32: warning: excess elements in scalar initializer
+#12 2.701    64 |                     {0,0,0,0,0,0}, 0, 0 };
+#12 2.701       |                                ^
+#12 2.701 ahci.c:64:32: note: (near initialization for 'pdev.class_code')
+#12 2.701 ahci.c:62:37: warning: missing braces around initializer 
+[-Wmissing-braces]
+#12 2.701    62 |                 pci_device_t pdev = { bus, dev, fn,
+#12 2.701       |                                     ^
+#12 2.701    63 |                     (uint16_t)(id & 0xFFFFu), (uint16_t)(id 
+>> 16u),
+#12 2.701    64 |                     {0,0,0,0,0,0}, 0, 0 };
+#12 2.701       |                                       { }
+#12 2.701 ahci.c:64:21: warning: missing initializer for field 'bar_is_io' of 
+'pci_device_t' [-Wmissing-field-initializers]
+#12 2.701    64 |                     {0,0,0,0,0,0}, 0, 0 };
+#12 2.701       |                     ^
+#12 2.701 In file included from ahci.c:10:
+#12 2.701 pci.h:46:14: note: 'bar_is_io' declared here
+#12 2.701    46 |     uint8_t  bar_is_io[6];    /* 1 = I/O port, 0 = 
+memory-mapped */
+#12 2.701       |              ^~~~~~~~~
+#12 2.735 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c selftest.c -o selftest.o
+#12 2.783 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c kprobes.c -o kprobes.o
+#12 2.827 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c keyboard_layout.c -o keyboard_layout.o
+#12 2.834 keyboard_layout.c:69:12: warning: multi-character character constant 
+[-Wmultichar]
+#12 2.834    69 |     [0x0C]='┬░',[0x0D]='+',
+#12 2.834       |            ^~~
+#12 2.834 keyboard_layout.c:69:12: warning: unsigned conversion from 'int' to 
+'unsigned char' changes value from '49840' to '176' [-Woverflow]
+#12 2.856 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c usb_hid.c -o usb_hid.o
+#12 2.876 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c gamepad.c -o gamepad.o
+#12 2.893 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c multimon.c -o multimon.o
+#12 2.915 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c sd.c -o sd.o
+#12 2.923 sd.c: In function 'sd_init':
+#12 2.923 sd.c:17:18: warning: variable 'dev' set but not used 
+[-Wunused-but-set-variable]
+#12 2.923    17 |     pci_device_t dev;
+#12 2.923       |                  ^~~
+#12 2.943 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c usb_msc.c -o usb_msc.o
+#12 2.960 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c floppy.c -o floppy.o
+#12 2.986 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c cdc_ecm.c -o cdc_ecm.o
+#12 3.003 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c wifi.c -o wifi.o
+#12 3.022 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c pci_hotplug.c -o pci_hotplug.o
+#12 3.054 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c secboot.c -o secboot.o
+#12 3.075 i686-elf-gcc -ffreestanding -O2 -Wall -Wextra -std=c11 
+-DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK 
+-fno-stack-protector -Ivendor/quickjs -c pxe.c -o pxe.o
+#12 3.099 pxe.c: In function 'pxe_init':
+#12 3.099 pxe.c:109:29: warning: array subscript 0 is outside array bounds of 
+'volatile uint16_t[0]' {aka 'volatile short unsigned int[]'} [-Warray-bounds=]
+#12 3.099   109 |         uint16_t ebda_seg = *(volatile uint16_t *)0x40E;
+#12 3.099       |                             ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+#12 3.099 cc1: note: source object is likely at address zero
+#12 3.119 i686-elf-gcc -ffreestanding -O2 -std=c11 
+-DCONFIG_VERSION=\"2025.09\" \
+#12 3.119   -D_GNU_SOURCE -fwrapv -Dasm=__asm__ -Dalloca=__builtin_alloca \
+#12 3.119   -D'PRId64="lld"' -D'PRIi64="lli"' -D'PRIu64="llu"' 
+-D'PRIx64="llx"' \
+#12 3.119   -DJSOS_JIT_HOOK -fno-stack-protector \
+#12 3.119   -w -Ivendor/quickjs -c vendor/quickjs/quickjs.c -o quickjs.o
+#12 14.23 i686-elf-gcc -ffreestanding -O2 -std=c11 
+-DCONFIG_VERSION=\"2025.09\" \
+#12 14.23   -D_GNU_SOURCE -fwrapv -Dasm=__asm__ -Dalloca=__builtin_alloca \
+#12 14.23   -D'PRId64="lld"' -D'PRIi64="lli"' -D'PRIu64="llu"' 
+-D'PRIx64="llx"' \
+#12 14.23   -DJSOS_JIT_HOOK -fno-stack-protector \
+#12 14.23   -w -Ivendor/quickjs -c vendor/quickjs/libregexp.c -o libregexp.o
+#12 14.79 i686-elf-gcc -ffreestanding -O2 -std=c11 
+-DCONFIG_VERSION=\"2025.09\" \
+#12 14.79   -D_GNU_SOURCE -fwrapv -Dasm=__asm__ -Dalloca=__builtin_alloca \
+#12 14.79   -D'PRId64="lld"' -D'PRIi64="lli"' -D'PRIu64="llu"' 
+-D'PRIx64="llx"' \
+#12 14.79   -DJSOS_JIT_HOOK -fno-stack-protector \
+#12 14.79   -w -Ivendor/quickjs -c vendor/quickjs/libunicode.c -o libunicode.o
+#12 15.17 i686-elf-gcc -ffreestanding -O2 -std=c11 
+-DCONFIG_VERSION=\"2025.09\" \
+#12 15.17   -D_GNU_SOURCE -fwrapv -Dasm=__asm__ -Dalloca=__builtin_alloca \
+#12 15.17   -D'PRId64="lld"' -D'PRIi64="lli"' -D'PRIu64="llu"' 
+-D'PRIx64="llx"' \
+#12 15.17   -DJSOS_JIT_HOOK -fno-stack-protector \
+#12 15.17   -w -Ivendor/quickjs -c vendor/quickjs/cutils.c -o cutils.o
+#12 15.29 i686-elf-gcc -ffreestanding -O2 -std=c11 
+-DCONFIG_VERSION=\"2025.09\" \
+#12 15.29   -D_GNU_SOURCE -fwrapv -Dasm=__asm__ -Dalloca=__builtin_alloca \
+#12 15.29   -D'PRId64="lld"' -D'PRIi64="lli"' -D'PRIu64="llu"' 
+-D'PRIx64="llx"' \
+#12 15.29   -DJSOS_JIT_HOOK -fno-stack-protector \
+#12 15.29   -w -Ivendor/quickjs -c vendor/quickjs/dtoa.c -o dtoa.o
+#12 15.56 i686-elf-gcc -T linker.ld -o jsos.bin -ffreestanding -O2 
+-nostartfiles -lgcc -lc -lnosys -lm -Wl,--allow-multiple-definition boot.o 
+crt0.o irq_asm.o kernel.o quickjs_binding.o platform.o memory.o syscalls.o 
+math_impl.o irq.o keyboard.o mouse.o timer.o ata.o pci.o virtio_net.o jit.o 
+cpuid.o cmdline.o acpi.o e1000.o rtl8139.o usb.o watchdog.o symtab.o kaslr.o 
+hpet.o virtio_blk.o virtio_gpu.o apic.o nvme.o ahci.o selftest.o kprobes.o 
+keyboard_layout.o usb_hid.o gamepad.o multimon.o sd.o usb_msc.o floppy.o 
+cdc_ecm.o wifi.o pci_hotplug.o secboot.o pxe.o quickjs.o libregexp.o 
+libunicode.o cutils.o dtoa.o
+#12 15.64 Creating ISO...
+#12 15.72 xorriso 1.5.2 : RockRidge filesystem manipulator, libburnia project.
+#12 15.72 
+#12 15.72 Drive current: -outdev 'stdio:build/jsos.iso'
+#12 15.72 Media current: stdio file, overwriteable
+#12 15.72 Media status : is blank
+#12 15.72 Media summary: 0 sessions, 0 data blocks, 0 data,  471g free
+#12 15.73 Added to ISO image: directory '/'='/tmp/grub.k2IUMa'
+#12 15.73 xorriso : UPDATE :     938 files added in 1 seconds
+#12 15.73 Added to ISO image: directory '/'='/workspace/build/iso'
+#12 15.73 xorriso : UPDATE :     942 files added in 1 seconds
+#12 15.73 xorriso : NOTE : Copying to System Area: 512 bytes from file 
+'/usr/lib/grub/i386-pc/boot_hybrid.img'
+#12 15.96 ISO image produced: 15094 sectors
+#12 15.96 Written to medium : 15094 sectors at LBA 0
+#12 15.96 Writing to 'stdio:build/jsos.iso' completed successfully.
+#12 15.96 
+#12 15.97 Build complete! ISO created at build/jsos.iso
+#12 15.97 Creating BIOS ISO (no-xorriso path)...
+#12 16.05 [build-iso] grub-mkimage produced 152559 byte core.img
+#12 16.06 Size of boot image is 4 sectors -> No emulation
+#12 16.06 Total translation table size: 2048
+#12 16.06 Total rockridge attributes bytes: 1127
+#12 16.06 Total directory bytes: 6496
+#12 16.06 Path table size(bytes): 54
+#12 16.06 Max brk space used 0
+#12 16.06 4241 extents written (8 MB)
+#12 16.06 [build-iso] Created build/jsos-noXorriso.iso (8685568 bytes)
+#12 16.06 [build-iso] BIOS-bootable ISO with GRUB2 (no xorriso dependency) ΓÇö 
+done.
+#12 16.06 No-xorriso ISO: build/jsos-noXorriso.iso
+#12 16.06 Creating UEFI GPT disk image...
+#12 16.08 [uefi] Building BOOTX64.EFI (x86_64-efi)...
+#12 16.10 [uefi] Building BOOTIA32.EFI (i386-efi)...
+#12 16.12 WARNING: Number of clusters for 32 bit FAT is less then suggested 
+minimum.
+#12 16.21 [uefi] ESP image: 32 MB FAT32
+#12 16.28 sh: 1: udevadm: not found
+#12 16.28 sh: 1: udevadm: not found
+#12 16.29 sh: 1: udevadm: not found
+#12 16.30 sh: 1: udevadm: not found
+#12 16.30 sh: 1: udevadm: not found
+#12 16.30 sh: 1: udevadm: not found
+#12 16.31 [uefi] GPT disk image ΓåÆ build/jsos-uefi.img
+#12 16.31 [uefi] Building hybrid UEFI+BIOS ISO via grub-mkrescue...
+#12 16.58 [uefi] Hybrid ISO ΓåÆ build/jsos-uefi.iso
+#12 16.58 
+#12 16.58 UEFI boot artifacts:
+#12 16.58   GPT raw disk:   build/jsos-uefi.img  (QEMU: -drive 
+format=raw,file=build/jsos-uefi.img,if=virtio)
+#12 16.58   Hybrid ISO:     build/jsos-uefi.iso  (QEMU: -cdrom 
+build/jsos-uefi.iso)
+#12 16.58 
+#12 16.58 QEMU UEFI test command:
+#12 16.58   qemu-system-x86_64 -machine q35 -bios /usr/share/ovmf/OVMF.fd \
+#12 16.58     -drive format=raw,file=build/jsos-uefi.img,if=virtio -m 512M 
+-serial stdio
+#12 16.58 
+#12 16.58 Done.
+#12 16.58 UEFI image: build/jsos-uefi.img
+#12 16.58 
+#12 16.58 All build artifacts:
+#12 16.58   BIOS ISO (xorriso):  build/jsos.iso
+#12 16.58   BIOS ISO (no-xorriso): build/jsos-noXorriso.iso
+#12 16.58   UEFI GPT image:      build/jsos-uefi.img
+#12 16.58   UEFI hybrid ISO:     build/jsos-uefi.iso
+#12 DONE 17.0s
+
+#13 [stage-1 1/1] COPY --from=builder /workspace/build/jsos.iso /jsos.iso
+#13 DONE 0.1s
+
+#14 exporting to image
+#14 exporting layers
+#14 exporting layers 0.9s done
+#14 exporting manifest 
+sha256:4eb816fe5029c95f339ba8688342d61c0c790857ed37882621725def3c97dd16
+#14 exporting manifest 
+sha256:4eb816fe5029c95f339ba8688342d61c0c790857ed37882621725def3c97dd16 0.0s 
+done
+#14 exporting config 
+sha256:884668a0f297136cb4b167605cd42be0fd446798439d2672954cb078dff9aac6 0.0s 
+done
+#14 exporting attestation manifest 
+sha256:4fadcbabceca0cc233bbe4260b244cf43ddeb2898fc3bc2cdf43671d1df5d0e7 0.1s 
+done
+#14 exporting manifest list 
+sha256:4a5a27070903b422c936139d0b40be05c04dcceacdcaeaf241a5ccf8563d8d68
+#14 exporting manifest list 
+sha256:4a5a27070903b422c936139d0b40be05c04dcceacdcaeaf241a5ccf8563d8d68 0.0s 
+done
+#14 naming to docker.io/library/jsos-build:latest 0.0s done
+#14 unpacking to docker.io/library/jsos-build:latest 0.1s done
+#14 DONE 1.3s
+b73f884b64cbe1f3aa1ab825a68e97239371d673dd6464dd7dde3fcf2390be91
+C:\DEV\JSOS\build\jsos.iso
+The process cannot access the file because it is being used by another process.
+remove C:\DEV\JSOS\build\jsos.iso: The process cannot access the file because 
+it is being used by another process.

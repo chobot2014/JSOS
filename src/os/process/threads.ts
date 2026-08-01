@@ -208,29 +208,53 @@ export class ThreadManager {
   }
 
   /**
-   * Advance every registered coroutine by one step.
-   * Uses a snapshot so that a step() may add or cancel coroutines safely.
+   * Emergency: clear ALL pending coroutines.  Called by the main loop when
+   * consecutive guardedRun faults suggest a coroutine is stuck in a crash
+   * loop — clearing the queue breaks the cycle and lets the OS recover.
    */
-  tickCoroutines(): void {
+  clearCoroutines(): void {
+    var n = this._coroutines.length;
+    this._coroutines = [];
+    (kernel as any).serialPut('[threadManager] clearCoroutines: removed ' + n + ' coroutines\n');
+  }
+
+  /** Returns true if there are pending coroutines (for activity detection). */
+  hasCoroutines(): boolean {
+    return this._coroutines.length > 0;
+  }
+
+  /**
+   * Advance registered coroutines by one step each, with optional time budget.
+   * Uses a snapshot so that a step() may add or cancel coroutines safely.
+   * @param frameStart — kernel.getTicks() at frame start; when provided,
+   *   remaining coroutines are deferred when frame exceeds ~20ms (2 ticks).
+   */
+  tickCoroutines(frameStart?: number): void {
     if (this._coroutines.length === 0) return;
     var snap = this._coroutines.slice();   // snapshot before iteration
+    var startCid = this._nextCid;          // IDs created during this tick are >= startCid
     var keep: Array<{ id: number; name: string; step: CoroutineStep }> = [];
     for (var i = 0; i < snap.length; i++) {
+      // Time budget: defer remaining coroutines when frame exceeds ~20ms
+      if (frameStart !== undefined && i > 0 && kernel.getTicks() - frameStart >= 2) {
+        for (var r = i; r < snap.length; r++) keep.push(snap[r]);
+        break;
+      }
       var c = snap[i];
       var result: 'done' | 'pending';
-      try { result = c.step(); } catch (_e) { result = 'done'; }
+      try { result = c.step(); } catch (_e) {
+        var _eMsg = '';
+        try { _eMsg = (_e instanceof Error) ? (_e.message + (_e.stack ? '\n' + _e.stack.slice(0, 200) : '')) : String(_e); } catch (_) {}
+        (kernel as any).serialPut('[coroutine] ' + c.name + ' threw: ' + _eMsg + '\n');
+        result = 'done';
+      }
       if (result === 'pending') keep.push(c);
     }
-    // Merge: retained pending items + any coroutines added during this tick.
-    // Use a Set of snapshot ids so the merge is O(n) instead of O(n²).
-    var snapIds = new Set<number>();
-    for (var m = 0; m < snap.length; m++) snapIds.add(snap[m].id);
-    var out: Array<{ id: number; name: string; step: CoroutineStep }> = [];
-    for (var j = 0; j < keep.length; j++) out.push(keep[j]);
+    // O(n) merge: append coroutines added during this tick (id >= startCid)
     for (var k = 0; k < this._coroutines.length; k++) {
-      if (!snapIds.has(this._coroutines[k].id)) out.push(this._coroutines[k]);
+      if (this._coroutines[k].id >= startCid) keep.push(this._coroutines[k]);
     }
-    this._coroutines = out;
+    this._coroutines = keep;
   }
 }
 

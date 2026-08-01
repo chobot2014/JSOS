@@ -25,7 +25,12 @@ const js = fs.readFileSync(BUNDLE, 'utf8');
 const lines = js.split('\n');
 const escaped = lines.map(line => {
   // Escape backslashes first, then double-quotes
-  const e = line.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const e = line.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    // Break C trigraph sequences (??=→# ??/→\ ??(→[ etc.)
+    // by inserting \? between the two ? characters.
+    // In C, \? is the escape for '?' so ?\?= compiles back to ??= at runtime
+    // but the preprocessor never sees the 3-char trigraph sequence ??=.
+    .replace(/\?\?/g, '?\\?');
   return '"' + e + '\\n"';
 });
 

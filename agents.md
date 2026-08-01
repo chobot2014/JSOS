@@ -7,6 +7,8 @@
 ### The Core Philosophy
 
 Traditional operating systems are built in C/C++ with assembly, creating a rigid boundary between "systems programming" and "application programming." JSOS obliterates this boundary by making **TypeScript the operating system itself**.
+JSOS sounds like Jesus, this is a christian os, includes the bible and a great app for reading it
+
 
 ### Architecture Vision
 

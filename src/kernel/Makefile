@@ -1,7 +1,9 @@
 CC = i686-elf-gcc
-CFLAGS = -ffreestanding -O2 -Wall -Wextra -std=c11 -DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca
-LDFLAGS = -ffreestanding -O2 -nostartfiles -lgcc -lc -lnosys -lm
-QUICKJS_DIR = /opt/quickjs
+CFLAGS = -ffreestanding -O2 -Wall -Wextra -std=c11 -DCONFIG_VERSION=\"2025.09\" -Dalloca=__builtin_alloca -DJSOS_JIT_HOOK -fno-stack-protector
+LDFLAGS = -ffreestanding -O2 -nostartfiles -lgcc -lc -lnosys -lm -Wl,--allow-multiple-definition -Wl,--wrap=_malloc_r -Wl,--wrap=_free_r -Wl,--wrap=_realloc_r
+# Use vendored QuickJS source directly so local changes (e.g. JS_ResetAfterFault)
+# are compiled without needing to rebuild the toolchain image.
+QUICKJS_DIR = vendor/quickjs
 
 # QuickJS source files (compiled separately for different warning settings)
 QJS_SOURCES = $(QUICKJS_DIR)/quickjs.c $(QUICKJS_DIR)/libregexp.c \
@@ -10,7 +12,15 @@ QJS_SOURCES = $(QUICKJS_DIR)/quickjs.c $(QUICKJS_DIR)/libregexp.c \
 
 SOURCES = boot.s crt0.s irq_asm.s kernel.c quickjs_binding.c platform.c memory.c \
           syscalls.c math_impl.c irq.c keyboard.c mouse.c timer.c ata.c \
-          pci.c virtio_net.c
+          pci.c virtio_net.c jit.c \
+          cpuid.c cmdline.c acpi.c \
+          e1000.c rtl8139.c usb.c \
+          watchdog.c symtab.c kaslr.c \
+          hpet.c virtio_blk.c virtio_gpu.c \
+          apic.c nvme.c ahci.c selftest.c kprobes.c keyboard_layout.c \
+          usb_hid.c gamepad.c multimon.c sd.c usb_msc.c floppy.c \
+          cdc_ecm.c wifi.c pci_hotplug.c \
+          secboot.c pxe.c
 OBJECTS = $(SOURCES:.s=.o)
 OBJECTS := $(OBJECTS:.c=.o)
 
@@ -36,8 +46,9 @@ $(TARGET): $(OBJECTS) $(QJS_OBJECTS)
 # properly expose inttypes.h format macros
 $(QJS_OBJECTS): $(QJS_SOURCES)
 	$(CC) -ffreestanding -O2 -std=c11 -DCONFIG_VERSION=\"2025.09\" \
-	  -D_GNU_SOURCE -fwrapv -Dasm=__asm__ -Dalloca=__builtin_alloca \
+	  -D_GNU_SOURCE -DNDEBUG -fwrapv -Dasm=__asm__ -Dalloca=__builtin_alloca \
 	  -D'PRId64="lld"' -D'PRIi64="lli"' -D'PRIu64="llu"' -D'PRIx64="llx"' \
+	  -DJSOS_JIT_HOOK -fno-stack-protector \
 	  -w -I$(QUICKJS_DIR) -c $(QUICKJS_DIR)/$(patsubst %.o,%.c,$@) -o $@
 
 %.o: %.s

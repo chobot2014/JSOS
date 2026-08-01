@@ -1,4 +1,4 @@
-/**
+﻿/**
  * JSOS Application SDK
  *
  * The ONLY module that application code should import OS services from.
@@ -21,35 +21,135 @@
  */
 
 import fs            from '../fs/filesystem.js';
+import { umask as fsUmask } from '../fs/filesystem.js';
 import { net }       from '../net/net.js';
 import { TLSSocket } from '../net/tls.js';
 import { threadManager, type CoroutineStep } from '../process/threads.js';
 import { processManager } from '../process/process.js';
-import { scheduler, type ProcessContext, type SchedulingAlgorithm } from '../process/scheduler.js';
-import { signalManager, SIG } from '../process/signals.js';
+import { scheduler, type ProcessContext } from '../process/scheduler.js';
+import { SIG } from '../process/signals.js';
 import {
   dnsResolveCached,
   dnsSendQueryAsync,
   dnsPollReplyAsync,
   dnsCancelAsync,
 } from '../net/dns.js';
-import { parseHttpResponse } from '../net/http.js';
+import { parseHttpResponse, cookieJar, HTTP2Connection } from '../net/http.js';
+import { httpDecompress } from '../net/deflate.js';
+import { config, getHostname, getDnsServers, getTimezone } from './config.js';
+import { locale } from './locale.js';
+import { tz as _tz } from './timezone.js';
 import { JSProcess, listProcesses } from '../process/jsprocess.js';
-import { ipc } from '../ipc/ipc.js';
+import { ProcessSupervisor, supervisor as _defaultSupervisor } from '../process/supervisor.js';
+import { ipc, Pipe } from '../ipc/ipc.js';
 import { users } from '../users/users.js';
-import { wm, getWM, type App, type WMWindow } from '../ui/wm.js';
+import { audio as _pcmAudio } from '../audio/index.js';
+import { wm, pumpCursor as _pumpCursor, type App, type WMWindow, type KeyEvent, type MouseEvent, type MenuItem } from '../ui/wm.js';
+import { Canvas } from '../ui/canvas.js';
+import { Colors } from '../ui/canvas.js';
+import { Mutex, Condvar, Semaphore } from '../process/sync.js';
+import { globalGC, type HeapStats } from '../process/gc.js';
+import { layoutProfiler } from '../apps/browser/layout.js';
+import {
+  sha256 as _sha256Raw,
+  hmacSha256 as _hmacSha256Raw,
+  gcmEncrypt as _gcmEncrypt,
+  gcmDecrypt as _gcmDecrypt,
+  byteToHex as _byteToHex,
+} from '../net/crypto.js';
+import type { User, Group } from '../users/users.js';
 export { Canvas, Colors, defaultFont, type PixelColor } from '../ui/canvas.js';
-export type { App, WMWindow, KeyEvent, MouseEvent } from '../ui/wm.js';
+export { Color } from '../core/kernel.js';
+export type { App, WMWindow, KeyEvent, MouseEvent, MenuItem } from '../ui/wm.js';
+export { pumpCursor } from '../ui/wm.js';
 export { JSProcess } from '../process/jsprocess.js';
+export { ProcessSupervisor } from '../process/supervisor.js';
+export type { SupervisedProcessOptions, SupervisedProcessStats, CrashEvent, CrashReason, RestartPolicy, SupervisedProcessState } from '../process/supervisor.js';
+export { Mutex, Condvar, Semaphore } from '../process/sync.js';
+export type { User, Group } from '../users/users.js';
+export { Pipe } from '../ipc/ipc.js';
+export type { ProcessContext } from '../process/scheduler.js';
+// ── Widget library ────────────────────────────────────────────────────────────
+export {
+  BaseApp,
+  TabBar,    type TabBarOptions,
+  Sidebar,   type SidebarOptions,
+  ListView,  type ListViewOptions,
+  ProgressBar,
+  Button,    type ButtonOptions,
+  TextInput, type TextInputOptions,
+  drawSection, drawRow,
+} from './widgets.js';
+
+// ── SDK-defined public types ──────────────────────────────────────────────────
+
+/**
+ * A live TCP connection returned by os.net.connect().
+ */
+export interface RawSocket {
+  readonly id: number;
+  readonly connected: boolean;
+  /** Send a string or byte array. */
+  write(data: string | number[]): void;
+  /** Receive buffered data as a string (Latin-1). Returns '' if empty. */
+  read(maxBytes?: number): string;
+  /** Receive buffered data as bytes. Returns [] if empty. */
+  readBytes(maxBytes?: number): number[];
+  /** Number of bytes currently in the receive buffer. */
+  available(): number;
+  /** Close the connection. */
+  close(): void;
+}
+
+/** A named color theme. See os.theme for usage. */
+export interface Theme {
+  name:       string;
+  bg:         number;   // ARGB — main background
+  fg:         number;   // foreground text
+  accent:     number;   // primary accent (buttons, focus rings)
+  titleBg:    number;   // window title bar background
+  titleFg:    number;   // title bar text
+  taskbarBg:  number;   // taskbar background
+  selBg:      number;   // selection background
+  selFg:      number;   // selection foreground
+  warnFg:     number;   // warning text
+  errorFg:    number;   // error text
+  successFg:  number;   // success text
+  mutedFg:    number;   // muted/disabled text
+  border:     number;   // widget border color
+}
+
+/** Fluent drawing surface returned by os.canvas.painter(). */
+export interface CanvasPainter {
+  readonly canvas: import('../ui/canvas.js').Canvas;
+  fill(color: number): void;
+  fillRect(x: number, y: number, w: number, h: number, color: number): void;
+  strokeRect(x: number, y: number, w: number, h: number, color: number): void;
+  fillRoundRect(x: number, y: number, w: number, h: number, r: number, color: number): void;
+  strokeRoundRect(x: number, y: number, w: number, h: number, r: number, color: number): void;
+  fillCircle(cx: number, cy: number, r: number, color: number): void;
+  strokeCircle(cx: number, cy: number, r: number, color: number): void;
+  drawLine(x0: number, y0: number, x1: number, y1: number, color: number): void;
+  drawText(x: number, y: number, text: string, color: number): void;
+  drawTextWrap(x: number, y: number, maxW: number, text: string, color: number, lineH?: number): number;
+  measureText(text: string): { width: number; height: number };
+  drawScrollbar(x: number, y: number, h: number, total: number, visible: number, offset: number, color?: number): void;
+  drawProgressBar(x: number, y: number, w: number, h: number, fraction: number, fgColor?: number, bgColor?: number): void;
+  drawButton(x: number, y: number, w: number, h: number, label: string, pressed?: boolean, fgColor?: number, bgColor?: number): void;
+  drawCheckbox(x: number, y: number, checked: boolean, label?: string, color?: number): void;
+  linearGradient(x: number, y: number, w: number, h: number, stops: Array<{stop: number; color: number}>, dir?: 'horizontal'|'vertical'|'diagonal'): void;
+  radialGradient(cx: number, cy: number, r: number, stops: Array<{stop: number; color: number}>): void;
+  drawSprite(x: number, y: number, pixels: number[], pw: number, ph: number, palette: number[], scale?: number): void;
+}
 
 declare var kernel: import('./kernel.js').KernelAPI;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
 export interface FetchOptions {
-  method?:       'GET' | 'POST';
+  method?:       string;  // any HTTP verb: GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS …
   headers?:      Record<string, string>;
-  body?:         string;
+  body?:         string | number[];
   /** Maximum redirects to follow (default 5). */
   maxRedirects?: number;
 }
@@ -67,8 +167,24 @@ export interface FetchResponse {
 
 // ── Internal fetch state ──────────────────────────────────────────────────────
 
+/** Convert a raw byte array to a Latin-1 string.
+ *  Pre-allocates output array and fills per-char, then joins in one pass — O(n).
+ *  QuickJS caches all single-byte (ASCII/Latin-1) char strings so
+ *  String.fromCharCode(byte) is allocation-free for bytes 0-255.
+ *  Avoids String.fromCharCode.apply(null, largeArray) which can overflow
+ *  QuickJS's C call stack when the array exceeds ~300 elements.
+ */
+function _bytesToString(bytes: number[]): string {
+  var _len = bytes.length;
+  if (_len === 0) return '';
+  var _parts = new Array(_len);
+  for (var _bsi = 0; _bsi < _len; _bsi++) _parts[_bsi] = String.fromCharCode(bytes[_bsi]!);
+  return _parts.join('');
+}
+
 type FetchStage =
-  | 'dns' | 'connecting' | 'tls' | 'sending' | 'receiving' | 'parsing' | 'done';
+  | 'dns' | 'connecting' | 'tls' | 'sending' | 'receiving' | 'parsing'
+  | 'h2-sending' | 'h2-receiving' | 'done';
 
 interface ParsedURL {
   protocol: 'http' | 'https';
@@ -78,11 +194,34 @@ interface ParsedURL {
 }
 
 function _parseURL(raw: string): ParsedURL | null {
-  var m = raw.match(/^(https?):\/\/([^/:]+)(?::(\d+))?(\/.*)?$/);
-  if (!m) return null;
-  var protocol = m[1] as 'http' | 'https';
-  var port     = m[3] ? parseInt(m[3], 10) : (protocol === 'https' ? 443 : 80);
-  return { protocol, host: m[2], port, path: m[4] || '/' };
+  // Strip any whitespace/newlines that may be in HTML attribute values
+  var url = raw.replace(/[\s]+/g, '');
+  var m = url.match(/^(https?):\/\/([^/:?#]+)(?::(\d+))?(\/[^]*|[?#][^]*)?$/);
+  if (!m) {
+    // Fallback: simple string splitting for very long URLs where regex may fail
+    var protoEnd = url.indexOf('://');
+    if (protoEnd < 0) return null;
+    var protocol = url.substring(0, protoEnd) as 'http' | 'https';
+    if (protocol !== 'http' && protocol !== 'https') return null;
+    var rest = url.substring(protoEnd + 3);
+    var slashIdx = rest.indexOf('/');
+    var qIdx     = rest.indexOf('?');
+    var hashIdx  = rest.indexOf('#');
+    var hostEnd  = slashIdx >= 0 ? slashIdx : (qIdx >= 0 ? qIdx : (hashIdx >= 0 ? hashIdx : rest.length));
+    var hostPort = rest.substring(0, hostEnd);
+    var colonIdx = hostPort.indexOf(':');
+    var host = colonIdx >= 0 ? hostPort.substring(0, colonIdx) : hostPort;
+    var port = colonIdx >= 0 ? parseInt(hostPort.substring(colonIdx + 1), 10) : (protocol === 'https' ? 443 : 80);
+    var path = hostEnd < rest.length ? rest.substring(hostEnd) : '/';
+    if (path.charCodeAt(0) === 63 || path.charCodeAt(0) === 35) path = '/' + path;
+    if (!host) return null;
+    return { protocol, host, port, path };
+  }
+  var protocol2 = m[1] as 'http' | 'https';
+  var port2     = m[3] ? parseInt(m[3], 10) : (protocol2 === 'https' ? 443 : 80);
+  var rawPath  = m[4] || '/';
+  var path2 = (rawPath.charCodeAt(0) === 63 || rawPath.charCodeAt(0) === 35) ? '/' + rawPath : rawPath;
+  return { protocol: protocol2, host: m[2], port: port2, path: path2 };
 }
 
 function _resolveHref(href: string, baseURL: string): string {
@@ -110,6 +249,11 @@ interface InFlightFetch {
   sock:         any;   // net.Socket
   tls:          any;   // TLSSocket | null
   chunks:       number[][];
+  totalRecv:    number;   // bytes received so far
+  contentLen:   number;   // Content-Length from headers, or -1 if unknown
+  headersDone:  boolean;  // true once we've seen \r\n\r\n in raw bytes
+  bodyOffset:   number;   // byte offset where body starts (after \r\n\r\n)
+  chunked:      boolean;  // true if Transfer-Encoding: chunked
   deadline:     number;
   dnsPort:      number;
   dnsId:        number;
@@ -117,12 +261,132 @@ interface InFlightFetch {
   maxRedirects: number;
   opts:         FetchOptions;
   callback:     (resp: FetchResponse | null, error?: string) => void;
+  pooled:       boolean;  // true if sock/tls came from the keep-alive pool
+  h2conn:       HTTP2Connection | null;  // HTTP/2 multiplexed connection (if ALPN h2)
+  h2streamId:   number;                  // HTTP/2 stream ID for this request
+  h2Retries:    number;                  // how many times we fell back from dead h2 conn
+}
+
+// ── TLS connection keep-alive pool ──────────────────────────────────────────
+
+interface _PoolEntry {
+  sock:   any;       // net.Socket
+  tls:    any;       // TLSSocket | null
+  host:   string;
+  port:   number;
+  https:  boolean;
+  expiry: number;    // kernel.getTicks() deadline
+}
+var _connPool: _PoolEntry[] = [];
+var _POOL_MAX = 6;
+var _POOL_TTL = 60000;  // 60 s at 1000 Hz PIT
+
+// ── HTTP/2 connection pool (one multiplexed connection per host) ──────────────
+interface _H2PoolEntry {
+  conn:   HTTP2Connection;
+  host:   string;
+  port:   number;
+  expiry: number;
+}
+var _h2Pool: _H2PoolEntry[] = [];
+var _H2_POOL_TTL = 120000;  // 120 s at 1000 Hz PIT
+
+function _h2PoolGet(host: string, port: number): HTTP2Connection | null {
+  var now = kernel.getTicks();
+  for (var i = _h2Pool.length - 1; i >= 0; i--) {
+    var p = _h2Pool[i];
+    if (now >= p.expiry) {
+      (kernel as any).serialPut('[h2pool] evict expired ' + p.host + '\n');
+      try { p.conn.close(); } catch(_) {}
+      _h2Pool.splice(i, 1);
+      continue;
+    }
+    if (!p.conn.isAlive()) {
+      (kernel as any).serialPut('[h2pool] evict dead ' + p.host + '\n');
+      try { p.conn.close(); } catch(_) {}
+      _h2Pool.splice(i, 1);
+      continue;
+    }
+    if (p.host === host && p.port === port) {
+      p.expiry = now + _H2_POOL_TTL;  // refresh TTL on use
+      return p.conn;
+    }
+  }
+  return null;
+}
+
+function _h2PoolPut(host: string, port: number, conn: HTTP2Connection): void {
+  var now = kernel.getTicks();
+  // Evict expired/dead entries
+  for (var i = _h2Pool.length - 1; i >= 0; i--) {
+    if (now >= _h2Pool[i].expiry || !_h2Pool[i].conn.isAlive()) {
+      try { _h2Pool[i].conn.close(); } catch(_) {}
+      _h2Pool.splice(i, 1);
+    }
+  }
+  // Don't duplicate
+  for (var j = 0; j < _h2Pool.length; j++) {
+    if (_h2Pool[j].host === host && _h2Pool[j].port === port) return;
+  }
+  _h2Pool.push({ conn, host, port, expiry: now + _H2_POOL_TTL });
+}
+
+function _poolGet(host: string, port: number, https: boolean): _PoolEntry | null {
+  var now = kernel.getTicks();
+  for (var i = _connPool.length - 1; i >= 0; i--) {
+    var p = _connPool[i];
+    if (now >= p.expiry) {
+      // Evict expired entry
+      try { if (p.tls) p.tls.close(); else net.close(p.sock); } catch(_) {}
+      _connPool.splice(i, 1);
+      continue;
+    }
+    if (p.host === host && p.port === port && p.https === https) {
+      _connPool.splice(i, 1);
+      return p;
+    }
+  }
+  return null;
+}
+
+function _poolPut(entry: _PoolEntry): void {
+  var now = kernel.getTicks();
+  // Evict expired entries
+  for (var i = _connPool.length - 1; i >= 0; i--) {
+    if (now >= _connPool[i].expiry) {
+      try { if (_connPool[i].tls) _connPool[i].tls.close(); else net.close(_connPool[i].sock); } catch(_) {}
+      _connPool.splice(i, 1);
+    }
+  }
+  if (_connPool.length >= _POOL_MAX) {
+    var old = _connPool.shift()!;
+    try { if (old.tls) old.tls.close(); else net.close(old.sock); } catch(_) {}
+  }
+  entry.expiry = now + _POOL_TTL;
+  _connPool.push(entry);
 }
 
 function _cleanupFetch(f: InFlightFetch): void {
-  if (f.sock) { try { net.close(f.sock); } catch (_e) {} f.sock = null; }
-  if (f.tls)  { try { f.tls.close();    } catch (_e) {} f.tls  = null; }
+  if (!f.pooled) {
+    if (f.sock) { try { net.close(f.sock); } catch (_e) {} f.sock = null; }
+    if (f.tls)  { try { f.tls.close();    } catch (_e) {} f.tls  = null; }
+  } else {
+    f.sock = null; f.tls = null;
+  }
   if (f.dnsPort > 0) { dnsCancelAsync(f.dnsPort); f.dnsPort = 0; }
+}
+
+/** Return the connection to the pool (keep-alive) or close it. */
+function _returnOrClose(f: InFlightFetch, connHdr: string): void {
+  if (connHdr.indexOf('close') >= 0) {
+    if (f.sock) { try { net.close(f.sock); } catch (_e) {} }
+    if (f.tls)  { try { f.tls.close();     } catch (_e) {} }
+  } else {
+    _poolPut({ sock: f.sock, tls: f.tls, host: f.parsed.host,
+               port: f.parsed.port, https: f.parsed.protocol === 'https',
+               expiry: 0 /* set by _poolPut */ });
+  }
+  f.sock = null; f.tls = null;
 }
 
 function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
@@ -133,8 +397,27 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       if (ip) {
         f.fetchIP  = ip;
         f.dnsPort  = 0;
+        // Try HTTP/2 pool first (HTTPS only)
+        if (f.parsed.protocol === 'https') {
+          var h2p = _h2PoolGet(f.parsed.host, f.parsed.port);
+          if (h2p) {
+            f.h2conn = h2p;
+            f.pooled = true;
+            f.stage  = 'h2-sending';
+            return 'pending';
+          }
+        }
+        // Try HTTP/1.1 connection pool
+        var pooled = _poolGet(f.parsed.host, f.parsed.port, f.parsed.protocol === 'https');
+        if (pooled) {
+          f.sock   = pooled.sock;
+          f.tls    = pooled.tls;
+          f.pooled = true;
+          f.stage  = 'sending';
+          return 'pending';
+        }
         f.stage    = 'connecting';
-        f.deadline = kernel.getTicks() + 200;
+        f.deadline = kernel.getTicks() + 5000;
         f.sock     = net.createSocket('tcp');
         net.connectAsync(f.sock, ip, f.parsed.port);
         return 'pending';
@@ -163,15 +446,37 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       return 'pending';
     }
 
-    // ── TLS handshake (synchronous — typically < 200 ms) ──────────────────
+    // ── TLS handshake (async, non-blocking — coroutine polls each frame) ──
     if (f.stage === 'tls') {
-      var tls = new TLSSocket(f.parsed.host);
-      if (!tls.handshakeOnConnected(f.sock)) {
+      if (!f.tls) {
+        // First entry: create TLSSocket and begin async handshake
+        var _tlsNew = new TLSSocket(f.parsed.host);
+        _tlsNew.beginHandshake(f.sock, f.fetchIP, +f.parsed.port);
+        f.tls = _tlsNew;
+        return 'pending';
+      }
+      // Subsequent frames: advance handshake state machine (never blocks)
+      var _hsRes = (f.tls as any).hsPoll();
+      if (_hsRes === 'failed') {
         _cleanupFetch(f);
         f.callback(null, 'TLS handshake failed with ' + f.fetchIP);
         return 'done';
       }
-      f.tls   = tls;
+      if (_hsRes === 'pending') return 'pending';
+      // 'connected' — handshake complete, inspect ALPN and advance stage
+      var _tlsDone = f.tls;
+      if (_tlsDone.alpnProtocol === 'h2') {
+        var h2c = new HTTP2Connection(f.parsed.host);
+        if (!h2c.connectOnSocket(_tlsDone)) {
+          _cleanupFetch(f);
+          f.callback(null, 'HTTP/2 setup failed with ' + f.fetchIP);
+          return 'done';
+        }
+        f.h2conn = h2c;
+        f.stage  = 'h2-sending';
+        _h2PoolPut(f.parsed.host, f.parsed.port, h2c);
+        return 'pending';
+      }
       f.stage = 'sending';
       return 'pending';
     }
@@ -184,57 +489,145 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
       if (f.opts.headers) {
         for (var k in f.opts.headers) extraHdrs += k + ': ' + f.opts.headers[k] + '\r\n';
       }
-      var bodyStr = f.opts.body || '';
+      // Inject cookies from the jar for this origin
+      var _cookieHdr = cookieJar.getCookieHeader(
+        f.parsed.host, f.parsed.path, f.parsed.protocol === 'https');
+      if (_cookieHdr && !extraHdrs.toLowerCase().includes('cookie:')) {
+        extraHdrs += 'Cookie: ' + _cookieHdr + '\r\n';
+      }
+      var _rawBody = f.opts.body;
+      var bodyStr = _rawBody
+        ? (typeof _rawBody === 'string'
+          ? _rawBody
+          : (function(b: number[]){ var s=''; for(var _i=0;_i<b.length;_i++) s+=String.fromCharCode(b[_i]); return s; })(_rawBody as number[]))
+        : '';
       var req  = method + ' ' + path + ' HTTP/1.1\r\n' +
                  'Host: ' + f.parsed.host + '\r\n' +
-                 'Connection: close\r\n' +
-                 'Accept: text/html,*/*\r\n' +
+                 'Connection: keep-alive\r\n' +
+                 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n' +
+                 'Accept-Encoding: gzip, deflate\r\n' +
+                 'Accept-Language: en-US,en;q=0.9\r\n' +
+                 'User-Agent: Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/115.0\r\n' +
                  (bodyStr ? 'Content-Length: ' + bodyStr.length + '\r\n' : '') +
                  extraHdrs +
                  '\r\n' + bodyStr;
       var reqBytes: number[] = new Array(req.length);
       for (var ri = 0; ri < req.length; ri++) reqBytes[ri] = req.charCodeAt(ri) & 0xff;
       if (f.tls) f.tls.write(reqBytes); else net.sendBytes(f.sock, reqBytes);
-      f.chunks   = [];
-      f.deadline = kernel.getTicks() + 500;   // 5 s hard timeout
-      f.stage    = 'receiving';
+      f.chunks     = [];
+      f.totalRecv  = 0;
+      f.contentLen = -1;
+      f.headersDone = false;
+      f.bodyOffset = 0;
+      f.chunked    = false;
+      f.deadline   = kernel.getTicks() + 30000;  // 30 s hard timeout
+      f.stage      = 'receiving';
       return 'pending';
     }
 
     // ── Receive ────────────────────────────────────────────────────────────
     if (f.stage === 'receiving') {
-      var chunk: number[] | null = f.tls ? f.tls.readNB() : net.recvBytesNB(f.sock);
-      if (chunk && chunk.length > 0) {
+      // Drain available data in one coroutine step (no inter-tick yielding).
+      // This avoids the ~20ms WM frame latency for each NIC read when TCP delivers
+      // data in multiple segments (common with gzip + chunked encoding).
+      // Cap at 16 reads to avoid monopolising the frame; remaining data next tick.
+      var _drainLimit = 16;
+      for (var _dr = 0; _dr < _drainLimit; _dr++) {
+        var chunk: number[] | null = f.tls ? f.tls.readNB() : net.recvBytesNB(f.sock);
+        if (!chunk || chunk.length === 0) break;  // nothing available right now
         f.chunks.push(chunk);
-        f.deadline = kernel.getTicks() + 100;  // silence timeout resets on each chunk
+        f.totalRecv += chunk.length;
+        f.deadline = kernel.getTicks() + 5000;  // 5 s silence timeout resets on each chunk
+
+        // Parse headers on-the-fly to extract Content-Length / Transfer-Encoding
+        if (!f.headersDone) {
+          var _rawSoFar = _bytesToString(f.chunks.length === 1 ? f.chunks[0] : _flattenChunks(f.chunks));
+          var _hEnd = _rawSoFar.indexOf('\r\n\r\n');
+          if (_hEnd >= 0) {
+            f.headersDone = true;
+            f.bodyOffset  = _hEnd + 4;
+            var _hdrStr = _rawSoFar.substring(0, _hEnd);
+            var _clMatch = _hdrStr.match(/content-length:\s*(\d+)/i);
+            if (_clMatch) f.contentLen = parseInt(_clMatch[1], 10);
+            if (/transfer-encoding:.*chunked/i.test(_hdrStr)) f.chunked = true;
+          }
+        }
+
+        // Early termination: Content-Length known → simple arithmetic
+        if (f.headersDone && f.contentLen >= 0 && f.totalRecv - f.bodyOffset >= f.contentLen) {
+          f.stage = 'parsing';
+          return 'pending';
+        }
+
+        // Chunked termination: scan last ≤8 bytes across chunks for "0\r\n\r\n"
+        if (f.headersDone && f.chunked) {
+          // Build tail from the last byte(s) of accumulated data
+          var _tail5: number[] = [];
+          for (var _ci2 = f.chunks.length - 1; _ci2 >= 0 && _tail5.length < 8; _ci2--) {
+            var _ck = f.chunks[_ci2];
+            var _take = Math.min(_ck.length, 8 - _tail5.length);
+            for (var _ti2 = _ck.length - _take; _ti2 < _ck.length; _ti2++) _tail5.unshift(_ck[_ti2]);
+          }
+          var _tl = _tail5.length;
+          if (_tl >= 5 &&
+              _tail5[_tl - 5] === 0x30 &&
+              _tail5[_tl - 4] === 0x0D &&
+              _tail5[_tl - 3] === 0x0A &&
+              _tail5[_tl - 2] === 0x0D &&
+              _tail5[_tl - 1] === 0x0A) {
+            f.stage = 'parsing';
+            return 'pending';
+          }
+        }
       }
+
+      // EOF: remote side closed connection — stop immediately
+      var _eof = f.tls ? f.tls.isEOF() : net.isEOF(f.sock);
+      if (_eof && f.totalRecv > 0) { f.stage = 'parsing'; return 'pending'; }
+
       if (kernel.getTicks() >= f.deadline) f.stage = 'parsing';
       return 'pending';
     }
 
     // ── Parse ──────────────────────────────────────────────────────────────
     if (f.stage === 'parsing') {
-      if (f.sock) { try { net.close(f.sock); } catch (_e) {} f.sock = null; }
-      if (f.tls)  { try { f.tls.close();    } catch (_e) {} f.tls  = null; }
-
       var total = 0;
       for (var ci = 0; ci < f.chunks.length; ci++) total += f.chunks[ci].length;
       if (total === 0) {
+        _cleanupFetch(f);
         f.callback(null, 'No response from ' + f.fetchIP);
         return 'done';
       }
-      var flat: number[] = new Array(total);
-      var off = 0;
-      for (var ci2 = 0; ci2 < f.chunks.length; ci2++) {
-        var ch = f.chunks[ci2];
-        for (var j = 0; j < ch.length; j++) flat[off++] = ch[j];
-      }
+      var flat = _flattenChunks(f.chunks);
       f.chunks = [];
 
       var resp = parseHttpResponse(flat);
       if (!resp) {
+        _cleanupFetch(f);
+        var _previewBytes = flat.slice(0, 64);
+        var _preview = _previewBytes.map(function(b) { return b >= 32 && b < 127 ? String.fromCharCode(b) : '.'; }).join('');
+        kernel.serialPut('[sdk] parse fail ' + total + 'B: ' + _preview + '\n');
         f.callback(null, 'Could not parse HTTP response from ' + f.fetchIP);
         return 'done';
+      }
+
+      // Return connection to pool or close it
+      var _connHdr = resp.headers.get('connection') || '';
+      _returnOrClose(f, _connHdr);
+
+      // Process Set-Cookie headers from response
+      var _setCookieHdr = resp.headers.get('set-cookie');
+      if (_setCookieHdr) {
+        var _scVals = _setCookieHdr.split('\n');
+        for (var _sci = 0; _sci < _scVals.length; _sci++) {
+          if (_scVals[_sci].trim()) {
+            cookieJar.setCookie(_scVals[_sci].trim(), {
+              host: f.parsed.host,
+              path: f.parsed.path,
+              secure: f.parsed.protocol === 'https',
+            });
+          }
+        }
       }
 
       // Redirect handling
@@ -242,21 +635,49 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
         var loc = resp.headers.get('location') || '';
         if (loc && f.redirects < f.maxRedirects) {
           f.redirects++;
+          // RFC 9110 §15.4: 301/302/303 demote method to GET and drop body;
+          // 307/308 preserve the original method and body.
+          if (resp.status === 301 || resp.status === 302 || resp.status === 303) {
+            f.opts = { ...f.opts, method: 'GET', body: undefined };
+          }
           var rURL    = _resolveHref(loc, f.currentURL);
           var rParsed = _parseURL(rURL);
           if (!rParsed) { f.callback(null, 'Invalid redirect URL: ' + rURL); return 'done'; }
           f.currentURL = rURL;
           f.parsed     = rParsed;
+          // _returnOrClose() already cleared f.sock/f.tls; always reset pooled flag
+          // so _cleanupFetch() correctly owns any new socket we create below.
+          f.pooled = false;
+          // Try H2 pool first for https targets (avoids a full TCP+TLS handshake
+          // when we already have a live h2 connection to the redirect target).
+          if (rParsed.protocol === 'https') {
+            var rH2p = _h2PoolGet(rParsed.host, rParsed.port);
+            if (rH2p) {
+              f.h2conn = rH2p;
+              f.stage  = 'h2-sending';
+              return 'pending';
+            }
+          }
+          // Try HTTP/1.1 keep-alive pool
+          var rPooled = _poolGet(rParsed.host, rParsed.port, rParsed.protocol === 'https');
+          if (rPooled) {
+            f.sock    = rPooled.sock;
+            f.tls     = rPooled.tls;
+            f.fetchIP = dnsResolveCached(rParsed.host) || f.fetchIP;
+            f.pooled  = true;
+            f.stage   = 'sending';
+            return 'pending';
+          }
           var rIP = dnsResolveCached(rParsed.host);
           if (rIP) {
             f.fetchIP  = rIP;
             f.stage    = 'connecting';
-            f.deadline = kernel.getTicks() + 200;
+            f.deadline = kernel.getTicks() + 5000;
             f.sock     = net.createSocket('tcp');
             net.connectAsync(f.sock, rIP, rParsed.port);
           } else {
             f.stage    = 'dns';
-            f.deadline = kernel.getTicks() + 300;
+            f.deadline = kernel.getTicks() + 5000;
             var rq     = dnsSendQueryAsync(rParsed.host);
             f.dnsPort  = rq.port;
             f.dnsId    = rq.id;
@@ -270,9 +691,7 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
 
       if (resp.status < 200 || resp.status >= 400) {
         // Return the error response — caller decides how to render it
-        var bodyText = '';
-        for (var bi = 0; bi < resp.body.length; bi++)
-          bodyText += String.fromCharCode(resp.body[bi] & 0xff);
+        var bodyText = _bytesToString(resp.body);
         f.callback({
           status: resp.status, headers: resp.headers,
           body: resp.body, bodyText, finalURL: f.currentURL
@@ -280,18 +699,987 @@ function _buildFetchCoroutine(f: InFlightFetch): CoroutineStep {
         return 'done';
       }
 
-      var bodyText2 = '';
-      for (var bi2 = 0; bi2 < resp.body.length; bi2++)
-        bodyText2 += String.fromCharCode(resp.body[bi2] & 0xff);
+      var bodyText2 = _bytesToString(resp.body);
       f.callback({ status: resp.status, headers: resp.headers, body: resp.body, bodyText: bodyText2, finalURL: f.currentURL });
       return 'done';
+    }
+
+    // ── HTTP/2: Send request via multiplexed stream ──────────────────────
+    if (f.stage === 'h2-sending') {
+      var h2 = f.h2conn!;
+      (kernel as any).serialPut('[h2 send] coro=' + f.coroId + ' host=' + f.parsed.host + ' path=' + f.parsed.path.slice(0, 60) + ' alive=' + h2.isAlive() + '\n');
+      // If the pooled H2 connection received GOAWAY or is dead, evict it and
+      // fall back to a fresh TCP connection for this request.
+      if (!h2.isAlive()) {
+        f.h2Retries = (f.h2Retries || 0) + 1;
+        (kernel as any).serialPut('[h2 send] coro=' + f.coroId + ' connection dead/GOAWAY — falling back to new TCP (retry ' + f.h2Retries + ')\n');
+        // Evict dead connection from pool immediately so other coroutines don't get it
+        var _deadH2 = f.h2conn;
+        f.h2conn = null;
+        f.pooled = false;
+        for (var _pi = _h2Pool.length - 1; _pi >= 0; _pi--) {
+          if (_h2Pool[_pi].conn === _deadH2) {
+            try { (_deadH2 as any).close(); } catch(_) {}
+            _h2Pool.splice(_pi, 1);
+            break;
+          }
+        }
+        // Abort after 2 retries to prevent infinite loop / heap corruption
+        if (f.h2Retries > 2) {
+          (kernel as any).serialPut('[h2 send] coro=' + f.coroId + ' too many h2 retries — aborting\n');
+          _cleanupFetch(f);
+          f.callback(null, 'HTTP/2 connection repeatedly died for ' + f.parsed.host);
+          return 'done';
+        }
+        var _ip2 = f.fetchIP || dnsResolveCached(f.parsed.host);
+        if (_ip2) {
+          f.fetchIP   = _ip2;
+          f.stage     = 'connecting';
+          f.deadline  = kernel.getTicks() + 5000;
+          f.sock      = net.createSocket('tcp');
+          net.connectAsync(f.sock, _ip2, f.parsed.port);
+        } else {
+          // No cached IP — full DNS re-query
+          f.stage    = 'dns';
+          f.deadline = kernel.getTicks() + 5000;
+          var _dq2   = dnsSendQueryAsync(f.parsed.host);
+          f.dnsPort  = _dq2.port;
+          f.dnsId    = _dq2.id;
+        }
+        return 'pending';
+      }
+      var h2method = (f.opts.method || 'GET').toUpperCase();
+      var h2path   = f.parsed.path;
+      var h2extras: [string, string][] = [];
+      // Add Accept and User-Agent pseudo-headers
+      h2extras.push(['accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8']);
+      h2extras.push(['accept-encoding', 'gzip, deflate']);
+      h2extras.push(['accept-language', 'en-US,en;q=0.9']);
+      h2extras.push(['user-agent', 'Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/115.0']);
+      // Inject cookies
+      var _h2CookieHdr = cookieJar.getCookieHeader(
+        f.parsed.host, f.parsed.path, f.parsed.protocol === 'https');
+      if (_h2CookieHdr) h2extras.push(['cookie', _h2CookieHdr]);
+      // Add custom headers
+      if (f.opts.headers) {
+        for (var hk in f.opts.headers) {
+          h2extras.push([hk.toLowerCase(), f.opts.headers[hk]]);
+        }
+      }
+      var h2sid = h2.request(h2method, h2path, f.parsed.host, h2extras);
+      f.h2streamId = h2sid;
+      (kernel as any).serialPut('[h2 req] coro=' + f.coroId + ' stream=' + h2sid + ' ' + h2method + ' ' + f.parsed.host + f.parsed.path.slice(0, 60) + '\n');
+      // Send body for POST/PUT etc.
+      if (f.opts.body && h2method !== 'GET' && h2method !== 'HEAD') {
+        var h2body: number[];
+        if (typeof f.opts.body === 'string') {
+          h2body = new Array(f.opts.body.length);
+          for (var _bi = 0; _bi < f.opts.body.length; _bi++) h2body[_bi] = f.opts.body.charCodeAt(_bi) & 0xff;
+        } else {
+          h2body = f.opts.body as number[];
+        }
+        h2.sendData(h2sid, h2body, true);
+      }
+      f.deadline = kernel.getTicks() + 30000;  // 30 s timeout
+      f.stage = 'h2-receiving';
+      return 'pending';
+    }
+
+    // ── HTTP/2: Receive response frames ──────────────────────────────────
+    if (f.stage === 'h2-receiving') {
+      var h2r = f.h2conn!;
+      var stream = h2r.receive(f.h2streamId, 10);  // short poll, 100ms — don't block coroutine
+      if (stream && (stream.state === 'half_closed_remote' || stream.state === 'closed')) {
+        (kernel as any).serialPut('[h2 done] coro=' + f.coroId + ' stream=' + f.h2streamId + ' body=' + stream.body.length + 'B\n');
+        var h2status = 200;
+        var h2headers = new Map<string, string>();
+        for (var _hi = 0; _hi < stream.headers.length; _hi++) {
+          var _hdr = stream.headers[_hi];
+          if (_hdr[0] === ':status') {
+            h2status = parseInt(_hdr[1], 10) || 200;
+          } else if (!_hdr[0].startsWith(':')) {
+            // Concatenate duplicate headers with newline (for Set-Cookie etc.)
+            var existing = h2headers.get(_hdr[0]);
+            h2headers.set(_hdr[0], existing ? existing + '\n' + _hdr[1] : _hdr[1]);
+          }
+        }
+
+        // Decompress body if content-encoding is gzip/deflate
+        var h2Body = stream.body;
+        var h2ce = h2headers.get('content-encoding') || '';
+        if (h2ce) {
+          try { h2Body = httpDecompress(h2Body, h2ce); } catch (_e) {}
+        }
+
+        // Process Set-Cookie
+        var _h2SetCookie = h2headers.get('set-cookie');
+        if (_h2SetCookie) {
+          var _scV2 = _h2SetCookie.split('\n');
+          for (var _sc2i = 0; _sc2i < _scV2.length; _sc2i++) {
+            if (_scV2[_sc2i].trim()) {
+              cookieJar.setCookie(_scV2[_sc2i].trim(), {
+                host: f.parsed.host,
+                path: f.parsed.path,
+                secure: f.parsed.protocol === 'https',
+              });
+            }
+          }
+        }
+
+        // Redirect handling
+        if (h2status >= 300 && h2status < 400) {
+          var h2loc = h2headers.get('location') || '';
+          if (h2loc && f.redirects < f.maxRedirects) {
+            f.redirects++;
+            // RFC 9110 §15.4: 301/302/303 demote to GET; 307/308 preserve method.
+            if (h2status === 301 || h2status === 302 || h2status === 303) {
+              f.opts = { ...f.opts, method: 'GET', body: undefined };
+            }
+            var h2rURL    = _resolveHref(h2loc, f.currentURL);
+            var h2rParsed = _parseURL(h2rURL);
+            if (!h2rParsed) { f.callback(null, 'Invalid redirect URL: ' + h2rURL); return 'done'; }
+            f.currentURL = h2rURL;
+            f.parsed     = h2rParsed;
+            // Try H2 pool for redirect target
+            if (h2rParsed.protocol === 'https') {
+              var h2rConn = _h2PoolGet(h2rParsed.host, h2rParsed.port);
+              if (h2rConn) {
+                f.h2conn = h2rConn;
+                f.stage  = 'h2-sending';
+                return 'pending';
+              }
+            }
+            // Fall back to normal connection flow.
+            // Clear stale h2/tls references — the 'tls' stage checks if (f.tls)
+            // to decide whether to create a new TLS socket; leaving the old
+            // reference would make it try hsPoll() on the discarded socket.
+            f.h2conn     = null;
+            f.h2streamId = 0;
+            f.tls        = null;   // ← must clear so 'tls' stage starts fresh
+            f.pooled     = false;  // ← new socket below is not pooled
+            var h2rIP = dnsResolveCached(h2rParsed.host);
+            if (h2rIP) {
+              f.fetchIP  = h2rIP;
+              f.stage    = 'connecting';
+              f.deadline = kernel.getTicks() + 5000;
+              f.sock     = net.createSocket('tcp');
+              net.connectAsync(f.sock, h2rIP, h2rParsed.port);
+            } else {
+              f.stage    = 'dns';
+              f.deadline = kernel.getTicks() + 5000;
+              var h2rq   = dnsSendQueryAsync(h2rParsed.host);
+              f.dnsPort  = h2rq.port;
+              f.dnsId    = h2rq.id;
+            }
+            return 'pending';
+          }
+        }
+
+        var h2bodyText = _bytesToString(h2Body);
+        if (h2status < 200 || h2status >= 400) {
+          f.callback({ status: h2status, headers: h2headers, body: h2Body, bodyText: h2bodyText, finalURL: f.currentURL }, 'HTTP ' + h2status);
+          return 'done';
+        }
+        f.callback({ status: h2status, headers: h2headers, body: h2Body, bodyText: h2bodyText, finalURL: f.currentURL });
+        return 'done';
+      }
+
+      if (kernel.getTicks() >= f.deadline) {
+        (kernel as any).serialPut('[h2 timeout] coro=' + f.coroId + ' stream=' + f.h2streamId + ' alive=' + h2r.isAlive() + ' rxBufLen=' + (h2r as any).rxBuf.length + '\n');
+        f.callback(null, 'HTTP/2 response timeout from ' + f.parsed.host);
+        return 'done';
+      }
+      // Periodic heartbeat log every ~5000 ticks (~5s) for debugging hangs
+      var _h2Ticks = kernel.getTicks();
+      if (f.deadline - _h2Ticks < 25000 && (f.deadline - _h2Ticks) % 5000 < 50) {
+        (kernel as any).serialPut('[h2 wait] coro=' + f.coroId + ' stream=' + f.h2streamId + ' alive=' + h2r.isAlive() + ' remaining=' + Math.round((f.deadline - _h2Ticks) / 1000) + 's\n');
+      }
+      return 'pending';
     }
 
     return 'done';
   };
 }
 
+/** Flatten chunks into a single contiguous array (O(n)). */
+function _flattenChunks(chunks: number[][]): number[] {
+  var total = 0;
+  for (var i = 0; i < chunks.length; i++) total += chunks[i].length;
+  var flat = new Array<number>(total);
+  var off = 0;
+  for (var i2 = 0; i2 < chunks.length; i2++) {
+    var ch = chunks[i2];
+    for (var j = 0; j < ch.length; j++) flat[off++] = ch[j];
+  }
+  return flat;
+}
+
+// ── Module-level state (timer, env, events) ─────────────────────────────────
+
+interface _TimerEntry {
+  id:       number;
+  fn:       () => void;
+  deadline: number;
+  interval: number;
+  active:   boolean;
+}
+var _timers: _TimerEntry[] = [];
+var _nextTimerId = 1;
+var _timerPumpId = -1;
+
+function _startTimerPump(): void {
+  if (_timerPumpId !== -1) return;
+  _timerPumpId = threadManager.runCoroutine('sdk:timer-pump', function(): 'done' | 'pending' {
+    var now = kernel.getUptime();
+    for (var _ti = 0; _ti < _timers.length; _ti++) {
+      var _t = _timers[_ti];
+      if (!_t.active) continue;
+      if (now >= _t.deadline) {
+        try { _t.fn(); } catch (_e) {}
+        if (_t.interval > 0) {
+          _t.deadline = now + _t.interval;
+        } else {
+          _t.active = false;
+        }
+      }
+    }
+    if (_timers.length > 200) {
+      _timers = _timers.filter(function(x) { return x.active; });
+    }
+    return 'pending';
+  });
+}
+
+var _envMap: Map<string, string> | null = null;
+
+function _getEnvMap(): Map<string, string> {
+  if (_envMap) return _envMap;
+  _envMap = new Map<string, string>();
+  _envMap.set('PATH',     '/bin:/usr/bin');
+  _envMap.set('HOME',     '/home/user');
+  _envMap.set('USER',     'root');
+  _envMap.set('TERM',     'jsos-vga');
+  _envMap.set('EDITOR',   'edit');
+  _envMap.set('SHELL',    '/bin/repl');
+  _envMap.set('HOSTNAME', fs.readFile('/etc/hostname') || 'jsos');
+  var envFile = fs.readFile('/etc/environment');
+  if (envFile) {
+    var lines = envFile.split('\n');
+    for (var _ei = 0; _ei < lines.length; _ei++) {
+      var _line = lines[_ei].trim();
+      if (!_line || _line.startsWith('#')) continue;
+      var _idx = _line.indexOf('=');
+      if (_idx > 0) _envMap.set(_line.slice(0, _idx).trim(), _line.slice(_idx + 1).trim());
+    }
+  }
+  return _envMap;
+}
+
+var _evtListeners: Map<string, Array<(data: any) => void>> = new Map();
+
+function _sdkStrToBytes(s: string): number[] {
+  var out: number[] = new Array(s.length);
+  for (var _si = 0; _si < s.length; _si++) out[_si] = s.charCodeAt(_si) & 0xff;
+  return out;
+}
+
+function _sdkBytesToHex(bytes: number[]): string {
+  var hex = '';
+  for (var _hi = 0; _hi < bytes.length; _hi++) hex += _byteToHex(bytes[_hi]);
+  return hex;
+}
+
+function _fsRmrf(path: string): boolean {
+  if (fs.isFile(path)) return fs.rm(path);
+  var _entries = fs.ls(path);
+  if (_entries) {
+    for (var _ri = 0; _ri < _entries.length; _ri++) {
+      var _child = path.replace(/\/$/, '') + '/' + (_entries[_ri] as any).name;
+      _fsRmrf(_child);
+    }
+  }
+  return fs.rm(path);
+}
+
+var _B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+function _base64Encode(bytes: number[]): string {
+  var out = '';
+  var _i = 0;
+  while (_i < bytes.length) {
+    var b0 = bytes[_i++];
+    var b1 = _i < bytes.length ? bytes[_i++] : 0;
+    var b2 = _i < bytes.length ? bytes[_i++] : 0;
+    out += _B64[b0 >> 2] + _B64[((b0 & 3) << 4) | (b1 >> 4)] +
+           _B64[((b1 & 0xf) << 2) | (b2 >> 6)] + _B64[b2 & 0x3f];
+  }
+  var pad = bytes.length % 3;
+  if (pad === 1) out = out.slice(0, -2) + '==';
+  else if (pad === 2) out = out.slice(0, -1) + '=';
+  return out;
+}
+
+function _base64Decode(b64: string): number[] {
+  var _lookup: number[] = [];
+  for (var _k0 = 0; _k0 < 256; _k0++) _lookup[_k0] = 0;
+  for (var _k = 0; _k < _B64.length; _k++) _lookup[_B64.charCodeAt(_k)] = _k;
+  var _out: number[] = [];
+  for (var _bi = 0; _bi + 3 < b64.length; _bi += 4) {
+    var c0 = _lookup[b64.charCodeAt(_bi)];
+    var c1 = _lookup[b64.charCodeAt(_bi + 1)];
+    var c2 = b64[_bi + 2] === '=' ? 0 : _lookup[b64.charCodeAt(_bi + 2)];
+    var c3 = b64[_bi + 3] === '=' ? 0 : _lookup[b64.charCodeAt(_bi + 3)];
+    _out.push((c0 << 2) | (c1 >> 4));
+    if (b64[_bi + 2] !== '=') _out.push(((c1 & 0xf) << 4) | (c2 >> 2));
+    if (b64[_bi + 3] !== '=') _out.push(((c2 & 3) << 6) | c3);
+  }
+  return _out;
+}
+
+// ── Module-level state: notifications, app registry, persistent disk ──────────
+
+interface _NotifEntry { id: number; message: string; level: string; until: number; active: boolean; }
+var _notifications: _NotifEntry[] = [];
+var _nextNotifId   = 1;
+
+/** Fire an event directly into the listener map without going through sdk.events. */
+function _emitEvent(event: string, data?: any): void {
+  var list = _evtListeners.get(event);
+  if (!list) return;
+  var copy = list.slice();
+  for (var _xi = 0; _xi < copy.length; _xi++) { try { copy[_xi](data); } catch (_e) {} }
+}
+
+function _notify(message: string, opts?: { level?: 'info'|'success'|'warn'|'error'; durationMs?: number }): number {
+  var id  = _nextNotifId++;
+  var dur = (opts && opts.durationMs !== undefined) ? opts.durationMs : 3000;
+  var lvl: string = (opts && opts.level) ? opts.level : 'info';
+  _notifications.push({ id, message, level: lvl, until: kernel.getUptime() + dur, active: true });
+  _emitEvent('notify:show', { id, message, level: lvl });
+  if (!wm) { (globalThis as any).print('[' + lvl.toUpperCase() + '] ' + message); }
+  _startTimerPump();
+  _timers.push({ id: _nextTimerId++, fn: function() { _notifyDismiss(id); }, deadline: kernel.getUptime() + dur, interval: 0, active: true });
+  return id;
+}
+
+function _notifyDismiss(id: number): void {
+  for (var _nd = 0; _nd < _notifications.length; _nd++) {
+    if (_notifications[_nd].id === id) { _notifications[_nd].active = false; _emitEvent('notify:dismiss', { id }); return; }
+  }
+}
+
+function _notifyDismissAll(): void {
+  for (var _na = 0; _na < _notifications.length; _na++) _notifications[_na].active = false;
+  _emitEvent('notify:dismissAll', {});
+}
+
+export interface AppManifest {
+  name:        string;
+  displayName: string;
+  category?:   'system' | 'utility' | 'game' | 'other';
+  minWidth?:   number;
+  minHeight?:  number;
+  icon?:       string;
+}
+
+interface _AppEntry { manifest: AppManifest; factory: (args?: string[]) => App; }
+var _appRegistry = new Map<string, _AppEntry>();
+
+function _sdkPrint(text: string): void {
+  (globalThis as any).print(text);
+}
+
+// Single disk-storage object — exposed as both os.fs.disk and os.disk (compat alias)
+var _diskStorage = {
+  /** Returns true when a FAT disk driver has been mounted. */
+  available(): boolean { return !!(globalThis as any)._diskFS; },
+  /** Read a file from persistent disk.  Returns null if unavailable or not found. */
+  read(path: string): string | null {
+    var d = (globalThis as any)._diskFS; return d ? d.read(path) : null;
+  },
+  /** Write (create or overwrite) a file on disk.  Returns false if unavailable. */
+  write(path: string, data: string): boolean {
+    var d = (globalThis as any)._diskFS; return d ? !!d.writeFile(path, data) : false;
+  },
+  /** List disk directory entries.  Returns [] if unavailable. */
+  list(path?: string): Array<{ name: string; type: 'file' | 'dir'; size: number }> {
+    var d = (globalThis as any)._diskFS; return d ? (d.list(path || '/') ?? []) : [];
+  },
+  /** Create a directory on disk. */
+  mkdir(path: string): boolean {
+    var d = (globalThis as any)._diskFS; return d ? !!d.mkdir(path) : false;
+  },
+  /** Check whether a path exists on disk. */
+  exists(path: string): boolean {
+    var d = (globalThis as any)._diskFS; return d ? !!d.exists(path) : false;
+  },
+  /** Remove a file or empty directory from disk. */
+  rm(path: string): boolean {
+    var d = (globalThis as any)._diskFS; return d ? !!d.remove(path) : false;
+  },
+};
+
+// ── Modal dialog helpers ──────────────────────────────────────────────────────
+
+function _dlgAlert(message: string, title: string): void {
+  if (!wm) { (globalThis as any).print('[ALERT] ' + title + ': ' + message); return; }
+  var _closed = false;
+  var _winId  = -1;
+  var _close  = function(): void { if (_closed) return; _closed = true; if (wm && _winId >= 0) wm.closeWindow(_winId); };
+  var _dlg: App = {
+    name: 'alert-dlg',
+    onMount(win: WMWindow):  void { _winId = win.id; },
+    onUnmount():             void {},
+    onKey(e: KeyEvent):      void { if (e.key === 'Enter' || e.key === 'Escape') _close(); },
+    onMouse(_e: MouseEvent): void {},
+    render(canvas: Canvas):  boolean {
+      canvas.clear(0xFF1E1E2E);
+      canvas.drawText(12, 14, message, 0xFFCDD6F4);
+      var lbl = '  OK  ';
+      var ox = (canvas.width - lbl.length * 8) >> 1;
+      canvas.fillRect(ox - 4, canvas.height - 25, lbl.length * 8 + 8, 18, 0xFF313244);
+      canvas.drawText(ox, canvas.height - 21, lbl, 0xFF89B4FA);
+      return true;
+    },
+  };
+  wm.createWindow({ title, app: _dlg, width: Math.max(220, message.length * 8 + 24), height: 75, closeable: false });
+}
+
+function _dlgConfirm(message: string, title: string, okLabel: string, cancelLabel: string, cb: (ok: boolean) => void): void {
+  if (!wm) { (globalThis as any).print('[CONFIRM] ' + title + ': ' + message + ' → false'); cb(false); return; }
+  var _closed = false;
+  var _winId  = -1;
+  var _dlgW   = 0;
+  var _dlgH   = 0;
+  var _close  = function(result: boolean): void { if (_closed) return; _closed = true; if (wm && _winId >= 0) wm.closeWindow(_winId); cb(result); };
+  var _dlg: App = {
+    name: 'confirm-dlg',
+    onMount(win: WMWindow):  void { _winId = win.id; },
+    onUnmount():             void {},
+    onKey(e: KeyEvent):      void { if (e.key === 'Enter') _close(true); if (e.key === 'Escape') _close(false); },
+    onMouse(e: MouseEvent):  void {
+      if ((e.type !== 'down' && e.type !== 'click') || e.y < _dlgH - 28) return;
+      _close(e.x < (_dlgW >> 1));
+    },
+    render(canvas: Canvas):  boolean {
+      _dlgW = canvas.width; _dlgH = canvas.height;
+      canvas.clear(0xFF1E1E2E);
+      canvas.drawText(12, 14, message, 0xFFCDD6F4);
+      canvas.drawText(12, _dlgH - 21, okLabel, 0xFF89B4FA);
+      canvas.drawText(_dlgW - cancelLabel.length * 8 - 12, _dlgH - 21, cancelLabel, 0xFFF38BA8);
+      return true;
+    },
+  };
+  wm.createWindow({ title, app: _dlg, width: Math.max(220, message.length * 8 + 24), height: 75, closeable: false });
+}
+
+function _dlgPrompt(question: string, title: string, defaultValue: string, cb: (value: string | null) => void): void {
+  if (!wm) { (globalThis as any).print('[PROMPT] ' + title + ': ' + question); cb(null); return; }
+  var _closed = false;
+  var _winId  = -1;
+  var _input  = defaultValue;
+  var _cursor = defaultValue.length;
+  var _dlgW   = 0;
+  var _dlgH   = 0;
+  var _close  = function(v: string | null): void { if (_closed) return; _closed = true; if (wm && _winId >= 0) wm.closeWindow(_winId); cb(v); };
+  var _dlg: App = {
+    name: 'prompt-dlg',
+    onMount(win: WMWindow):  void { _winId = win.id; },
+    onUnmount():             void {},
+    onKey(e: KeyEvent):      void {
+      if (e.key === 'Enter')     { _close(_input); return; }
+      if (e.key === 'Escape')    { _close(null);   return; }
+      if (e.key === 'Backspace') {
+        if (_cursor > 0) { _input = _input.slice(0, _cursor - 1) + _input.slice(_cursor); _cursor--; if (wm) wm.markDirty(); }
+        return;
+      }
+      if (e.key === 'ArrowLeft')  { if (_cursor > 0)              _cursor--; if (wm) wm.markDirty(); return; }
+      if (e.key === 'ArrowRight') { if (_cursor < _input.length)  _cursor++; if (wm) wm.markDirty(); return; }
+      if (e.key.length === 1) { _input = _input.slice(0, _cursor) + e.key + _input.slice(_cursor); _cursor++; if (wm) wm.markDirty(); }
+    },
+    onMouse(e: MouseEvent):  void {
+      if ((e.type !== 'down' && e.type !== 'click') || e.y < _dlgH - 28) return;
+      _close(e.x < (_dlgW >> 1) ? _input : null);
+    },
+    render(canvas: Canvas):  boolean {
+      _dlgW = canvas.width; _dlgH = canvas.height;
+      canvas.clear(0xFF1E1E2E);
+      canvas.drawText(12, 10, question, 0xFF89DCEB);
+      canvas.fillRect(10, 27, _dlgW - 20, 18, 0xFF313244);
+      canvas.drawText(12, 31, _input, 0xFFCDD6F4);
+      canvas.fillRect(12 + _cursor * 8, 28, 1, 16, 0xFFCDD6F4);
+      canvas.drawText(12,                  _dlgH - 21, 'OK',     0xFF89B4FA);
+      canvas.drawText(_dlgW - 12 - 6 * 8, _dlgH - 21, 'Cancel', 0xFFF38BA8);
+      return true;
+    },
+  };
+  wm.createWindow({ title, app: _dlg, width: 300, height: 95, closeable: false });
+}
+
+// ── Internal fetch function ───────────────────────────────────────────────────
+
+/**
+ * Deduplication map for in-flight GET/HEAD fetches.
+ * Maps URL → array of pending callbacks.  When a URL is already being fetched,
+ * additional requests for the same URL queue their callbacks here instead of
+ * launching duplicate coroutines.  When the first request completes, all queued
+ * callbacks are called with the same response.  Only applies to idempotent
+ * requests (GET/HEAD with no custom body/headers).
+ */
+var _fetchDedup = new Map<string, Array<(resp: FetchResponse | null, error?: string) => void>>();
+
+function _doFetch(
+  url: string,
+  callback: (resp: FetchResponse | null, error?: string) => void,
+  opts?: FetchOptions,
+): number {
+  var o      = opts || {};
+  var parsed = _parseURL(url);
+  if (!parsed) {
+    var _deferCoroId = threadManager.runCoroutine('fetch-err', function() {
+      callback(null, 'Invalid URL: ' + url);
+      return 'done';
+    });
+    return _deferCoroId;
+  }
+
+  // ── Deduplication: coalesce concurrent GET/HEAD fetches for the same URL ──
+  // Prevents duplicate H2 streams (and HPACK encoder corruption) when the page
+  // triggers multiple fetches for the same resource (e.g. duplicate <link> tags).
+  var _isIdempotent = !o.body && (!o.method || o.method === 'GET' || o.method === 'HEAD') && !o.headers;
+  if (_isIdempotent) {
+    var _existing = _fetchDedup.get(url);
+    if (_existing) {
+      // Already in-flight — queue this callback and return the same coro id
+      _existing.push(callback);
+      (kernel as any).serialPut('[fetch] dedup hit for ' + parsed.host + parsed.path.slice(0, 60) + ' queued=' + _existing.length + '\n');
+      return -1;  // No new coroutine; caller doesn't need the id
+    }
+    // Register this URL as in-flight with the initial callback in the list
+    _fetchDedup.set(url, [callback]);
+    // Wrap callback to drain all queued callbacks when the fetch completes
+    callback = function(resp, err) {
+      var _pending = _fetchDedup.get(url) || [];
+      _fetchDedup.delete(url);
+      for (var _pi = 0; _pi < _pending.length; _pi++) {
+        try { _pending[_pi](resp, err); } catch (_e) {}
+      }
+    };
+  }
+
+  var f: InFlightFetch = {
+    coroId:       -1,
+    stage:        'dns',
+    originalURL:  url,
+    currentURL:   url,
+    parsed,
+    fetchIP:      '',
+    sock:         null,
+    tls:          null,
+    chunks:       [],
+    totalRecv:    0,
+    contentLen:   -1,
+    headersDone:  false,
+    bodyOffset:   0,
+    chunked:      false,
+    deadline:     0,
+    dnsPort:      0,
+    dnsId:        0,
+    redirects:    0,
+    maxRedirects: o.maxRedirects !== undefined ? o.maxRedirects : 5,
+    opts:         o,
+    callback,
+    pooled:       false,
+    h2conn:       null,
+    h2streamId:   0,
+    h2Retries:    0,
+  };
+
+  // Try HTTP/2 multiplexed connection pool first (HTTPS only)
+  if (parsed.protocol === 'https') {
+    var h2c = _h2PoolGet(parsed.host, parsed.port);
+    if (h2c) {
+      f.h2conn  = h2c;
+      f.fetchIP = dnsResolveCached(parsed.host) || '';
+      f.pooled  = true;
+      f.stage   = 'h2-sending';
+    } else {
+      (kernel as any).serialPut('[fetch] h2pool miss for ' + parsed.host + ':' + parsed.port + ' pool=' + _h2Pool.length + '\n');
+    }
+  }
+
+  if (!f.h2conn) {
+    // Try HTTP/1.1 connection pool before DNS/TCP
+    var pooled = _poolGet(parsed.host, parsed.port, parsed.protocol === 'https');
+    if (pooled) {
+      f.sock   = pooled.sock;
+      f.tls    = pooled.tls;
+      f.fetchIP = dnsResolveCached(parsed.host) || '';
+      f.pooled = true;
+      f.stage  = 'sending';
+    } else {
+      var cachedIP = dnsResolveCached(parsed.host);
+      if (cachedIP) {
+        f.fetchIP  = cachedIP;
+        f.stage    = 'connecting';
+        f.deadline = kernel.getTicks() + 5000;
+        f.sock     = net.createSocket('tcp');
+        net.connectAsync(f.sock, cachedIP, parsed.port);
+      } else {
+        f.stage    = 'dns';
+        f.deadline = kernel.getTicks() + 5000;
+        var q      = dnsSendQueryAsync(parsed.host);
+        f.dnsPort  = q.port;
+        f.dnsId    = q.id;
+      }
+    }
+  }
+
+  var step = _buildFetchCoroutine(f);
+  var id   = threadManager.runCoroutine('fetch:' + parsed.host, step);
+  f.coroId = id;
+  (kernel as any).serialPut('[fetch] new coro id=' + id + ' stage=' + f.stage + ' host=' + parsed.host + ' path=' + parsed.path.slice(0, 80) + '\n');
+  return id;
+}
+
 // ── SDK implementation ────────────────────────────────────────────────────────
+
+// ── New module-level state ────────────────────────────────────────────────────
+
+/** Cached CMOS RTC read at first call: Unix epoch ms at that moment. */
+var _rtcBootEpoch: number | null = null;
+var _rtcBootUptime = 0;
+/** Boot-time uptime in microseconds for sub-ms elapsed tracking (Phase 4.1). */
+var _rtcBootUptimeUs = 0;
+
+/** Animation registry: id → { cb, duration, startUptime } */
+var _animRegistry = new Map<number, { cb: (progress: number) => void; duration: number; startUptime: number; coroId: number }>();
+var _nextAnimId = 1;
+
+/** Theme registry */
+var _themeMap = new Map<string, Theme>();
+var _activeThemeName = 'dark';
+
+/** fs.watch registry: path prefix → array of callbacks */
+type _WatchCb = (ev: 'change'|'delete'|'create', path: string) => void;
+var _fsWatchMap = new Map<string, _WatchCb[]>();
+var _fsWatchPatched = false;
+
+/** Raw socket receive buffers: socket.id → { sock, buf } */
+var _netSockBufs = new Map<number, { sock: import('../net/net.js').Socket; buf: number[] }>();
+
+// ── Built-in themes ───────────────────────────────────────────────────────────
+
+function _makeTheme(
+  name: string, bg: number, fg: number, accent: number,
+  titleBg: number, titleFg: number, taskbarBg: number,
+  selBg: number, selFg: number,
+  warnFg: number, errorFg: number, successFg: number, mutedFg: number, border: number,
+): Theme {
+  return { name, bg, fg, accent, titleBg, titleFg, taskbarBg,
+           selBg, selFg, warnFg, errorFg, successFg, mutedFg, border };
+}
+
+_themeMap.set('dark',   _makeTheme('dark',   0xFF1E1E2E, 0xFFDDDDEE, 0xFF2255AA, 0xFF1A3A5C, 0xFFFFFFFF, 0xFF1A2B3C, 0xFF2255AA, 0xFFFFFFFF, 0xFFFFB900, 0xFFFF4444, 0xFF44CC44, 0xFF888899, 0xFF445566));
+_themeMap.set('light',  _makeTheme('light',  0xFFF5F5F5, 0xFF222222, 0xFF0078D7, 0xFF0078D7, 0xFFFFFFFF, 0xFFE0E0E0, 0xFF0078D7, 0xFFFFFFFF, 0xFFFFB900, 0xFFCC1111, 0xFF007700, 0xFF888888, 0xFFCCCCCC));
+_themeMap.set('hacker', _makeTheme('hacker', 0xFF000000, 0xFF00FF00, 0xFF00CC00, 0xFF001100, 0xFF00FF00, 0xFF000800, 0xFF003300, 0xFF00FF00, 0xFFFFFF00, 0xFFFF0000, 0xFF00FF00, 0xFF005500, 0xFF003300));
+_themeMap.set('retro',  _makeTheme('retro',  0xFF0000AA, 0xFFAAAAAA, 0xFFFF5555, 0xFFAA0000, 0xFFFFFFFF, 0xFF000055, 0xFFAA0000, 0xFFFFFFFF, 0xFFFFFF55, 0xFFFF5555, 0xFF55FF55, 0xFF5555AA, 0xFF5555AA));
+
+// ── RTC helpers ───────────────────────────────────────────────────────────────
+
+function _rtcCmosRead(reg: number): number {
+  kernel.outb(0x70, reg);
+  var v = kernel.inb(0x71);
+  return ((v >> 4) * 10) + (v & 0xF); // BCD → decimal
+}
+
+function _rtcGetUnixMs(): number {
+  // Read CMOS RTC registers
+  var sec = _rtcCmosRead(0x00);
+  var min = _rtcCmosRead(0x02);
+  var hr  = _rtcCmosRead(0x04);
+  var day = _rtcCmosRead(0x07);
+  var mon = _rtcCmosRead(0x08);
+  var yr2 = _rtcCmosRead(0x09);
+  var cen = _rtcCmosRead(0x32) || 20; // century register (may be 0)
+  var year = cen * 100 + yr2;
+  if (year < 2000) year += 2000;
+  // Days from 1970-01-01 to this date via a simple formula
+  var m = mon, y = year;
+  if (m <= 2) { m += 12; y--; }
+  var jdn = Math.floor(365.25 * (y + 4716)) + Math.floor(30.6001 * (m + 1)) + day - 1524;
+  var epoch1970 = 2440588; // JDN of 1970-01-01
+  var daysSinceEpoch = jdn - epoch1970;
+  return (daysSinceEpoch * 86400 + hr * 3600 + min * 60 + sec) * 1000;
+}
+
+function _sdkTimeNow(): number {
+  if (_rtcBootEpoch === null) {
+    try {
+      _rtcBootEpoch     = _rtcGetUnixMs();
+      _rtcBootUptime    = kernel.getUptime();
+      _rtcBootUptimeUs  = (kernel.uptimeUs ? kernel.uptimeUs() : _rtcBootUptime * 1000);
+    } catch (_e) {
+      // Fallback: treat boot as 2026-01-01T00:00:00Z
+      _rtcBootEpoch     = 1735689600000;
+      _rtcBootUptime    = kernel.getUptime();
+      _rtcBootUptimeUs  = _rtcBootUptime * 1000;
+    }
+  }
+  // Phase 4.1: use sub-ms TSC resolution when kernel.uptimeUs() is available.
+  if (kernel.uptimeUs) {
+    return _rtcBootEpoch + (kernel.uptimeUs() - _rtcBootUptimeUs) / 1000;
+  }
+  return _rtcBootEpoch + (kernel.getUptime() - _rtcBootUptime);
+}
+
+// ── fs.watch patcher ──────────────────────────────────────────────────────────
+
+function _fireWatch(path: string, ev: 'change'|'delete'|'create'): void {
+  _fsWatchMap.forEach(function(cbs: _WatchCb[], prefix: string) {
+    if (path.startsWith(prefix)) {
+      for (var i = 0; i < cbs.length; i++) { try { cbs[i](ev, path); } catch (_e) {} }
+    }
+  });
+}
+
+function _patchFsWatch(): void {
+  if (_fsWatchPatched) return;
+  _fsWatchPatched = true;
+  var origWrite = fs.writeFile.bind(fs);
+  var origRm    = fs.rm.bind(fs);
+  var origMkdir = fs.mkdir.bind(fs);
+  (fs as any).writeFile = function(p: string, d: string) {
+    var existed = fs.readFile(p) !== null;
+    var r = origWrite(p, d);
+    _fireWatch(p, existed ? 'change' : 'create');
+    return r;
+  };
+  (fs as any).rm = function(p: string) {
+    var r = origRm(p);
+    if (r) _fireWatch(p, 'delete');
+    return r;
+  };
+  (fs as any).mkdir = function(p: string) {
+    var r = origMkdir(p);
+    if (r) _fireWatch(p, 'create');
+    return r;
+  };
+}
+
+// ── Debug serial helper ───────────────────────────────────────────────────────
+
+function _debugSerial(level: string, args: unknown[]): void {
+  var msg = args.map(function(a) { return typeof a === 'string' ? a : JSON.stringify(a); }).join(' ');
+  var line = '[' + level + '] ' + msg + '\n';
+  for (var _di = 0; _di < line.length; _di++) kernel.serialPut(line[_di]);
+  // Also fire event bus so in-process listeners can pick it up
+  if ((sdk as any).events) {
+    try { sdk.events.emit('debug:event', { level: level.toLowerCase(), msg, ts: _sdkTimeNow() }); } catch (_e) {}
+  }
+}
+
+// ── JIT stats registry (wired from main.ts via _registerJITStats) ──────────
+
+interface _JITStatsProvider {
+  compiledCount: number;
+  bailedCount:   number;
+  deoptCount:    number;
+  resetCount:    number;
+}
+interface _JITOSStatsProvider {
+  (): { checksumNative: boolean; stringNative: boolean; compiled: number; poolUsedKB: number };
+}
+
+var _jitStatsProvider: _JITStatsProvider | null = null;
+var _jitOSStatsProvider: _JITOSStatsProvider | null = null;
+
+/**
+ * Register the runtime JIT hook and OS-kernel stats provider.
+ * Called once by main.ts after creating QJSJITHook and JITOSKernels.
+ */
+export function _registerJITStats(
+  hook: _JITStatsProvider,
+  osStats: _JITOSStatsProvider
+): void {
+  _jitStatsProvider    = hook;
+  _jitOSStatsProvider  = osStats;
+}
+
+// ── MenuBar widget (Phase 5.8) ──────────────────────────────────────────────
+
+/**
+ * A top-level menu in a MenuBar: label + list of items.
+ * Keyboard: Alt+first-letter opens the menu.  Arrow keys navigate.
+ */
+export interface MenuBarItem {
+  label: string;
+  items: MenuItem[];
+}
+
+/**
+ * Horizontal menu bar widget.  Embed in your app's render()/onKey()/onMouse()
+ * calls and offset content by `menuBar.height` pixels.
+ *
+ * @example
+ *   var mb = os.wm.createMenuBar([
+ *     { label: 'File', items: [{ label: 'Open', action: openFile }, { label: 'Quit', action: quit }] },
+ *     { label: 'View', items: [{ label: 'Zoom In', action: zoomIn }] },
+ *   ]);
+ *   function render(canvas) {
+ *     mb.render(canvas, win.width);          // draw bar at y=0
+ *     canvas.setClipRect(0, mb.height, win.width, win.height - mb.height);
+ *     // ... draw content ...
+ *     canvas.clearClipRect();
+ *     return mb.dirty || contentDirty;
+ *   }
+ *   function onKey(ev) { if (mb.onKey(ev)) return; /* ... *\/ }
+ *   function onMouse(ev) { if (mb.onMouse(ev, win.width)) return; /* ... *\/ }
+ */
+export class MenuBar {
+  private _menus:   MenuBarItem[];
+  private _openIdx: number   = -1;   // -1 = closed
+  /** True when render() should be called (bar or dropdown changed). */
+  dirty: boolean = true;
+
+  static readonly HEIGHT:     number = 20;
+  static readonly ITEM_H:     number = 16;
+  static readonly DROPDOWN_W: number = 150;
+
+  private static readonly C_BAR     = 0xFF1E1E2E;
+  private static readonly C_BAR_HL  = 0xFF2A2A4A;
+  private static readonly C_BG      = 0xFF2A2A3A;
+  private static readonly C_BORDER  = 0xFF5599CC;
+  private static readonly C_TEXT    = 0xFFD0D0D0;
+  private static readonly C_DIM     = 0xFF667788;
+  private static readonly C_SEP     = 0xFF445566;
+
+  get height(): number { return MenuBar.HEIGHT; }
+  get isOpen(): boolean { return this._openIdx >= 0; }
+
+  constructor(menus: MenuBarItem[]) {
+    this._menus = menus;
+  }
+
+  /** Close the open dropdown without invoking any action. */
+  close(): void {
+    if (this._openIdx >= 0) { this._openIdx = -1; this.dirty = true; }
+  }
+
+  /** Handle a keyboard event. Returns true if the event was consumed. */
+  onKey(ev: KeyEvent): boolean {
+    if (ev.type !== 'down') return false;
+    // Alt + letter: open matching menu
+    if ((ev as any).alt && ev.ch && !(ev as any).ctrl) {
+      var ch = ev.ch.toLowerCase();
+      for (var i = 0; i < this._menus.length; i++) {
+        if (this._menus[i].label[0] && this._menus[i].label[0].toLowerCase() === ch) {
+          this._openIdx = (this._openIdx === i) ? -1 : i;
+          this.dirty = true;
+          return true;
+        }
+      }
+    }
+    if (this._openIdx < 0) return false;
+    var k = ev.key || '';
+    if (k === 'ArrowLeft'  || k === 'Left')  { this._openIdx = (this._openIdx - 1 + this._menus.length) % this._menus.length; this.dirty = true; return true; }
+    if (k === 'ArrowRight' || k === 'Right') { this._openIdx = (this._openIdx + 1) % this._menus.length;                        this.dirty = true; return true; }
+    if (k === 'Escape')                       { this.close(); return true; }
+    return false;
+  }
+
+  /** Handle a mouse event (coordinates relative to window top-left). Returns true if consumed. */
+  onMouse(ev: MouseEvent, winW: number): boolean {
+    if (ev.type !== 'down') return false;
+    var ex = ev.x, ey = ev.y;
+    // Click on bar?
+    if (ey >= 0 && ey < MenuBar.HEIGHT) {
+      var cx = 4;
+      for (var i = 0; i < this._menus.length; i++) {
+        var lw = this._menus[i].label.length * 8 + 12;
+        if (ex >= cx && ex < cx + lw) {
+          this._openIdx = (this._openIdx === i) ? -1 : i;
+          this.dirty = true;
+          return true;
+        }
+        cx += lw;
+      }
+      if (this._openIdx >= 0) { this.close(); }
+      return true;
+    }
+    // Click on open dropdown?
+    if (this._openIdx >= 0) {
+      var hit = this._hitItem(ex, ey);
+      this._openIdx = -1;
+      this.dirty = true;
+      if (hit && !hit.disabled && !hit.separator && hit.action) hit.action();
+      return true;
+    }
+    return false;
+  }
+
+  private _menuX(idx: number): number {
+    var cx = 4;
+    for (var i = 0; i < idx; i++) cx += this._menus[i].label.length * 8 + 12;
+    return cx;
+  }
+
+  private _hitItem(mx: number, my: number): MenuItem | null {
+    if (this._openIdx < 0) return null;
+    var menu = this._menus[this._openIdx];
+    var dx   = this._menuX(this._openIdx);
+    var dy   = MenuBar.HEIGHT;
+    var W    = MenuBar.DROPDOWN_W;
+    var iy   = dy + 4;
+    for (var i = 0; i < menu.items.length; i++) {
+      var item = menu.items[i];
+      var ih   = item.separator ? 5 : MenuBar.ITEM_H;
+      if (!item.separator && mx >= dx && mx < dx + W && my >= iy && my < iy + ih) return item;
+      iy += ih;
+    }
+    return null;
+  }
+
+  /**
+   * Draw the menu bar (and any open dropdown) onto `canvas`.
+   * Call this at y=0 before drawing your app content.
+   * @param winW  Window width (from `win.width`).
+   */
+  render(canvas: Canvas, winW: number): void {
+    var C = MenuBar;
+    // Bar background
+    canvas.fillRect(0, 0, winW, C.HEIGHT, C.C_BAR);
+    // Labels
+    var cx = 4;
+    for (var i = 0; i < this._menus.length; i++) {
+      var label = this._menus[i].label;
+      var lw    = label.length * 8 + 12;
+      if (i === this._openIdx) canvas.fillRect(cx - 2, 1, lw + 2, C.HEIGHT - 2, C.C_BAR_HL);
+      canvas.drawText(cx + 4, 5, label, i === this._openIdx ? Colors.WHITE : C.C_TEXT);
+      cx += lw;
+    }
+    // Bottom separator
+    canvas.fillRect(0, C.HEIGHT - 1, winW, 1, C.C_BORDER);
+    // Draw open dropdown
+    if (this._openIdx >= 0) {
+      var menu  = this._menus[this._openIdx];
+      var dx    = this._menuX(this._openIdx);
+      var totalH = 8;
+      for (var k = 0; k < menu.items.length; k++) totalH += menu.items[k].separator ? 5 : C.ITEM_H;
+      var W = C.DROPDOWN_W;
+      canvas.fillRect(dx, C.HEIGHT, W, totalH, C.C_BG);
+      canvas.drawRect(dx, C.HEIGHT, W, totalH, C.C_BORDER);
+      var iy = C.HEIGHT + 4;
+      for (var j = 0; j < menu.items.length; j++) {
+        var item = menu.items[j];
+        if (item.separator) { canvas.fillRect(dx + 4, iy + 2, W - 8, 1, C.C_SEP); iy += 5; continue; }
+        canvas.drawText(dx + 8, iy + 3, item.label, item.disabled ? C.C_DIM : Colors.WHITE);
+        iy += C.ITEM_H;
+      }
+    }
+    this.dirty = false;
+  }
+}
 
 const sdk = {
 
@@ -317,7 +1705,7 @@ const sdk = {
     /** List directory entry names. Returns [] for missing/non-dir. */
     list(path: string): string[] {
       try {
-        var entries = fs.list(path);
+        var entries = fs.ls(path);
         if (!entries) return [];
         return entries.map(function(e: any) { return e.name as string; });
       } catch (_e) { return []; }
@@ -329,7 +1717,7 @@ const sdk = {
     /** Returns true if path exists as a file or directory. */
     exists(path: string): boolean {
       if (fs.readFile(path) !== null) return true;
-      try { return fs.list(path) != null; } catch (_e) { return false; }
+      try { return fs.ls(path) != null; } catch (_e) { return false; }
     },
     /** Current working directory. */
     cwd(): string {
@@ -339,105 +1727,376 @@ const sdk = {
     cd(path: string): boolean {
       return fs.cd(path);
     },
-    /** Remove a file or directory. */
+    /** Remove a file or empty directory. */
     rm(path: string): boolean {
       return fs.rm(path);
     },
+    /** Recursively remove a path (file or non-empty directory). */
+    rmrf(path: string): boolean {
+      return _fsRmrf(path);
+    },
+    /** Append data to a file (creates it if absent). */
+    append(path: string, data: string): boolean {
+      return fs.appendFile(path, data);
+    },
+    /** Rename / move a file or directory. */
+    rename(from: string, to: string): boolean {
+      return fs.mv(from, to);
+    },
+    /** Copy a file (not recursive). */
+    copy(src: string, dst: string): boolean {
+      return fs.cp(src, dst);
+    },
+    /** Stat a path.  Returns null if not found. */
+    stat(path: string): { size: number; isDir: boolean; created: number; mtime: number; permissions: string } | null {
+      var s = fs.stat(path);
+      if (!s) return null;
+      return { size: s.size, isDir: (s.type as any) === 'directory', created: s.created, mtime: s.modified, permissions: s.permissions };
+    },
+    /** Returns true if path exists and is a regular file. */
+    isFile(path: string): boolean {
+      return fs.isFile(path);
+    },
+    /** Returns true if path exists and is a directory. */
+    isDir(path: string): boolean {
+      return fs.isDirectory(path);
+    },
+    /** Glob-style recursive search using * as wildcard. */
+    find(basePath: string, pattern: string): string[] {
+      return fs.find(basePath, pattern);
+    },
+    /** Resolve a path against the current working directory. */
+    resolve(path: string): string {
+      return fs.resolvePath(path);
+    },
+    /** Read a file as an array of lines.  Returns null if file not found. */
+    readLines(path: string): string[] | null {
+      var t = fs.readFile(path);
+      return t !== null ? t.split('\n') : null;
+    },
+    /** Write an array of lines joined with '\n'. */
+    writeLines(path: string, lines: string[]): boolean {
+      return fs.writeFile(path, lines.join('\n'));
+    },
+    /** Read and JSON.parse a file.  Returns null on missing file or parse error. */
+    readJSON<T = unknown>(path: string): T | null {
+      try {
+        var t = fs.readFile(path);
+        return t ? JSON.parse(t) as T : null;
+      } catch (_e) { return null; }
+    },
+    /** JSON.stringify and write a file. Pass pretty=true for 2-space indentation. */
+    writeJSON(path: string, value: unknown, pretty?: boolean): boolean {
+      return fs.writeFile(path, pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value));
+    },
+
+    // ── Symlinks (item 176) ─────────────────────────────────────────────────
+    /** Create a symbolic link at `linkPath` pointing to `target`. */
+    symlink(target: string, linkPath: string): boolean {
+      return fs.symlink(target, linkPath);
+    },
+    /** Read the target of a symlink. Returns null if not a symlink. */
+    readlink(path: string): string | null {
+      return fs.readlink(path);
+    },
+
+    // ── File Descriptor API (items 173-174) ─────────────────────────────────
+    /**
+     * Open a file and return a file descriptor (≥ 3).
+     * flags: O_RDONLY=0, O_WRONLY=1, O_RDWR=2, O_APPEND=0x400,
+     *        O_CREAT=0x40, O_TRUNC=0x200, O_CLOEXEC=0x80000, O_NONBLOCK=0x800.
+     */
+    open(path: string, flags?: number): number {
+      return fs.open(path, flags);
+    },
+    /** Close a file descriptor. */
+    close(fd: number): boolean {
+      return fs.close(fd);
+    },
+    /** Read up to `count` characters from fd. Returns null on error. */
+    readFd(fd: number, count: number): string | null {
+      return fs.readFd(fd, count);
+    },
+    /** Write data to fd at current position. */
+    writeFd(fd: number, data: string): boolean {
+      return fs.writeFd(fd, data);
+    },
+    /** Seek within fd. whence: 'set' | 'cur' | 'end'. Returns new position. */
+    seek(fd: number, offset: number, whence?: 'set' | 'cur' | 'end'): number {
+      return fs.seek(fd, offset, whence);
+    },
+    /** Duplicate a file descriptor. Returns new fd or -1. */
+    dup(fd: number): number {
+      return fs.dup(fd);
+    },
+    /** Duplicate fd to a specific target fd (dup2 semantic). */
+    dup2(fd: number, newFd: number): number {
+      return fs.dup2(fd, newFd);
+    },
+    /**
+     * fcntl operations (item 174).
+     * cmd: 'getfl' | 'setfl' | 'getfd' | 'setfd' | 'dupfd'
+     */
+    fcntl(fd: number, cmd: 'getfl' | 'setfl' | 'getfd' | 'setfd' | 'dupfd', arg?: number): number {
+      return fs.fcntl(fd, cmd, arg);
+    },
+
+    /**
+     * Persistent FAT32/FAT16 disk storage.
+     * Only available when a block device is present.
+     * Check os.fs.disk.available() before calling other disk methods.
+     * In-memory VFS and disk are separate — use os.fs.disk for data
+     * that must survive a reboot.
+     */
+    disk: _diskStorage,
+
+    /**
+     * Watch a path (or prefix) for changes.
+     * Returns an unsubscribe function.
+     *
+     * Example:
+     *   var unsub = os.fs.watch('/home', function(ev, path) {
+     *     os.print(ev + ': ' + path);
+     *   });
+     *   // in onUnmount: unsub();
+     */
+    watch(path: string, callback: (event: 'change'|'delete'|'create', path: string) => void): () => void {
+      _patchFsWatch();
+      var prefix = path.endsWith('/') ? path : path + '/';
+      // Also match exact path
+      var key = path;
+      if (!_fsWatchMap.has(key)) _fsWatchMap.set(key, []);
+      var list = _fsWatchMap.get(key)!;
+      list.push(callback);
+      return function() {
+        var idx = list.indexOf(callback);
+        if (idx >= 0) list.splice(idx, 1);
+      };
+    },
+
+    // ── Backward-compat aliases for existing apps ──────────────────────────
+    /** @deprecated Use os.fs.list() instead. */
+    readdir(path: string): string[] { return sdk.fs.list(path); },
+    /** @deprecated Use os.fs.isDir() instead. */
+    isDirectory(path: string): boolean { return sdk.fs.isDir(path); },
+
+    // item 706/707: VFS mount / umount
+    /**
+     * Mount a VirtualFileSystem provider at a path prefix.
+     * The `vfs` object must implement the VFSMount interface used by the kernel.
+     *
+     * Example:
+     *   os.fs.mount('/proc', procVFS);
+     */
+    mount(mountpoint: string, vfs: any): void {
+      fs.mountVFS(mountpoint, vfs);
+    },
+    /**
+     * Unmount a previously mounted VFS.  Returns true if the mountpoint existed.
+     *
+     * Example:
+     *   os.fs.umount('/proc');
+     */
+    umount(mountpoint: string): boolean {
+      return fs.unmountVFS(mountpoint);
+    },
+    /**
+     * List all active VFS mount points.
+     *
+     * Example:
+     *   os.fs.mounts();  // → ['/proc', '/sys']
+     */
+    mounts(): string[] {
+      return fs.listMounts();
+    },
   },
 
-  // ── Async network fetch ─────────────────────────────────────────────────────
+  /**
+   * File creation mask (item 932).
+   * With no argument, returns the current umask.
+   * With `mask`, sets the new umask and returns the previous value.
+   *
+   * Default mask is 0o022 → files get 0o644, dirs get 0o755.
+   *
+   * @example os.umask()          // → 18  (0o022)
+   * @example os.umask(0o027)     // → 18; now files get 0o640, dirs 0o750
+   */
+  umask(mask?: number): number {
+    return fsUmask(mask);
+  },
+
+  // ── Network ─────────────────────────────────────────────────────────────────
 
   /**
-   * Fetch a URL without blocking the OS.
-   *
-   * The request is driven by the WM coroutine scheduler — one step per frame
-   * (~16 ms).  `callback` is invoked on completion (success or failure).
-   * Returns a coroutine id that can be passed to `os.cancel()` to abort.
+   * Networking — HTTP/HTTPS fetch and IP info.
    *
    * Example:
-   *   var id = os.fetchAsync('https://example.com/', function(resp, err) {
-   *     if (err)  { /* handle error *\/ }
-   *     else      { /* use resp.bodyText *\/ }
+   *   var id = os.net.fetch('https://example.com', function(resp, err) {
+   *     if (err) return;
+   *     os.print(resp.bodyText);
    *   });
+   *   // abort: os.process.cancel(id);
    */
-  fetchAsync(
-    url: string,
-    callback: (resp: FetchResponse | null, error?: string) => void,
-    opts?: FetchOptions,
-  ): number {
-    var o      = opts || {};
-    var parsed = _parseURL(url);
-    if (!parsed) {
-      // Defer callback to next tick so callers can capture the returned id first
-      var deferCoroId = -1;
-      deferCoroId = threadManager.runCoroutine('fetch-err', function () {
-        callback(null, 'Invalid URL: ' + url);
+  net: {
+    /**
+     * Non-blocking HTTP/HTTPS fetch, driven by the WM scheduler (~16 ms/step).
+     * Returns a coroutine id — pass to os.process.cancel() to abort.
+     */
+    fetch(
+      url: string,
+      callback: (resp: FetchResponse | null, error?: string) => void,
+      opts?: FetchOptions,
+    ): number {
+      return _doFetch(url, callback, opts);
+    },
+    /** DHCP-assigned IP address, or null if the network is not up. */
+    getIP(): string | null {
+      try { return (net as any).getLocalIP ? (net as any).getLocalIP() : null; } catch (_e) { return null; }
+    },
+    /** Device MAC address, or null if not available. */
+    getMACAddress(): string | null {
+      try { return (net as any).mac || null; } catch (_e) { return null; }
+    },
+    /** True when a DHCP lease has been obtained. */
+    online(): boolean {
+      try { return !!(net as any).leased || !!(net as any).nicReady; } catch (_e) { return false; }
+    },
+    /**
+     * Open a raw TCP connection.  The callback is called with a RawSocket
+     * when connected (or null on error).  Returns a coroutine id.
+     *
+     * Example:
+     *   var id = os.net.connect('93.184.216.34', 80, function(sock, err) {
+     *     if (!sock) return;
+     *     sock.write('GET / HTTP/1.0\r\nHost: example.com\r\n\r\n');
+     *     os.timer.setInterval(function() {
+     *       var data = sock.read();
+     *       if (data) os.print(data);
+     *     }, 100);
+     *   });
+     */
+    connect(
+      host: string,
+      port: number,
+      callback: (sock: RawSocket | null, error?: string) => void,
+      opts?: { timeoutMs?: number },
+    ): number {
+      var timeoutTicks = (opts && opts.timeoutMs) ? opts.timeoutMs : 5000;  // 1 tick = 1 ms at 1000 Hz PIT
+      var netSock: import('../net/net.js').Socket | null = null;
+      var done   = false;
+      var deadline = kernel.getTicks() + timeoutTicks;
+      var resolvedIP: string | null = dnsResolveCached(host);
+      if (!resolvedIP && /^\d+\.\d+\.\d+\.\d+$/.test(host)) resolvedIP = host;
+
+      // If DNS needed, start async query
+      if (!resolvedIP) {
+        var q = dnsSendQueryAsync(host);
+        threadManager.runCoroutine('rawsock-dns:' + host, function(): 'done'|'pending' {
+          var r = dnsPollReplyAsync(host, q.port, q.id);
+          if (r) { resolvedIP = r; return 'done'; }
+          return 'pending';
+        });
+      }
+
+      var step: () => 'done' | 'pending' = function() {
+        if (done) return 'done';
+        if (kernel.getTicks() > deadline) {
+          done = true;
+          try { callback(null, 'timeout'); } catch (_e) {}
+          return 'done';
+        }
+        if (!resolvedIP) return 'pending';
+
+        if (!netSock) {
+          netSock = net.createSocket('tcp');
+          _netSockBufs.set(netSock.id, { sock: netSock, buf: [] });
+          net.connectAsync(netSock, resolvedIP!, port);
+          return 'pending';
+        }
+
+        var state = net.connectPoll(netSock);
+        if (state === 'pending') return 'pending';
+        if (state !== 'connected') {
+          done = true;
+          _netSockBufs.delete(netSock.id);
+          try { callback(null, 'connection refused'); } catch (_e) {}
+          return 'done';
+        }
+
+        done = true;
+        var entry = _netSockBufs.get(netSock.id)!;
+        var nSock = netSock; // capture
+        var _closed = false;
+        var sock: RawSocket = {
+          get id()        { return nSock.id; },
+          get connected() { return !_closed; },
+          write(data: string | number[]): void {
+            if (_closed) return;
+            var bytes: number[];
+            if (typeof data === 'string') {
+              bytes = [];
+              for (var _i = 0; _i < data.length; _i++) bytes.push(data.charCodeAt(_i) & 0xFF);
+            } else { bytes = data; }
+            var _sendStr = '';
+            for (var _si = 0; _si < bytes.length; _si++) _sendStr += String.fromCharCode(bytes[_si]);
+            net.send(nSock, _sendStr);
+          },
+          read(maxBytes?: number): string {
+            var bytes = sock.readBytes(maxBytes);
+            var s = '';
+            for (var _ri = 0; _ri < bytes.length; _ri++) s += String.fromCharCode(bytes[_ri]);
+            return s;
+          },
+          readBytes(maxBytes?: number): number[] {
+            if (!_closed) {
+              var fresh = net.recvBytesNB(nSock);
+              if (fresh && fresh.length > 0) {
+                for (var _bi = 0; _bi < fresh.length; _bi++) entry.buf.push(fresh[_bi]);
+              }
+            }
+            if (maxBytes !== undefined && maxBytes < entry.buf.length) {
+              return entry.buf.splice(0, maxBytes);
+            }
+            var out = entry.buf.slice();
+            entry.buf.length = 0;
+            return out;
+          },
+          available(): number {
+            if (!_closed) {
+              var fresh2 = net.recvBytesNB(nSock);
+              if (fresh2 && fresh2.length > 0) {
+                for (var _bi2 = 0; _bi2 < fresh2.length; _bi2++) entry.buf.push(fresh2[_bi2]);
+              }
+            }
+            return entry.buf.length;
+          },
+          close(): void {
+            if (_closed) return;
+            _closed = true;
+            net.close(nSock);
+            _netSockBufs.delete(nSock.id);
+          },
+        };
+        try { callback(sock); } catch (_e) {}
         return 'done';
-      });
-      return deferCoroId;
-    }
+      };
 
-    var f: InFlightFetch = {
-      coroId:       -1,
-      stage:        'dns',
-      originalURL:  url,
-      currentURL:   url,
-      parsed,
-      fetchIP:      '',
-      sock:         null,
-      tls:          null,
-      chunks:       [],
-      deadline:     0,
-      dnsPort:      0,
-      dnsId:        0,
-      redirects:    0,
-      maxRedirects: o.maxRedirects !== undefined ? o.maxRedirects : 5,
-      opts:         o,
-      callback,
-    };
-
-    // If the IP is already cached, skip DNS
-    var cachedIP = dnsResolveCached(parsed.host);
-    if (cachedIP) {
-      f.fetchIP  = cachedIP;
-      f.stage    = 'connecting';
-      f.deadline = kernel.getTicks() + 200;
-      f.sock     = net.createSocket('tcp');
-      net.connectAsync(f.sock, cachedIP, parsed.port);
-    } else {
-      f.stage    = 'dns';
-      f.deadline = kernel.getTicks() + 300;
-      var q      = dnsSendQueryAsync(parsed.host);
-      f.dnsPort  = q.port;
-      f.dnsId    = q.id;
-    }
-
-    var step = _buildFetchCoroutine(f);
-    var id   = threadManager.runCoroutine('fetch:' + parsed.host, step);
-    f.coroId = id;
-    return id;
+      return threadManager.runCoroutine('rawsock:' + host + ':' + port, step);
+    },
   },
 
-  // ── Coroutine control ───────────────────────────────────────────────────────
+  // ── Output ──────────────────────────────────────────────────────────────────
 
   /**
-   * Register a custom cooperative coroutine.
-   * `step` is called once per WM frame (~16 ms).  Return 'done' to finish.
-   * Returns a coroutine id for use with `os.cancel()`.
+   * Write a line to the active output.
+   * Text mode: terminal.  WM mode: system debug console.
+   * Prefer this over bare print() for portability.
    */
-  spawn(name: string, step: CoroutineStep): number {
-    return threadManager.runCoroutine(name, step);
+  print(text: string): void {
+    _sdkPrint(text);
   },
 
-  /**
-   * Cancel a running coroutine (fetch or custom).
-   * The coroutine's step function will not be called again.
-   */
-  cancel(coroId: number): void {
-    threadManager.cancelCoroutine(coroId);
-  },
-
-  // ── System information ──────────────────────────────────────────────────────
+  // ── System information ───────────────────────────────────────────────────────
 
   system: {
     /** Milliseconds since OS boot. */
@@ -448,7 +2107,7 @@ const sdk = {
     ticks(): number {
       return kernel.getTicks();
     },
-    /** Current process ID (from process scheduler). */
+    /** Current process ID. */
     pid(): number {
       return scheduler.getpid();
     },
@@ -465,26 +2124,221 @@ const sdk = {
     uname(): { sysname: string; release: string; machine: string } {
       return { sysname: 'JSOS', release: '1.0.0', machine: 'i686' };
     },
+    /** Screen width in pixels (0 in text mode). Use os.wm.screenWidth for WM-specific code. */
+    screenWidth():  number { return wm ? wm.screenWidth  : 0; },
+    /** Screen height in pixels (0 in text mode). Use os.wm.screenHeight for WM-specific code. */
+    screenHeight(): number { return wm ? wm.screenHeight : 0; },
+    /**
+     * JIT compiler statistics — compiled function counts, pool usage, GC resets.
+     *
+     * Example:
+     *   var s = os.system.jitStats();
+     *   print('JIT: ' + s.compiled + ' compiled, ' + s.bailed + ' bailed, ' +
+     *         s.poolUsedKB + '/' + s.poolCapKB + ' KB, ' + s.resets + ' GC resets');
+     */
+    jitStats(): {
+      compiled:     number;   // functions successfully JIT-compiled
+      bailed:       number;   // functions that failed or bailed out
+      deopts:       number;   // deoptimisation events
+      resets:       number;   // full pool GC reset count
+      poolUsedKB:   number;   // bytes used in 8 MB main JIT pool
+      poolCapKB:    number;   // total capacity (8192 KB)
+      osNative:     boolean;  // JIT OS kernels (checksum, mem ops) compiled
+      stringNative: boolean;  // JIT string ops (strcmp, memchr, hash) compiled
+    } {
+      var jh = _jitStatsProvider;
+      var os = _jitOSStatsProvider ? _jitOSStatsProvider() : null;
+      return {
+        compiled:     jh?.compiledCount  ?? 0,
+        bailed:       jh?.bailedCount    ?? 0,
+        deopts:       jh?.deoptCount     ?? 0,
+        resets:       jh?.resetCount     ?? 0,
+        poolUsedKB:   ((typeof kernel !== 'undefined' ? kernel.jitUsedBytes() : 0) / 1024) | 0,
+        poolCapKB:    8192,
+        osNative:     os?.checksumNative  ?? false,
+        stringNative: os?.stringNative    ?? false,
+      };
+    },
+
+    /**
+     * Live GC heap statistics.
+     *
+     * @example
+     *   var g = os.system.gcStats();
+     *   print('Heap: ' + (g.totalBytes/1024|0) + ' KB, minorGC=' + g.minorGCCount + ' majorGC=' + g.majorGCCount);
+     */
+    gcStats(): HeapStats {
+      return globalGC.stats();
+    },
   },
 
-  // ── Multi-process (isolated QuickJS runtimes) ─────────────────────────────
+  // ── Browser profiler API (item 4.4) ──────────────────────────────────────────
+
+  browser: {
+    /** Enable per-subtree layout timing. */
+    enableLayout():  string { layoutProfiler.enabled = true;  return 'Layout profiler ON'; },
+    /** Disable per-subtree layout timing. */
+    disableLayout(): string { layoutProfiler.enabled = false; return 'Layout profiler OFF'; },
+    /** Clear accumulated layout timing data. */
+    resetLayout():   string { layoutProfiler.reset(); return 'Layout stats cleared'; },
+    /**
+     * Return hot layout subtrees sorted by total time (ms).
+     *
+     * @example
+     *   os.browser.enableLayout();
+     *   // ... browse a page ...
+     *   os.browser.layoutStats();
+     *   // → [{ id: 'p', totalMs: 42, count: 380, avgMs: 0.11 }, ...]
+     */
+    layoutStats(): Array<{ id: string; totalMs: number; count: number; avgMs: number }> {
+      return layoutProfiler.report();
+    },
+  },
+
+  // ── Perf tools: ASCII flame graph (item 4.5) ─────────────────────────────────
+
+  perf: {
+    /**
+     * Render an ASCII flame graph (horizontal bar chart) from current layout profiler
+     * data, combined with a JIT stats summary footer.
+     *
+     * @example
+     *   os.browser.enableLayout();    // start collecting
+     *   // ... navigate a page ...
+     *   print(os.perf.flame());       // render to terminal
+     *
+     * @param opts.width    Column width (default 80)
+     * @param opts.maxRows  Max bars to show (default 20)
+     */
+    flame(opts?: { width?: number; maxRows?: number }): string {
+      var cols    = (opts && opts.width)   || 80;
+      var maxRows = (opts && opts.maxRows) || 20;
+      var rows    = layoutProfiler.report();
+      var FILL    = '\u2588';
+      var EMPTY   = '\u2591';
+      var SEP     = '\u2500'.repeat(cols);
+      var out: string[] = [];
+
+      out.push('Layout Flame Graph');
+      out.push(SEP);
+
+      if (rows.length === 0) {
+        out.push('(no data \u2014 call os.browser.enableLayout() first, then navigate a page)');
+      } else {
+        var maxMs  = rows[0].totalMs || 1;
+        var labelW = 10;
+        var statsW = 14;   // '  999.9ms x999'
+        var barW   = Math.max(10, cols - labelW - statsW - 3); // ' |' + '|' = 3
+        var limit  = Math.min(rows.length, maxRows);
+        for (var i = 0; i < limit; i++) {
+          var r    = rows[i];
+          var fill = Math.round((r.totalMs / maxMs) * barW);
+          var bar  = FILL.repeat(fill) + EMPTY.repeat(barW - fill);
+          var lbl  = (r.id.length > labelW ? r.id.slice(0, labelW - 1) + '\u2026' : r.id).padEnd(labelW);
+          var ms   = r.totalMs.toFixed(1);
+          var cnt  = 'x' + r.count;
+          var stat = (ms + 'ms').padStart(8) + (' ' + cnt).padStart(6);
+          out.push(lbl + stat + ' |' + bar + '|');
+        }
+      }
+
+      out.push(SEP);
+
+      // Footer: live JIT stats summary
+      try {
+        var jitS = (globalThis as any).os?.system?.jitStats?.();
+        if (jitS) {
+          out.push('JIT: ' + jitS.compiled + ' compiled | pool ' + jitS.poolUsedKB +
+                   '/' + jitS.poolCapKB + ' KB | ' + jitS.deopts + ' deopts | ' +
+                   jitS.bailed + ' bailed');
+        }
+      } catch (_) {}
+
+      return out.join('\n');
+    },
+  },
+
+  // ── Machine configuration (items 920, 924) ────────────────────────────────────
+
+  config: {
+    /**
+     * Read a configuration value.
+     * @param key  Key name or dot-path (e.g. 'network.dns.primary').
+     * @param def  Default value returned when key is absent.
+     */
+    get<T = string>(key: string, def?: T): T {
+      return config.get(key, def as any) as T;
+    },
+    /**
+     * Write a configuration value and persist to /etc/config.json.
+     */
+    set(key: string, value: string | number | boolean | string[] | null): void {
+      config.set(key, value);
+    },
+    /** Return a shallow copy of all configuration entries. */
+    getAll(): Record<string, unknown> {
+      return config.getAll();
+    },
+    /** Remove a key from configuration. */
+    delete(key: string): void {
+      config.delete(key);
+    },
+    /** Force reload from /etc/config.json. */
+    reload(): void {
+      config.reload();
+    },
+    /** Shorthand: machine hostname. */
+    hostname(): string { return getHostname(); },
+    /** Shorthand: DNS server list. */
+    dnsServers(): string[] { return getDnsServers(); },
+    /** Shorthand: timezone string (IANA). */
+    timezone(): string { return getTimezone(); },
+  },
+
+  // ── Locale (items 925, 926) ───────────────────────────────────────────────────
+  locale: {
+    /** Get the current process locale string (e.g. 'en-US'). */
+    get(): string { return locale.get(); },
+    /** Set the locale for this process. */
+    set(loc: string): void { locale.set(loc); },
+    /**
+     * Format a Date according to the current locale.
+     * @param date  Date to format (defaults to now)
+     * @param style 'date' | 'time' | 'datetime' (default)
+     */
+    format(date?: Date, style?: 'date' | 'time' | 'datetime'): string {
+      return locale.format(date, style);
+    },
+    /**
+     * Format a number with group separators and decimal point for the current locale.
+     * @example os.locale.formatNumber(1234567.89)
+     * @example os.locale.formatNumber(42, { style: 'currency' })
+     */
+    formatNumber(n: number, opts?: { style?: 'decimal' | 'currency' | 'percent'; minimumFractionDigits?: number; maximumFractionDigits?: number; currency?: string }): string {
+      return locale.formatNumber(n, opts);
+    },
+    /**
+     * Locale-aware string comparison. Returns -1, 0, or 1.
+     * @example ['ä','z','a'].sort(os.locale.collate) // ['a','ä','z']
+     */
+    collate(a: string, b: string): -1 | 0 | 1 { return locale.collate(a, b); },
+    /** Produce a stable sort key for locale-aware sorting. */
+    sortKey(s: string): string { return locale.sortKey(s); },
+  },
+
+  // ── Multi-process ────────────────────────────────────────────────────────────
 
   /**
-   * Spawn and manage isolated QuickJS child runtimes.
-   * Each process has its own heap, GC, and global scope.
-   * The WM automatically ticks all live processes every frame (~16 ms).
-   * Communicate via send/recv and kernel.postMessage/pollMessage inside the child.
+   * Process management — spawn child runtimes, signal, cancel coroutines.
    *
    * Example:
-   *   var p = os.process.spawn(`
-   *     var n = 0;
-   *     function tick() { kernel.postMessage(String(++n)); }
-   *   `, 'counter');
-   *   p.eval('tick()');
-   *   p.recv(); // → 1
+   *   var p = os.process.spawn('function step() { kernel.postMessage(String(++n)); }', 'worker');
+   *   p.eval('var n=0');
+   *   p.eval('step()');
+   *   p.recv(); // → '1'
    */
   process: {
-    /** Spawn a new isolated QuickJS runtime.  See JSProcess docs for full API. */
+    /** Spawn a new isolated QuickJS runtime. */
     spawn(code: string, name?: string): JSProcess {
       return JSProcess.spawn(code, name);
     },
@@ -492,113 +2346,308 @@ const sdk = {
     list(): Array<{ id: number; inboxCount: number; outboxCount: number }> {
       return listProcesses();
     },
-    /**
-     * All OS-level processes known to the scheduler (idle, kernel, init,
-     * and any forked children).  Equivalent to `ps aux`.
-     */
+    /** All OS-level processes known to the scheduler (like `ps aux`). */
     all(): ProcessContext[] {
       return scheduler.getLiveProcesses();
     },
-    /**
-     * Send a signal to a process by PID.
-     * Fatal signals (SIGKILL, SIGTERM, SIGINT, …) terminate the process.
-     * Ignored by default: SIGCHLD, SIGCONT.
-     *
-     * Example:
-     *   os.process.kill(5, os.process.SIG.SIGTERM); // graceful
-     *   os.process.kill(5, os.process.SIG.SIGKILL);  // hard kill
-     */
+    /** Send a POSIX signal to a process.  Example: os.process.kill(5, os.process.SIG.SIGTERM). */
     kill(pid: number, sig: number): boolean {
       return processManager.kill(pid, sig);
     },
-    /** POSIX signal numbers (e.g. os.process.SIG.SIGTERM). */
+    /** POSIX signal number constants. */
     SIG,
-    /** Change the scheduling algorithm for the process scheduler. */
-    setAlgorithm(alg: SchedulingAlgorithm): void {
-      scheduler.setAlgorithm(alg);
+    /**
+     * Cancel a running coroutine or in-flight os.net.fetch by id.
+     * Safe to call even if the coroutine has already finished.
+     */
+    cancel(coroId: number): void {
+      threadManager.cancelCoroutine(coroId);
     },
-    /** Get the current scheduling algorithm. */
-    getAlgorithm(): SchedulingAlgorithm {
-      return scheduler.getAlgorithm();
+    /**
+     * Register a named cooperative coroutine.
+     * step() is called once per WM frame (~16 ms).  Return 'done' to stop.
+     * Returns an id for os.process.cancel().
+     */
+    coroutine(name: string, step: () => 'done' | 'pending'): number {
+      return threadManager.runCoroutine(name, step);
+    },
+    /**
+     * Zero-copy shared memory between parent and a child JSProcess.
+     * Eliminates JSON serialisation for large data transfers.
+     */
+    sharedBuffer: {
+      /** Allocate bytes of shared memory. Returns a buffer id. */
+      create(bytes: number): number {
+        return (kernel as any).sharedBufferCreate ? (kernel as any).sharedBufferCreate(bytes) : -1;
+      },
+      /** Map a shared buffer into the current JS runtime by id. */
+      open(id: number): ArrayBuffer | null {
+        return (kernel as any).sharedBufferOpen ? (kernel as any).sharedBufferOpen(id) : null;
+      },
+    },
+
+    /** Return the ProcessContext for the current process, or null. */
+    current(): ProcessContext | null {
+      var pid = scheduler.getpid();
+      var live = scheduler.getLiveProcesses();
+      for (var _pi = 0; _pi < live.length; _pi++) {
+        if (live[_pi].pid === pid) return live[_pi];
+      }
+      return null;
+    },
+
+    /**
+     * Wait for a process to finish, then call callback with its exit code.
+     * Returns a coroutine id (cancel with os.process.cancel()).
+     *
+     * Example:
+     *   os.process.wait(childPid, function(code) { print('exit ' + code); });
+     */
+    wait(pid: number, callback: (exitCode: number) => void): number {
+      return threadManager.runCoroutine('wait:' + pid, function(): 'done' | 'pending' {
+        var live = scheduler.getLiveProcesses();
+        for (var _wi = 0; _wi < live.length; _wi++) {
+          if (live[_wi].pid === pid) return 'pending';
+        }
+        try { callback(0); } catch (_e) {}
+        return 'done';
+      });
+    },
+
+    /** Rename the current process (visible in os.process.all()). */
+    setName(name: string): void {
+      if ((scheduler as any).setProcessName) (scheduler as any).setProcessName(scheduler.getpid(), name);
+    },
+
+    /**
+     * Set the scheduling priority of the current process.
+     * Higher numbers = higher priority (range 0–19, like UNIX nice inverted).
+     * No-op on kernels that don't support priorities.
+     */
+    setPriority(priority: number): void {
+      if ((scheduler as any).setPriority) (scheduler as any).setPriority(scheduler.getpid(), priority);
+    },
+
+    /**
+     * Handle a POSIX signal by number for the current process.
+     * Returns an unsubscribe function.
+     *
+     * Example:
+     *   var unsub = os.process.onSignal(os.process.SIG.SIGTERM, cleanup);
+     *   // Later: unsub();
+     */
+    onSignal(sig: number, handler: () => void): () => void {
+      var pid = scheduler.getpid();
+      ipc.signals.handle(pid, sig, handler);
+      return function() { ipc.signals.ignore(pid, sig); };
     },
   },
 
-  // ── IPC (pipes, signals, message queues between JS coroutines) ────────────
+  // ── Process Supervisor ───────────────────────────────────────────────────────
 
   /**
-   * Inter-process communication primitives.
-   * Provides pipes, POSIX signals, and named message queues that work
-   * across scheduler contexts and coroutines.
+   * Process supervisor — spawn and supervise isolated child JS runtimes with
+   * heartbeat, CPU/memory budgets, crash detection, log capture, and auto-restart.
    *
    * Example:
-   *   var pipe = os.ipc.createPipe(3, 4);
-   *   pipe.write('hello');
-   *   pipe.read(5); // → 'hello'
+   *   var proc = os.supervisor.spawn(`
+   *     var n = 0;
+   *     function work() { n++; sv.heartbeat(); sv.log('info', 'n=' + n); }
+   *   `, {
+   *     name: 'counter',
+   *     heartbeatIntervalMs: 2000,
+   *     cpuTickBudget: 200,
+   *     restartPolicy: 'on-failure',
+   *     maxRestarts: 3,
+   *   });
+   *   proc.onMessage(function(m) { print(m); });
+   *   proc.onCrash(function(ev) { print('crash:', ev.reason); });
+   *
+   *   // Drive supervision manually each frame, or call os.supervisor.startCoroutine()
+   *   // once to run it automatically in the background.
    */
-  ipc,
+  supervisor: {
+    /**
+     * Spawn a new supervised child process.
+     *
+     * @param code   JS source executed immediately in the child runtime.
+     * @param opts   Supervision options (heartbeat, budgets, restart policy, logs).
+     */
+    spawn(code: string, opts?: import('../process/supervisor.js').SupervisedProcessOptions): import('../process/supervisor.js').SupervisedProcess {
+      return _defaultSupervisor.spawn(code, opts);
+    },
 
-  // ── User accounts and authentication ─────────────────────────────────────
+    /**
+     * Create an independent supervisor instance.
+     * Use this when you need separate supervision domains (e.g. one per app).
+     */
+    create(): ProcessSupervisor {
+      return new ProcessSupervisor();
+    },
+
+    /** Drive all supervised children for one WM frame. */
+    tick(): void {
+      _defaultSupervisor.tick();
+    },
+
+    /**
+     * Register an autonomous per-frame coroutine so tick() is called
+     * automatically.  Returns the coroutine id.
+     */
+    startCoroutine(): number {
+      return _defaultSupervisor.startCoroutine();
+    },
+
+    /** Stop the autonomous coroutine. */
+    stopCoroutine(): void {
+      _defaultSupervisor.stopCoroutine();
+    },
+
+    /** Stats snapshot for all children of the default supervisor. */
+    stats(): import('../process/supervisor.js').SupervisedProcessStats[] {
+      return _defaultSupervisor.allStats();
+    },
+
+    /** All supervised processes in the default supervisor. */
+    children(): import('../process/supervisor.js').SupervisedProcess[] {
+      return _defaultSupervisor.children();
+    },
+
+    /** Kill and release all supervised processes, stop coroutine. */
+    shutdown(): void {
+      _defaultSupervisor.shutdown();
+    },
+  },
+
+  // ── IPC ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Inter-process communication: pipes, signals, typed message queues.
+   *
+   * Example (pipe):
+   *   var [r, w] = os.ipc.pipe();
+   *   w.write('hello');
+   *   r.read(); // → 'hello'
+   *
+   * Example (signals):
+   *   os.ipc.signal.on('SIGTERM', function() { cleanup(); });
+   *
+   * Example (messages):
+   *   os.ipc.message.subscribe();
+   *   os.ipc.message.send(0, 'ping', { ts: os.system.uptime() }); // broadcast
+   *   var msg = os.ipc.message.recv('ping'); // → { type, from, payload }
+   */
+  ipc: {
+    /** Create a pipe.  Both ends of the returned pair are the same buffer. */
+    pipe(): [Pipe, Pipe] { return ipc.pipe(); },
+    /** Create a bidirectional FIFO (single Pipe object for both ends). */
+    fifo(): Pipe { return ipc.fifo(); },
+    /** Look up a pipe by its file descriptor number. */
+    getPipe(fd: number): Pipe | null { return ipc.getPipe(fd); },
+    /** Close one end of a pipe by its file descriptor. */
+    closePipe(fd: number): void { ipc.closePipe(fd); },
+
+    /** Signal handling for the current process. */
+    signal: {
+      /** Register a handler for a named signal on the current process. */
+      on(sigName: string, handler: (sig: number) => void): void {
+        var num = (SIG as any)[sigName];
+        if (num !== undefined) ipc.signals.handle(scheduler.getpid(), num, handler);
+      },
+      /** Remove a registered signal handler from the current process. */
+      off(sigName: string): void {
+        var num = (SIG as any)[sigName];
+        if (num !== undefined) ipc.signals.ignore(scheduler.getpid(), num);
+      },
+      /** Send a named signal to another process by PID. */
+      send(pid: number, sigName: string): void {
+        var num = (SIG as any)[sigName];
+        if (num !== undefined) ipc.signals.send(pid, num);
+      },
+      /** Dequeue all pending (unhandled) signals for the current process. */
+      poll(): number[] {
+        return ipc.signals.poll(scheduler.getpid());
+      },
+    },
+
+    /** Typed message passing between processes. */
+    message: {
+      /** Send a typed message to a process (toPid=0 = broadcast). */
+      send(toPid: number, type: string, payload: unknown): void {
+        ipc.mq.send({ type, from: scheduler.getpid(), to: toPid, payload });
+      },
+      /** Receive the next message for the current process, optionally filtered by type. */
+      recv(type?: string): { type: string; from: number; payload: unknown } | null {
+        var m = ipc.mq.recv(scheduler.getpid(), type);
+        return m ? { type: m.type, from: m.from, payload: m.payload } : null;
+      },
+      /** Count pending messages for the current process. */
+      available(type?: string): number {
+        return ipc.mq.available(scheduler.getpid(), type);
+      },
+      /** Subscribe to broadcast (toPid=0) messages. */
+      subscribe(): void { ipc.mq.subscribe(scheduler.getpid()); },
+      /** Unsubscribe from broadcasts and clear the message queue. */
+      unsubscribe(): void { ipc.mq.unsubscribe(scheduler.getpid()); },
+    },
+
+    /** Send SIGINT (Ctrl+C) to a process. */
+    interrupt(pid: number): void { ipc.interrupt(pid); },
+    /** Send SIGTERM to a process. */
+    terminate(pid: number): void { ipc.terminate(pid); },
+  },
+
+  // ── User accounts ────────────────────────────────────────────────────────────
 
   /**
    * User account management and authentication.
-   * Reads/writes /etc/passwd and /etc/group.
    *
    * Example:
-   *   os.users.login('user', '');  // login as unprivileged user
-   *   os.users.whoami();           // → { uid: 1000, name: 'user', ... }
+   *   os.users.login('user', '');
+   *   os.users.whoami()?.name;   // → 'user'
+   *   os.users.isRoot();         // → false
    */
-  users,
-
-  // ── Disk (FAT32/FAT16 persistent storage) ───────────────────────────────
-
-  /**
-   * Persistent disk storage via FAT32/FAT16.  Only available when QEMU
-   * presents a block device; check `os.disk.available()` first.
-   *
-   * Example:
-   *   if (os.disk.available()) {
-   *     os.disk.write('/notes.txt', 'hello');
-   *     os.disk.read('/notes.txt'); // → 'hello'
-   *   }
-   */
-  disk: {
-    /** Returns true when a FAT disk driver has been mounted. */
-    available(): boolean { return !!(globalThis as any)._diskFS; },
-    /** Read a file from disk.  Returns null if unavailable or not found. */
-    read(path: string): string | null {
-      var d = (globalThis as any)._diskFS; return d ? d.read(path) : null;
+  users: {
+    /** Returns the currently logged-in user. */
+    whoami(): User | null { return users.getCurrentUser(); },
+    /** Log in as user (returns false on bad password). */
+    login(name: string, pw: string): boolean { return users.login(name, pw) !== null; },
+    /** Log out and return to the root session. */
+    logout(): void { users.logout(); },
+    /** Switch user context (root only, or matching credentials). */
+    su(nameOrUid: string | number): boolean { return users.su(nameOrUid); },
+    /** Returns true when current user is root (uid 0). */
+    isRoot(): boolean { return users.isRoot(); },
+    /** List all non-system user accounts. */
+    list(): User[] { return users.listUsers(); },
+    /** List all groups. */
+    listGroups(): Group[] { return users.listGroups(); },
+    /** Look up a user by name or uid. */
+    getUser(nameOrUid: string | number): User | null { return users.getUser(nameOrUid); },
+    /** Look up a group by name or gid. */
+    getGroup(nameOrGid: string | number): Group | null { return users.getGroup(nameOrGid); },
+    /** Get all groups a user belongs to. */
+    getGroupsForUser(name: string): Group[] { return users.getGroupsForUser(name); },
+    /** Add a new user account.  Requires root. Returns null on failure. */
+    addUser(name: string, pw: string, opts?: { displayName?: string; home?: string; shell?: string; uid?: number; gid?: number }): User | null {
+      return users.addUser(name, pw, opts);
     },
-    /** Write (create or overwrite) a file on disk.  Returns false if unavailable. */
-    write(path: string, data: string): boolean {
-      var d = (globalThis as any)._diskFS; return d ? !!d.writeFile(path, data) : false;
-    },
-    /** List directory entries.  Returns [] if unavailable. */
-    list(path?: string): Array<{ name: string; type: 'file' | 'dir'; size: number }> {
-      var d = (globalThis as any)._diskFS; return d ? (d.list(path || '/') ?? []) : [];
-    },
-    /** Create a directory.  Returns false if unavailable. */
-    mkdir(path: string): boolean {
-      var d = (globalThis as any)._diskFS; return d ? !!d.mkdir(path) : false;
-    },
-    /** Check whether a path exists. */
-    exists(path: string): boolean {
-      var d = (globalThis as any)._diskFS; return d ? !!d.exists(path) : false;
-    },
-    /** Remove a file or empty directory. */
-    rm(path: string): boolean {
-      var d = (globalThis as any)._diskFS; return d ? !!d.remove(path) : false;
-    },
+    /** Remove a user account.  Requires root. Cannot remove root. */
+    removeUser(name: string): boolean { return users.removeUser(name); },
+    /** Change a user's password. */
+    passwd(name: string, newPw: string): boolean { return users.passwd(name, newPw); },
+    /** Format user/group identity as a string (like `id`). */
+    idString(user?: User): string { return users.idString(user); },
   },
 
-  // ── Clipboard (WM-backed) ───────────────────────────────────────────────
+  // ── Clipboard ────────────────────────────────────────────────────────────────
 
   /**
-   * System clipboard backed by the WindowManager.
-   * Only meaningful once a WM instance is active (windowed mode).
+   * System clipboard backed by the WM.  No-op in text mode.
    *
    * Example:
-   *   os.clipboard.write('copy me');
-   *   os.clipboard.read(); // → 'copy me'
+   *   os.clipboard.write('hello');
+   *   os.clipboard.read(); // → 'hello'
    */
   clipboard: {
     /** Read the current clipboard text. */
@@ -607,24 +2656,20 @@ const sdk = {
     write(text: string): void { if (wm) wm.setClipboard(text); },
   },
 
-  // ── Window Manager ─────────────────────────────────────────────────────
+  // ── Window Manager ───────────────────────────────────────────────────────────
 
   /**
-   * Window manager API for app code that needs to open child windows,
-   * query the window list, or force a repaint.
-   * All methods are no-ops if the WM has not been initialised (text mode).
+   * Window manager API.  All methods are no-ops when the WM is not running
+   * (text mode).  Check os.wm.available() first if in doubt.
    *
-   * Example (app that opens a dialog):
-   *   os.wm.openWindow({ title: 'Alert', width: 300, height: 120, app: myDialog });
+   * Example:
+   *   var win = os.wm.openWindow({ title: 'Demo', app: myApp, width: 400, height: 300 });
    */
   wm: {
-    /** Returns true when the WM is running (framebuffer / windowed mode). */
+    /** Returns true when the WM is running (framebuffer mode). */
     available(): boolean { return wm !== null; },
 
-    /**
-     * Open a new window.  Returns the WMWindow or null in text mode.
-     * `app` must implement the App interface (onMount, render, onKey, onMouse, …)
-     */
+    /** Open a new window.  Returns the WMWindow or null in text mode. */
     openWindow(opts: {
       title: string;
       app: App;
@@ -637,25 +2682,1556 @@ const sdk = {
       return wm ? wm.createWindow(opts) : null;
     },
 
-    /** Close a window by its id (triggers app.onUnmount). */
+    /** Close a window by id (triggers app.onUnmount). */
     closeWindow(id: number): void { if (wm) wm.closeWindow(id); },
-
     /** Move keyboard focus to a window. */
     focus(id: number): void { if (wm) wm.focusWindow(id); },
-
-    /** Return a snapshot of all open windows. */
+    /** Snapshot of all open windows. */
     getWindows(): WMWindow[] { return wm ? wm.getWindows() : []; },
-
-    /** Return the currently focused window, or null. */
+    /** The currently focused window, or null. */
     getFocused(): WMWindow | null { return wm ? wm.getFocused() : null; },
-
-    /** Signal the compositor that something changed; force a full redraw. */
+    /** Force a full compositor redraw. */
     markDirty(): void { if (wm) wm.markDirty(); },
-
-    /** Screen dimensions (0 × 0 in text mode). */
+    /** Register a proc ID as app-managed (WM skips it in _tickChildProcs). */
+    registerManagedProc(id: number): void { if (wm) wm.registerManagedProc(id); },
+    /** Unregister a managed proc ID. */
+    unregisterManagedProc(id: number): void { if (wm) wm.unregisterManagedProc(id); },
+    /** Screen width in pixels (0 in text mode). */
     screenWidth():  number { return wm ? wm.screenWidth  : 0; },
+    /** Screen height in pixels (0 in text mode). */
     screenHeight(): number { return wm ? wm.screenHeight : 0; },
+
+    /** Update a window's title bar text. */
+    setTitle(id: number, title: string): void { if (wm) wm.setTitle(id, title); },
+    /** Minimize a window to the taskbar. */
+    minimize(id: number): void { if (wm) wm.minimiseWindow(id); },
+    /** Restore a minimized window to its normal state. */
+    restore(id: number): void { if (wm) wm.restoreWindow(id); },
+    /** Maximize / restore a window (toggle). */
+    maximize(id: number): void { if (wm) wm.maximiseWindow(id); },
+    /** Returns 'normal', 'minimized', 'maximized', or null if window not found. */
+    getState(id: number): 'normal' | 'minimized' | 'maximized' | null {
+      if (!wm) return null;
+      var wins = wm.getWindows();
+      for (var _wi = 0; _wi < wins.length; _wi++) {
+        var _w = wins[_wi];
+        if (_w.id === id) return _w.minimised ? 'minimized' : _w.maximised ? 'maximized' : 'normal';
+      }
+      return null;
+    },
+
+    /** Move a window to absolute screen coordinates. */
+    move(id: number, x: number, y: number): void { if (wm) wm.moveWindow(id, x, y); },
+    /** Resize a window (pixel dimensions). */
+    resize(id: number, w: number, h: number): void { if (wm) wm.resizeWindow(id, w, h); },
+    /** Bring a window to the front of the Z-order. */
+    bringToFront(id: number): void { if (wm) wm.bringToFront(id); },
+    /** Show or hide the close button on a window. */
+    setCloseable(id: number, closeable: boolean): void { if (wm) wm.setCloseable(id, closeable); },
+    /** Set per-window opacity (0=transparent … 255=opaque). */
+    setOpacity(id: number, opacity: number): void { if (wm) wm.setWindowOpacity(id, opacity); },
+    /** Change the mouse cursor shape: 'default', 'pointer', 'text', 'crosshair', 'none'. */
+    setCursor(shape: string): void { if (wm) wm.setCursorShape(shape); },
+    /** Height of the WM taskbar in pixels (0 in text mode). */
+    getTaskbarHeight(): number { return wm ? wm.taskbarH : 0; },
+    /**
+     * Open a window as a modal (dims everything behind it).
+     * Only one modal can be active at a time.
+     * Returns the WMWindow or null in text mode.
+     *
+     * Example:
+     *   os.wm.openModal({ title: 'Settings', app: settingsApp, width: 480, height: 360 });
+     */
+    openModal(opts: { title: string; app: App; width: number; height: number; x?: number; y?: number }): WMWindow | null {
+      return wm ? wm.openModal(opts) : null;
+    },
+    /**
+     * Show a context menu at screen coordinates.
+     *
+     * Example:
+     *   os.wm.showContextMenu(x, y, [
+     *     { label: 'Open',   action: () => openFile() },
+     *     { label: 'Delete', action: () => deleteFile(), disabled: isReadOnly },
+     *     { separator: true },
+     *     { label: 'Cancel' },
+     *   ]);
+     */
+    showContextMenu(x: number, y: number, items: MenuItem[]): void { if (wm) wm.showContextMenu(x, y, items); },
+    /** Close the active context menu without invoking any action. */
+    dismissContextMenu(): void { if (wm) wm.dismissContextMenu(); },
+
+    /**
+     * Create a horizontal menu bar widget.
+     * Embed it in your app's render/onKey/onMouse handlers.
+     * Offset your content by `menuBar.height` (20 px).
+     *
+     * @example
+     *   var mb = os.wm.createMenuBar([
+     *     { label: 'File', items: [{ label: 'New', action: newFile }, { label: 'Quit', action: quit }] },
+     *     { label: 'Edit', items: [{ label: 'Copy', action: doCopy }] },
+     *   ]);
+     *   // In app.render():    mb.render(canvas, win.width);
+     *   // In app.onKey():     if (mb.onKey(ev)) return;
+     *   // In app.onMouse():   if (mb.onMouse(ev, win.width)) return;
+     */
+    createMenuBar(menus: MenuBarItem[]): MenuBar { return new MenuBar(menus); },
+
+    /**
+     * Launch a sandboxed child JS process in a new managed window.
+     * The child runtime gets:
+     *   - A BSS-backed render surface (blitted to the window each frame)
+     *   - File I/O via the main runtime's VFS (registerChildFSBridge)
+     *   - Per-process timers (setTimeout / setInterval)
+     *   - An event queue for keyboard / mouse / focus events
+     *   - A window-command channel (setTitle, close, renderReady)
+     *
+     * The child code runs in a completely isolated QuickJS runtime.
+     * Up to 8 child slots (0–7) are available simultaneously.
+     *
+     * Returns the child process slot id (0–7), or -1 if no slot is free.
+     * In text mode (no WM), always returns -1.
+     *
+     * Example:
+     *   var id = os.wm.launchApp({
+     *     name: 'counter',
+     *     title: 'Counter',
+     *     width: 320,
+     *     height: 240,
+     *     code: `
+     *       var n = 0;
+     *       function render() {
+     *         var buf = new Uint32Array(kernel.getRenderBuffer());
+     *         buf.fill(0xFF1E1E2E);
+     *         kernel.windowCommand({ type: 'renderReady' });
+     *       }
+     *       kernel.setInterval(render, 33);
+     *     `,
+     *   });
+     */
+    launchApp(opts: {
+      name: string;
+      title: string;
+      width: number;
+      height: number;
+      code: string;
+      singleInstance?: boolean;
+    }): number {
+      return wm ? wm.launchApp(opts as any) : -1;
+    },
+
+    /**
+     * Modal dialogs.  Callbacks are called when the dialog closes.
+     * In text mode, dialogs fall back to print() with a default response.
+     *
+     * Example:
+     *   os.wm.dialog.confirm('Delete file?', function(ok) { if (ok) doDelete(); });
+     */
+    dialog: {
+      /** Show an informational alert with an OK button. */
+      alert(message: string, opts?: { title?: string }): void {
+        _dlgAlert(message, (opts && opts.title) ? opts.title : 'Alert');
+      },
+      /** Show a confirm dialog.  callback receives true (OK) or false (Cancel). */
+      confirm(message: string, callback: (ok: boolean) => void, opts?: { title?: string; okLabel?: string; cancelLabel?: string }): void {
+        _dlgConfirm(
+          message,
+          (opts && opts.title)       ? opts.title       : 'Confirm',
+          (opts && opts.okLabel)     ? opts.okLabel     : 'OK',
+          (opts && opts.cancelLabel) ? opts.cancelLabel : 'Cancel',
+          callback
+        );
+      },
+      /** Show a text-input prompt.  callback receives the string or null on Cancel. */
+      prompt(question: string, callback: (value: string | null) => void, opts?: { title?: string; defaultValue?: string }): void {
+        _dlgPrompt(
+          question,
+          (opts && opts.title)        ? opts.title        : 'Input',
+          (opts && opts.defaultValue) ? opts.defaultValue : '',
+          callback
+        );
+      },
+      /**
+       * Open a file-picker dialog.  callback receives the chosen path or null.
+       *
+       * Example:
+       *   os.wm.dialog.filePicker(function(path) { if (path) openFile(path); });
+       */
+      filePicker(callback: (path: string | null) => void, opts?: { title?: string; startDir?: string }): void {
+        var startDir = (opts && opts.startDir) ? opts.startDir : '/';
+        var title    = (opts && opts.title)    ? opts.title    : 'Open File';
+        if (!wm) { callback(null); return; }
+        var chosen: string | null = null;
+        var _cbFired = false;
+        var entries: string[] = [];
+        try { entries = sdk.fs.list(startDir); } catch (_e) { entries = []; }
+        var selected = -1;
+        var H = 22;
+        var BG = 0xFF1E1E1E, FG = 0xFFD0D0D0, SEL = 0xFF2060C0;
+        var _win: WMWindow | null = null;
+        var _dirty = true;
+        var dlgApp: App = {
+          name: 'file-picker',
+          onMount(win: WMWindow): void { _win = win; },
+          onUnmount(): void {
+            if (!_cbFired) { _cbFired = true; callback(chosen); }
+          },
+          onKey(_ev: KeyEvent): void {},
+          onMouse(ev: MouseEvent): void {
+            if (ev.type !== 'down' || !_win) return;
+            var row = Math.floor(ev.y / H);
+            if (ev.y >= _win.height - H) {
+              if (ev.x < 50 && selected >= 0) chosen = startDir.replace(/\/$/, '') + '/' + entries[selected];
+              if (!_cbFired) { _cbFired = true; callback(chosen); }
+              wm!.closeWindow(_win.id);
+            } else {
+              selected = (row < entries.length) ? row : -1;
+              _dirty = true;
+            }
+          },
+          render(canvas: import('../ui/canvas.js').Canvas): boolean {
+            if (!_dirty || !_win) return false;
+            _dirty = false;
+            canvas.fillRect(0, 0, _win.width, _win.height, BG);
+            for (var _ei = 0; _ei < entries.length; _ei++) {
+              if (_ei === selected) canvas.fillRect(0, _ei * H, _win.width, H, SEL);
+              canvas.drawText(4, _ei * H + 5, entries[_ei], FG);
+            }
+            canvas.drawText(4,  _win.height - H + 5, 'OK',     FG);
+            canvas.drawText(60, _win.height - H + 5, 'Cancel', FG);
+            return true;
+          },
+        };
+        wm.openModal({ title, app: dlgApp, width: 320, height: 400 });
+      },
+      /**
+       * Open a colour-picker dialog.  callback receives a 0xRRGGBB number or null.
+       *
+       * Example:
+       *   os.wm.dialog.colorPicker(function(color) { if (color !== null) applyColor(color); });
+       */
+      colorPicker(callback: (color: number | null) => void, opts?: { title?: string; initial?: number }): void {
+        var title   = (opts && opts.title)               ? opts.title   : 'Pick Color';
+        var initial = (opts && opts.initial !== undefined) ? opts.initial : 0xFF0000;
+        if (!wm) { callback(null); return; }
+        var sr = (initial >> 16) & 0xFF;
+        var sg = (initial >>  8) & 0xFF;
+        var sb =  initial        & 0xFF;
+        var chosen: number | null = null;
+        var _cbFired = false;
+        var _win: WMWindow | null = null;
+        var _dirty = true;
+        var BG = 0xFF1E1E1E, FG = 0xFFD0D0D0;
+        function clamp(v: number) { return v < 0 ? 0 : v > 255 ? 255 : v; }
+        var dlgApp: App = {
+          name: 'color-picker',
+          onMount(win: WMWindow): void { _win = win; },
+          onUnmount(): void {
+            if (!_cbFired) { _cbFired = true; callback(chosen); }
+          },
+          onKey(_ev: KeyEvent): void {},
+          onMouse(ev: MouseEvent): void {
+            if (ev.type !== 'down' || !_win) return;
+            if (ev.y >= _win.height - 40) {
+              if (ev.x < 50) { chosen = (sr << 16) | (sg << 8) | sb; }
+              if (!_cbFired) { _cbFired = true; callback(chosen); }
+              wm!.closeWindow(_win.id);
+            } else if (ev.y >= 60 && ev.y < 72) { sr = clamp(Math.round((ev.x / _win.width) * 255)); _dirty = true; }
+            else if (ev.y >= 82 && ev.y < 94)   { sg = clamp(Math.round((ev.x / _win.width) * 255)); _dirty = true; }
+            else if (ev.y >= 104 && ev.y < 116) { sb = clamp(Math.round((ev.x / _win.width) * 255)); _dirty = true; }
+          },
+          render(canvas: import('../ui/canvas.js').Canvas): boolean {
+            if (!_dirty || !_win) return false;
+            _dirty = false;
+            canvas.fillRect(0, 0, _win.width, _win.height, BG);
+            var preview = 0xFF000000 | (sr << 16) | (sg << 8) | sb;
+            canvas.fillRect(10, 10, _win.width - 20, 40, preview);
+            canvas.drawText(10, 60,  'R: ' + sr, FG);
+            canvas.drawText(10, 82,  'G: ' + sg, FG);
+            canvas.drawText(10, 104, 'B: ' + sb, FG);
+            canvas.drawText(10,  _win.height - 30, 'OK',     FG);
+            canvas.drawText(60,  _win.height - 30, 'Cancel', FG);
+            return true;
+          },
+        };
+        wm.openModal({ title, app: dlgApp, width: 280, height: 220 });
+      },
+    },
   },
+
+  // ── Notifications ─────────────────────────────────────────────────────────────
+
+  /**
+   * Toast notifications.
+   * In text mode: prints a prefixed line to the terminal.
+   * In WM mode: emits a 'notify:show' event (subscribe with os.events.on).
+   *
+   * Example:
+   *   os.notify('File saved', { level: 'success', durationMs: 2000 });
+   *   var unsub = os.events.on('notify:show', function(n) { renderToast(n); });
+   */
+  notify: Object.assign(
+    function notify_fn(message: string, opts?: { level?: 'info'|'success'|'warn'|'error'; durationMs?: number }): number {
+      return _notify(message, opts);
+    },
+    {
+      /** Dismiss a notification before it auto-expires. */
+      dismiss(id: number): void { _notifyDismiss(id); },
+      /** Dismiss all active notifications. */
+      dismissAll(): void { _notifyDismissAll(); },
+      /** All currently active (not yet dismissed / expired) notifications. */
+      getAll(): Array<{ id: number; message: string; level: string; until: number }> {
+        return _notifications.filter(function(n) { return n.active; }).map(function(n) {
+          return { id: n.id, message: n.message, level: n.level, until: n.until };
+        });
+      },
+    }
+  ),
+
+  // ── App registry ──────────────────────────────────────────────────────────────
+
+  /**
+   * Register and launch named apps.
+   * The shell `open <name>` command uses this registry.
+   *
+   * Example:
+   *   os.apps.register(
+   *     { name: 'my-app', displayName: 'My App', minWidth: 400, minHeight: 300 },
+   *     function() { return new MyApp(); }
+   *   );
+   *   os.apps.launch('my-app');
+   */
+  apps: {
+    /** Register an app with its manifest and factory function. */
+    register(manifest: AppManifest, factory: (args?: string[]) => App): void {
+      _appRegistry.set(manifest.name, { manifest, factory });
+    },
+    /** Unregister an app. */
+    unregister(name: string): void { _appRegistry.delete(name); },
+    /** List all registered app manifests. */
+    list(): AppManifest[] {
+      var out: AppManifest[] = [];
+      _appRegistry.forEach(function(e) { out.push(e.manifest); });
+      return out;
+    },
+    /** Returns true if an app with the given name is registered. */
+    isRegistered(name: string): boolean { return _appRegistry.has(name); },
+    /**
+     * Launch a registered app in a new WM window.
+     * Returns the WMWindow, or null in text mode or if not registered.
+     */
+    launch(name: string, args?: string[]): WMWindow | null {
+      var entry = _appRegistry.get(name);
+      if (!entry) return null;
+      var m = entry.manifest;
+      return sdk.wm.openWindow({
+        title:  m.displayName,
+        app:    entry.factory(args),
+        width:  m.minWidth  || 400,
+        height: m.minHeight || 300,
+      });
+    },
+  },
+
+  // ── Sync primitives ───────────────────────────────────────────────────────────
+
+  /**
+   * Cooperative synchronisation primitives.
+   * These are NOT preemptive — lock() blocks only in a cooperative scheduler sense.
+   *
+   * Example:
+   *   var mtx = new os.sync.Mutex();
+   *   mtx.lock(); doWork(); mtx.unlock();
+   */
+  sync: { Mutex, Condvar, Semaphore },
+
+  // ── Environment variables ─────────────────────────────────────────────────────
+
+  /**
+   * Environment variables.  Initialised from /etc/environment at first access.
+   * Standard variables: PATH, HOME, USER, TERM, EDITOR, SHELL, HOSTNAME.
+   *
+   * Example:
+   *   os.env.get('HOME')              // '/home/user'
+   *   os.env.expand('$HOME/notes')    // '/home/user/notes'
+   */
+  env: {
+    /** Get an environment variable.  Returns undefined if not set. */
+    get(key: string): string | undefined {
+      return _getEnvMap().get(key);
+    },
+    /** Set an environment variable. */
+    set(key: string, value: string): void {
+      _getEnvMap().set(key, value);
+    },
+    /** Delete an environment variable. */
+    delete(key: string): void {
+      _getEnvMap().delete(key);
+    },
+    /** Return all environment variables as a plain object. */
+    all(): Record<string, string> {
+      var out: Record<string, string> = {};
+      _getEnvMap().forEach(function(v, k) { out[k] = v; });
+      return out;
+    },
+    /** Expand $VAR and ${VAR} references.  Unknown variables expand to ''. */
+    expand(template: string): string {
+      return template.replace(/\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+        function(_m: string, brace: string, bare: string): string {
+          return _getEnvMap().get(brace || bare) || '';
+        });
+    },
+  },
+
+  // ── Path manipulation ─────────────────────────────────────────────────────────
+
+  /**
+   * Pure-string path utilities — no filesystem access.
+   *
+   * Example:
+   *   os.path.join('/etc', 'passwd')           // '/etc/passwd'
+   *   os.path.dirname('/etc/passwd')           // '/etc'
+   *   os.path.basename('/etc/foo.txt', '.txt') // 'foo'
+   */
+  path: {
+    /** Join path segments, handling absolute right-hand operands and ../. */
+    join(...parts: string[]): string {
+      var out = '';
+      for (var _pi = 0; _pi < parts.length; _pi++) {
+        var _p = parts[_pi];
+        if (!_p) continue;
+        if (_p.startsWith('/')) { out = _p; }
+        else if (!out) { out = _p; }
+        else { out = out.replace(/\/$/, '') + '/' + _p; }
+      }
+      return sdk.path.normalize(out || '.');
+    },
+    /** Directory portion of a path. */
+    dirname(path: string): string {
+      if (path === '/') return '/';
+      var s = path.replace(/\/$/, '');
+      var idx = s.lastIndexOf('/');
+      if (idx < 0)   return '.';
+      if (idx === 0) return '/';
+      return s.slice(0, idx);
+    },
+    /** Final path component, optionally with a given extension stripped. */
+    basename(path: string, ext?: string): string {
+      var s = path.replace(/\/$/, '');
+      var idx = s.lastIndexOf('/');
+      var base = idx >= 0 ? s.slice(idx + 1) : s;
+      if (ext && base.endsWith(ext)) base = base.slice(0, base.length - ext.length);
+      return base;
+    },
+    /** File extension including the dot, or '' if none. */
+    ext(path: string): string {
+      var base = sdk.path.basename(path);
+      var dot  = base.lastIndexOf('.');
+      return dot > 0 ? base.slice(dot) : '';
+    },
+    /** Returns true if the path starts with '/'. */
+    isAbsolute(path: string): boolean {
+      return path.startsWith('/');
+    },
+    /** Resolve parts against a base directory. */
+    resolve(base: string, ...parts: string[]): string {
+      var all = [base as string].concat(parts as string[]);
+      return sdk.path.join.apply(null as any, all as any);
+    },
+    /** Collapse //, /./, and /../ in a path. */
+    normalize(path: string): string {
+      if (!path) return '.';
+      var isAbs = path.startsWith('/');
+      var segs  = path.split('/');
+      var out: string[] = [];
+      for (var _ni = 0; _ni < segs.length; _ni++) {
+        var seg = segs[_ni];
+        if (seg === '' || seg === '.') continue;
+        if (seg === '..') { if (out.length > 0) out.pop(); }
+        else out.push(seg);
+      }
+      var result = (isAbs ? '/' : '') + out.join('/');
+      return result || (isAbs ? '/' : '.');
+    },
+    /** Compute the relative path from `from` to `to`. */
+    relative(from: string, to: string): string {
+      var af = sdk.path.normalize(from).split('/').filter(Boolean);
+      var at = sdk.path.normalize(to).split('/').filter(Boolean);
+      var i = 0;
+      while (i < af.length && i < at.length && af[i] === at[i]) i++;
+      var up   = af.length - i;
+      var down = at.slice(i);
+      var rel: string[] = [];
+      for (var _ui = 0; _ui < up; _ui++) rel.push('..');
+      return rel.concat(down).join('/') || '.';
+    },
+  },
+
+  // ── Timers ────────────────────────────────────────────────────────────────────
+
+  /**
+   * Coroutine-driven timers (~10 ms granularity on bare metal).
+   * Always call os.timer.clearAll() in app.onUnmount to prevent leaks.
+   *
+   * Example:
+   *   var id = os.timer.setInterval(function() { repaint(); }, 1000);
+   *   // in onUnmount: os.timer.clearAll();
+   */
+  timer: {
+    /** Call fn once after ms milliseconds.  Returns an id for clearTimeout. */
+    setTimeout(fn: () => void, ms: number): number {
+      _startTimerPump();
+      var id = _nextTimerId++;
+      _timers.push({ id, fn, deadline: kernel.getUptime() + ms, interval: 0, active: true });
+      return id;
+    },
+    /** Call fn repeatedly every ms milliseconds.  Returns an id for clearInterval. */
+    setInterval(fn: () => void, ms: number): number {
+      _startTimerPump();
+      var id = _nextTimerId++;
+      _timers.push({ id, fn, deadline: kernel.getUptime() + ms, interval: ms, active: true });
+      return id;
+    },
+    /** Cancel a one-shot timer. */
+    clearTimeout(id: number): void {
+      for (var _ci = 0; _ci < _timers.length; _ci++) {
+        if (_timers[_ci].id === id) { _timers[_ci].active = false; break; }
+      }
+    },
+    /** Cancel a repeating interval. */
+    clearInterval(id: number): void {
+      for (var _ci2 = 0; _ci2 < _timers.length; _ci2++) {
+        if (_timers[_ci2].id === id) { _timers[_ci2].active = false; break; }
+      }
+    },
+    /** Cancel all pending timers and intervals.  Call this in app.onUnmount. */
+    clearAll(): void {
+      for (var _ca = 0; _ca < _timers.length; _ca++) _timers[_ca].active = false;
+    },
+  },
+
+  // ── Event bus ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Lightweight pub/sub event bus for app-to-app and system-to-app messaging.
+   * Always call the returned unsubscribe function in app.onUnmount.
+   *
+   * System events: 'system:boot', 'wm:ready', 'wm:window:open', 'wm:window:close',
+   *                'disk:mounted', 'net:up', 'net:down', 'user:login', 'user:logout',
+   *                'notify:show', 'notify:dismiss', 'theme:change', 'prefs:change'.
+   *
+   * Example:
+   *   var unsub = os.events.on('net:up', function(d) { os.print('IP: ' + d.ip); });
+   *   // in onUnmount: unsub();
+   */
+  events: {
+    /** Subscribe to an event.  Returns an unsubscribe function. */
+    on<T = unknown>(event: string, handler: (data: T) => void): () => void {
+      if (!_evtListeners.has(event)) _evtListeners.set(event, []);
+      var list = _evtListeners.get(event)!;
+      var h = handler as (data: any) => void;
+      list.push(h);
+      return function() {
+        var idx = list.indexOf(h);
+        if (idx >= 0) list.splice(idx, 1);
+      };
+    },
+    /** Subscribe once; auto-unsubscribes after the first fire. */
+    once<T = unknown>(event: string, handler: (data: T) => void): void {
+      var unsub: () => void;
+      unsub = sdk.events.on(event, function(data: T) {
+        unsub();
+        handler(data);
+      });
+    },
+    /** Publish an event to all subscribers. */
+    emit<T = unknown>(event: string, data?: T): void {
+      _emitEvent(event, data);
+    },
+    /** Unsubscribe a specific handler from an event. */
+    off(event: string, handler: (data: any) => void): void {
+      var list = _evtListeners.get(event);
+      if (!list) return;
+      var idx = list.indexOf(handler);
+      if (idx >= 0) list.splice(idx, 1);
+    },
+    /** Number of registered handlers for a given event name. */
+    listeners(event: string): number {
+      var list = _evtListeners.get(event);
+      return list ? list.length : 0;
+    },
+  },
+
+  // ── Text utilities ────────────────────────────────────────────────────────────
+
+  /**
+   * Text encoding, decoding, and formatting helpers.
+   *
+   * Example:
+   *   os.text.encodeBase64('hello')           // 'aGVsbG8='
+   *   os.text.format('%s: %d ms', 'boot', 42) // 'boot: 42 ms'
+   *   os.text.bytes(1048576)                  // '1.0 MB'
+   */
+  text: {
+    /** Encode a string to Latin-1 bytes. */
+    encodeUTF8(str: string): number[] { return _sdkStrToBytes(str); },
+    /** Decode bytes to a string. */
+    decodeUTF8(bytes: number[]): string {
+      var s = '';
+      for (var _i = 0; _i < bytes.length; _i++) s += String.fromCharCode(bytes[_i]);
+      return s;
+    },
+    /** Encode a string or byte array to Base64. */
+    encodeBase64(data: string | number[]): string {
+      return _base64Encode(typeof data === 'string' ? _sdkStrToBytes(data) : data);
+    },
+    /** Decode a Base64 string to a byte array. */
+    decodeBase64(b64: string): number[] { return _base64Decode(b64); },
+    /** Encode a string or byte array to lowercase hex. */
+    encodeHex(data: string | number[]): string {
+      return _sdkBytesToHex(typeof data === 'string' ? _sdkStrToBytes(data) : data);
+    },
+    /** Decode a hex string to bytes. */
+    decodeHex(hex: string): number[] {
+      var out: number[] = [];
+      for (var _i = 0; _i + 1 < hex.length; _i += 2)
+        out.push(parseInt(hex.slice(_i, _i + 2), 16));
+      return out;
+    },
+    /** Percent-encode a string for use in a URL. */
+    encodeURL(str: string): string {
+      var safe = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*\'()';
+      var out = '';
+      for (var _i = 0; _i < str.length; _i++) {
+        var c = str[_i];
+        if (safe.indexOf(c) >= 0) { out += c; }
+        else { out += '%' + _byteToHex(str.charCodeAt(_i) & 0xff).toUpperCase(); }
+      }
+      return out;
+    },
+    /** Decode percent-encoded URL characters. */
+    decodeURL(str: string): string {
+      return str.replace(/%([0-9A-Fa-f]{2})/g, function(_m: string, hex: string): string {
+        return String.fromCharCode(parseInt(hex, 16));
+      });
+    },
+    /**
+     * printf-style formatting.  Supports: %s %d %i %f %x %o %b %% and width.precision.
+     * Example: os.text.format('%s: %.2f ms', 'load', 3.1415) → 'load: 3.14 ms'
+     */
+    format(template: string, ...args: unknown[]): string {
+      var ai = 0;
+      return template.replace(/%(-?\d*)(?:\.(\d+))?([sdifxob%])/g,
+        function(_m: string, width: string, prec: string, spec: string): string {
+          if (spec === '%') return '%';
+          var v = args[ai++];
+          var s: string;
+          if      (spec === 's') { s = String(v); }
+          else if (spec === 'd' || spec === 'i') { s = Math.trunc(Number(v)).toString(10); }
+          else if (spec === 'f') { s = prec ? Number(v).toFixed(parseInt(prec)) : String(Number(v)); }
+          else if (spec === 'x') { s = (Math.trunc(Number(v)) >>> 0).toString(16); }
+          else if (spec === 'o') { s = (Math.trunc(Number(v)) >>> 0).toString(8); }
+          else if (spec === 'b') { s = (Math.trunc(Number(v)) >>> 0).toString(2); }
+          else { s = String(v); }
+          if (width) {
+            var w = parseInt(width);
+            var pad = Math.abs(w) - s.length;
+            if (pad > 0) {
+              var padding = '';
+              for (var _pi = 0; _pi < pad; _pi++) padding += (w > 0 && spec !== 's') ? '0' : ' ';
+              s = w < 0 ? s + padding : padding + s;
+            }
+          }
+          return s;
+        });
+    },
+    /** Pad string `s` to at least `width` characters.  right=true to left-pad. */
+    pad(s: string, width: number, char?: string, right?: boolean): string {
+      var pc = char || ' ';
+      var padding = '';
+      for (var _pi = s.length; _pi < width; _pi++) padding += pc;
+      return right ? padding + s : s + padding;
+    },
+    /** Format a byte count as B / KB / MB / GB. */
+    bytes(n: number): string {
+      if (n < 1024)       return n + ' B';
+      if (n < 1048576)    return (n / 1024).toFixed(1) + ' KB';
+      if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+      return (n / 1073741824).toFixed(2) + ' GB';
+    },
+    /** Return `n singular` or `n plurals` based on count. */
+    pluralise(n: number, singular: string, plural?: string): string {
+      return n + ' ' + (n === 1 ? singular : (plural || singular + 's'));
+    },
+    /** Truncate a string, appending suffix ('…' by default) if needed. */
+    truncate(s: string, maxLen: number, suffix?: string): string {
+      var suf = suffix !== undefined ? suffix : '\u2026';
+      if (s.length <= maxLen) return s;
+      return s.slice(0, maxLen - suf.length) + suf;
+    },
+    /** Wrap text to `cols` columns, breaking at word boundaries. */
+    wrapWords(s: string, cols: number): string[] {
+      var lines: string[] = [];
+      var words = s.split(' ');
+      var cur = '';
+      for (var _wi = 0; _wi < words.length; _wi++) {
+        var _w = words[_wi];
+        if (!cur) { cur = _w; }
+        else if (cur.length + 1 + _w.length <= cols) { cur += ' ' + _w; }
+        else { lines.push(cur); cur = _w; }
+      }
+      if (cur) lines.push(cur);
+      return lines;
+    },
+  },
+
+  // ── Cryptography ──────────────────────────────────────────────────────────────
+
+  /**
+   * Cryptographic primitives — pure TypeScript, no C required.
+   *
+   * Example:
+   *   os.crypto.sha256('hello')  // '2cf24dba5fb0…'
+   *   os.crypto.uuid()           // 'xxxxxxxx-xxxx-4xxx-…'
+   */
+  crypto: {
+    /** SHA-256 hash.  Input may be a string or byte array.  Returns hex. */
+    sha256(data: string | number[]): string {
+      return _sdkBytesToHex(_sha256Raw(typeof data === 'string' ? _sdkStrToBytes(data) : data));
+    },
+    /** SHA-256 as a raw 32-byte array. */
+    sha256Bytes(data: string | number[]): number[] {
+      return _sha256Raw(typeof data === 'string' ? _sdkStrToBytes(data) : data);
+    },
+    /** HMAC-SHA-256.  key and data may be strings or byte arrays.  Returns hex. */
+    hmacSHA256(key: string | number[], data: string | number[]): string {
+      var k = typeof key  === 'string' ? _sdkStrToBytes(key)  : key;
+      var d = typeof data === 'string' ? _sdkStrToBytes(data) : data;
+      return _sdkBytesToHex(_hmacSha256Raw(k, d));
+    },
+    /** Generate n random bytes (LCG seeded from kernel tick counter). */
+    randomBytes(n: number): number[] {
+      var out: number[] = [];
+      var seed = kernel.getTicks() >>> 0;
+      for (var _rb = 0; _rb < n; _rb++) {
+        seed = ((seed * 1664525) + 1013904223) >>> 0;
+        if ((_rb & 7) === 0) seed ^= (kernel.getTicks() >>> 0);
+        out.push(seed & 0xff);
+      }
+      return out;
+    },
+    /**
+     * AES-128-GCM encrypt.
+     * key: 16 bytes, iv: 12 bytes.  Returns ciphertext + 16-byte auth tag.
+     */
+    aesEncrypt(key: number[], iv: number[], data: number[]): number[] {
+      var r = _gcmEncrypt(key, iv, [], data);
+      return r.ciphertext.concat(r.tag);
+    },
+    /**
+     * AES-128-GCM decrypt.
+     * data: ciphertext + 16-byte auth tag (as returned by aesEncrypt).
+     * Returns plaintext, or null if the auth tag is invalid.
+     */
+    aesDecrypt(key: number[], iv: number[], data: number[]): number[] | null {
+      var ciphertext = data.slice(0, data.length - 16);
+      var tag        = data.slice(data.length - 16);
+      return _gcmDecrypt(key, iv, [], ciphertext, tag);
+    },
+    /** Generate a random UUID v4 string. */
+    uuid(): string {
+      var r = sdk.crypto.randomBytes(16);
+      r[6] = (r[6] & 0x0f) | 0x40;
+      r[8] = (r[8] & 0x3f) | 0x80;
+      var h = _sdkBytesToHex(r);
+      return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
+    },
+  },
+
+  // ── Per-app preferences ───────────────────────────────────────────────────────
+
+  /**
+   * Per-app persistent preferences stored at /etc/prefs/<appName>.json.
+   *
+   * Example:
+   *   var prefs = os.prefs.forApp('file-manager');
+   *   prefs.set('sortOrder', 'name');
+   *   prefs.get('sortOrder', 'name'); // → 'name'
+   */
+  prefs: {
+    /** Return a scoped preferences store for the given app name. */
+    forApp(appName: string): {
+      get<T>(key: string, fallback?: T): T;
+      set(key: string, value: unknown): void;
+      delete(key: string): void;
+      all(): Record<string, unknown>;
+      reset(): void;
+      flush(): void;
+      onChange(key: string, cb: (value: unknown) => void): () => void;
+    } {
+      var _path  = '/etc/prefs/' + appName + '.json';
+      var _cache: Record<string, unknown> | null = null;
+
+      function _load(): Record<string, unknown> {
+        if (_cache) return _cache;
+        try {
+          var txt = fs.readFile(_path);
+          _cache = txt ? JSON.parse(txt) : {};
+        } catch (_e) { _cache = {}; }
+        return _cache!;
+      }
+
+      function _save(): void {
+        fs.mkdir('/etc/prefs');
+        fs.writeFile(_path, JSON.stringify(_load(), null, 2));
+      }
+
+      return {
+        get<T>(key: string, fallback?: T): T {
+          var v = _load()[key];
+          return v !== undefined ? v as T : (fallback as T);
+        },
+        set(key: string, value: unknown): void {
+          _load()[key] = value;
+          _save();
+          sdk.events.emit('prefs:change', { app: appName, key, value });
+        },
+        delete(key: string): void {
+          delete _load()[key];
+          _save();
+        },
+        all(): Record<string, unknown> {
+          return Object.assign({}, _load());
+        },
+        reset(): void {
+          _cache = {};
+          _save();
+        },
+        flush(): void {
+          _save();
+        },
+        /**
+         * Watch for changes to a specific key.  Returns an unsubscribe function.
+         *
+         * Example:
+         *   var unsub = prefs.onChange('theme', function(v) { applyTheme(v); });
+         */
+        onChange(key: string, cb: (value: unknown) => void): () => void {
+          return sdk.events.on('prefs:change', function(d: any) {
+            if (d && d.app === appName && d.key === key) cb(d.value);
+          });
+        },
+      };
+    },
+  },
+
+  // ── Time ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Wall-clock time and duration helpers (backed by CMOS RTC on first call).
+   *
+   * Example:
+   *   var t = os.time.now();          // Unix epoch ms
+   *   os.time.since(t);               // elapsed ms
+   *   os.time.format(t);              // '2026-01-15 09:22:04'
+   *   os.time.duration(90500);        // '1m 30s'
+   */
+  time: {
+    /** Current time as Unix epoch milliseconds. */
+    now(): number { return _sdkTimeNow(); },
+    /** OS uptime in milliseconds since boot (sub-ms resolution when TSC available). */
+    uptime(): number {
+      return kernel.uptimeUs ? kernel.uptimeUs() / 1000 : kernel.getUptime();
+    },
+    /** Current date/time as a structured object. */
+    date(epochMs?: number): { year: number; month: number; day: number; hour: number; minute: number; second: number; dow: number } {
+      var d = (epochMs !== undefined ? epochMs : _sdkTimeNow()) / 1000;
+      var sec = Math.floor(d) % 60;
+      var min = Math.floor(d / 60) % 60;
+      var hr  = Math.floor(d / 3600) % 24;
+      var days = Math.floor(d / 86400);
+      var dow = (days + 4) % 7; // 0=Sun
+      var z   = days + 719468;
+      var era = Math.floor((z >= 0 ? z : z - 146096) / 146097);
+      var doe = z - era * 146097;
+      var yoe = Math.floor((doe - Math.floor(doe/1460) + Math.floor(doe/36524) - Math.floor(doe/146096)) / 365);
+      var y   = yoe + era * 400;
+      var doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+      var mp  = Math.floor((5 * doy + 2) / 153);
+      var dd  = doy - Math.floor((153 * mp + 2) / 5) + 1;
+      var mm  = mp < 10 ? mp + 3 : mp - 9;
+      if (mm <= 2) y++;
+      return { year: y, month: mm, day: dd, hour: hr, minute: min, second: sec, dow };
+    },
+    /**
+     * Milliseconds elapsed since epoch value `t`.
+     * If called with one numeric arg, returns elapsed ms (numeric).
+     */
+    since(t: number): number { return _sdkTimeNow() - t; },
+    /**
+     * Human-readable relative time string from an epoch ms value to now.
+     * e.g. 'just now', '5s ago', '3m ago', '2h ago', '4d ago'.
+     */
+    ago(epochMs: number): string {
+      var diff = Math.floor((_sdkTimeNow() - epochMs) / 1000);
+      if (diff < 5)  return 'just now';
+      if (diff < 60) return diff + 's ago';
+      var m = Math.floor(diff / 60);
+      if (m < 60) return m + 'm ago';
+      var h = Math.floor(m / 60);
+      if (h < 24) return h + 'h ago';
+      var days = Math.floor(h / 24);
+      if (days < 30) return days + 'd ago';
+      return Math.floor(days / 30) + 'mo ago';
+    },
+    /**
+     * Format a Unix epoch ms value as a human-readable string.
+     * fmt tokens: YYYY MM DD HH mm ss.  Default: 'YYYY-MM-DD HH:mm:ss'.
+     */
+    format(epochMs: number, fmt?: string): string {
+      var dt = sdk.time.date(epochMs);
+      function p2(n: number) { return (n < 10 ? '0' : '') + n; }
+      var f = fmt || 'YYYY-MM-DD HH:mm:ss';
+      return f.replace('YYYY', '' + dt.year)
+              .replace('MM',   p2(dt.month))
+              .replace('DD',   p2(dt.day))
+              .replace('HH',   p2(dt.hour))
+              .replace('mm',   p2(dt.minute))
+              .replace('ss',   p2(dt.second));
+    },
+    /** Human-readable duration.  e.g. 90500 → '1m 30s', 3700000 → '1h 1m'. */
+    duration(ms: number): string {
+      var s = Math.floor(ms / 1000);
+      if (s < 60) return s + 's';
+      var m = Math.floor(s / 60); s %= 60;
+      if (m < 60) return m + 'm ' + (s ? s + 's' : '');
+      var h = Math.floor(m / 60); m %= 60;
+      if (h < 24) return h + 'h ' + (m ? m + 'm' : '');
+      var d = Math.floor(h / 24); h %= 24;
+      return d + 'd ' + (h ? h + 'h' : '');
+    },
+
+    /**
+     * IANA timezone database (item 919).
+     * Covers ~130 major timezones with DST support.
+     *
+     * Example:
+     *   os.time.tz.list();               // → ['Africa/Cairo', 'America/Chicago', …]
+     *   os.time.tz.offset('Asia/Tokyo'); // → 540 (minutes east of UTC)
+     *   os.time.tz.abbr('Europe/Paris'); // → 'CEST' or 'CET'
+     *   os.time.tz.utcToLocal(Date.now(), 'America/New_York');
+     *   os.time.tz.formatOffset(-300);   // → '-05:00'
+     */
+    tz: _tz,
+    /** ISO-8601 UTC string for the given epoch ms (defaults to now): '2026-02-25T14:30:00Z'. */
+    iso(epochMs?: number): string {
+      var dt = sdk.time.date(epochMs);
+      function p2(n: number) { return (n < 10 ? '0' : '') + n; }
+      return dt.year + '-' + p2(dt.month) + '-' + p2(dt.day)
+           + 'T' + p2(dt.hour) + ':' + p2(dt.minute) + ':' + p2(dt.second) + 'Z';
+    },
+  },
+
+  // ── Audio (PC speaker) ────────────────────────────────────────────────────────
+
+  /**
+   * PC-speaker audio.  Tones are generated via the 8253 PIT channel 2.
+   * Only one tone can play at a time.  Only audible in real hardware / QEMU
+   * when configured with '-soundhw pcspk'.
+   *
+   * Example:
+   *   os.audio.beep(440, 200);     // 440 Hz for 200 ms
+   *   os.audio.play([{ freq: 261, duration: 150 }, { freq: 329, duration: 150 }]);
+   */
+  audio: {
+    /**
+     * Returns true — PC speaker is always available on i686.
+     * Can be used to guard audio code on architectures without it.
+     */
+    isAvailable(): boolean { return true; },
+    /** Start a continuous tone at `freq` Hz.  Call silence() to stop. */
+    tone(freq: number): void {
+      if (freq <= 0) { sdk.audio.silence(); return; }
+      var divisor = Math.floor(1193180 / freq) & 0xFFFF;
+      kernel.outb(0x43, 0xB6);
+      kernel.outb(0x42, divisor & 0xFF);
+      kernel.outb(0x42, (divisor >> 8) & 0xFF);
+      kernel.outb(0x61, kernel.inb(0x61) | 0x03);
+    },
+    /** Stop any playing tone immediately. */
+    silence(): void {
+      kernel.outb(0x61, kernel.inb(0x61) & 0xFC);
+    },
+    /** Alias for silence() — more intuitive when paired with beep(). */
+    stop(): void { sdk.audio.silence(); },
+    /** Play a tone at `freq` Hz for `durationMs` milliseconds. */
+    beep(freq: number, durationMs?: number): void {
+      if (freq <= 0) { sdk.audio.silence(); return; }
+      sdk.audio.tone(freq);
+      if (durationMs && durationMs > 0) {
+        sdk.process.coroutine('audio:beep', (function() {
+          var endTicks = kernel.getTicks() + Math.ceil(durationMs / 10);
+          return function(): 'done'|'pending' {
+            if (kernel.getTicks() >= endTicks) { sdk.audio.silence(); return 'done'; }
+            return 'pending';
+          };
+        })());
+      }
+    },
+    /**
+     * Play a sequence of notes.  Each note: { freq, duration } in Hz / ms.
+     * freq=0 is a rest.  Returns a coroutine id (cancel with os.process.cancel()).
+     *
+     * Example:
+     *   os.audio.play([
+     *     { freq: 523, duration: 150 }, // C5
+     *     { freq: 0,   duration:  50 }, // rest
+     *     { freq: 659, duration: 150 }, // E5
+     *   ]);
+     */
+    play(notes: Array<{ freq: number; duration: number }>): number {
+      var idx = 0;
+      var noteEndTick = 0;
+      return sdk.process.coroutine('audio:play', function(): 'done'|'pending' {
+        var now = kernel.getTicks();
+        if (idx >= notes.length) { sdk.audio.silence(); return 'done'; }
+        if (now >= noteEndTick) {
+          var note = notes[idx++];
+          noteEndTick = now + Math.ceil(note.duration / 10);
+          if (note.freq > 0) sdk.audio.tone(note.freq);
+          else sdk.audio.silence();
+        }
+        return 'pending';
+      });
+    },
+
+    /**
+     * Full HDA/AC97/VirtioSound PCM audio subsystem.
+     * Supports MP3, OGG, AAC, FLAC, and raw PCM decoding and mixing.
+     *
+     * Example:
+     *   const src = os.audio.pcm.load('mp3', mp3Data);
+     *   os.audio.pcm.setVolume(src, 0.8);
+     *   os.audio.pcm.play(src);
+     */
+    pcm: {
+      /** Returns true if the HDA/PCM audio subsystem initialised successfully. */
+      isAvailable(): boolean {
+        try { _pcmAudio.init(); return true; } catch (_) { return false; }
+      },
+      /** Decode and buffer audio data. Returns an AudioSource handle. */
+      load(format: 'mp3'|'ogg'|'aac'|'flac'|'pcm', data: Uint8Array) {
+        return _pcmAudio.loadDecoded(format, data);
+      },
+      play(src: any): void   { _pcmAudio.play(src); },
+      pause(src: any): void  { _pcmAudio.pause(src); },
+      stop(src: any): void   { _pcmAudio.stop(src); },
+      seek(src: any, seconds: number): void { _pcmAudio.seek(src, seconds); },
+      setVolume(src: any, vol: number): void       { _pcmAudio.setVolume(src, vol); },
+      setPan(src: any, pan: number): void          { _pcmAudio.setPan(src, pan); },
+      setMasterVolume(vol: number): void           { _pcmAudio.setMasterVolume(vol); },
+      setBass(gain: number): void                  { _pcmAudio.setBass(gain); },
+      setTreble(gain: number): void                { _pcmAudio.setTreble(gain); },
+    },
+  },
+
+  // ── Animation ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Cooperative frame-based animation engine.
+   * Each animation calls `tick(progress)` once per WM frame (~16 ms) with
+   * an eased progress value in [0,1].
+   *
+   * Example:
+   *   var id = os.anim.start({ duration: 300, easing: os.anim.easings.easeOut },
+   *     function(p) { win.x = Math.round(p * 200); os.wm.markDirty(); },
+   *     function() { print('done'); }
+   *   );
+   *   // cancel early:
+   *   os.anim.cancel(id);
+   */
+  anim: {
+    /**
+     * Start an animation.  Returns an animation id for `os.anim.cancel()`.
+     * tick(progress) is called with 0..1 eased progress each frame.
+     * done() is called once when the animation completes.
+     */
+    start(
+      opts: { duration?: number; easing?: (t: number) => number },
+      tick: (progress: number) => void,
+      done?: () => void,
+    ): number {
+      var animId     = _nextAnimId++;
+      var duration   = (opts && opts.duration !== undefined) ? opts.duration : 300;
+      var easing     = (opts && opts.easing)                 ? opts.easing   : function(t: number) { return t; };
+      var startUp    = _sdkTimeNow();
+      var coroId     = threadManager.runCoroutine('anim:' + animId, function(): 'done'|'pending' {
+        var elapsed = _sdkTimeNow() - startUp;
+        var t       = duration > 0 ? Math.min(elapsed / duration, 1) : 1;
+        var p       = easing(t);
+        try { tick(p); } catch (_e) {}
+        if (t >= 1) {
+          _animRegistry.delete(animId);
+          if (done) try { done(); } catch (_e2) {}
+          return 'done';
+        }
+        return 'pending';
+      });
+      _animRegistry.set(animId, { cb: tick, duration, startUptime: startUp, coroId });
+      return animId;
+    },
+    /** Cancel a running animation by id. */
+    cancel(animId: number): void {
+      var entry = _animRegistry.get(animId);
+      if (!entry) return;
+      threadManager.cancelCoroutine(entry.coroId);
+      _animRegistry.delete(animId);
+    },
+    /** Named easing functions. */
+    easings: {
+      linear:    function(t: number): number { return t; },
+      easeIn:    function(t: number): number { return t * t; },
+      easeOut:   function(t: number): number { return t * (2 - t); },
+      easeInOut: function(t: number): number { return t < 0.5 ? 2*t*t : -1+(4-2*t)*t; },
+      bounce:    function(t: number): number {
+        if (t < 1/2.75)  return 7.5625*t*t;
+        if (t < 2/2.75)  { t -= 1.5/2.75;   return 7.5625*t*t+0.75; }
+        if (t < 2.5/2.75){ t -= 2.25/2.75;  return 7.5625*t*t+0.9375; }
+        t -= 2.625/2.75; return 7.5625*t*t+0.984375;
+      },
+      elastic: function(t: number): number {
+        if (t === 0 || t === 1) return t;
+        return -Math.pow(2, 10*(t-1)) * Math.sin((t-1.1)*5*Math.PI);
+      },
+    },
+  },
+
+  // ── Persistent storage ────────────────────────────────────────────────────────
+
+  /**
+   * Persistent storage — file-path based, disk-first with VFS fallback.
+   * Also includes a key-value convenience layer (get/set).
+   *
+   * Example:
+   *   os.storage.write('/data/notes.txt', 'hello');
+   *   os.storage.read('/data/notes.txt');       // → 'hello'
+   *   os.storage.readJSON('/config/app.json');  // → parsed object
+   *   os.storage.isPersistent();                // true when disk mounted
+   *
+   *   // Key-value layer:
+   *   os.storage.set('last-file', '/home/user/notes.txt');
+   *   os.storage.get<string>('last-file', '/');
+   */
+  storage: {
+    /** True when a persistent disk is mounted (writes survive reboot). */
+    isPersistent(): boolean {
+      return !!((_diskStorage as any).available && (_diskStorage as any).available());
+    },
+    /** Read a file as a string.  Returns null if not found. */
+    read(path: string): string | null {
+      try {
+        if (sdk.storage.isPersistent()) {
+          var v = (_diskStorage as any).read ? (_diskStorage as any).read(path) : null;
+          if (v !== null) return v;
+        }
+        return fs.readFile(path);
+      } catch (_e) { return null; }
+    },
+    /** Write a string to a file.  Returns true on success. */
+    write(path: string, data: string): boolean {
+      try {
+        if (sdk.storage.isPersistent() && (_diskStorage as any).write) {
+          return (_diskStorage as any).write(path, data);
+        }
+        return fs.writeFile(path, data);
+      } catch (_e) { return false; }
+    },
+    /** Append to a file (creates it if missing). */
+    append(path: string, data: string): boolean {
+      var existing = sdk.storage.read(path) || '';
+      return sdk.storage.write(path, existing + data);
+    },
+    /** Returns true if the path exists (file or directory). */
+    exists(path: string): boolean {
+      try { return fs.stat(path) !== null; } catch (_e) { return false; }
+    },
+    /** List names in a directory (defaults to '/'). */
+    list(path?: string): string[] {
+      try { return sdk.fs.list(path || '/'); } catch (_e) { return []; }
+    },
+    /** Delete a file. */
+    rm(path: string): boolean {
+      try { return !!(fs.rm(path)); } catch (_e) { return false; }
+    },
+    /** Create a directory (and parents). */
+    mkdir(path: string): boolean {
+      try { fs.mkdir(path); return true; } catch (_e) { return false; }
+    },
+    /** Read a file and JSON.parse it.  Returns null on error. */
+    readJSON<T>(path: string): T | null {
+      try {
+        var txt = sdk.storage.read(path);
+        return txt ? JSON.parse(txt) as T : null;
+      } catch (_e) { return null; }
+    },
+    /** JSON.stringify a value and write it. */
+    writeJSON(path: string, value: unknown, pretty?: boolean): boolean {
+      try {
+        return sdk.storage.write(path, JSON.stringify(value, null, pretty ? 2 : 0));
+      } catch (_e) { return false; }
+    },
+
+    // ── Key-value convenience layer ───────────────────────────────────────────
+    /** Get a stored value by key.  Returns `fallback` if not found. */
+    get<T>(key: string, fallback?: T): T {
+      return sdk.storage.readJSON<T>('/etc/storage/' + key + '.json') ?? (fallback as T);
+    },
+    /** Store a value by key. */
+    set(key: string, value: unknown): void {
+      fs.mkdir('/etc/storage');
+      sdk.storage.writeJSON('/etc/storage/' + key + '.json', value);
+    },
+    /** Delete a stored value by key. */
+    delete(key: string): void {
+      sdk.storage.rm('/etc/storage/' + key + '.json');
+    },
+    /** All stored keys. */
+    keys(): string[] {
+      try {
+        var items = sdk.fs.list('/etc/storage');
+        return items.filter(function(n: string) { return n.endsWith('.json'); })
+                    .map(function(n: string) { return n.slice(0, -5); });
+      } catch (_e) { return []; }
+    },
+    /** Delete all stored key-value entries. */
+    clear(): void {
+      var ks = sdk.storage.keys();
+      for (var _ki = 0; _ki < ks.length; _ki++) sdk.storage.delete(ks[_ki]);
+    },
+  },
+
+  // ── Debug ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Debug utilities: structured logging to serial port + event bus.
+   *
+   * Example:
+   *   os.debug.log('Loaded', { count: 5 });    // serial: [LOG] Loaded {"count":5}
+   *   os.debug.warn('Low memory:', free);
+   *   os.debug.assert(x > 0, 'x must be positive');
+   *   os.debug.measure('sort', () => array.sort());  // → elapsed ms
+   *   print(os.debug.inspect({ a: [1, 2] }));        // '{ a: [1, 2] }'
+   *   var unsub = os.debug.onEvent(e => panel.add(e.level + ': ' + e.msg));
+   */
+  debug: {
+    /** Log an informational message to serial and the debug event bus. */
+    log(...args: unknown[]): void  { _debugSerial('LOG',   args); },
+    /** Log a warning. */
+    warn(...args: unknown[]): void  { _debugSerial('WARN',  args); },
+    /** Log an error. */
+    error(...args: unknown[]): void { _debugSerial('ERROR', args); },
+    /** Write directly to the serial debug port (no level prefix). */
+    print(...args: unknown[]): void {
+      var line = args.map(function(a) { return typeof a === 'string' ? a : JSON.stringify(a); }).join(' ') + '\n';
+      for (var _di = 0; _di < line.length; _di++) kernel.serialPut(line[_di]);
+    },
+    /** Throw an Error if `cond` is falsy.  Message is included in the stack. */
+    assert(cond: boolean, message?: string): void {
+      if (!cond) {
+        var msg = 'Assertion failed' + (message ? ': ' + message : '');
+        sdk.debug.error(msg);
+        throw new Error(msg);
+      }
+    },
+    /** Capture an approximate stack trace as a string. */
+    trace(): string {
+      try { return (new Error()).stack || '(no stack)'; } catch (_e) { return '(no stack)'; }
+    },
+    /**
+     * Human-readable serialisation, similar to util.inspect.
+     * depth limits recursive expansion (default 2).
+     *
+     * Example:  os.debug.inspect({ a: [1, 2, 3], b: { c: true } })
+     *   // → '{ a: [1, 2, 3], b: { c: true } }'
+     */
+    inspect(value: unknown, depth?: number): string {
+      var maxDepth = depth !== undefined ? depth : 2;
+      function _ins(v: unknown, d: number): string {
+        if (v === null) return 'null';
+        if (v === undefined) return 'undefined';
+        var t = typeof v;
+        if (t === 'string') return JSON.stringify(v);
+        if (t === 'number' || t === 'boolean') return String(v);
+        if (t === 'function') return '[Function ' + ((v as any).name || 'anonymous') + ']';
+        if (Array.isArray(v)) {
+          if (d >= maxDepth) return '[Array(' + (v as any[]).length + ')]';
+          var aItems = (v as any[]).slice(0, 10).map(function(x) { return _ins(x, d + 1); });
+          if ((v as any[]).length > 10) aItems.push('... ' + ((v as any[]).length - 10) + ' more');
+          return '[' + aItems.join(', ') + ']';
+        }
+        if (t === 'object') {
+          if (d >= maxDepth) return '{...}';
+          var keys = Object.keys(v as object).slice(0, 8);
+          var pairs = keys.map(function(k) { return k + ': ' + _ins((v as any)[k], d + 1); });
+          if (Object.keys(v as object).length > 8) pairs.push('...');
+          return '{ ' + pairs.join(', ') + ' }';
+        }
+        return String(v);
+      }
+      return _ins(value, 0);
+    },
+    /**
+     * Measure execution time of a function.  Returns elapsed milliseconds.
+     *
+     * Example:  var ms = os.debug.measure('sort', () => bigArray.sort());
+     */
+    measure(label: string, fn: () => void): number {
+      var t0 = kernel.getTicks();
+      try { fn(); } catch (_e) {}
+      var elapsed = (kernel.getTicks() - t0) * 10; // ticks are ~10ms
+      sdk.debug.log('measure(' + label + '):', elapsed + 'ms');
+      return elapsed;
+    },
+    /** Software breakpoint — no-op unless the kernel exposes debugBreak(). */
+    break(): void {
+      if ((kernel as any).debugBreak) (kernel as any).debugBreak();
+      else sdk.debug.log('BREAKPOINT');
+    },
+    /** JSON-dump an object to serial — handy for deep objects. */
+    dump(label: string, obj: unknown): void {
+      sdk.debug.print('[dump] ' + label + ': ' + JSON.stringify(obj, null, 2));
+    },
+    /** Approximate heap usage from the QuickJS runtime. */
+    heapSnapshot(): { total: number; free: number; used: number } {
+      try {
+        var mem = (globalThis as any).os?.memoryUsage?.() ||
+                  (typeof (globalThis as any).gc === 'function' ? { heapSize: 0, heapUsed: 0 } : null);
+        if (mem) return { total: mem.heapSize || 0, free: (mem.heapSize || 0) - (mem.heapUsed || 0), used: mem.heapUsed || 0 };
+      } catch (_e) {}
+      return { total: 0, free: 0, used: 0 };
+    },
+    /** Subscribe to debug events emitted via os.debug.log/warn/error/event(). */
+    onEvent(handler: (ev: { level: string; msg: string; ts: number }) => void): () => void {
+      return sdk.events.on('debug:event', handler);
+    },
+    /** Emit a debug event with an explicit level. */
+    event(level: 'trace'|'info'|'warn'|'error', msg: string): void {
+      sdk.events.emit('debug:event', { level, msg, ts: _sdkTimeNow() });
+    },
+  },
+
+  // ── Canvas helpers ────────────────────────────────────────────────────────────
+
+  /**
+   * High-level drawing utilities.
+   *
+   * Example — fluent painter:
+   *   var p = os.canvas.painter(canvas);
+   *   p.fillRect(0, 0, 200, 100, 0xFF1E1E2E);
+   *   p.drawText(10, 10, 'Hello', 0xFFFFFFFF);
+   *
+   * Example — sprite:
+   *   os.canvas.drawSprite(canvas, 10, 10, pixelData, 8, 8, palette, 2);
+   */
+  canvas: {
+    /** Wrap a Canvas in a fluent CanvasPainter. */
+    painter(c: import('../ui/canvas.js').Canvas): CanvasPainter {
+      var C = c as any;
+      return {
+        get canvas(): import('../ui/canvas.js').Canvas { return c; },
+        fill(color: number)                             { c.fillRect(0, 0, 99999, 99999, color); },
+        fillRect(x, y, w, h, color)                    { c.fillRect(x, y, w, h, color); },
+        strokeRect(x, y, w, h, color)                  { c.drawRect(x, y, w, h, color); },
+        fillRoundRect(x, y, w, h, r, color)            { C.fillRoundRect(x, y, w, h, r, color); },
+        strokeRoundRect(x, y, w, h, r, color)          { C.drawRoundRect(x, y, w, h, r, color); },
+        fillCircle(cx, cy, r, color)                   { C.fillCircle(cx, cy, r, color); },
+        strokeCircle(cx, cy, r, color)                 { C.drawCircle(cx, cy, r, color); },
+        drawLine(x0, y0, x1, y1, color)                { c.drawLine(x0, y0, x1, y1, color); },
+        drawText(x, y, text, color)                    { c.drawText(x, y, text, color); },
+        drawTextWrap(x, y, maxW, text, color, lineH) {
+          var words = text.split(' ');
+          var cx = x, cy = y, lh = lineH || 16;
+          for (var _wi = 0; _wi < words.length; _wi++) {
+            var w = words[_wi];
+            var m = c.measureText(w + ' ');
+            if (cx + m.width > x + maxW && cx > x) { cx = x; cy += lh; }
+            c.drawText(cx, cy, w + ' ', color);
+            cx += m.width;
+          }
+          return cy + lh;
+        },
+        measureText(text)          { return c.measureText(text); },
+        drawScrollbar(x, y, h, total, visible, offset, color) {
+          var track = color || 0xFF333344;
+          var thumb = color ? (color | 0xFF000000) : 0xFF6688AA;
+          c.drawRect(x, y, 8, h, track);
+          if (total > 0 && visible < total) {
+            var ratio = visible / total;
+            var th = Math.max(8, Math.floor(h * ratio));
+            var ty = y + Math.floor((h - th) * (offset / (total - visible)));
+            c.fillRect(x, ty, 8, th, thumb);
+          }
+        },
+        drawProgressBar(x, y, w, h, fraction, fgColor, bgColor) {
+          c.fillRect(x, y, w, h, bgColor || 0xFF222233);
+          c.fillRect(x, y, Math.floor(w * Math.min(1, Math.max(0, fraction))), h, fgColor || 0xFF4488DD);
+        },
+        drawButton(x, y, w, h, label, pressed, fgColor, bgColor) {
+          var bg = pressed ? 0xFF2255AA : (bgColor || 0xFF334466);
+          var fg = fgColor || 0xFFDDDDFF;
+          c.fillRect(x, y, w, h, bg);
+          c.drawRect(x, y, w, h, 0xFF6688AA);
+          var m = c.measureText(label);
+          c.drawText(x + Math.floor((w - m.width) / 2), y + Math.floor((h - m.height) / 2), label, fg);
+        },
+        drawCheckbox(x, y, checked, label, color) {
+          var fg = color || 0xFFDDDDFF;
+          c.drawRect(x, y, 12, 12, fg);
+          if (checked) { c.drawLine(x+2, y+6, x+5, y+9, fg); c.drawLine(x+5, y+9, x+10, y+3, fg); }
+          if (label) c.drawText(x + 16, y, label, fg);
+        },
+        linearGradient(x, y, w, h, stops, dir) { C.drawLinearGradient(x, y, w, h, stops, dir); },
+        radialGradient(cx, cy, r, stops)        { C.drawRadialGradient(cx, cy, r, stops); },
+        drawSprite(x, y, pixels, pw, ph, palette, scale) { C.drawSprite(x, y, pixels, pw, ph, palette, scale); },
+      };
+    },
+    /**
+     * Draw an indexed-colour sprite directly onto a canvas.
+     * pixels = array of palette indices; palette = array of 0xAARRGGBB colours.
+     * scale = integer pixel multiplier (default 1).
+     */
+    drawSprite(
+      canvas: import('../ui/canvas.js').Canvas,
+      x: number, y: number,
+      pixels: number[], pw: number, ph: number,
+      palette: number[], scale?: number,
+    ): void {
+      (canvas as any).drawSprite(x, y, pixels, pw, ph, palette, scale);
+    },
+    /**
+     * Allocate a new off-screen Canvas (not attached to any window).
+     * Useful for pre-rendering, double-buffering, or sprite sheets.
+     *
+     * Example:
+     *   var offscreen = os.canvas.create(200, 100);
+     *   var p = os.canvas.painter(offscreen);
+     *   p.fill(0xFF000000);
+     *   p.drawText(10, 10, 'Buffered', 0xFFFFFFFF);
+     *   // Then blit to a window canvas:
+     *   windowCanvas.blit(offscreen, 0, 0, destX, destY, 200, 100);
+     */
+    create(w: number, h: number): import('../ui/canvas.js').Canvas {
+      return new Canvas(w, h);
+    },
+  },
+
+  // ── Theme ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Colour theme system.  Built-in themes: 'dark', 'light', 'hacker', 'retro'.
+   *
+   * Example:
+   *   var theme = os.theme.current();
+   *   canvas.fillRect(0, 0, w, h, theme.bg);
+   *   canvas.drawText(10, 10, 'Hello', theme.fg);
+   *   os.theme.set('hacker');
+   *   os.events.on('theme:change', function(t) { repaint(t.theme); });
+   */
+  theme: {
+    /** Name of the active theme. */
+    name(): string { return _activeThemeName; },
+    /** The active Theme object. */
+    current(): Theme {
+      return _themeMap.get(_activeThemeName) ||
+             _makeTheme('dark', 0xFF1E1E2E, 0xFFDDDDEE, 0xFF2255AA,
+                        0xFF1A3A5C, 0xFFFFFFFF, 0xFF1A2B3C,
+                        0xFF2255AA, 0xFFFFFFFF,
+                        0xFFFFB900, 0xFFFF4444, 0xFF44CC44, 0xFF888899, 0xFF445566);
+    },
+    /** All registered theme names. */
+    list(): string[] {
+      var out: string[] = [];
+      _themeMap.forEach(function(_v: Theme, k: string) { out.push(k); });
+      return out;
+    },
+    /** Get a theme by name.  Returns null if not registered. */
+    get(name: string): Theme | null { return _themeMap.get(name) || null; },
+    /** Register (or overwrite) a named theme. */
+    register(name: string, theme: Theme): void { _themeMap.set(name, theme); },
+    /**
+     * Activate a theme by name.
+     * Returns false if the theme is not registered.
+     * Emits 'theme:change' event with { name, theme }.
+     */
+    set(name: string): boolean {
+      if (!_themeMap.has(name)) return false;
+      _activeThemeName = name;
+      sdk.events.emit('theme:change', { name, theme: _themeMap.get(name) });
+      return true;
+    },
+  },
+
+  // ── Backward-compatibility aliases ────────────────────────────────────────────
+
+  /**
+   * Warm up a function for JIT compilation and return a Promise that resolves
+   * with the same function once it has been compiled.
+   *
+   * The JIT compiler promotes functions after 2 calls (JIT_THRESHOLD).  This
+   * wrapper calls the function 3 times with no arguments (errors silently
+   * swallowed) to trigger tier-1 → tier-2 promotion, then resolves with the
+   * original function reference so callers can `await` and then invoke it
+   * with confidence that the first real call hits native code.
+   *
+   * @example
+   *   var fast = await os.run_optimized(heavyLoop);
+   *   fast(bigArray);  // first real call is JIT-compiled native code
+   *
+   * @example  (no-await variant for fire-and-forget warmup)
+   *   os.run_optimized(parseJSON);
+   */
+  run_optimized<T extends (...args: any[]) => any>(fn: T): Promise<T> {
+    return new Promise<T>(function(resolve) {
+      // Three warmup calls: enough to trigger tier-1 and tier-2 JIT promotion.
+      // Errors are swallowed so functions that require arguments don't crash.
+      for (var _wi = 0; _wi < 3; _wi++) { try { (fn as any)(); } catch (_) {} }
+      // Resolve synchronously on the next microtask tick so `await` works naturally.
+      resolve(fn);
+    });
+  },
+
+  /**
+   * @deprecated Use os.net.fetch() instead.
+   * Kept for backward compatibility with existing apps.
+   */
+  fetchAsync(
+    url: string,
+    callback: (resp: FetchResponse | null, error?: string) => void,
+    opts?: FetchOptions,
+  ): number {
+    return _doFetch(url, callback, opts);
+  },
+
+  /**
+   * @deprecated Use os.process.coroutine() instead.
+   * Kept for backward compatibility with existing apps.
+   */
+  spawn(name: string, step: () => 'done' | 'pending'): number {
+    return threadManager.runCoroutine(name, step);
+  },
+
+  /**
+   * @deprecated Use os.process.cancel() instead.
+   * Kept for backward compatibility with existing apps.
+   */
+  cancel(coroId: number): void {
+    threadManager.cancelCoroutine(coroId);
+  },
+
+  /**
+   * @deprecated Use os.fs.disk instead.
+   * Kept for backward compatibility with existing apps.
+   */
+  disk: _diskStorage,
 
 };
 

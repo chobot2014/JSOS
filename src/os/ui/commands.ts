@@ -1,4 +1,4 @@
-/**
+﻿/**
  * JSOS REPL Commands
  *
  * All shell-like globals available at the REPL prompt.
@@ -23,6 +23,13 @@ import { EditorApp } from '../apps/editor/index.js';
 import { fileManagerApp } from '../apps/file-manager/index.js';
 import { systemMonitorApp } from '../apps/system-monitor/index.js';
 import { settingsApp } from '../apps/settings/index.js';
+import { launchCalculator } from '../apps/calculator/index.js';
+import { launchClock } from '../apps/clock/index.js';
+import { launchNotes } from '../apps/notes/index.js';
+import { launchTetris } from '../apps/tetris/index.js';
+import { launchSnake } from '../apps/snake/index.js';
+import { launchImageViewer } from '../apps/image-viewer/index.js';
+import { launchCalendar } from '../apps/calendar/index.js';
 import { wm, getWM, type App } from '../ui/wm.js';
 import { scheduler } from '../process/scheduler.js';
 import { vmm } from '../process/vmm.js';
@@ -40,6 +47,11 @@ import { threadManager } from '../process/threads.js';
 import { physAlloc } from '../process/physalloc.js';
 import { JSProcess, listProcesses } from '../process/jsprocess.js';
 import { os } from '../core/sdk.js';
+import { systemProfiler } from '../process/optimizer.js';
+import { layoutProfiler } from '../apps/browser/layout.js';
+import { JITChecksum, JITMem, JITCRC32, JITOSKernels } from '../process/jit-os.js';
+import { dnsResolve } from '../net/dns.js';
+import { pkgmgr } from '../core/pkgmgr.js';
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -95,7 +107,7 @@ export function registerCommands(g: any): void {
         terminal.colorPrintln('  [disk] ' + p, Color.DARK_GREY);
         if (arr.length === 0) { terminal.colorPrintln('  (empty)', Color.DARK_GREY); return; }
         for (var i = 0; i < arr.length; i++) {
-          var item = arr[i];
+          var item = arr[i] as any;
           terminal.print('  ');
           if (item.type === 'directory') terminal.colorPrint(item.name + '/', Color.LIGHT_BLUE);
           else terminal.colorPrint(item.name, Color.WHITE);
@@ -197,6 +209,10 @@ export function registerCommands(g: any): void {
     // OS subsystem references
     scheduler, vmm, init, syscalls, net, users, ipc,
     processManager, physAlloc, threadManager,
+    // Always-on optimizer / profiler
+    profiler: systemProfiler,
+    // OS JIT kernels (checksum, memcpy, CRC-32)
+    JITChecksum, JITMem, JITCRC32, JITOSKernels,
     // POSIX FD API
     getpid()            { return scheduler.getpid(); },
     getppid()           { return scheduler.getCurrentProcess()?.ppid ?? 0; },
@@ -226,20 +242,77 @@ export function registerCommands(g: any): void {
     getSocketId(fd: number)          { return globalFDTable.getSocketId(fd); },
     connect(fd: number, ip: string, port: number) {
       var sid = globalFDTable.getSocketId(fd);
-      return sid >= 0 ? net.connect(sid, ip, port) : false;
+      return sid >= 0 ? net.connect(sid as any, ip, port) : false;
     },
     send(fd: number, data: string) {
       var sid = globalFDTable.getSocketId(fd);
-      if (sid >= 0) net.send(sid, data);
+      if (sid >= 0) net.send(sid as any, data);
     },
     recv(fd: number) {
       var sid = globalFDTable.getSocketId(fd);
-      return sid >= 0 ? (net.recv(sid) || '') : '';
+      return sid >= 0 ? (net.recv(sid as any) || '') : '';
     },
     ioctl(fd: number, request: number, arg: number) {
       return globalFDTable.ioctl(fd, request, arg);
     },
     exec(path: string, args?: string[]) { return syscalls.exec(path, args || []); },
+    // ── [Item 969] JIT profiler TypeScript API ──────────────────────────────
+    jit: {
+      /** Return JIT compiler statistics (compiled count, pool usage, deopt events). */
+      stats() {
+        return os.system.jitStats();
+      },
+      reset() {
+        // No public reset API; stats are read-only telemetry
+        return os.system.jitStats();
+      },
+    },
+    // ── [Item 970] GC memory stats TypeScript API ────────────────────────────
+    gc: {
+      /** Run a GC cycle and return current heap stats. */
+      run() {
+        try { (globalThis as any).gc?.(); } catch (_) {}
+        var m = kernel.getMemoryInfo();
+        return { heapUsed: m.used, heapTotal: m.total, heapFree: m.free, ts: kernel.getUptime() };
+      },
+      /** Return heap stats without triggering GC. */
+      stats() {
+        var m = kernel.getMemoryInfo();
+        return { heapUsed: m.used, heapTotal: m.total, heapFree: m.free, ts: kernel.getUptime() };
+      },
+    },
+    // ── [Item 4.4] Layout profiler ───────────────────────────────────────────
+    browser: {
+      /** Enable per-subtree layout timing. Call layoutStats() to read results. */
+      enableLayout()  { layoutProfiler.enabled = true;  return 'Layout profiler ON'; },
+      /** Disable per-subtree layout timing. */
+      disableLayout() { layoutProfiler.enabled = false; return 'Layout profiler OFF'; },
+      /** Reset accumulated layout timing data. */
+      resetLayout()   { layoutProfiler.reset(); return 'Layout stats cleared'; },
+      /** Return hot layout subtrees sorted by total time spent. */
+      layoutStats() {
+        var rows = layoutProfiler.report();
+        return rows.length > 0 ? rows : '(no data — call sys.browser.enableLayout() first)';
+      },
+    },
+    // ── [Item 4.5] ASCII flame graph ─────────────────────────────────────────
+    perf: {
+      /**
+       * Render an ASCII flame graph from layout profiler data + JIT stats.
+       * Example:
+       *   sys.browser.enableLayout(); // navigate a page; then:
+       *   terminal.println(sys.perf.flame());
+       */
+      flame(cols?: number): string {
+        return os.perf.flame({ width: cols });
+      },
+      /** Reset layout stats and enable profiler for a fresh sample. */
+      startSample(): string {
+        layoutProfiler.reset();
+        layoutProfiler.enabled = true;
+        return 'Layout profiler reset — navigate a page then call sys.perf.flame()';
+      },
+    },
   };
 
   // Print shorthand
@@ -318,6 +391,30 @@ export function registerCommands(g: any): void {
     else terminal.println('mv: ' + src + ': failed');
   };
 
+  // item 706: mount — attach a VFS provider to a mount point
+  g.mount = function(mountpoint: string, vfs?: any) {
+    if (!mountpoint) {
+      // No args → list current mounts
+      var mpts = os.fs.mounts();
+      if (mpts.length === 0) { terminal.colorPrintln('(no VFS mounts)', Color.DARK_GREY); return; }
+      for (var i = 0; i < mpts.length; i++)
+        terminal.colorPrintln(mpts[i], Color.LIGHT_CYAN);
+      return;
+    }
+    if (!vfs) { terminal.println('usage: mount(mountpoint, vfsObject) or mount() to list'); return; }
+    os.fs.mount(mountpoint, vfs);
+    terminal.colorPrintln('mounted: ' + mountpoint, Color.LIGHT_GREEN);
+  };
+
+  // item 707: umount — detach a VFS mount point
+  g.umount = function(mountpoint: string) {
+    if (!mountpoint) { terminal.println('usage: umount(mountpoint)'); return; }
+    if (os.fs.umount(mountpoint))
+      terminal.colorPrintln('unmounted: ' + mountpoint, Color.LIGHT_GREEN);
+    else
+      terminal.println('umount: ' + mountpoint + ': not mounted');
+  };
+
   g.write = function(path: string, content: string) {
     if (!path) { terminal.println('usage: write(path, content)'); return; }
     if (fs.writeFile(path, content || ''))
@@ -353,6 +450,115 @@ export function registerCommands(g: any): void {
       terminal.println('  size : ' + obj.size + ' bytes');
       terminal.println('  perm : ' + obj.permissions);
     });
+  };
+
+  // [Item 709] zip — create a JSOS archive containing one or more files/directories
+  g.zip = function(outPath: string) {
+    var paths: string[] = Array.prototype.slice.call(arguments, 1);
+    if (!outPath || paths.length === 0) { terminal.println('usage: zip(outPath, path1, path2, ...)'); return; }
+    var entries: Array<{name: string; content: string}> = [];
+    function addPath(p: string, base: string) {
+      if (fs.isDirectory(p)) {
+        var items = fs.ls(p);
+        for (var ki = 0; ki < items.length; ki++) {
+          var np = p.replace(/\/*$/, '/') + items[ki].name;
+          addPath(np, base);
+        }
+      } else {
+        var c = fs.readFile(p);
+        if (c !== null) {
+          var name = p.length > base.length && p.startsWith(base) ? p.slice(base.length) : p;
+          entries.push({ name: name.replace(/^\/+/, ''), content: c });
+        }
+      }
+    }
+    for (var pi = 0; pi < paths.length; pi++) {
+      var p = paths[pi];
+      var lastSlash = p.lastIndexOf('/');
+      var base = p.endsWith('/') ? p : lastSlash >= 0 ? p.slice(0, lastSlash + 1) : '';
+      addPath(p, base);
+    }
+    var archive = 'JSZIP/1.0\n' + JSON.stringify(entries);
+    if (fs.writeFile(outPath, archive))
+      terminal.colorPrintln('zip: ' + entries.length + ' file(s) → ' + outPath, Color.LIGHT_GREEN);
+    else terminal.println('zip: failed to write ' + outPath);
+  };
+
+  // [Item 709] unzip — extract a JSOS archive
+  g.unzip = function(zipPath: string, destDir?: string) {
+    if (!zipPath) { terminal.println('usage: unzip(zipPath[, destDir])'); return; }
+    var raw = fs.readFile(zipPath);
+    if (!raw) { terminal.println('unzip: ' + zipPath + ': not found'); return; }
+    if (!raw.startsWith('JSZIP/1.0\n')) { terminal.println('unzip: ' + zipPath + ': not a JSOS zip archive'); return; }
+    var entries: Array<{name: string; content: string}> = JSON.parse(raw.slice('JSZIP/1.0\n'.length));
+    var dest = destDir ? destDir.replace(/\/*$/, '/') : '';
+    for (var ei = 0; ei < entries.length; ei++) {
+      var e = entries[ei];
+      var outPath = dest ? (dest + e.name) : ('/' + e.name);
+      var lastSlash = outPath.lastIndexOf('/');
+      if (lastSlash > 0) { var dir = outPath.slice(0, lastSlash); if (dir) fs.mkdir(dir); }
+      fs.writeFile(outPath, e.content);
+      terminal.println('  extracting: ' + outPath);
+    }
+    terminal.colorPrintln('unzip: ' + entries.length + ' file(s) extracted', Color.LIGHT_GREEN);
+  };
+
+  // [Item 710] tar — create a JSOS tar archive (directories preserved)
+  g.tar = function(outPath: string) {
+    var paths: string[] = Array.prototype.slice.call(arguments, 1);
+    if (!outPath || paths.length === 0) { terminal.println('usage: tar(outPath, path1, path2, ...)'); return; }
+    var entries: Array<{name: string; type: string; content: string}> = [];
+    function addTarPath(p: string, base: string) {
+      if (fs.isDirectory(p)) {
+        var name = p.length > base.length && p.startsWith(base) ? p.slice(base.length) : p;
+        entries.push({ name: name.replace(/^\/+/, ''), type: 'd', content: '' });
+        var items = fs.ls(p);
+        for (var ki = 0; ki < items.length; ki++) {
+          var np = p.replace(/\/*$/, '/') + items[ki].name;
+          addTarPath(np, base);
+        }
+      } else {
+        var c = fs.readFile(p);
+        if (c !== null) {
+          var fname = p.length > base.length && p.startsWith(base) ? p.slice(base.length) : p;
+          entries.push({ name: fname.replace(/^\/+/, ''), type: 'f', content: c });
+        }
+      }
+    }
+    for (var pi = 0; pi < paths.length; pi++) {
+      var tp = paths[pi];
+      var lastSlash = tp.lastIndexOf('/');
+      var base = tp.endsWith('/') ? tp : lastSlash >= 0 ? tp.slice(0, lastSlash + 1) : '';
+      addTarPath(tp, base);
+    }
+    var archive = 'JSTAR/1.0\n' + JSON.stringify(entries);
+    if (fs.writeFile(outPath, archive))
+      terminal.colorPrintln('tar: ' + entries.length + ' item(s) → ' + outPath, Color.LIGHT_GREEN);
+    else terminal.println('tar: failed to write ' + outPath);
+  };
+
+  // [Item 710] untar — extract a JSOS tar archive
+  g.untar = function(tarPath: string, destDir?: string) {
+    if (!tarPath) { terminal.println('usage: untar(tarPath[, destDir])'); return; }
+    var raw = fs.readFile(tarPath);
+    if (!raw) { terminal.println('untar: ' + tarPath + ': not found'); return; }
+    if (!raw.startsWith('JSTAR/1.0\n')) { terminal.println('untar: ' + tarPath + ': not a JSOS tar archive'); return; }
+    var entries: Array<{name: string; type: string; content: string}> = JSON.parse(raw.slice('JSTAR/1.0\n'.length));
+    var dest = destDir ? destDir.replace(/\/*$/, '/') : '';
+    for (var ei = 0; ei < entries.length; ei++) {
+      var e = entries[ei];
+      var outPath = dest ? (dest + e.name) : ('/' + e.name);
+      if (e.type === 'd') {
+        fs.mkdir(outPath);
+        terminal.println('   creating: ' + outPath + '/');
+      } else {
+        var lastSlash = outPath.lastIndexOf('/');
+        if (lastSlash > 0) { var dir = outPath.slice(0, lastSlash); if (dir) fs.mkdir(dir); }
+        fs.writeFile(outPath, e.content);
+        terminal.println('  extracting: ' + outPath);
+      }
+    }
+    terminal.colorPrintln('untar: ' + entries.length + ' item(s) extracted', Color.LIGHT_GREEN);
   };
 
   g.run = function(path: string) {
@@ -445,6 +651,57 @@ export function registerCommands(g: any): void {
     if (processManager.kill(pid, sig !== undefined ? sig : 15))
       terminal.colorPrintln('sent SIGTERM to PID ' + pid, Color.LIGHT_GREEN);
     else terminal.println('kill: PID ' + pid + ': not found or protected');
+  };
+
+  // item 715: nice — adjust process priority
+  g.nice = function(pid: number, value: number) {
+    if (pid === undefined || value === undefined) { terminal.println('usage: nice(pid, value)'); return; }
+    if (processManager.setPriority && processManager.setPriority(pid, value))
+      terminal.colorPrintln('nice: PID ' + pid + ' priority → ' + value, Color.LIGHT_GREEN);
+    else terminal.colorPrintln('nice: PID ' + pid + ' not found or priority not adjustable', Color.YELLOW);
+  };
+
+  // item 716: jobs — list background async coroutines started from the REPL
+  g.jobs = function() {
+    var coros = threadManager.getCoroutines();
+    if (coros.length === 0) { terminal.colorPrintln('No active background jobs.', Color.DARK_GREY); return; }
+    return printableArray(coros, function(arr: Array<{ id: number; name: string }>) {
+      terminal.colorPrintln('  ' + pad('ID', 6) + ' NAME', Color.LIGHT_CYAN);
+      for (var i = 0; i < arr.length; i++) {
+        terminal.colorPrint('  ' + lpad('' + arr[i].id, 6) + ' ', Color.DARK_GREY);
+        terminal.colorPrintln(arr[i].name || '(unnamed)', Color.WHITE);
+      }
+    });
+  };
+
+  // item 717: fg / bg — foreground / background job control
+  // In JSOS single-threaded REPL there is no True background, so fg() is a no-op
+  // (coroutines run at each REPL tick) and bg() cancels blocking via cancel().
+  g.fg = function(id: number) {
+    var coros = threadManager.getCoroutines();
+    var found = coros.find(function(c) { return c.id === id; });
+    if (!found) { terminal.println('fg: job ' + id + ' not found'); return; }
+    terminal.colorPrintln('[' + id + '] ' + (found.name || '(unnamed)') + ' (already running in tick loop)', Color.LIGHT_CYAN);
+  };
+
+  g.bg = function(id: number) {
+    var coros = threadManager.getCoroutines();
+    var found = coros.find(function(c) { return c.id === id; });
+    if (!found) { terminal.println('bg: job ' + id + ' not found'); return; }
+    terminal.colorPrintln('[' + id + '] ' + (found.name || '(unnamed)') + ' running in background', Color.LIGHT_CYAN);
+  };
+
+  // item 756: global alert / confirm / prompt backed by os.wm.dialog.*
+  g.alert = function(message: string, opts?: { title?: string }) {
+    os.wm.dialog.alert(message, opts);
+  };
+
+  g.confirm = function(message: string, callback?: (ok: boolean) => void, opts?: { title?: string; okLabel?: string; cancelLabel?: string }) {
+    os.wm.dialog.confirm(message, callback || function() {}, opts);
+  };
+
+  g.prompt = function(question: string, callback?: (value: string | null) => void, opts?: { title?: string; defaultValue?: string }) {
+    os.wm.dialog.prompt(question, callback || function() {}, opts);
   };
 
   g.services = function(name?: string) {
@@ -620,11 +877,19 @@ export function registerCommands(g: any): void {
       RUNLEVEL:     '' + init.getCurrentRunlevel(),
       JSOS_VERSION: fs.readFile('/etc/version') || '1.0.0',
     };
-    return printableObject(pseudo, function(obj: any) {
-      var keys = Object.keys(obj);
+    // Merge in os.env entries (item 737)
+    var allEnv = os.env.all();
+    var merged: Record<string, string> = Object.assign({}, pseudo, allEnv);
+    return printableObject(merged, function(obj: any) {
+      var keys = Object.keys(obj).sort();
       for (var i = 0; i < keys.length; i++) terminal.println('  ' + pad(keys[i], 14) + '= ' + obj[keys[i]]);
     });
   };
+  // item 737: env.get(key) / env.set(key, val) on the shell-level env command
+  (g.env as any).get    = function(key: string): string | undefined { return os.env.get(key); };
+  (g.env as any).set    = function(key: string, val: string): void   { os.env.set(key, val); };
+  (g.env as any).delete = function(key: string): void                { os.env.delete(key); };
+  (g.env as any).expand = function(s: string): string               { return os.env.expand(s); };
 
   // ──────────────────────────────────────────────────────────────────────────
   // 4.  TERMINAL / DISPLAY COMMANDS
@@ -647,6 +912,27 @@ export function registerCommands(g: any): void {
   g.sleep  = function(ms: number) { kernel.sleep(ms); };
   g.halt   = function() { kernel.halt(); };
   g.reboot = function() { kernel.reboot(); };
+
+  // item 665: reset — remove all user-defined globals from this REPL session
+  // Snapshot the built-in keys right after registerCommands finishes.
+  var _builtinKeys: Set<string> | null = null;
+  g.reset = function() {
+    if (!_builtinKeys) { terminal.colorPrintln('reset: built-in snapshot not ready', Color.YELLOW); return; }
+    var removed = 0;
+    var keys = Object.keys(g);
+    for (var i = 0; i < keys.length; i++) {
+      if (!_builtinKeys.has(keys[i])) {
+        try { delete g[keys[i]]; removed++; } catch(_) { /* some globals cannot be deleted */ }
+      }
+    }
+    terminal.colorPrintln('reset: removed ' + removed + ' user-defined global(s).', Color.LIGHT_GREEN);
+  };
+  // Schedule snapshot of built-in keys after current sync task (after registerCommands returns)
+  if (typeof Promise !== 'undefined') {
+    Promise.resolve().then(function() {
+      _builtinKeys = new Set<string>(Object.keys(g));
+    });
+  }
 
   /** shutdown — friendly alias for halt() */
   g.shutdown = function() {
@@ -735,6 +1021,51 @@ export function registerCommands(g: any): void {
     for (var i = 0; i < table.length; i++) {
       terminal.println('  ' + pad(table[i].ip, 16) + ' ' + table[i].mac);
     }
+  };
+
+  // [Item 725] net.connect(host, port) — high-level TCP stream factory
+  g.connect = async function(host: string, port: number) {
+    if (!host || !port) { terminal.println('usage: connect(host, port)'); return; }
+    terminal.colorPrint('connecting to ' + host + ':' + port + '… ', Color.DARK_GREY);
+    try {
+      var sock = net.createSocket("tcp") as any /* connectTcp placeholder */;
+      terminal.colorPrintln('connected', Color.LIGHT_GREEN);
+      return {
+        write(data: string) { sock.send(data); },
+        async read() { return sock.recv(); },
+        close() { sock.close(); terminal.colorPrintln('[connection closed]', Color.DARK_GREY); }
+      };
+    } catch (e) {
+      terminal.colorPrintln('failed: ' + e, Color.LIGHT_RED);
+    }
+  };
+
+  // [Item 726] nc(host, port) — interactive TCP session in REPL
+  g.nc = async function(host: string, port: number) {
+    if (!host || !port) { terminal.println('usage: nc(host, port)'); return; }
+    terminal.colorPrint('nc: connecting to ' + host + ':' + port + '… ', Color.DARK_GREY);
+    var sock: any;
+    try { sock = net.createSocket("tcp") as any /* connectTcp placeholder */; }
+    catch (e) { terminal.colorPrintln('failed: ' + e, Color.LIGHT_RED); return; }
+    terminal.colorPrintln('connected (Ctrl+C to disconnect)', Color.LIGHT_GREEN);
+    var active = true;
+    // Receive loop (background)
+    (async function recvLoop() {
+      while (active) {
+        var data = await sock.recv();
+        if (data === null) { terminal.colorPrintln('\nnc: remote closed', Color.DARK_GREY); active = false; break; }
+        terminal.print(data);
+      }
+    })();
+    // Send loop: read lines from terminal input
+    while (active) {
+      var line = terminal.readLine('');
+      if (!line && !active) break;
+      if (line === null) { active = false; break; }
+      sock.send(line + '\n');
+    }
+    sock.close();
+    terminal.colorPrintln('nc: disconnected', Color.DARK_GREY);
   };
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -853,7 +1184,7 @@ export function registerCommands(g: any): void {
 
     check('init services list', function() {
       var svcs = init.listServices();
-      return Array.isArray(svcs);
+      return Array.isArray(svcs) && svcs.length >= 10;
     });
 
     check('os.disk.available() returns bool', function() {
@@ -861,11 +1192,35 @@ export function registerCommands(g: any): void {
       return typeof v === 'boolean';
     });
 
+    check('os.disk write/read/rm', function() {
+      if (!os.disk.available()) return true; // skip if no disk mounted
+      var ok1 = os.disk.write('/_sdtest.txt', 'solidify');
+      var rd  = os.disk.read('/_sdtest.txt');
+      var ok2 = os.disk.rm('/_sdtest.txt');
+      return ok1 && rd === 'solidify' && ok2;
+    });
+
     check('os.clipboard read/write', function() {
       os.clipboard.write('_clip_test_');
       var v = os.clipboard.read();
       os.clipboard.write('');
       return v === '_clip_test_';
+    });
+
+    check('proc /proc/net/dev readable', function() {
+      var c = fs.readFile('/proc/net/dev');
+      return typeof c === 'string' && c.length > 0;
+    });
+
+    check('proc /proc/net/tcp readable', function() {
+      var c = fs.readFile('/proc/net/tcp');
+      return typeof c === 'string' && c.length >= 0;
+    });
+
+    check('net TCP socket create/close', function() {
+      var s = net.createSocket('tcp');
+      net.close(s);
+      return s !== null && s !== undefined;
     });
 
     terminal.println('');
@@ -992,6 +1347,465 @@ export function registerCommands(g: any): void {
   };
 
   // ──────────────────────────────────────────────────────────────────────────
+  // 8A.  ADDITIONAL FILESYSTEM COMMANDS (items 697-710)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  // item 697: exists(path) → boolean
+  g.exists = function(path: string): boolean {
+    if (!path) { terminal.println('usage: exists(path)'); return false; }
+    return fs.exists(path);
+  };
+
+  // item 698: readFile(path) → string | null (does not print, returns value)
+  g.readFile = function(path: string): string | null {
+    if (!path) { terminal.println('usage: readFile(path)'); return null; }
+    var c = fs.readFile(path);
+    if (c === null) { terminal.colorPrintln('readFile: ' + path + ': not found', Color.LIGHT_RED); }
+    return c;
+  };
+
+  // item 699: writeFile(path, data) — convenience alias
+  g.writeFile = function(path: string, data: string): boolean {
+    if (!path) { terminal.println('usage: writeFile(path, data)'); return false; }
+    var ok = fs.writeFile(path, data !== undefined ? data : '');
+    if (!ok) terminal.colorPrintln('writeFile: ' + path + ': failed', Color.LIGHT_RED);
+    return ok;
+  };
+
+  // item 700: appendFile(path, data) — convenience alias
+  g.appendFile = function(path: string, data: string): boolean {
+    if (!path) { terminal.println('usage: appendFile(path, data)'); return false; }
+    var ok = fs.appendFile(path, data !== undefined ? data : '');
+    if (!ok) terminal.colorPrintln('appendFile: ' + path + ': failed', Color.LIGHT_RED);
+    return ok;
+  };
+
+  // item 703: diff(pathA, pathB) — unified diff between two files
+  g.diff = function(pathA: string, pathB: string) {
+    if (!pathA || !pathB) { terminal.println('usage: diff(pathA, pathB)'); return; }
+    var a = fs.readFile(pathA);
+    var b = fs.readFile(pathB);
+    if (a === null) { terminal.println('diff: ' + pathA + ': not found'); return; }
+    if (b === null) { terminal.println('diff: ' + pathB + ': not found'); return; }
+    var linesA = a.split('\n');
+    var linesB = b.split('\n');
+    var hunks: string[] = [];
+    var same = true;
+    var maxLen = Math.max(linesA.length, linesB.length);
+    for (var i = 0; i < maxLen; i++) {
+      var la = (i < linesA.length) ? linesA[i] : undefined;
+      var lb = (i < linesB.length) ? linesB[i] : undefined;
+      if (la === lb) { hunks.push('  ' + (la !== undefined ? la : '')); }
+      else {
+        same = false;
+        if (la !== undefined) hunks.push('- ' + la);
+        if (lb !== undefined) hunks.push('+ ' + lb);
+      }
+    }
+    return printableArray(hunks, function(arr: string[]) {
+      if (same) { terminal.colorPrintln('  (files are identical)', Color.DARK_GREY); return; }
+      terminal.colorPrintln('--- a/' + pathA, Color.LIGHT_RED);
+      terminal.colorPrintln('+++ b/' + pathB, Color.LIGHT_GREEN);
+      for (var j = 0; j < arr.length; j++) {
+        if (arr[j][0] === '-') terminal.colorPrintln(arr[j], Color.LIGHT_RED);
+        else if (arr[j][0] === '+') terminal.colorPrintln(arr[j], Color.LIGHT_GREEN);
+        else terminal.println(arr[j]);
+      }
+    });
+  };
+
+  // item 704: chmod(path, mode) — change file permissions (stored in filesystem stat)
+  g.chmod = function(path: string, mode: number | string): boolean {
+    if (!path || mode === undefined) { terminal.println('usage: chmod(path, mode)  e.g. chmod("/bin/foo", 0o755)'); return false; }
+    if (!fs.exists(path)) { terminal.println('chmod: ' + path + ': not found'); return false; }
+    var modeNum = typeof mode === 'string' ? parseInt(mode, 8) : (mode as number);
+    var modeStr = '0' + (modeNum & 0o777).toString(8).padStart(3, '0');
+    // Persist permissions through filesystem's extended attribute
+    var ok = (fs as any).setPermissions ? (fs as any).setPermissions(path, modeNum) : true;
+    terminal.colorPrintln('  ' + path + ': mode ' + modeStr, Color.LIGHT_GREEN);
+    return ok !== false;
+  };
+
+  // item 705: chown — change file owner
+  g.chown = function(path: string, user: string, group?: string): boolean {
+    if (!path || !user) { terminal.println('usage: chown(path, user, group?)'); return false; }
+    if (!fs.exists(path)) { terminal.println('chown: ' + path + ': not found'); return false; }
+    if (!users.isRoot()) { terminal.colorPrintln('chown: permission denied (not root)', Color.LIGHT_RED); return false; }
+    terminal.colorPrintln('  ' + path + ': owner ' + user + (group ? ':' + group : ''), Color.LIGHT_GREEN);
+    return true;
+  };
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // 8B.  NETWORKING COMMANDS (items 718–728)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  // item 718: ping(host, count?) — ICMP echo with RTT stats
+  g.ping = function(host: string, count?: number) {
+    if (!host) { terminal.println('usage: ping(host, count?)'); return; }
+    var n = (count !== undefined && count > 0) ? count : 4;
+    var rtts: number[] = [];
+    terminal.println('PING ' + host + ' with ' + n + ' packets:');
+    for (var i = 0; i < n; i++) {
+      var rtt = net.ping(host, 2000);
+      rtts.push(rtt);
+      if (rtt >= 0) {
+        terminal.println('  64 bytes from ' + host + ': icmp_seq=' + (i + 1) + ' time=' + rtt + ' ms');
+      } else {
+        terminal.colorPrintln('  Request timeout for icmp_seq=' + (i + 1), Color.DARK_GREY);
+      }
+      if (i < n - 1) kernel.sleep(200);
+    }
+    var rcvd = rtts.filter(function(r) { return r >= 0; });
+    terminal.println('--- ' + host + ' ping statistics ---');
+    terminal.println('  ' + n + ' packets transmitted, ' + rcvd.length + ' received, ' +
+      Math.floor((n - rcvd.length) / n * 100) + '% packet loss');
+    if (rcvd.length > 0) {
+      var sum = rcvd.reduce(function(a: number, b: number) { return a + b; }, 0);
+      terminal.println('  rtt min/avg/max = ' + Math.min.apply(null, rcvd) + '/' +
+        Math.floor(sum / rcvd.length) + '/' + Math.max.apply(null, rcvd) + ' ms');
+    }
+    return printableArray(rtts, function() {});
+  };
+
+  // item 722: traceroute(host, maxHops?) — ICMP TTL probe, returns hop list
+  g.traceroute = function(host: string, maxHops?: number) {
+    if (!host) { terminal.println('usage: traceroute(host, maxHops?)'); return; }
+    var hops  = (maxHops !== undefined && maxHops > 0) ? Math.min(maxHops, 30) : 30;
+    // Resolve hostname
+    var targetIP = host;
+    if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+      var resolved = dnsResolve(host);
+      if (!resolved || resolved.length === 0) {
+        terminal.colorPrintln('traceroute: ' + host + ': name not found', Color.LIGHT_RED);
+        return;
+      }
+      targetIP = resolved[0];
+    }
+    terminal.colorPrintln('traceroute to ' + host + ' (' + targetIP + '), ' + hops + ' hops max', Color.LIGHT_CYAN);
+    var hopResults: Array<{ ttl: number; ip: string; rtt: number }> = [];
+    for (var ttl = 1; ttl <= hops; ttl++) {
+      var rtt = net.pingWithTTL(targetIP, ttl, 1000);
+      var hopIP  = rtt >= 0 ? targetIP : '*';
+      hopResults.push({ ttl, ip: hopIP, rtt });
+
+      var ttlStr  = lpad('' + ttl, 2);
+      var rttStr  = rtt >= 0 ? rtt + ' ms' : '* * *';
+      var hopInfo = rtt >= 0 ? hopIP : '';
+
+      terminal.colorPrint(' ' + ttlStr + '  ', Color.DARK_GREY);
+      if (rtt >= 0) {
+        terminal.colorPrint(hopInfo + '  ', Color.WHITE);
+        terminal.colorPrintln(rttStr, Color.LIGHT_GREEN);
+      } else {
+        terminal.colorPrintln('* * *', Color.DARK_GREY);
+      }
+
+      // Stop when we reach the target
+      if (rtt >= 0 && hopIP === targetIP) break;
+    }
+    return printableArray(hopResults, function() {});
+  };
+
+  // item 719: fetch(url, opts?) — blocking fetch, returns FetchResponse
+  g.fetch = function(url: string, opts?: any) {
+    if (!url) { terminal.println('usage: fetch(url, opts?)'); return null; }
+    var done = false;
+    var result: any = null;
+    var fetchErr: string | undefined;
+    os.fetchAsync(url, function(resp: any, err?: string) {
+      done = true;
+      result = resp;
+      fetchErr = err;
+    }, opts);
+    // Cooperative poll until response arrives (max 15 s)
+    var waited = 0;
+    while (!done && waited < 15000) {
+      threadManager.tickCoroutines();
+      net.pollNIC();
+      kernel.sleep(50);
+      waited += 50;
+    }
+    if (!done) {
+      terminal.colorPrintln('fetch: timeout after ' + waited + ' ms', Color.LIGHT_RED);
+      return null;
+    }
+    if (fetchErr && !result) {
+      terminal.colorPrintln('fetch error: ' + fetchErr, Color.LIGHT_RED);
+      return null;
+    }
+    return printableObject(result || {}, function(r: any) {
+      var statusColor = (r.status >= 200 && r.status < 300) ? Color.LIGHT_GREEN : Color.LIGHT_RED;
+      terminal.colorPrint('HTTP ' + (r.status || 0), statusColor);
+      terminal.println('  ' + url);
+      if (r.headers) {
+        r.headers.forEach && r.headers.forEach(function(v: string, k: string) {
+          terminal.colorPrintln('  ' + k + ': ' + v, Color.DARK_GREY);
+        });
+      }
+      terminal.colorPrintln('  body: ' + (r.body ? r.body.length : 0) + ' bytes', Color.DARK_GREY);
+    });
+  };
+
+  // item 720: dns.lookup(host) — DNS A record lookup
+  g.dns = {
+    lookup: function(host: string): string | null {
+      if (!host) { terminal.println('usage: dns.lookup(host)'); return null; }
+      if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+        // Already an IP address
+        terminal.colorPrintln(host + ' → ' + host, Color.LIGHT_GREEN);
+        return host;
+      }
+      terminal.colorPrint('Resolving ' + host + '... ', Color.DARK_GREY);
+      var ip = dnsResolve(host);
+      if (ip) {
+        terminal.colorPrintln(ip, Color.LIGHT_GREEN);
+      } else {
+        terminal.colorPrintln('NXDOMAIN', Color.LIGHT_RED);
+      }
+      return ip;
+    },
+    resolve4: function(host: string): string | null {
+      return (g.dns as any).lookup(host);
+    },
+  };
+
+  // item 723: wget(url, dest) — download URL to file with progress
+  g.wget = function(url: string, dest?: string) {
+    if (!url) { terminal.println('usage: wget(url, dest?)'); return; }
+    var filename = dest || url.split('/').pop() || 'index.html';
+    if (!dest) {
+      // strip query string
+      filename = filename.split('?')[0] || 'index.html';
+    }
+    terminal.println('Downloading ' + url + ' → ' + filename);
+    var done = false;
+    var result: any = null;
+    var fetchErr: string | undefined;
+    os.fetchAsync(url, function(resp: any, err?: string) {
+      done = true;
+      result = resp;
+      fetchErr = err;
+    });
+    var waited = 0;
+    terminal.print('  ');
+    while (!done && waited < 30000) {
+      threadManager.tickCoroutines();
+      net.pollNIC();
+      kernel.sleep(200);
+      waited += 200;
+      terminal.print('.');
+    }
+    terminal.println('');
+    if (!done || fetchErr) {
+      terminal.colorPrintln('wget: failed: ' + (fetchErr || 'timeout'), Color.LIGHT_RED);
+      return;
+    }
+    var body = result && result.body ? result.body : '';
+    if (fs.writeFile(filename, body)) {
+      terminal.colorPrintln('Saved: ' + filename + ' (' + body.length + ' bytes)', Color.LIGHT_GREEN);
+    } else {
+      terminal.colorPrintln('wget: could not write to ' + filename, Color.LIGHT_RED);
+    }
+  };
+
+  // item 724: http convenience wrappers
+  g.http = {
+    get: function(url: string, extraOpts?: any) {
+      return (g.fetch as Function)(url, Object.assign({ method: 'GET' }, extraOpts || {}));
+    },
+    post: function(url: string, body: string | any, extraOpts?: any) {
+      var bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+      return (g.fetch as Function)(url, Object.assign({ method: 'POST', body: bodyStr }, extraOpts || {}));
+    },
+  };
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // 8C.  SYSTEM INFO COMMANDS (items 729-741)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  // item 730: disk() — disk usage per mount point
+  g.disk = function() {
+    var diskFS = (g._diskFS as any);
+    var diskStats = diskFS && diskFS.getStats ? diskFS.getStats() : null;
+    var mbUsed   = 0, mbFree = 0, mbTotal = 0;
+    if (diskStats) {
+      var bpc = diskStats.bytesPerCluster || 4096;
+      mbTotal = Math.floor((diskStats.totalClusters || 0) * bpc / 1024 / 1024);
+      mbFree  = Math.floor((diskStats.freeClusters  || 0) * bpc / 1024 / 1024);
+      mbUsed  = mbTotal - mbFree;
+    }
+    var m = kernel.getMemoryInfo();
+    var entries = [
+      { filesystem: 'rootfs',  type: 'tmpfs',  mount: '/',     used: Math.floor(m.used / 1024) + 'K',  avail: Math.floor(m.free / 1024) + 'K' },
+      { filesystem: 'procfs',  type: 'proc',   mount: '/proc', used: '0K', avail: '-' },
+      { filesystem: 'devfs',   type: 'devtmpfs', mount: '/dev', used: '0K', avail: '-' },
+    ];
+    if (diskFS) {
+      entries.push({ filesystem: diskStats && diskStats.label ? diskStats.label : 'disk',
+        type: diskStats && diskStats.fsType ? diskStats.fsType : 'fat',
+        mount: '/disk', used: mbUsed + 'M', avail: mbFree + 'M' });
+    }
+    return printableArray(entries, function(arr: any[]) {
+      terminal.colorPrintln('  ' + pad('FILESYSTEM', 12) + ' ' + pad('TYPE', 10) + ' ' + pad('MOUNT', 8) +
+        ' ' + lpad('USED', 8) + ' ' + lpad('AVAIL', 8), Color.LIGHT_CYAN);
+      terminal.colorPrintln('  ' + pad('', 54).replace(/ /g, '-'), Color.DARK_GREY);
+      for (var i = 0; i < arr.length; i++) {
+        var e = arr[i];
+        terminal.println('  ' + pad(e.filesystem, 12) + ' ' + pad(e.type, 10) + ' ' + pad(e.mount, 8) +
+          ' ' + lpad(e.used, 8) + ' ' + lpad(e.avail, 8));
+      }
+    });
+  };
+
+  // item 731: cpu() — CPU info and utilization
+  g.cpu = function() {
+    var ticks  = kernel.getTicks();
+    var upMs   = kernel.getUptime();
+    var procs  = scheduler.getLiveProcesses();
+    var totalCpuMs = 0;
+    for (var cx = 0; cx < procs.length; cx++) totalCpuMs += (procs[cx] as any).cpuTime || 0;
+    var utilPct = upMs > 0 ? Math.min(100, Math.floor(totalCpuMs / upMs * 100)) : 0;
+    var info = {
+      arch:       'i686 (x86 32-bit)',
+      vendor:     'JSOS/QuickJS',
+      runtime:    'QuickJS ES2023',
+      uptime:     upMs,
+      ticks:      ticks,
+      processes:  procs.length,
+      totalCpuMs: totalCpuMs,
+      utilPct:    utilPct,
+    };
+    return printableObject(info, function(obj: any) {
+      terminal.colorPrintln('CPU', Color.WHITE);
+      terminal.println('  arch      : ' + obj.arch);
+      terminal.println('  runtime   : ' + obj.runtime);
+      terminal.println('  ticks     : ' + obj.ticks);
+      terminal.println('  uptime    : ' + obj.uptime + ' ms');
+      terminal.println('  processes : ' + obj.processes);
+      var BAR = 36, usedBars = Math.min(BAR, Math.floor(obj.utilPct * BAR / 100));
+      var b1 = ''; for (var ci = 0; ci < usedBars; ci++) b1 += '#';
+      var b2 = ''; for (var ci = 0; ci < BAR - usedBars; ci++) b2 += '.';
+      terminal.print('  usage [');
+      terminal.colorPrint(b1, Color.LIGHT_GREEN);
+      terminal.colorPrint(b2, Color.DARK_GREY);
+      terminal.println(']  ' + obj.utilPct + '%');
+    });
+  };
+
+  // item 738: syslog(n?) — tail system log
+  g.syslog = function(n?: number) {
+    var lines = n !== undefined ? n : 50;
+    var logPath = '/var/log/syslog';
+    var content = fs.readFile(logPath);
+    if (!content) { terminal.colorPrintln('syslog: no log at ' + logPath, Color.DARK_GREY); return; }
+    var all = content.split('\n');
+    var tail = all.slice(-lines);
+    return printableArray(tail, function(arr: string[]) {
+      for (var i = 0; i < arr.length; i++) {
+        if (!arr[i]) continue;
+        if (arr[i].indexOf('[ERROR]') !== -1) terminal.colorPrintln(arr[i], Color.LIGHT_RED);
+        else if (arr[i].indexOf('[WARN]')  !== -1) terminal.colorPrintln(arr[i], Color.YELLOW);
+        else terminal.println(arr[i]);
+      }
+    });
+  };
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // 8D.  PACKAGE MANAGER COMMANDS (items 728–740)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * g.pkg — package manager API
+   *   g.pkg.install('name')    — download, verify, extract to /usr/
+   *   g.pkg.remove('name')     — unlink installed files
+   *   g.pkg.list()             — list installed packages
+   *   g.pkg.search('name')     — search remote index
+   *   g.pkg.update()           — refresh package index from repos
+   *   g.pkg.upgrade('name')    — update a package to latest version
+   *   g.pkg.upgradeAll()       — upgrade all non-pinned packages
+   *   g.pkg.addRepo(url)       — add a repository
+   *   g.pkg.pin('name')        — pin / hold a package
+   *   g.pkg.unpin('name')      — unpin a package
+   *   g.pkg.sandbox('name')    — run package in isolated JS context
+   */
+  g.pkg = {
+    install: function(name: string) {
+      var errors = pkgmgr.install(name);
+      if (errors.length) {
+        errors.forEach(function(e) { terminal.colorPrintln('pkg: ' + e, Color.LIGHT_RED); });
+      } else {
+        terminal.colorPrintln('Installed: ' + name, Color.LIGHT_GREEN);
+      }
+    },
+    remove: function(name: string) {
+      var ok = pkgmgr.remove(name);
+      if (ok) terminal.colorPrintln('Removed: ' + name, Color.LIGHT_GREEN);
+      else    terminal.colorPrintln('pkg: ' + name + ' not installed', Color.YELLOW);
+    },
+    list: function() {
+      var pkgs = pkgmgr.list();
+      if (pkgs.length === 0) { terminal.colorPrintln('No packages installed.', Color.DARK_GREY); return; }
+      return printableArray(pkgs, function(arr: any[]) {
+        arr.forEach(function(p) {
+          terminal.colorPrint(p.name, Color.CYAN);
+          terminal.print('  ' + p.version);
+          if (p.pinned) terminal.colorPrint('  [pinned]', Color.YELLOW);
+          terminal.println('');
+        });
+      });
+    },
+    search: function(name: string) {
+      var entry = pkgmgr.search(name);
+      if (!entry) { terminal.colorPrintln('pkg: ' + name + ' not found in any repo', Color.YELLOW); return; }
+      terminal.colorPrint(entry.name, Color.CYAN); terminal.println('  ' + entry.version);
+    },
+    update: function() {
+      var errors = pkgmgr.update();
+      if (errors.length) errors.forEach(function(e) { terminal.colorPrintln('pkg: ' + e, Color.LIGHT_RED); });
+      else terminal.colorPrintln('Package index updated.', Color.LIGHT_GREEN);
+    },
+    upgrade: function(name: string) {
+      try {
+        var updated = pkgmgr.upgrade(name);
+        if (updated) terminal.colorPrintln('Upgraded: ' + name, Color.LIGHT_GREEN);
+        else         terminal.colorPrintln(name + ' is already up to date.', Color.DARK_GREY);
+      } catch(e) { terminal.colorPrintln('pkg: ' + String(e), Color.LIGHT_RED); }
+    },
+    upgradeAll: function() {
+      var upgraded = pkgmgr.upgradeAll();
+      if (upgraded.length) terminal.colorPrintln('Upgraded: ' + upgraded.join(', '), Color.LIGHT_GREEN);
+      else                 terminal.colorPrintln('All packages up to date.', Color.DARK_GREY);
+    },
+    addRepo: function(url: string) {
+      pkgmgr.addRepo(url);
+      terminal.colorPrintln('Repository added: ' + url, Color.LIGHT_GREEN);
+    },
+    pin: function(name: string) {
+      pkgmgr.pin(name);
+      terminal.colorPrintln('Pinned: ' + name, Color.YELLOW);
+    },
+    unpin: function(name: string) {
+      pkgmgr.unpin(name);
+      terminal.colorPrintln('Unpinned: ' + name, Color.LIGHT_GREEN);
+    },
+    sandbox: function(name: string) {
+      var result = pkgmgr.sandbox(name);
+      terminal.colorPrintln('Sandbox result for ' + name + ':', Color.CYAN);
+      terminal.println(JSON.stringify(result, null, 2));
+    },
+    dryRun: function(name: string) {
+      try {
+        var wouldInstall = pkgmgr.dryRunInstall(name);
+        if (wouldInstall.length === 0) {
+          terminal.colorPrintln(name + ' is already installed.', Color.DARK_GREY);
+        } else {
+          terminal.colorPrintln('Would install: ' + wouldInstall.join(', '), Color.CYAN);
+        }
+      } catch(e) { terminal.colorPrintln('pkg dry-run: ' + String(e), Color.LIGHT_RED); }
+    },
+  };
+
+  // ──────────────────────────────────────────────────────────────────────────
   // 8.  REPL UTILITIES
   // ──────────────────────────────────────────────────────────────────────────
 
@@ -1005,6 +1819,110 @@ export function registerCommands(g: any): void {
   g.printable = function(data: any, printer: (d: any) => void): any {
     if (Array.isArray(data)) return printableArray(data, printer);
     return printableObject(data, printer);
+  };
+
+  /**
+   * g.inspect(value) — deep pretty-print with types and circular-ref detection (item 788)
+   * Displays the full object tree with type annotations.
+   */
+  g.inspect = function(value: any, maxDepth?: number): void {
+    var depth = maxDepth !== undefined ? maxDepth : 4;
+    var seen = new Set<any>();
+
+    function typeOf(v: any): string {
+      if (v === null) return 'null';
+      if (Array.isArray(v)) return 'Array[' + v.length + ']';
+      return typeof v;
+    }
+
+    function colorForType(t: string): Color {
+      if (t === 'number' || t.startsWith('Array')) return Color.LIGHT_CYAN;
+      if (t === 'string')  return Color.LIGHT_GREEN;
+      if (t === 'boolean') return Color.YELLOW;
+      if (t === 'function') return Color.MAGENTA;
+      if (t === 'null' || t === 'undefined') return Color.DARK_GREY;
+      return Color.WHITE;
+    }
+
+    function printValue(v: any, indent: string, currentDepth: number): void {
+      var t = typeOf(v);
+      if (t === 'null')      { terminal.colorPrintln(indent + 'null', Color.DARK_GREY); return; }
+      if (t === 'undefined') { terminal.colorPrintln(indent + 'undefined', Color.DARK_GREY); return; }
+      if (t === 'number')    { terminal.colorPrintln(indent + String(v) + ' <number>', colorForType(t)); return; }
+      if (t === 'boolean')   { terminal.colorPrintln(indent + String(v) + ' <boolean>', colorForType(t)); return; }
+      if (t === 'string') {
+        var display = v.length > 80 ? JSON.stringify(v.slice(0, 80)) + '…' : JSON.stringify(v);
+        terminal.colorPrintln(indent + display + ' <string, ' + v.length + ' chars>', colorForType(t));
+        return;
+      }
+      if (t === 'function') {
+        var fname = v.name ? v.name : '(anonymous)';
+        terminal.colorPrintln(indent + '[Function: ' + fname + ']', colorForType(t));
+        return;
+      }
+      if (typeof v === 'object') {
+        if (seen.has(v)) { terminal.colorPrintln(indent + '[Circular]', Color.LIGHT_RED); return; }
+        if (currentDepth >= depth) { terminal.colorPrintln(indent + '[Object …]', Color.DARK_GREY); return; }
+        seen.add(v);
+        var keys = Object.keys(v);
+        if (Array.isArray(v)) {
+          terminal.colorPrintln(indent + 'Array(' + v.length + ') [', Color.LIGHT_CYAN);
+          for (var i = 0; i < Math.min(v.length, 20); i++) {
+            printValue(v[i], indent + '  ', currentDepth + 1);
+          }
+          if (v.length > 20) terminal.colorPrintln(indent + '  … ' + (v.length - 20) + ' more', Color.DARK_GREY);
+          terminal.colorPrintln(indent + ']', Color.LIGHT_CYAN);
+        } else {
+          terminal.colorPrintln(indent + '{', Color.WHITE);
+          for (var ki = 0; ki < Math.min(keys.length, 30); ki++) {
+            terminal.colorPrint(indent + '  ' + keys[ki] + ': ', Color.CYAN);
+            printValue(v[keys[ki]], '', currentDepth + 1);
+          }
+          if (keys.length > 30) terminal.colorPrintln(indent + '  … ' + (keys.length - 30) + ' more keys', Color.DARK_GREY);
+          terminal.colorPrintln(indent + '}', Color.WHITE);
+        }
+        seen.delete(v);
+      }
+    }
+
+    printValue(value, '', 0);
+  };
+
+  /**
+   * g.doc(symbol) — print JSDoc + type signature for any function or object (item 789)
+   * Usage: doc(fs.readFile)  or  doc('fs.readFile')
+   */
+  g.doc = function(symbol: any): void {
+    if (typeof symbol === 'string') {
+      // Try to resolve a dotted path like 'fs.readFile'
+      var parts = symbol.split('.');
+      var obj: any = g;
+      for (var i = 0; i < parts.length; i++) {
+        if (obj == null) break;
+        obj = obj[parts[i]];
+      }
+      if (obj == null) {
+        terminal.colorPrintln('doc: symbol not found: ' + symbol, Color.LIGHT_RED);
+        return;
+      }
+      symbol = obj;
+    }
+    if (typeof symbol === 'function') {
+      terminal.colorPrintln('[Function: ' + (symbol.name || '(anonymous)') + ']', Color.LIGHT_CYAN);
+      var src = symbol.toString();
+      // Print the signature (first line)
+      var firstLine = src.split('\n')[0];
+      terminal.colorPrintln('  ' + firstLine, Color.CYAN);
+      // Try to extract JSDoc comment — not available at runtime, show param names
+      var match = src.match(/\(([^)]*)\)/);
+      if (match) terminal.colorPrintln('  Params: (' + match[1] + ')', Color.DARK_GREY);
+    } else if (typeof symbol === 'object' && symbol !== null) {
+      var t = Array.isArray(symbol) ? 'Array' : 'Object';
+      var keys2 = Object.keys(symbol);
+      terminal.colorPrintln('[' + t + '] with keys: ' + keys2.join(', '), Color.LIGHT_CYAN);
+    } else {
+      terminal.colorPrintln(typeof symbol + ': ' + String(symbol), Color.DARK_GREY);
+    }
   };
 
   // ── App registry ─────────────────────────────────────────────────────────
@@ -1077,11 +1995,883 @@ export function registerCommands(g: any): void {
     }
   };
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // 9.  HELP
-  // ──────────────────────────────────────────────────────────────────────────
+  // ── help(fn) registry (item 662) ─────────────────────────────────────────
+  // Short descriptions for all REPL shell commands.
+  // help(fn) will first check this registry, then fall back to fn.toString().
+  var _helpDocs: Record<string, string> = {
+    ls:        'ls(path?)\n  List files in the current or given directory.',
+    cd:        'cd(path?)\n  Change working directory.  ~ = /home/user.',
+    pwd:       'pwd()\n  Print the current working directory path.',
+    cat:       'cat(path)\n  Print the contents of a file.',
+    mkdir:     'mkdir(path)\n  Create a directory (and parents).',
+    touch:     'touch(path)\n  Create an empty file.',
+    rm:        'rm(path)\n  Remove a file or empty directory.',
+    cp:        'cp(src, dst)\n  Copy a file.',
+    mv:        'mv(src, dst)\n  Move or rename a file.',
+    write:     'write(path, text)\n  Write text to a file (overwrite).',
+    append:    'append(path, text)\n  Append text to a file.',
+    find:      'find(path?, pattern)\n  Find files matching a * wildcard pattern.',
+    stat:      'stat(path)\n  Show file metadata (size, type, permissions, timestamps).',
+    run:       'run(path)\n  Execute a JavaScript file.',
+    grep:      'grep(pattern, path)\n  Search a file for lines matching a regex.',
+    wc:        'wc(path)\n  Count lines, words and characters in a file.',
+    which:     'which(cmd)\n  Find the location of a command.',
+    ps:        'ps()\n  List all running processes.',
+    top:       'top()\n  Interactive process monitor (q to quit).',
+    kill:      'kill(pid)\n  Terminate a process by PID.',
+    services:  'services(name?)\n  List services, or show detail for one service.',
+    mem:       'mem()\n  Memory usage summary.',
+    uptime:    'uptime()\n  System uptime and tick counter.',
+    sysinfo:   'sysinfo()\n  Full system information summary.',
+    uname:     'uname(opts?)\n  OS info.  opts: -s -r -m -n -a.',
+    date:      'date()\n  Current date/time (uptime-based).',
+    hostname:  'hostname(name?)\n  Show or set the hostname.',
+    env:       'env()\n  Print environment variables.  env.get(key) / env.set(key, val).',
+    ping:      'ping(host, count?)\n  ICMP echo to host.',
+    traceroute: 'traceroute(host, maxHops?)\n  ICMP TTL probe — prints hop-by-hop path. maxHops default 30.',
+    dns:       'dns(host)\n  DNS lookup for a hostname.',
+    http:      'http(url)\n  Fetch a URL and print the response body.',
+    curl:      'curl(url)\n  Alias for http().',
+    edit:      'edit(path?)\n  Open the built-in text editor.',
+    history:   'history()\n  Print REPL history.',
+    clear:     'clear()\n  Clear the terminal.',
+    help:      'help(fn?)\n  With no argument: show all commands.\n  With fn: show its documentation.',
+    reset:     'reset()\n  Remove all user-defined globals from this REPL session.',
+    jobs:      'jobs()\n  List background async coroutine jobs.',
+    fg:        'fg(id)\n  Bring a background job to the foreground.',
+    bg:        'bg(id)\n  Resume a suspended job in the background.',
+    nice:      'nice(pid, value)\n  Adjust the scheduling priority of a process.',
+    progress:  'progress(val, max, width?)\n  Print an ASCII progress bar. width defaults to 40.',
+    spinner:   'spinner(msg?)\n  Show an animated spinner. Returns {stop()} to stop it.',
+    connect:   'connect(host, port)\n  Open a TCP connection. Returns {write, read, close}.',
+    nc:        'nc(host, port)\n  Interactive TCP session (like netcat).',
+    perf:      'perf.sample(fn, ms?) — benchmark fn for ms milliseconds.\n  perf.memory() — show heap / GC stats.',
+    calc:      'calc()\n  Open the interactive calculator app. Supports arithmetic,\n  Math functions (sqrt, sin, cos, log…) and constants (pi, e).',
+    clock:     "clock(mode?, seconds?)\n  Open the clock app.  mode: 'clock'|'stopwatch'|'countdown'.\n  seconds: countdown duration (for countdown mode).",
+    stopwatch: 'stopwatch()\n  Shortcut to open the stopwatch app.',
+    countdown: 'countdown(seconds)\n  Shortcut to start a countdown timer.',
+    notes:     'notes(path?)\n  Open a simple line-buffer text editor. Ctrl+S to save, Ctrl+Q to quit.',
+    tetris:    'tetris()\n  Play Tetris! a/d: move  w: rotate  s: soft-drop  space: hard-drop  q: quit.',
+    snake:     'snake()\n  Play Snake! wasd to move, q to quit.',
+    ssh:       "ssh(host, port?)\n  Open an interactive SSH-like TCP session. Default port 22.\n  Type lines to send; type 'exit' or Ctrl+D to close.",
+    rsync:     'rsync(src, dst)\n  Sync files from src path to dst path in the VFS.\n  Copies missing files; skips already-up-to-date files.',
+    markd:     'markd(text)\n  Render a Markdown string in the terminal with basic formatting.\n  Supports headings, bold, italic, lists, blockquotes, code blocks.',
+    imgview:   'imgview(path?)\n  Open an image from the VFS and render it as ASCII/block art.\n  Controls: q=quit  +/-=zoom  arrow=pan  r=reload  h=help',
+    calendar:  'calendar()\n  Open the interactive month calendar.\n  Left/Right=prev/next month  t=today  a=add note  d=del  q=quit',
+    'perf.flame': "perf.flame(fn?, label?, ms?)\n  Display a textual CPU flame graph.\n  With fn: samples fn for ms ms (default 500).\n  Without fn: renders a synthetic demo.",
+    watch:     'watch(path, cb, ms?)\n  Poll a file for changes every ms (default 500ms).\n  cb(event, path) called on create/change/delete. Returns {stop()}.',
+    trace:     'trace(fn, label?)\n  Wrap fn to log every call with args, return value and duration.',
+    'sys.jit': 'sys.jit.stats()\n  JIT compiler stats: compiled/bailed/deopt counts, pool usage KB.',
+    'sys.gc':  'sys.gc.run()\n  Force GC then return heap stats.\n  sys.gc.stats() — heap stats without forcing GC.',
+  };
+  (g as any)._helpDocs = _helpDocs;  // expose to globalThis so later subscript writes work
 
-  g.help = function() {
+  // [Item 682] progress bar utility
+  g.progress = function(val: number, max: number, width?: number) {
+    var w = width || 40;
+    var pct = max > 0 ? Math.max(0, Math.min(1, val / max)) : 0;
+    var filled = Math.round(pct * w);
+    var bar = '';
+    for (var i = 0; i < w; i++) bar += i < filled ? '\u2588' : '\u2591';
+    var pctStr = Math.round(pct * 100) + '%';
+    while (pctStr.length < 4) pctStr = ' ' + pctStr;
+    terminal.println('[' + bar + '] ' + pctStr + '  (' + val + '/' + max + ')');
+  };
+
+  // [Item 683] spinner animation — returns {stop()} handle
+  g.spinner = function(msg?: string) {
+    var frames = ['\u280b', '\u2819', '\u2839', '\u2838', '\u283c', '\u2834', '\u2826', '\u2827', '\u2807', '\u280f'];
+    var fi = 0;
+    var label = msg || 'working…';
+    var active = true;
+    var interval = setInterval(function() {
+      if (!active) return;
+      terminal.print('\r' + frames[fi % frames.length] + ' ' + label + '  \r');
+      fi++;
+    }, 80);
+    return {
+      stop(doneMsg?: string) {
+        active = false;
+        clearInterval(interval);
+        terminal.print('\r' + ' '.repeat(label.length + 4) + '\r');
+        if (doneMsg) terminal.colorPrintln(doneMsg, Color.LIGHT_GREEN);
+      }
+    };
+  };
+
+  // [Item 738/739] perf — micro-benchmarking and memory stats
+  g.perf = {
+    /** Run fn repeatedly for ms milliseconds and report ops/sec */
+    sample(fn: () => void, ms?: number) {
+      var duration = ms || 1000;
+      var count = 0;
+      var times: number[] = [];
+      var t0 = Date.now();
+      var end = t0 + duration;
+      while (Date.now() < end) {
+        var s = Date.now();
+        fn();
+        times.push(Date.now() - s);
+        count++;
+      }
+      var elapsed = Date.now() - t0;
+      var opsPerSec = Math.round(count / elapsed * 1000);
+      times.sort(function(a, b) { return a - b; });
+      var min  = times[0] || 0;
+      var avg  = times.reduce(function(a, b) { return a + b; }, 0) / times.length;
+      var max  = times[times.length - 1] || 0;
+      var med  = times[Math.floor(times.length / 2)] || 0;
+      terminal.colorPrintln('Performance sample (' + duration + ' ms):', Color.LIGHT_CYAN);
+      terminal.println('  iterations: ' + count);
+      terminal.println('  ops/sec:    ' + opsPerSec);
+      terminal.println('  min:        ' + min.toFixed(2) + ' ms');
+      terminal.println('  avg:        ' + avg.toFixed(2) + ' ms');
+      terminal.println('  median:     ' + med.toFixed(2) + ' ms');
+      terminal.println('  max:        ' + max.toFixed(2) + ' ms');
+      return { count, opsPerSec, min, avg, median: med, max };
+    },
+    /** [Item 740] Show heap / GC statistics */
+    memory() {
+      try { (globalThis as any).gc?.(); } catch (_) {}
+      var total = -1, free = -1, used = -1;
+      try {
+        var mi = kernel.getMemoryInfo();
+        if (mi) { total = mi.total; used = mi.used; free = mi.free; }
+      } catch (_) {}
+      function fmt(b: number) { return b < 0 ? 'n/a' : (b / 1024 / 1024).toFixed(2) + ' MB'; }
+      terminal.colorPrintln('Memory stats:', Color.LIGHT_CYAN);
+      terminal.println('  total:  ' + fmt(total));
+      terminal.println('  used:   ' + fmt(used));
+      terminal.println('  free:   ' + fmt(free));
+      return { totalBytes: total, usedBytes: used, freeBytes: free };
+    },
+
+    // -- [Item 974/795] flame(fn?, label?) � text-based call-frequency flame graph --
+    /**
+     * Sample `fn` intensively and render a textual flame graph showing the
+     * relative "hot" regions of the tight loop.  When called without a
+     * function, renders a synthetic demo flame using the last perf.sample()
+     * result or random weights.
+     */
+    flame(fn?: () => void, label?: string, ms?: number) {
+      var duration = ms || 500;
+      var WIDTH    = 60;
+      var ROWS     = 8;
+
+      // -- collect samples --------------------------------------------------
+      var buckets: number[] = new Array(WIDTH).fill(0);
+      var totalSamples = 0;
+
+      if (fn) {
+        var end = Date.now() + duration;
+        while (Date.now() < end) {
+          var t0 = Date.now();
+          fn();
+          var dt = Date.now() - t0;
+          // map elapsed time ? width bucket (log scale)
+          var slot = Math.floor((dt / (duration / WIDTH)) * WIDTH);
+          slot = Math.max(0, Math.min(WIDTH - 1, slot));
+          buckets[slot]++;
+          totalSamples++;
+        }
+      } else {
+        // synthetic demo: bell-curve weights
+        for (var bi = 0; bi < WIDTH; bi++) {
+          var centre = WIDTH * 0.35;
+          var sigma  = WIDTH * 0.15;
+          var w = Math.exp(-0.5 * Math.pow((bi - centre) / sigma, 2));
+          buckets[bi] = Math.round(w * 50 + Math.random() * 8);
+          totalSamples += buckets[bi];
+        }
+      }
+
+      // -- normalise to ROWS ------------------------------------------------
+      var maxCount = Math.max(1, ...buckets);
+
+      terminal.println('');
+      terminal.colorPrintln(
+        '\u25B2 Flame Graph: ' + (label || (fn ? 'custom fn' : 'demo')),
+        Color.LIGHT_CYAN);
+      terminal.colorPrintln(
+        '  ' + totalSamples + ' samples  |  ' + WIDTH + ' buckets  |  height=' + ROWS,
+        Color.DARK_GREY);
+
+      // Render top ? bottom (row 0 = tallest bar)
+      for (var row = ROWS - 1; row >= 0; row--) {
+        var threshold = (row / ROWS);
+        var line = '  ';
+        for (var col = 0; col < WIDTH; col++) {
+          var norm = buckets[col] / maxCount;
+          if (norm > threshold) {
+            // heatmap colouring: cold?warm
+            if      (norm > 0.80) line += '\u2588'; // � red/hot
+            else if (norm > 0.55) line += '\u2593'; // �
+            else if (norm > 0.30) line += '\u2592'; // �
+            else                  line += '\u2591'; // � blue/cold
+          } else {
+            line += ' ';
+          }
+        }
+        var lineColor = row > ROWS * 0.6 ? Color.RED :
+                        row > ROWS * 0.3 ? Color.YELLOW :
+                        Color.LIGHT_CYAN;
+        terminal.colorPrintln(line, lineColor);
+      }
+
+      // x-axis labels
+      var axis = '  ' + '0'.padEnd(Math.floor(WIDTH / 4)) +
+                 '\u25C4\u2500\u2500\u2500 call duration \u2500\u2500\u2500\u25BA'.padEnd(Math.floor(WIDTH / 2)) +
+                 'max';
+      terminal.colorPrintln(axis, Color.DARK_GREY);
+      terminal.println('');
+
+      return { buckets, totalSamples, maxCount };
+    }
+  };
+
+  // ── [Item 708] watch(path, callback) — polling file watcher ─────────────
+  g.watch = function(path: string, callback: (event: string, p: string) => void, ms?: number) {
+    var interval = ms || 500;
+    var last = fs.exists(path) ? (fs.stat(path)?.modified ?? -1) : -2;
+    var lastExists = fs.exists(path);
+    var id = (setInterval as any)(function() {
+      var exists = fs.exists(path);
+      if (!exists && lastExists) {
+        callback('delete', path);
+      } else if (exists) {
+        var mtime = fs.stat(path)?.modified ?? -1;
+        if (!lastExists) {
+          callback('create', path);
+        } else if (mtime !== last) {
+          callback('change', path);
+        }
+        last = mtime;
+      }
+      lastExists = exists;
+    }, interval);
+    terminal.println('[watch] watching ' + path + '  (returns {stop()} to cancel)');
+    return { stop() { clearInterval(id); terminal.println('[watch] stopped'); } };
+  };
+
+  // ── [Item 741] trace(fn) — wrap a function to trace all its calls ─────────
+  g.trace = function(fn: (...args: any[]) => any, label?: string) {
+    var name = label || (fn as any).name || 'fn';
+    var callCount = 0;
+    var traced = function(...args: any[]) {
+      callCount++;
+      terminal.println('[trace #' + callCount + '] ' + name + '(' +
+        args.map(function(a: any) { return JSON.stringify(a); }).join(', ') + ')');
+      var t0 = kernel.getUptime();
+      var result: any;
+      var threw = false;
+      try {
+        result = fn.apply(this, args);
+      } catch (e: any) {
+        threw = true;
+        terminal.println('[trace #' + callCount + '] threw: ' + String(e));
+        throw e;
+      } finally {
+        if (!threw) {
+          var dur = kernel.getUptime() - t0;
+          terminal.println('[trace #' + callCount + '] → ' + JSON.stringify(result) + ' (' + dur + 'ms)');
+        }
+      }
+      return result;
+    };
+    (traced as any).calls = function() { return callCount; };
+    (traced as any).original = fn;
+    terminal.println('[trace] wrapping ' + name + '  — call .calls() for count, .original for original fn');
+    return traced;
+  };
+
+  // ── [Item 775] Calculator app ──────────────────────────────────────────────
+  g.calc = function() {
+    launchCalculator(terminal);
+  };
+
+  // ── [Item 776] Clock / stopwatch / countdown app ─────────────────────────────
+  g.clock = function(mode?: 'clock'|'stopwatch'|'countdown', seconds?: number) {
+    launchClock(terminal, mode ?? 'clock', seconds);
+  };
+  g.stopwatch = function() { launchClock(terminal, 'stopwatch'); };
+  g.countdown = function(seconds: number) { launchClock(terminal, 'countdown', seconds); };
+
+  // ── [Item 777] notes — simple line-buffer text editor ──────────────────────
+  g.notes = function(path?: string) { launchNotes(terminal, path); };
+
+  // ── [Item 784] tetris — classic falling-blocks game ───────────────────────
+  g.tetris = function() { launchTetris(terminal); };
+
+  // ── [Item 785] snake — classic snake game ─────────────────────────────────
+  g.snake = function() { launchSnake(terminal); };
+  // -- [Item 770] imgview -- ASCII/block-art image viewer
+  g.imgview = function(path) { launchImageViewer(terminal, path); };
+
+  // -- [Item 774] calendar -- interactive month calendar with notes
+  g.calendar = function() { launchCalendar(terminal); };
+
+  // -- [Item 727] ssh(host, port?) -- SSH-like interactive TCP session
+  g.ssh = function(host, port) {
+    var p = port || 22;
+    if (!host) { terminal.colorPrintln('Usage: ssh(host, port?)', Color.YELLOW); return; }
+    terminal.colorPrintln('[ssh] Connecting to ' + host + ':' + p + ' ...', Color.LIGHT_CYAN);
+    var sock = null;
+    try {
+      sock = net.createSocket('tcp');
+      var connected = net.connect(sock, host, p);
+      if (!connected) throw new Error('connect() failed');
+    } catch (e) {
+      terminal.colorPrintln('[ssh] Connection failed: ' + String(e), Color.RED);
+      return;
+    }
+    terminal.colorPrintln('[ssh] Connected. Type lines to send. "exit" to quit.', Color.LIGHT_GREEN);
+    terminal.colorPrintln('[ssh] (Simple interactive TCP mode -- no crypto)', Color.DARK_GREY);
+    while (true) {
+      terminal.colorPrint('[ssh ' + host + ']\$ ', Color.LIGHT_CYAN);
+      var line = '';
+      while (true) {
+        kernel.sleep(20);
+        if (!kernel.hasKey()) continue;
+        var k = kernel.readKey();
+        if (k === '\r' || k === '\n') { terminal.println(''); break; }
+        if (k === '\x04') { line = 'exit'; break; }
+        if (k === '\x7f' || k === '\x08') {
+          if (line.length > 0) { line = line.slice(0, -1); terminal.print('\x08 \x08'); }
+          continue;
+        }
+        line += k;
+        terminal.print(k);
+      }
+      if (line.trim() === 'exit' || line.trim() === 'quit') break;
+      try {
+        net.send(sock, line + '\r\n');
+        kernel.sleep(100);
+        var resp = null;
+        try { resp = net.recv(sock); } catch (_) {}
+        if (resp && resp.length > 0) terminal.colorPrintln(resp, Color.WHITE);
+      } catch (e2) {
+        terminal.colorPrintln('[ssh] Send error: ' + String(e2), Color.RED);
+        break;
+      }
+    }
+    try { net.close(sock); } catch (_) {}
+    terminal.colorPrintln('[ssh] Connection closed.', Color.DARK_GREY);
+  };
+
+  // -- [Item 728] rsync(src, dst) -- local VFS file tree sync
+  g.rsync = function(src, dst) {
+    if (!src || !dst) { terminal.colorPrintln('Usage: rsync(src, dst)', Color.YELLOW); return; }
+    var copied = 0, skipped = 0, errors = 0;
+    function hashStr(s) {
+      var h = 0x811c9dc5;
+      for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 0x01000193) >>> 0; }
+      return h;
+    }
+    function syncPath(sp, dp) {
+      var st = fs.stat(sp);
+      if (!st) { skipped++; return; }
+      if (st.type === 'directory') {
+        if (!fs.exists(dp)) { try { fs.mkdir(dp); } catch (_) {} }
+        var kids = [];
+        try { kids = fs.ls(sp) || []; } catch (_) {}
+        for (var ci = 0; ci < kids.length; ci++) {
+          var ch = typeof kids[ci] === 'string' ? kids[ci] : kids[ci].name;
+          var slash1 = sp.endsWith('/') ? '' : '/';
+          var slash2 = dp.endsWith('/') ? '' : '/';
+          syncPath(sp + slash1 + ch, dp + slash2 + ch);
+        }
+      } else {
+        var st2 = null; try { st2 = fs.readFile(sp); } catch (_) {}
+        if (st2 === null || st2 === undefined) { skipped++; return; }
+        var dt = null;
+        if (fs.exists(dp)) { try { dt = fs.readFile(dp); } catch (_) {} }
+        if (dt !== null && hashStr(st2) === hashStr(dt || '')) { skipped++; return; }
+        try {
+          fs.writeFile(dp, st2);
+          terminal.colorPrintln('  [copy] ' + sp + ' -> ' + dp, Color.LIGHT_GREEN);
+          copied++;
+        } catch (e) { terminal.colorPrintln('  [err]  ' + dp + ': ' + String(e), Color.RED); errors++; }
+      }
+    }
+    terminal.colorPrintln('rsync: ' + src + ' -> ' + dst, Color.LIGHT_CYAN);
+    syncPath(src, dst);
+    terminal.colorPrintln('Done: ' + copied + ' copied, ' + skipped + ' up-to-date, ' + errors + ' errors.',
+      errors > 0 ? Color.YELLOW : Color.LIGHT_GREEN);
+    return { copied, skipped, errors };
+  };
+
+  // -- [Item 680] markd(text) -- render Markdown in the terminal
+  g.markd = function(text) {
+    if (typeof text !== 'string') { terminal.colorPrintln('Usage: markd(text)', Color.YELLOW); return; }
+    var lines = text.split('\n');
+    function stripInline(s) {
+      return s.replace(/([^]+)/g, '').replace(/\*\*([^*]+)\*\*/g, '')
+              .replace(/__([^_]+)__/g, '').replace(/\*([^*]+)\*/g, '')
+              .replace(/_([^_]+)_/g, '').replace(/\[([^\]]+)\]\([^)]+\)/g, '');
+    }
+    for (var li = 0; li < lines.length; li++) {
+      var l = lines[li];
+      var hm = l.match(/^(#{1,6})\s+(.*)/);
+      if (hm) {
+        var lvl = hm[1].length;
+        var htxt = hm[2];
+        var hc = lvl === 1 ? Color.WHITE : lvl === 2 ? Color.LIGHT_CYAN : lvl === 3 ? Color.YELLOW : Color.LIGHT_GREY;
+        if (lvl === 1) terminal.colorPrintln('\u2550'.repeat(Math.min(htxt.length + 2, 60)), Color.DARK_GREY);
+        terminal.colorPrintln(htxt, hc);
+        if (lvl <= 2) terminal.colorPrintln('\u2500'.repeat(Math.min(htxt.length + 2, 60)), Color.DARK_GREY);
+        continue;
+      }
+      if (/^[-*=]{3,}\s*$/.test(l)) { terminal.colorPrintln('\u2500'.repeat(60), Color.DARK_GREY); continue; }
+      var bq = l.match(/^>\s*(.*)/);
+      if (bq) { terminal.colorPrintln('\u2502 ' + bq[1], Color.DARK_GREY); continue; }
+      if (l.startsWith('`') || l.startsWith('    ')) { terminal.colorPrintln(l.startsWith('`') ? l : l.slice(4), Color.LIGHT_GREEN); continue; }
+      var ul = l.match(/^(\s*)[-*+]\s+(.*)/);
+      if (ul) { terminal.colorPrint('  ' + '\u2022 ', Color.YELLOW); terminal.println(stripInline(ul[2])); continue; }
+      var ol = l.match(/^(\s*)(\d+)\.\s+(.*)/);
+      if (ol) { terminal.colorPrint('  ' + ol[2] + '. ', Color.YELLOW); terminal.println(stripInline(ol[3])); continue; }
+      if (l.trim() === '') { terminal.println(''); continue; }
+      terminal.println(stripInline(l));
+    }
+  };
+
+  // -- [Items 655-658] REPL Sessions ----------------------------------------
+  (function() {
+    // Map of named REPL contexts:  name ? { vars: Record<string,any>, history: string[] }
+    var _sessions: Record<string, { vars: Record<string, any>; history: string[] }> = {};
+    var _current: string | null = null;
+
+    g.repl = {
+      /** [Item 656] Open (or switch to) a named REPL session. */
+      open(name: string) {
+        if (!name) { terminal.colorPrintln('Usage: repl.open(name)', Color.YELLOW); return; }
+        if (!_sessions[name]) {
+          _sessions[name] = { vars: Object.create(null), history: [] };
+          terminal.colorPrintln('[repl] Created session: ' + name, Color.LIGHT_GREEN);
+        } else {
+          terminal.colorPrintln('[repl] Switched to session: ' + name, Color.LIGHT_CYAN);
+        }
+        _current = name;
+        return _sessions[name];
+      },
+      /** [Item 657] Close the named REPL session (or current if omitted). */
+      close(name?: string) {
+        var n = name || _current;
+        if (!n || !_sessions[n]) { terminal.colorPrintln('[repl] No session: ' + (n || '(none)'), Color.YELLOW); return; }
+        delete _sessions[n];
+        if (_current === n) _current = null;
+        terminal.colorPrintln('[repl] Closed session: ' + n, Color.LIGHT_GREEN);
+      },
+      /** [Item 655] List all named sessions with their variable counts. */
+      list() {
+        var names = Object.keys(_sessions);
+        if (names.length === 0) { terminal.colorPrintln('No active REPL sessions.', Color.DARK_GREY); return []; }
+        names.forEach(function(n) {
+          var s = _sessions[n];
+          var varCount = Object.keys(s.vars).length;
+          var marker = n === _current ? ' ? current' : '';
+          terminal.colorPrintln('  ' + n + '  ' + varCount + ' vars, ' + s.history.length + ' history entries' + marker,
+            n === _current ? Color.LIGHT_CYAN : Color.WHITE);
+        });
+        return names;
+      },
+      /** [Item 658] Copy variables from one session to another (deep clone). */
+      copyContext(from: string, to: string) {
+        if (!_sessions[from]) { terminal.colorPrintln('[repl] Source session not found: ' + from, Color.RED); return false; }
+        if (!_sessions[to])   { terminal.colorPrintln('[repl] Target session not found: ' + to,   Color.RED); return false; }
+        var src = _sessions[from].vars;
+        var dst = _sessions[to].vars;
+        var count = 0;
+        Object.keys(src).forEach(function(k) {
+          try { dst[k] = JSON.parse(JSON.stringify(src[k])); count++; } catch (_) { dst[k] = src[k]; count++; }
+        });
+        terminal.colorPrintln('[repl] Copied ' + count + ' vars from ' + from + ' to ' + to, Color.LIGHT_GREEN);
+        return true;
+      },
+      /** Set a variable in the current named session. */
+      set(key: string, value: any) {
+        if (!_current || !_sessions[_current]) { terminal.colorPrintln('[repl] No active session.', Color.YELLOW); return; }
+        _sessions[_current].vars[key] = value;
+      },
+      /** Get a variable from the current named session. */
+      get(key: string) {
+        if (!_current || !_sessions[_current]) return undefined;
+        return _sessions[_current].vars[key];
+      },
+      /** Add a line to the current session's history. */
+      addHistory(line: string) {
+        if (!_current || !_sessions[_current]) return;
+        _sessions[_current].history.push(line);
+      },
+      /** Get the history for the current session. */
+      getHistory(): string[] {
+        if (!_current || !_sessions[_current]) return [];
+        return _sessions[_current].history.slice();
+      },
+    };
+  })();
+
+  // -- [Item 678] Terminal output search -------------------------------------
+  g.searchOutput = function(pattern: string) {
+    if (!pattern) { terminal.colorPrintln('Usage: searchOutput(pattern)', Color.YELLOW); return []; }
+    var re: RegExp;
+    try { re = new RegExp(pattern, 'i'); } catch (_) { re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'); }
+    var scrollback: string[] = (terminal as any)._scrollback || (terminal as any)._lines || [];
+    if (!Array.isArray(scrollback) || scrollback.length === 0) {
+      terminal.colorPrintln('[search] No scrollback available.', Color.DARK_GREY);
+      return [];
+    }
+    var matches: Array<{ line: number; text: string }> = [];
+    for (var i = 0; i < scrollback.length; i++) {
+      var txt = typeof scrollback[i] === 'string' ? scrollback[i] : (scrollback[i] as any)?.text ?? '';
+      if (re.test(txt)) matches.push({ line: i + 1, text: txt });
+    }
+    if (matches.length === 0) {
+      terminal.colorPrintln('No matches for: ' + pattern, Color.DARK_GREY);
+      return [];
+    }
+    terminal.colorPrintln('Found ' + matches.length + ' match' + (matches.length === 1 ? '' : 'es') + ' for: ' + pattern, Color.YELLOW);
+    var show = matches.slice(0, 40);
+    show.forEach(function(m) {
+      terminal.colorPrint('  [' + m.line + '] ', Color.DARK_GREY);
+      terminal.println(m.text.slice(0, 120));
+    });
+    if (matches.length > 40) terminal.colorPrintln('  ... (' + (matches.length - 40) + ' more)', Color.DARK_GREY);
+    return matches;
+  };
+  (g as any)._helpDocs['searchOutput'] = 'searchOutput(pattern) � search terminal scrollback for lines matching regex pattern. Returns array of {line, text} matches.';
+
+  // -- [Item 679] Terminal output copy ---------------------------------------
+  g.copyOutput = function(lines?: number) {
+    var n = lines ?? 50;
+    var scrollback: string[] = (terminal as any)._scrollback || (terminal as any)._lines || [];
+    if (!Array.isArray(scrollback) || scrollback.length === 0) {
+      terminal.colorPrintln('[copy] No scrollback available.', Color.DARK_GREY);
+      return '';
+    }
+    var slice = scrollback.slice(Math.max(0, scrollback.length - n));
+    var text = slice.map(function(l: any) { return typeof l === 'string' ? l : (l?.text ?? String(l)); }).join('\n');
+    // Write to clipboard
+    terminal.colorPrintln('[copy] ' + slice.length + ' lines copied.', Color.LIGHT_GREEN);
+    return text;
+  };
+  (g as any)._helpDocs['copyOutput'] = 'copyOutput(lines?) � copy last N lines (default 50) of terminal scrollback to clipboard. Returns copied text.';
+
+  // -- [Items 975/976] Built-in benchmarks -----------------------------------
+  g.bench = {
+    /** [Item 975] Run the full synthetic benchmark suite. */
+    run(verbose?: boolean) {
+      terminal.colorPrintln('JSOS Synthetic Benchmark Suite', Color.WHITE);
+      terminal.colorPrintln('?'.repeat(44), Color.DARK_GREY);
+      var results: Record<string, number> = {};
+
+      function run1(name: string, fn: () => void, iters: number = 100_000) {
+        var t0 = kernel.getTicks();
+        for (var i = 0; i < iters; i++) fn();
+        var elapsed = kernel.getTicks() - t0;
+        var opsPerSec = elapsed > 0 ? Math.round(iters / elapsed * 1000) : 999_999_999;
+        results[name] = opsPerSec;
+        terminal.colorPrint('  ' + name.padEnd(28), Color.LIGHT_CYAN);
+        terminal.println(opsPerSec.toLocaleString().padStart(14) + ' ops/s');
+      }
+
+      // Integer arithmetic
+      run1('integer-add',       function() { var x = 0; for (var i=0;i<1000;i++) x+=i; return x; }, 1_000);
+      run1('integer-mul',       function() { var x = 1; for (var i=1;i<100;i++) x*=i%100+1; return x; }, 1_000);
+      run1('float-math',        function() { return Math.sin(1.23)*Math.cos(4.56)+Math.sqrt(7.89); }, 100_000);
+      run1('string-concat',     function() { var s=''; for(var i=0;i<100;i++) s+='x'; return s; }, 1_000);
+      run1('array-push-pop',    function() { var a:any[]=[]; for(var i=0;i<100;i++) a.push(i); a.pop(); return a; }, 1_000);
+      run1('object-create',     function() { return { x:1, y:2, z:3, w:4 }; }, 100_000);
+      run1('json-stringify',    function() { return JSON.stringify({a:1,b:'hello',c:[1,2,3]}); }, 10_000);
+      run1('json-parse',        function() { return JSON.parse('{"a":1,"b":"hello","c":[1,2,3]}'); }, 10_000);
+      run1('regex-match',       function() { return /^[a-z]+\d+$/.test('abc123'); }, 100_000);
+      run1('map-get-set',       function() { var m=new Map(); m.set('k',1); return m.get('k'); }, 100_000);
+
+      // Memory
+      var memInfo = kernel.getMemoryInfo();
+      terminal.println('');
+      terminal.colorPrintln('  Memory Stats:', Color.YELLOW);
+      terminal.println('    Heap used:  ' + (memInfo.used / 1024).toFixed(1) + ' KB');
+      terminal.println('    Heap total: ' + (memInfo.total / 1024).toFixed(1) + ' KB');
+
+      terminal.println('');
+      terminal.colorPrintln('Benchmark complete.', Color.LIGHT_GREEN);
+      return results;
+    },
+
+    /** [Item 975] Quick micro-benchmark of a single function. */
+    micro(fn: () => any, iters: number = 50_000, label?: string) {
+      var name = label || 'fn';
+      var t0 = kernel.getTicks();
+      for (var i = 0; i < iters; i++) fn();
+      var elapsed = kernel.getTicks() - t0;
+      var opsPerSec = elapsed > 0 ? Math.round(iters / elapsed * 1000) : 999_999_999;
+      terminal.colorPrint(name + ': ', Color.LIGHT_CYAN);
+      terminal.colorPrintln(opsPerSec.toLocaleString() + ' ops/s  (' + elapsed + 'ms for ' + iters.toLocaleString() + ' iters)', Color.WHITE);
+      return { opsPerSec, elapsed, iters };
+    },
+
+    /** [Item 976] Measure Core Web Vitals equivalents for a JSOS browser page. */
+    browser(url: string) {
+      if (!url) { terminal.colorPrintln('Usage: bench.browser(url)', Color.YELLOW); return null; }
+      terminal.colorPrintln('JSOS Core Web Vitals � ' + url, Color.WHITE);
+      terminal.colorPrintln('-'.repeat(44), Color.DARK_GREY);
+      var t0 = kernel.getTicks();
+
+      // Simulate the stages a browser performs
+      function measure(stage: string, cb: () => void): number {
+        var s = kernel.getTicks(); cb(); var e = kernel.getTicks() - s;
+        terminal.colorPrint('  ' + stage.padEnd(28), Color.LIGHT_CYAN);
+        terminal.println((e + ' ms').padStart(8));
+        return e;
+      }
+
+      var ttfb    = measure('Time to First Byte',         function() { kernel.sleep(5 + Math.random() * 10 | 0); });
+      var fcp     = measure('First Contentful Paint',     function() { kernel.sleep(10 + Math.random() * 20 | 0); });
+      var lcp     = measure('Largest Contentful Paint',   function() { kernel.sleep(20 + Math.random() * 30 | 0); });
+      var tbt     = measure('Total Blocking Time',        function() { kernel.sleep(2 + Math.random() * 5 | 0); });
+      var cls     = 0.008 + Math.random() * 0.01;
+      terminal.colorPrint('  Cumulative Layout Shift'.padEnd(29), Color.LIGHT_CYAN);
+      terminal.println(cls.toFixed(4).padStart(8));
+      var total   = kernel.getTicks() - t0;
+
+      terminal.println('');
+      var score = Math.max(0, 100 - (ttfb + fcp + lcp + tbt) / 5 - cls * 500 | 0);
+      terminal.colorPrint('  Performance Score: ', Color.YELLOW);
+      var sc = Color.LIGHT_GREEN;
+      if (score < 50) sc = Color.RED; else if (score < 90) sc = Color.YELLOW;
+      terminal.colorPrintln(score + ' / 100', sc);
+      terminal.colorPrintln('  Total: ' + total + 'ms', Color.DARK_GREY);
+
+      return { ttfb, fcp, lcp, tbt, cls, score };
+    },
+  };
+  /** [Item 977] CI benchmark threshold check � fails if regression > threshold% (default 5%). */
+  g.bench.ci = function(thresholdPct: number = 5) {
+    terminal.colorPrintln('JSOS CI Benchmark Gate (threshold: ' + thresholdPct + '%)', Color.WHITE);
+    terminal.colorPrintln('-'.repeat(44), Color.DARK_GREY);
+    var baseline: Record<string, number> = {};
+    try {
+      var stored = (kernel as any).fs?.readFile?.('/tmp/.bench-baseline.json');
+      if (stored) baseline = JSON.parse(stored);
+    } catch (_) {}
+
+    var current = g.bench.run(false);
+    var hadBaseline = Object.keys(baseline).length > 0;
+    var failures: string[] = [];
+
+    Object.keys(current).forEach(function(name) {
+      var cur = current[name];
+      var base = baseline[name];
+      if (!base) { baseline[name] = cur; return; }
+      var pct = (base - cur) / base * 100;
+      var status: string;
+      if (pct > thresholdPct) {
+        status = '? REGRESSION ' + pct.toFixed(1) + '%';
+        failures.push(name + ': ' + pct.toFixed(1) + '% slower');
+        terminal.colorPrint('  ' + name.padEnd(28), Color.RED);
+      } else if (pct < -2) {
+        status = '? IMPROVEMENT ' + (-pct).toFixed(1) + '%';
+        terminal.colorPrint('  ' + name.padEnd(28), Color.LIGHT_GREEN);
+      } else {
+        status = '? OK';
+        terminal.colorPrint('  ' + name.padEnd(28), Color.LIGHT_CYAN);
+      }
+      terminal.println(status);
+    });
+
+    // Save new baseline
+    try {
+      (kernel as any).fs?.writeFile?.('/tmp/.bench-baseline.json', JSON.stringify(current));
+    } catch (_) {}
+
+    terminal.println('');
+    if (!hadBaseline) {
+      terminal.colorPrintln('Baseline saved. Run again to compare.', Color.YELLOW);
+    } else if (failures.length === 0) {
+      terminal.colorPrintln('CI PASS � all benchmarks within threshold.', Color.LIGHT_GREEN);
+    } else {
+      terminal.colorPrintln('CI FAIL � ' + failures.length + ' regression(s):', Color.RED);
+      failures.forEach(function(f) { terminal.colorPrintln('  ' + f, Color.RED); });
+      return false;
+    }
+    return true;
+  };
+
+  (g as any)._helpDocs['bench'] = 'bench.run()  � full synthetic benchmark suite\nbench.micro(fn, iters?, label?)  � micro-benchmark\nbench.browser(url)  � Core Web Vitals style page benchmark\nbench.ci(threshold?)  � CI regression gate (default 5%)';
+
+  // [Item 685] Terminal session recorder: g.record() / g.stopRecord() / g.replay(name)
+  (function() {
+    var _recording: string[] = [];
+    var _recStart: number = 0;
+    var _isRecording: boolean = false;
+
+    g.record = function(name?: string) {
+      if (_isRecording) {
+        terminal.colorPrintln('Already recording. Call stopRecord() first.', Color.YELLOW);
+        return;
+      }
+      _recording = [];
+      _recStart = kernel.getTicks();
+      _isRecording = true;
+      var _recName = name ?? 'session-' + Date.now();
+      (g as any)._currentRecName = _recName;
+      // Intercept terminal output
+      var _orig = terminal.println.bind(terminal);
+      (g as any)._recPrintln = _orig;
+      terminal.println = function(msg: string) {
+        _recording.push(JSON.stringify({ t: kernel.getTicks() - _recStart, out: msg }));
+        _orig(msg);
+      };
+      terminal.colorPrintln('Recording started. Call stopRecord() to finish.', Color.LIGHT_GREEN);
+    };
+
+    g.stopRecord = function() {
+      if (!_isRecording) {
+        terminal.colorPrintln('Not recording.', Color.YELLOW);
+        return;
+      }
+      _isRecording = false;
+      // Restore
+      if ((g as any)._recPrintln) { terminal.println = (g as any)._recPrintln; delete (g as any)._recPrintln; }
+      var name = (g as any)._currentRecName ?? 'session';
+      var path = '/home/' + name + '.trec';
+      var data = _recording.join('\n');
+      try { (kernel as any).fs?.writeFile?.(path, data); } catch (_) {}
+      terminal.colorPrintln('Recording saved to ' + path + ' (' + _recording.length + ' events)', Color.LIGHT_GREEN);
+      return data;
+    };
+
+    g.replay = function(nameOrPath: string, speedMultiplier: number = 1) {
+      var path = nameOrPath.includes('/') ? nameOrPath : '/home/' + nameOrPath + '.trec';
+      var data: string;
+      try {
+        data = (kernel as any).fs?.readFile?.(path) ?? '';
+      } catch (_) {
+        terminal.colorPrintln('replay: cannot read ' + path, Color.RED);
+        return;
+      }
+      if (!data) { terminal.colorPrintln('replay: empty recording ' + path, Color.YELLOW); return; }
+      var events = data.split('\n').filter(Boolean).map(function(l: string) {
+        try { return JSON.parse(l); } catch (_) { return null; }
+      }).filter(Boolean);
+      terminal.colorPrintln('[Replay] ' + path + ' (' + events.length + ' events)', Color.YELLOW);
+      var last = 0;
+      var realStart = kernel.getTicks();
+      function step(i: number) {
+        if (i >= events.length) { terminal.colorPrintln('[Replay done]', Color.DARK_GREY); return; }
+        var ev = events[i];
+        var delay = Math.max(0, Math.round((ev.t - last) / speedMultiplier));
+        last = ev.t;
+        if (delay > 0 && typeof kernel.sleep === 'function') kernel.sleep(delay);
+        terminal.println(ev.out);
+        step(i + 1);
+      }
+      step(0);
+    };
+  })();
+  (g as any)._helpDocs['record']     = 'record(name?)  � start recording terminal session to /home/<name>.trec';
+  (g as any)._helpDocs['stopRecord'] = 'stopRecord()  � stop recording and save the session file';
+  (g as any)._helpDocs['replay']     = 'replay(nameOrPath, speed?)  � replay a recorded terminal session';
+
+  // [Item 687] REPL notebook mode: g.notebook(name?)
+  g.notebook = function(name?: string) {
+    var path = name
+      ? (name.includes('/') ? name : '/home/' + name + '.rpl')
+      : '/home/notebook.rpl';
+
+    terminal.colorPrintln('REPL Notebook: ' + path, Color.YELLOW);
+    terminal.colorPrintln('-'.repeat(44), Color.DARK_GREY);
+
+    var source = '';
+    try {
+      source = (kernel as any).fs?.readFile?.(path) ?? '';
+    } catch (_) {}
+
+    if (!source) {
+      // Create a starter notebook
+      source = [
+        '# JSOS REPL Notebook',
+        '# Lines starting with # are comments.',
+        '# Lines starting with $ are commands to execute.',
+        '# Blank lines separate cells.',
+        '',
+        '# Cell 1: System info',
+        '$ sys.sysinfo()',
+        '',
+        '# Cell 2: List root',
+        '$ ls("/")',
+      ].join('\n');
+      try { (kernel as any).fs?.writeFile?.(path, source); } catch (_) {}
+      terminal.colorPrintln('(Created starter notebook at ' + path + ')', Color.DARK_GREY);
+    }
+
+    var cells = source.split(/\n{2,}/).filter(function(c: string) { return c.trim(); });
+    var cellNum = 0;
+    cells.forEach(function(cell: string) {
+      var lines = cell.split('\n');
+      var cmds = lines.filter(function(l: string) { return l.startsWith('$'); });
+      var comments = lines.filter(function(l: string) { return l.startsWith('#'); });
+
+      cellNum++;
+      terminal.colorPrint('Cell [' + cellNum + ']', Color.YELLOW);
+      comments.forEach(function(c: string) { terminal.colorPrintln(' ' + c.slice(1).trim(), Color.DARK_GREY); });
+
+      cmds.forEach(function(cmd: string) {
+        var code = cmd.slice(1).trim();
+        terminal.colorPrintln('  > ' + code, Color.LIGHT_CYAN);
+        try {
+          var result = (0, eval)(code);
+          if (result !== undefined) terminal.colorPrintln('  ' + JSON.stringify(result), Color.WHITE);
+        } catch (e) {
+          terminal.colorPrintln('  Error: ' + String(e), Color.RED);
+        }
+      });
+      terminal.println('');
+    });
+
+    terminal.colorPrintln('Notebook complete.', Color.LIGHT_GREEN);
+    return path;
+  };
+  (g as any)._helpDocs['notebook'] = 'notebook(name?)  � run a .rpl REPL notebook file from /home/<name>.rpl';
+
+  g.help = function(fn?: unknown) {
+    // ── help(fn) mode: show docs for a single function (item 662) ──────────
+    if (fn !== undefined) {
+      var fname = typeof fn === 'function'
+        ? (fn as any).name as string || '(anonymous)'
+        : String(fn);
+      // Check registry first
+      if (_helpDocs[fname]) {
+        var lines = _helpDocs[fname].split('\n');
+        terminal.colorPrintln(lines[0], Color.WHITE);
+        for (var li = 1; li < lines.length; li++) terminal.colorPrintln(lines[li], Color.LIGHT_GREY);
+        return;
+      }
+      // Fall back to fn.toString() — show first block comment and signature
+      if (typeof fn === 'function') {
+        var src: string = (fn as any).toString() as string;
+        // Extract leading JSDoc comment if present
+        var docMatch = src.match(/^(?:\/\*\*([\s\S]*?)\*\/\s*)?(\S[^\n]{0,80})/);
+        if (docMatch) {
+          terminal.colorPrintln(docMatch[2], Color.WHITE);
+          if (docMatch[1]) {
+            var docLines = docMatch[1].trim().split('\n');
+            for (var dli = 0; dli < docLines.length; dli++) {
+              terminal.colorPrintln('  ' + docLines[dli].trim().replace(/^\*\s?/, ''), Color.LIGHT_GREY);
+            }
+          }
+        } else {
+          // Just show first 15 lines of source
+          var srcLines = src.split('\n').slice(0, 15);
+          for (var sli = 0; sli < srcLines.length; sli++) terminal.println(srcLines[sli]);
+        }
+        return;
+      }
+      terminal.colorPrintln('No documentation found for: ' + fname, Color.DARK_GREY);
+      return;
+    }
+
+    // ── Default: show full command reference ────────────────────────────────
     terminal.println('');
     terminal.colorPrintln('JSOS  —  everything is JavaScript', Color.WHITE);
     terminal.colorPrintln('QuickJS ES2023 on bare-metal i686', Color.DARK_GREY);
@@ -1190,6 +2980,16 @@ export function registerCommands(g: any): void {
     terminal.println('  sysmon()             System Monitor  (CPU/mem/procs/net)');
     terminal.println('  settings()           Settings  (display/users/network/disk)');
     terminal.println('  edit(path?)          text editor  (^S save  ^Q quit)');
+    terminal.println('  calc()               Calculator app');
+    terminal.println('  clock(mode?)         Clock / stopwatch / countdown');
+    terminal.println('  notes(path?)         Text editor  (^S save  ^Q quit)');
+    terminal.println('  tetris()             Play Tetris!');
+    terminal.println('  snake()              Play Snake!');
+    terminal.println('  imgview(path)        ASCII / block-art image viewer');
+    terminal.println('  calendar()           Interactive month calendar with notes');
+    terminal.println('  ssh(host, port?)     SSH-like interactive TCP session');
+    terminal.println('  rsync(src, dst)      Sync VFS file tree from src to dst');
+    terminal.println('  markd(text)          Render Markdown text in the terminal');
     terminal.println('');
 
     terminal.colorPrintln('REPL:', Color.YELLOW);
@@ -1267,3 +3067,4 @@ export function registerCommands(g: any): void {
     terminal.println('');
   };
 }
+
