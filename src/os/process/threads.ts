@@ -221,15 +221,14 @@ export class ThreadManager {
       try { result = c.step(); } catch (_e) { result = 'done'; }
       if (result === 'pending') keep.push(c);
     }
-    // Merge: retained pending items + any coroutines added during this tick
+    // Merge: retained pending items + any coroutines added during this tick.
+    // Use a Set of snapshot ids so the merge is O(n) instead of O(n²).
+    var snapIds = new Set<number>();
+    for (var m = 0; m < snap.length; m++) snapIds.add(snap[m].id);
     var out: Array<{ id: number; name: string; step: CoroutineStep }> = [];
     for (var j = 0; j < keep.length; j++) out.push(keep[j]);
     for (var k = 0; k < this._coroutines.length; k++) {
-      var isNew = true;
-      for (var m = 0; m < snap.length; m++) {
-        if (snap[m].id === this._coroutines[k].id) { isNew = false; break; }
-      }
-      if (isNew) out.push(this._coroutines[k]);
+      if (!snapIds.has(this._coroutines[k].id)) out.push(this._coroutines[k]);
     }
     this._coroutines = out;
   }

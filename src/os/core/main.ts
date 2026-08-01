@@ -27,8 +27,6 @@ import { WindowManager, setWM } from '../ui/wm.js';
 import { terminalApp } from '../apps/terminal/index.js';
 import { browserApp } from '../apps/browser/index.js';
 import { dhcpDiscover } from '../net/dhcp.js';
-import { dnsResolve } from '../net/dns.js';
-import { httpsGet } from '../net/http.js';
 import { registerCommands } from '../ui/commands.js';
 
 declare var kernel: import('./kernel.js').KernelAPI; // kernel.js is in core/
@@ -213,37 +211,13 @@ function main(): void {
     var macBytes = kernel.netMacAddress();
     kernel.serialPut('MAC: ' + formatMac(macBytes) + '\n');
 
-    // DHCP
+    // DHCP — the only synchronous network step at boot (~fast when a server
+    // answers; bounded at ~2 s per exchange when none does).  The old DNS /
+    // TCP / HTTPS self-tests blocked boot for up to 20 s and were removed;
+    // networking is exercised lazily by apps via os.fetchAsync().
     var dhcpConf = dhcpDiscover();
     if (dhcpConf) {
       kernel.serialPut('DHCP: acquired ' + dhcpConf.ip + '/24 gw ' + dhcpConf.gateway + '\n');
-
-      // DNS
-      var exampleIP = dnsResolve('example.com');
-      if (exampleIP) {
-        kernel.serialPut('DNS: resolved example.com \u2192 ' + exampleIP + '\n');
-
-        // TCP connect test
-        var tcpTestSock = net.createSocket('tcp');
-        var tcpOk = net.connect(tcpTestSock, exampleIP, 80);
-        kernel.serialPut('TCP connect to ' + exampleIP + ':80: ' +
-                          (tcpOk ? 'OK' : 'FAIL') + '\n');
-        if (tcpOk) net.close(tcpTestSock);
-
-        // HTTPS / TLS 1.3 test
-        var httpsResult = httpsGet('example.com', exampleIP, 443, '/');
-        kernel.serialPut('TLS handshake: ' +
-                          (httpsResult.tlsOk ? 'OK' : 'FAIL') + '\n');
-        if (httpsResult.tlsOk && httpsResult.response) {
-          kernel.serialPut('HTTPS GET /: ' + httpsResult.response.status +
-                            ' OK (received ' + httpsResult.response.body.length +
-                            ' bytes)\n');
-        } else if (httpsResult.tlsOk) {
-          kernel.serialPut('HTTPS GET /: no response\n');
-        }
-      } else {
-        kernel.serialPut('DNS: resolution failed (no internet?)\n');
-      }
     } else {
       kernel.serialPut('DHCP: no offer received\n');
     }

@@ -135,10 +135,12 @@ export function httpGet(
   var deadline = kernel.getTicks() + 500;  // 5 seconds
   while (kernel.getTicks() < deadline) {
     if (net.nicReady) net.pollNIC();
-    var chunk = net.recvBytes(sock, 50);
+    var chunk = net.recvBytes(sock, 10);
     if (chunk && chunk.length > 0) {
       chunks.push(chunk);
       deadline = kernel.getTicks() + 100;  // reset on new data
+    } else if (net.connClosed(sock)) {
+      break;  // server sent FIN and buffer is drained — response complete
     }
   }
   net.close(sock);
@@ -181,10 +183,12 @@ export function httpsGet(
   var tlsChunks: number[][] = [];
   var tlsDeadline = kernel.getTicks() + 500;  // 5 seconds
   while (kernel.getTicks() < tlsDeadline) {
-    var chunk2 = tls.read(100);
+    var chunk2 = tls.read(10);
     if (chunk2 && chunk2.length > 0) {
       tlsChunks.push(chunk2);
       tlsDeadline = kernel.getTicks() + 100;  // reset on new data
+    } else if (tls.isClosed()) {
+      break;  // peer closed and no decryptable data left — response complete
     }
   }
   tls.close();

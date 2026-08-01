@@ -324,8 +324,14 @@ export class ProcessScheduler {
   }
 
   private _schedulePriority(): ProcessContext {
-    this.readyQueue.sort(function(a, b) { return a.priority - b.priority; });
-    return this.readyQueue.shift()!;
+    // Linear scan for the highest-priority (lowest value) process — O(n)
+    // instead of sorting the whole queue every tick.  Picking the first
+    // minimum preserves FIFO order among equal priorities.
+    var best = 0;
+    for (var i = 1; i < this.readyQueue.length; i++) {
+      if (this.readyQueue[i].priority < this.readyQueue[best].priority) best = i;
+    }
+    return this.readyQueue.splice(best, 1)[0];
   }
 
   private _scheduleRealTime(): ProcessContext {

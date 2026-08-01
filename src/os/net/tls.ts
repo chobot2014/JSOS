@@ -161,6 +161,11 @@ export class TLSSocket {
     return this._performHandshake();
   }
 
+  /** True once the underlying TCP connection has been closed by the peer. */
+  isClosed(): boolean {
+    return net.connClosed(this.sock);
+  }
+
   /**
    * Non-blocking TLS read: poll the NIC once and try to parse one complete
    * TLS record from the buffer.  Returns decrypted app data or null.

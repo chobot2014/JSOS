@@ -613,6 +613,20 @@ export class NetworkStack {
     return null;
   }
 
+  /**
+   * True once the peer has closed the connection (FIN received) or the
+   * connection no longer exists.  Lets receive loops exit as soon as a
+   * 'Connection: close' response is complete instead of spinning until
+   * their timeout lapses.
+   */
+  connClosed(sock: Socket): boolean {
+    var conn = this._connForSock(sock);
+    if (!conn) return true;
+    var st = conn.state;
+    return st === 'CLOSE_WAIT' || st === 'CLOSED' || st === 'CLOSING' ||
+           st === 'LAST_ACK'   || st === 'TIME_WAIT';
+  }
+
   // ── Egress ────────────────────────────────────────────────────────────────
 
   private _sendEth(frame: EthernetFrame): void {
@@ -848,9 +862,10 @@ export class NetworkStack {
         conn.recvBuf = [];
         return data;
       }
-      if (deadline > 0 && kernel.getTicks() >= deadline) break;
+      if (deadline === 0) break;                     // non-blocking: single poll, no sleep
+      if (kernel.getTicks() >= deadline) break;
       kernel.sleep(1);  // yield to QEMU for virtio BH processing
-    } while (deadline > 0);
+    } while (true);
     return null;
   }
 

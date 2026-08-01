@@ -170,7 +170,7 @@ function parseDHCP(data: number[]): DHCPResponse | null {
  * Updates the net stack configuration on success.
  * Returns the obtained config or null on failure.
  */
-export function dhcpDiscover(): DHCPConfig | null {
+export function dhcpDiscover(timeoutTicks: number = 200): DHCPConfig | null {
   var mac = macToBytes(net.mac);
   var xid = (kernel.getTicks() * 0x9e3779b9) >>> 0;
 
@@ -182,7 +182,7 @@ export function dhcpDiscover(): DHCPConfig | null {
   net.sendUDPRaw(DHCP_CLIENT_PORT, '255.255.255.255', DHCP_SERVER_PORT, discover);
 
   // Wait for DHCP Offer
-  var offerPkt = net.recvUDPRaw(DHCP_CLIENT_PORT, 500);
+  var offerPkt = net.recvUDPRaw(DHCP_CLIENT_PORT, timeoutTicks);
   if (!offerPkt) return null;
   var offer = parseDHCP(offerPkt.data);
   if (!offer || offer.msgType !== DHCP_OFFER) return null;
@@ -192,7 +192,7 @@ export function dhcpDiscover(): DHCPConfig | null {
   net.sendUDPRaw(DHCP_CLIENT_PORT, '255.255.255.255', DHCP_SERVER_PORT, request);
 
   // Wait for DHCP ACK
-  var ackPkt = net.recvUDPRaw(DHCP_CLIENT_PORT, 500);
+  var ackPkt = net.recvUDPRaw(DHCP_CLIENT_PORT, timeoutTicks);
   if (!ackPkt) return null;
   var ack = parseDHCP(ackPkt.data);
   if (!ack || ack.msgType !== DHCP_ACK) return null;
