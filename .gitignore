@@ -52,3 +52,5 @@ temp/
 # Logs
 logs/
 *.log
+
+build-*.txt

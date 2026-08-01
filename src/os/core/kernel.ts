@@ -120,6 +120,8 @@ export interface KernelAPI {
   //  System 
   halt(): void;
   reboot(): void;
+  /** Run a full native QuickJS GC cycle (JS_RunGC). Stop-the-world — call only on idle frames. */
+  gc(): void;
   /** Evaluate a JS string in the global QuickJS context; returns result as string */
   eval(code: string): string;
   /** Write a string to the serial port (COM1) — appears on QEMU -serial stdio */

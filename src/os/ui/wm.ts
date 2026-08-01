@@ -23,6 +23,8 @@ import { SyscallPolicy, registerPolicy, unregisterPolicy } from '../core/syscall
 
 // GC tick counter — incremented each WM frame, passed to globalGC.tick()
 let _wmGCTick = 0;
+// Last PIT tick at which the native QuickJS GC was run (idle-frame pacing)
+let _lastNativeGCTick = 0;
 
 declare var kernel: import('../core/kernel.js').KernelAPI;
 
@@ -696,6 +698,18 @@ export class WindowManager {
       try { globalGC.tick(_wmGCTick); } catch (_) {}
     }
     _wmGCTick++;
+
+    // Native QuickJS GC pacing: the runtime's GC threshold is 128 MB, so
+    // without pacing garbage accumulates until one giant stop-the-world
+    // pause lands mid-interaction.  Run the native collector on idle frames
+    // (no input, no coroutines, no pending redraw) at most every ~10 s so
+    // each cycle stays small and invisible.
+    var _nowTicks = kernel.getTicks();
+    if (!_activity && !this._wmDirty && !threadManager.hasCoroutines() &&
+        _nowTicks - _lastNativeGCTick >= 1000) {
+      _lastNativeGCTick = _nowTicks;
+      try { kernel.gc(); } catch (_) {}
+    }
 
     this._composite();
     if (this._wmDirty || this._cursorDirty) _activity = true;
