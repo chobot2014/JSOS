@@ -189,6 +189,10 @@ export interface WMWindow {
   _crashed?: boolean;
   /** Short description of the crash reason. */
   _crashMsg?: string;
+  /** Consecutive time-budget aborts (render/tick).  Reset on any completed
+   *  callback; window is crash-marked only after 3 strikes so a single
+   *  legitimately heavy frame (e.g. browser page rerender) survives. */
+  _budgetStrikes?: number;
 }
 
 /** Context menu item. */
@@ -679,10 +683,10 @@ export class WindowManager {
       if (!_aw.minimised && !_aw._crashed && _aw.app.tick) {
         var _awT = _aw;
         try {
-          if (!this._budgeted(function () { _awT.app.tick!(); }, 1000)) {
-            _awT._crashed = true;
-            _awT._crashMsg = 'tick() exceeded 1s budget — aborted';
-            this._wmDirty = true;
+          if (!this._budgeted(function () { _awT.app.tick!(); }, 3000)) {
+            this._budgetStrike(_awT, 'tick()');
+          } else {
+            _awT._budgetStrikes = 0;
           }
         } catch(_) {}
       }
@@ -736,6 +740,23 @@ export class WindowManager {
     var kb = (kernel as any).callBudget;
     if (typeof kb !== 'function') { fn(); return true; }
     return (kernel as any).callBudget(fn, ms) !== -1;
+  }
+
+  /**
+   * Record a time-budget abort for a window.  Three consecutive strikes
+   * crash-mark the window (true runaway — it will run away again next frame);
+   * fewer strikes just log, so one legitimately heavy frame (page rerender,
+   * large layout) costs that frame's work but keeps the app alive.
+   */
+  private _budgetStrike(win: WMWindow, what: string): void {
+    win._budgetStrikes = (win._budgetStrikes || 0) + 1;
+    kernel.serialPut('[wm] ' + win.title + ' ' + what + ' budget abort (strike ' +
+                     win._budgetStrikes + '/3)\n');
+    if (win._budgetStrikes >= 3) {
+      win._crashed  = true;
+      win._crashMsg = what + ' exceeded time budget 3× — aborted';
+      this._wmDirty = true;
+    }
   }
 
   /**
@@ -1002,10 +1023,10 @@ export class WindowManager {
                 buttons: pkt.buttons,
                 type:    evType,
               };
-              if (!this._budgeted(function () { _dwM.app.onMouse!(_mev); }, 3000)) {
-                dispWin._crashed  = true;
-                dispWin._crashMsg = 'onMouse() exceeded 3s budget — aborted';
-                this._wmDirty = true;
+              if (!this._budgeted(function () { _dwM.app.onMouse!(_mev); }, 5000)) {
+                this._budgetStrike(dispWin, 'onMouse()');
+              } else {
+                dispWin._budgetStrikes = 0;
               }
             } catch (me) {
               dispWin._crashed = true;
@@ -1038,10 +1059,10 @@ export class WindowManager {
           try {
             var _fkW = focused;
             var _kev = this._makeKeyEvent(raw);
-            if (!this._budgeted(function () { _fkW.app.onKey(_kev); }, 3000)) {
-              focused._crashed  = true;
-              focused._crashMsg = 'onKey() exceeded 3s budget — aborted';
-              this._wmDirty = true;
+            if (!this._budgeted(function () { _fkW.app.onKey(_kev); }, 5000)) {
+              this._budgetStrike(focused, 'onKey()');
+            } else {
+              focused._budgetStrikes = 0;
             }
           } catch (ke) {
             focused._crashed = true;
@@ -1156,14 +1177,16 @@ export class WindowManager {
           try {
             var _wiR = wi;
             var _wiDirty = false;
-            var _wiDone = this._budgeted(function () { _wiDirty = _wiR.app.render(_wiR.canvas); }, 1000);
+            var _wiDone = this._budgeted(function () { _wiDirty = _wiR.app.render(_wiR.canvas); }, 3000);
             if (!_wiDone) {
-              wi._crashed  = true;
-              wi._crashMsg = 'render() exceeded 1s budget — aborted';
+              this._budgetStrike(wi, 'render()');
               anyContentDirty = true;
-            } else if (_wiDirty) {
-              anyContentDirty = true;
-              dirtyWinIdxs.push(ai);
+            } else {
+              wi._budgetStrikes = 0;
+              if (_wiDirty) {
+                anyContentDirty = true;
+                dirtyWinIdxs.push(ai);
+              }
             }
           } catch (err) {
             wi._crashed = true;
