@@ -26,5 +26,10 @@ RUN find . -name "*.sh" -exec sed -i 's/\r$//' {} + && \
 RUN npm run build:local
 RUN ./scripts/build.sh
 
+# Sorted symbol map for post-mortem address→symbol resolution (heap debugging)
+RUN i686-elf-nm -n src/kernel/jsos.bin > /workspace/build/kernel.map
+
 FROM scratch
 COPY --from=builder /workspace/build/jsos.iso /jsos.iso
+COPY --from=builder /workspace/src/kernel/jsos.bin /kernel.elf
+COPY --from=builder /workspace/build/kernel.map /kernel.map

@@ -47,6 +47,14 @@ extern volatile int  _js_in_page_eval;
 static volatile uint32_t _heap_head_violations;
 static volatile uint32_t _heap_tail_violations;
 static volatile uint32_t _heap_leaks_prevented;
+static volatile uint32_t _heap_double_frees;
+
+/* newlib dlmalloc bin array — when a freed chunk is linked into a small/large
+ * bin, dlmalloc stores fd/bk pointers INTO this array over the first bytes of
+ * the chunk payload (= our [size][canary] header).  A "HEAD violation" whose
+ * canary word points inside __malloc_av_ is therefore a DOUBLE-FREE of a
+ * block dlmalloc already owns — not wild memory corruption. */
+extern void *__malloc_av_[];
 
 /* Forward-declare fallback allocator state (defined with --wrap wrappers) */
 static volatile int      _heap_broken;
@@ -417,6 +425,7 @@ static JSValue js_heap_stats(JSContext *c, JSValueConst this_val, int argc, JSVa
     JS_SetPropertyStr(c, obj, "headViolations", JS_NewInt32(c, (int32_t)_heap_head_violations));
     JS_SetPropertyStr(c, obj, "tailViolations", JS_NewInt32(c, (int32_t)_heap_tail_violations));
     JS_SetPropertyStr(c, obj, "leaksPrevented", JS_NewInt32(c, (int32_t)_heap_leaks_prevented));
+    JS_SetPropertyStr(c, obj, "doubleFrees",    JS_NewInt32(c, (int32_t)_heap_double_frees));
     JS_SetPropertyStr(c, obj, "heapBroken",     JS_NewBool(c, _heap_broken));
     JS_SetPropertyStr(c, obj, "fallbackUsed",   JS_NewInt32(c, (int32_t)_fallback_offset));
     return obj;
@@ -656,6 +665,14 @@ static JSValue js_eval(JSContext *c, JSValueConst this_val, int argc, JSValueCon
 #define JSOS_CANARY_HEAD       0xABCD1234u
 #define JSOS_CANARY_TAIL       0xDEADBEEFu
 
+/* Free-quarantine ring: defers the underlying free() by up to 256 frees so
+ * double-frees land on a still-poisoned canary (detectable) rather than on
+ * memory dlmalloc has already handed to a new owner (undetectable).  Power
+ * of two for cheap masking. */
+#define JSOS_QUAR_SLOTS 256u
+static void    *_quar_ring[JSOS_QUAR_SLOTS];
+static uint32_t _quar_idx = 0;
+
 /* ── Serial output helpers (no printf/snprintf dependency) ─────────── */
 static void _heap_puts_hex32(uint32_t v) {
     static const char _h[] = "0123456789ABCDEF";
@@ -711,10 +728,12 @@ static void jsos_free(JSMallocState *s, void *ptr)
     /* Quick range check: pointers outside the heap are obviously corrupted.
      * Our heap lives between _heap_start (~0x0B..) and sbrk's current break.
      * Anything above 0x80000000 (2 GB) is definitely not a valid heap ptr.
-     * Common bad values: 0xFFFFFFFC (-4 from NAN_BOXING integer miscast). */
+     * Common bad values: 0xFFFFFFFC (-4 from NAN_BOXING integer miscast).
+     * Contained bogus free — nothing touched — so count as doubleFrees (the
+     * "safely ignored" bucket), NOT headViolations which trip JS heap gates. */
     uintptr_t p = (uintptr_t)ptr;
     if (unlikely(p < 0x00100000u || p > 0x80000000u)) {
-        _heap_head_violations++;
+        _heap_double_frees++;
         _heap_leaks_prevented++;
         return;  /* silently discard — no need to spam serial */
     }
@@ -723,8 +742,31 @@ static void jsos_free(JSMallocState *s, void *ptr)
     size_t size = *hdr;
     uint32_t hc = *((uint32_t *)hdr + 1);
 
-    /* HEAD canary — detects header corruption, double-free, wild write */
+    /* HEAD canary — detects header corruption, double-free, or wild write */
     if (unlikely(hc != JSOS_CANARY_HEAD)) {
+        /* ── Double-free classification ────────────────────────────────
+         *   hc == 0            → block freed by us (canary poisoned), not yet
+         *                        recycled by dlmalloc — classic double-free.
+         *   hc ∈ __malloc_av_  → dlmalloc already binned the chunk and wrote
+         *                        its bk bin-pointer over our canary word
+         *                        (fd overwrites the size word).
+         * Either way the memory now belongs to dlmalloc (or a new owner that
+         * reused it).  The ONLY safe action is to ignore this free entirely —
+         * touching the payload would corrupt the freelist or a live block.
+         * Tracked separately from genuine violations so JS-side heap gates
+         * don't kill page runtimes over a fully-contained double-free.       */
+        uintptr_t av_lo = (uintptr_t)__malloc_av_;
+        uintptr_t av_hi = av_lo + 0x420;   /* bin array ≈ 0x408 bytes */
+        if (hc == 0u || ((uintptr_t)hc >= av_lo && (uintptr_t)hc < av_hi)) {
+            _heap_double_frees++;
+            if (_heap_double_frees <= 8) {
+                platform_serial_puts("[HEAP] double-free ignored ptr=");
+                _heap_puts_hex32((uint32_t)(uintptr_t)ptr);
+                platform_serial_puts(hc == 0u ? " (poisoned)" : " (binned)");
+                platform_serial_puts(_cur_proc >= 0 ? " [child]\n" : " [main]\n");
+            }
+            return;  /* memory belongs to dlmalloc / new owner — hands off */
+        }
         _heap_head_violations++;
         _heap_leaks_prevented++;
         /* Limit serial spam to first 8 unique violations */
@@ -780,11 +822,21 @@ static void jsos_free(JSMallocState *s, void *ptr)
         return;  /* intentional leak: don't free overflowed block */
     }
 
-    /* Canaries OK — poison head canary (catches double-free) then free */
+    /* Canaries OK — poison head canary, then QUARANTINE the block.
+     * The real free() is deferred by QUAR_SLOTS frees.  While quarantined the
+     * poisoned canary stays visible, so a late double-free is detected and
+     * ignored ("(poisoned)" path above) instead of hitting a block dlmalloc
+     * has already recycled to a new owner — which would be undetectable
+     * corruption of live memory. */
     *((uint32_t *)hdr + 1) = 0x00000000u;
     s->malloc_count--;
     s->malloc_size -= size + MALLOC_OVERHEAD;
-    free(hdr);                /* goes through our global fault-guarded free() */
+    {
+        void *evicted = _quar_ring[_quar_idx];
+        _quar_ring[_quar_idx] = hdr;
+        _quar_idx = (_quar_idx + 1u) & (JSOS_QUAR_SLOTS - 1u);
+        if (evicted) free(evicted);   /* fault-guarded free() via --wrap */
+    }
 }
 
 static void *jsos_realloc(JSMallocState *s, void *ptr, size_t size)
@@ -797,7 +849,7 @@ static void *jsos_realloc(JSMallocState *s, void *ptr, size_t size)
     /* Range check: reject obviously-invalid pointers (same as jsos_free) */
     uintptr_t p = (uintptr_t)ptr;
     if (unlikely(p < 0x00100000u || p > 0x80000000u)) {
-        _heap_head_violations++;
+        _heap_double_frees++;   /* contained bogus pointer — not a gate-tripping violation */
         if (size == 0) return NULL;
         return jsos_malloc(s, size);  /* allocate fresh; can't realloc garbage */
     }
