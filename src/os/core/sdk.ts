@@ -34,7 +34,7 @@ import {
   dnsPollReplyAsync,
   dnsCancelAsync,
 } from '../net/dns.js';
-import { parseHttpResponse, cookieJar, HTTP2Connection } from '../net/http.js';
+import { parseHttpResponse, cookieJar, HTTP2Connection, serviceWorkers } from '../net/http.js';
 import { httpDecompress } from '../net/deflate.js';
 import { config, getHostname, getDnsServers, getTimezone } from './config.js';
 import { locale } from './locale.js';
@@ -1241,6 +1241,25 @@ function _doFetch(
       return 'done';
     });
     return _deferCoroId;
+  }
+
+  // ── Service Worker intercept (Phase 6.7) ───────────────────────────────────
+  // A registered SW may serve the request synthetically (cache-first /
+  // offline PWA).  Deliver via a coroutine so the callback stays async.
+  var _swHit = serviceWorkers.intercept(url);
+  if (_swHit) {
+    var _swr = _swHit;
+    return threadManager.runCoroutine('fetch-sw', function() {
+      var _swHdrs = new Map<string, string>();
+      for (var _si = 0; _si < _swr.headers.length; _si++) {
+        _swHdrs.set(_swr.headers[_si][0].toLowerCase(), _swr.headers[_si][1]);
+      }
+      callback({
+        status: _swr.status, headers: _swHdrs, body: _swr.body,
+        bodyText: _bytesToString(_swr.body), finalURL: url,
+      }, _swr.status >= 400 ? 'HTTP ' + _swr.status : undefined);
+      return 'done';
+    });
   }
 
   // ── Deduplication: coalesce concurrent GET/HEAD fetches for the same URL ──
