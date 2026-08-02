@@ -85,6 +85,7 @@ if ($Headless) {
     Remove-Item "test-output\qemu-err.log" -ErrorAction SilentlyContinue
 
     $proc = Start-Process -FilePath $qemuExe -ArgumentList @(
+        "-accel", "whpx,kernel-irqchip=off", "-accel", "tcg",
         "-cdrom", "build/jsos.iso",
         "-drive", "file=build/disk.img,format=raw,media=disk",
         "-boot", "order=d",
@@ -152,6 +153,7 @@ if ($Headless) {
     Remove-Item "test-output\serial.log" -ErrorAction SilentlyContinue
 
     & $qemuExe `
+        -accel whpx,kernel-irqchip=off -accel tcg `
         -cdrom "build/jsos.iso" `
         -drive "file=build/disk.img,format=raw,media=disk" `
         -boot order=d `
