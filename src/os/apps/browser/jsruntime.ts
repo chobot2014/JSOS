@@ -322,6 +322,13 @@ export function createPageJS(
   // is effectively "Aw, Snap!"'d — only a navigation away clears the flag.
   var _pageFaulted = false;
 
+  // Baseline of C-heap canary violations at page-JS creation time.  All heap
+  // gates below compare against this DELTA — an old violation left over from
+  // the main runtime or a previous page must not permanently halt JS for
+  // every page loaded afterwards (previously `> 0` disabled JS forever).
+  var _pageHeapBase = 0;
+  try { _pageHeapBase = (kernel as any).heapStats().headViolations || 0; } catch(_) {}
+
   // ── Child-runtime page script isolation ──────────────────────────────────
   // When the coordinator runtime faults on a page script (evalGuarded →
   // sentinel -9999), we spin up an isolated child JSRuntime via
@@ -10249,8 +10256,8 @@ export function createPageJS(
     // later operations trigger cascading page faults.
     try {
       var _postScriptViolations = (kernel as any).heapStats().headViolations || 0;
-      if (_postScriptViolations > 0) {
-        cb.log('[JS] post-script heap check: ' + _postScriptViolations + ' violations — destroying child');
+      if (_postScriptViolations > _pageHeapBase) {
+        cb.log('[JS] post-script heap check: ' + (_postScriptViolations - _pageHeapBase) + ' new violations — destroying child');
         if (_pageChildId >= 0) {
           try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
           _clearChildProc();
@@ -10836,8 +10843,8 @@ export function createPageJS(
       if (!_pageFaulted) {
         try {
           var _hsv = (kernel as any).heapStats();
-          if (_hsv && _hsv.headViolations > 0) {
-            cb.log('[JS] tick heap gate: ' + _hsv.headViolations + ' violations — halting JS');
+          if (_hsv && (_hsv.headViolations || 0) > _pageHeapBase) {
+            cb.log('[JS] tick heap gate: ' + ((_hsv.headViolations || 0) - _pageHeapBase) + ' new violations — halting JS');
             if (_pageChildId >= 0) {
               try { (kernel as any).procDestroy(_pageChildId); } catch(_) {}
               _clearChildProc();

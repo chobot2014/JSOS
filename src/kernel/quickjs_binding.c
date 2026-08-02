@@ -195,6 +195,23 @@ static int _proc_interrupt_cb(JSRuntime *rt, void *opaque) {
     return (timer_get_ticks() >= deadline) ? 1 : 0;
 }
 
+/* ── Main-runtime time budget ────────────────────────────────────────
+ * kernel.callBudget(fn, maxMs, ...args) arms this deadline before JS_Call.
+ * When the PIT tick counter passes the deadline the interrupt handler
+ * returns 1 and QuickJS aborts the running JS with an uncatchable
+ * "interrupted" error — unwinding cleanly back to the C call boundary.
+ * This is the hard guarantee that a runaway app callback (infinite loop,
+ * pathological algorithm) can never freeze the OS: the WM aborts it and
+ * marks the window crashed instead.                                        */
+static volatile uint32_t _main_budget_deadline = 0;
+
+static int _main_interrupt_cb(JSRuntime *rt2, void *opaque) {
+    (void)rt2; (void)opaque;
+    uint32_t d = _main_budget_deadline;
+    if (d == 0) return 0;
+    return (timer_get_ticks() >= d) ? 1 : 0;
+}
+
 /*  VGA raw access  */
 
 static JSValue js_vga_put(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -722,13 +739,14 @@ static void jsos_free(JSMallocState *s, void *ptr)
             platform_serial_puts(_cur_proc >= 0 ? " [child]" : " [main]");
             platform_serial_puts(" — LEAK\n");
         }
-        /* Nullify payload to prevent QJS from following corrupted pointers out of
-         * this block.  Set first uint32 (ref_count in JSObject/JSString) to a
-         * high sentinel so the GC never tries to free it again, zero the rest. */
+        /* Nullify ONLY the first word of the payload (pin ref_count so the
+         * GC never re-frees this block).  We must NOT zero beyond that: the
+         * header is corrupted, so the stored size is untrusted — zeroing a
+         * fixed 64 bytes previously wiped the HEADER OF THE NEXT BLOCK,
+         * turning one genuine violation into a self-inflicted cascade
+         * (observed as a second violation at ptr+0x40 with canary=0). */
         uint32_t *z = (uint32_t *)ptr;
         z[0] = 0x7FFFFFFFu;  /* pin ref_count: prevents GC from re-freeing */
-        z[1]=z[2]=z[3]=z[4]=z[5]=z[6]=z[7]=
-        z[8]=z[9]=z[10]=z[11]=z[12]=z[13]=z[14]=z[15]=0;
         /* Bump main GC threshold: heap corruption means GC would walk
          * corrupted pointers → page fault cascade.  Disable GC entirely
          * (threshold = 1GB) to prevent any heap walking after corruption. */
@@ -750,11 +768,13 @@ static void jsos_free(JSMallocState *s, void *ptr)
             _heap_puts_hex32(tc);
             platform_serial_puts(" — LEAK\n");
         }
-        /* Null-fill payload: prevent QJS from following stale pointers */
+        /* Null-fill payload to prevent QJS from following stale pointers.
+         * Head canary is intact here so `size` IS trusted — but still clamp
+         * to the stored size so small blocks don't overflow into neighbours. */
         uint32_t *z = (uint32_t *)ptr;
-        z[0] = 0x7FFFFFFFu;
-        z[1]=z[2]=z[3]=z[4]=z[5]=z[6]=z[7]=
-        z[8]=z[9]=z[10]=z[11]=z[12]=z[13]=z[14]=z[15]=0;
+        size_t zw = size / 4; if (zw > 16) zw = 16;
+        for (size_t zi = 0; zi < zw; zi++) z[zi] = 0;
+        if (size >= 4) z[0] = 0x7FFFFFFFu;
         /* Disable GC — heap is corrupted */
         if (rt) JS_SetGCThreshold(rt, 1024u * 1024u * 1024u);
         return;  /* intentional leak: don't free overflowed block */
@@ -1214,6 +1234,53 @@ static JSValue js_guarded_run(JSContext *c, JSValueConst this_val,
         JS_FreeValue(c, exc);
         JS_FreeValue(c, r);
         return JS_NewInt32(c, -3);
+    }
+    JS_FreeValue(c, r);
+    return JS_NewInt32(c, 0);
+}
+
+/*
+ * kernel.callBudget(fn, maxMs [, arg1, arg2, ...])
+ *
+ * Call fn with a hard wall-clock budget.  If fn runs longer than maxMs,
+ * the main-runtime interrupt handler aborts it (uncatchable "interrupted"
+ * error) and callBudget returns -1.  Normal JS exceptions thrown by fn
+ * propagate unchanged so existing try/catch error handling keeps working.
+ *
+ * Nesting: an inner budget may only shorten the effective deadline; the
+ * outer deadline is restored on return.
+ *
+ * Returns: 0 = completed, -1 = aborted on timeout, -2 = bad arguments.
+ */
+static JSValue js_call_budget(JSContext *c, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2 || !JS_IsFunction(c, argv[0]))
+        return JS_NewInt32(c, -2);
+    int32_t max_ms = 0;
+    JS_ToInt32(c, &max_ms, argv[1]);
+    if (max_ms <= 0) max_ms = 1;
+
+    uint32_t saved = _main_budget_deadline;
+    uint32_t dl = timer_get_ticks() + MS_TO_TICKS((uint32_t)max_ms);
+    if (saved == 0 || dl < saved) _main_budget_deadline = dl;
+
+    JSValue r = JS_Call(c, argv[0], JS_UNDEFINED,
+                        argc - 2,
+                        argc > 2 ? argv + 2 : (JSValueConst *)NULL);
+    int timed_out = (_main_budget_deadline != 0 &&
+                     timer_get_ticks() >= _main_budget_deadline);
+    _main_budget_deadline = saved;
+
+    if (JS_IsException(r)) {
+        if (timed_out) {
+            /* Swallow the "interrupted" error and report timeout */
+            JSValue exc = JS_GetException(c);
+            JS_FreeValue(c, exc);
+            platform_serial_puts("[kernel] callBudget: JS aborted after budget expiry\n");
+            return JS_NewInt32(c, -1);
+        }
+        return JS_EXCEPTION;  /* normal JS exception — propagate to caller */
     }
     JS_FreeValue(c, r);
     return JS_NewInt32(c, 0);
@@ -4228,6 +4295,7 @@ static const JSCFunctionListEntry js_kernel_funcs[] = {
     JS_CFUNC_DEF("evalGuarded",  1, js_eval_guarded),
     JS_CFUNC_DEF("callGuarded",  1, js_call_guarded),
     JS_CFUNC_DEF("guardedRun",   1, js_guarded_run),
+    JS_CFUNC_DEF("callBudget",   2, js_call_budget),
     /* ATA block device */
     JS_CFUNC_DEF("ataPresent",     0, js_ata_present),
     JS_CFUNC_DEF("ataSectorCount", 0, js_ata_sector_count),
@@ -4441,6 +4509,10 @@ int quickjs_initialize(void) {
 
     /* ── Item 121: Atomics.wait() — declare single-threaded can_block ─── */
     JS_SetCanBlock(rt, 1);
+
+    /* Main-runtime time-budget interrupt handler (kernel.callBudget).
+     * Idle (deadline==0) costs one volatile load per interpreter check. */
+    JS_SetInterruptHandler(rt, _main_interrupt_cb, NULL);
 
     ctx = JS_NewContext(rt);
     if (!ctx) { JS_FreeRuntime(rt); rt = NULL; return -1; }

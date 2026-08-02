@@ -122,6 +122,12 @@ export interface KernelAPI {
   reboot(): void;
   /** Run a full native QuickJS GC cycle (JS_RunGC). Stop-the-world — call only on idle frames. */
   gc(): void;
+  /**
+   * Call fn under a hard wall-clock budget.  If fn runs longer than maxMs the
+   * interpreter aborts it and callBudget returns -1.  Normal JS exceptions
+   * propagate unchanged.  Returns 0 = completed, -1 = aborted, -2 = bad args.
+   */
+  callBudget(fn: () => void, maxMs: number): number;
   /** Evaluate a JS string in the global QuickJS context; returns result as string */
   eval(code: string): string;
   /** Write a string to the serial port (COM1) — appears on QEMU -serial stdio */

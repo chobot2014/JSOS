@@ -677,7 +677,14 @@ export class WindowManager {
     for (var _ati = 0; _ati < this._windows.length; _ati++) {
       var _aw = this._windows[_ati];
       if (!_aw.minimised && !_aw._crashed && _aw.app.tick) {
-        try { _aw.app.tick(); } catch(_) {}
+        var _awT = _aw;
+        try {
+          if (!this._budgeted(function () { _awT.app.tick!(); }, 1000)) {
+            _awT._crashed = true;
+            _awT._crashMsg = 'tick() exceeded 1s budget — aborted';
+            this._wmDirty = true;
+          }
+        } catch(_) {}
       }
     }
 
@@ -717,6 +724,19 @@ export class WindowManager {
   }
   /** Mark the WM as needing a repaint (call from app code or external events). */
   markDirty(): void { this._wmDirty = true; }
+
+  /**
+   * Run an app callback under a hard time budget (kernel.callBudget).
+   * Returns true if the callback completed, false if it was aborted because
+   * it exceeded `ms` of wall-clock time (infinite loop / runaway algorithm).
+   * JS exceptions thrown by the callback propagate to the caller's try/catch.
+   * Falls back to a direct call on kernels without the callBudget binding.
+   */
+  private _budgeted(fn: () => void, ms: number): boolean {
+    var kb = (kernel as any).callBudget;
+    if (typeof kb !== 'function') { fn(); return true; }
+    return (kernel as any).callBudget(fn, ms) !== -1;
+  }
 
   /**
    * Lightweight cursor-only pump: read mouse packets, update cursor position,
@@ -973,14 +993,20 @@ export class WindowManager {
             }
           } else {
             try {
-              dispWin.app.onMouse({
+              var _dwM = dispWin;
+              var _mev = {
                 x:       cx - dispWin.x,
                 y:       cy - (dispWin.y + TITLE_H),
                 dx:      cx - prevX,
                 dy:      cy - prevY,
                 buttons: pkt.buttons,
                 type:    evType,
-              });
+              };
+              if (!this._budgeted(function () { _dwM.app.onMouse!(_mev); }, 3000)) {
+                dispWin._crashed  = true;
+                dispWin._crashMsg = 'onMouse() exceeded 3s budget — aborted';
+                this._wmDirty = true;
+              }
             } catch (me) {
               dispWin._crashed = true;
               var meMsg = '';
@@ -1009,7 +1035,15 @@ export class WindowManager {
         var raw = kernel.readKeyEx();
         if (!raw) break;
         if (!focused._crashed) {
-          try { focused.app.onKey(this._makeKeyEvent(raw)); } catch (ke) {
+          try {
+            var _fkW = focused;
+            var _kev = this._makeKeyEvent(raw);
+            if (!this._budgeted(function () { _fkW.app.onKey(_kev); }, 3000)) {
+              focused._crashed  = true;
+              focused._crashMsg = 'onKey() exceeded 3s budget — aborted';
+              this._wmDirty = true;
+            }
+          } catch (ke) {
             focused._crashed = true;
             var keMsg = '';
             try { keMsg = (ke instanceof Error) ? ke.message : String(ke); } catch (_k) { keMsg = 'Unknown error'; }
@@ -1120,7 +1154,14 @@ export class WindowManager {
           anyContentDirty = true;
         } else {
           try {
-            if (wi.app.render(wi.canvas)) {
+            var _wiR = wi;
+            var _wiDirty = false;
+            var _wiDone = this._budgeted(function () { _wiDirty = _wiR.app.render(_wiR.canvas); }, 1000);
+            if (!_wiDone) {
+              wi._crashed  = true;
+              wi._crashMsg = 'render() exceeded 1s budget — aborted';
+              anyContentDirty = true;
+            } else if (_wiDirty) {
               anyContentDirty = true;
               dirtyWinIdxs.push(ai);
             }
