@@ -40,6 +40,9 @@ import { parseHTML, parseHTMLFromTokens, tokenise, fastExtractFromTokens } from 
 import { parseStylesheet, buildSheetIndex, type CSSRule, type RuleIndex, resetCSSVars, setViewport, flushCSSMatchCache, getCSSMatchCacheStats, flushSheetCache } from './stylesheet.js';
 import { decodePNG }    from './img-png.js';
 import { decodeJPEG }   from './img-jpeg.js';
+import { decodeGIFStatic } from './img-gif.js';
+import { decodeWebP }   from './img-webp.js';
+import { renderSVG }    from './svg.js';
 import { layoutNodes }  from './layout.js';
 import { aboutJsosHTML, aboutJstestHTML, errorHTML, jsonViewerHTML } from './pages.js';
 import { createPageJS, getBlobURLContent, type PageJS } from './jsruntime.js';
@@ -151,6 +154,37 @@ function _parseTextShadow(css: string): _TextShadowLayer[] {
   }
   _textShadowCache.set(css, out);
   return out;
+}
+
+// ── Universal image decoder ───────────────────────────────────────────────────
+/**
+ * Sniff magic bytes and decode BMP / PNG / JPEG / GIF / WebP / SVG.
+ * Returns null for unknown or undecodable formats (caller shows placeholder).
+ */
+function decodeAnyImage(body: number[]): DecodedImage | null {
+  if (!body || body.length < 4) return null;
+  var b0 = body[0] ?? 0, b1 = body[1] ?? 0, b2 = body[2] ?? 0, b3 = body[3] ?? 0;
+  try {
+    if (b0 === 0x42 && b1 === 0x4D) return decodeBMP(body);
+    if (b0 === 0x89 && b1 === 0x50) return decodePNG(new Uint8Array(body));
+    if (b0 === 0xFF && b1 === 0xD8) return decodeJPEG(new Uint8Array(body));
+    if (b0 === 0x47 && b1 === 0x49 && b2 === 0x46) return decodeGIFStatic(new Uint8Array(body));  // "GIF"
+    if (b0 === 0x52 && b1 === 0x49 && b2 === 0x46 && b3 === 0x46 && body.length > 11 &&
+        body[8] === 0x57 && body[9] === 0x45 && body[10] === 0x42 && body[11] === 0x50) {          // "RIFF....WEBP"
+      return decodeWebP(new Uint8Array(body));
+    }
+    // SVG — text document starting with '<' (skip BOM / leading whitespace)
+    var si = 0;
+    while (si < body.length && si < 64 &&
+           (body[si] === 0x20 || body[si] === 0x09 || body[si] === 0x0A ||
+            body[si] === 0x0D || body[si] === 0xEF || body[si] === 0xBB || body[si] === 0xBF)) si++;
+    if (body[si] === 0x3C /* '<' */) {
+      var svgStr = '';
+      for (var ci = 0; ci < body.length; ci++) svgStr += String.fromCharCode(body[ci]! & 0xFF);
+      if (svgStr.indexOf('<svg') >= 0) return renderSVG(svgStr);
+    }
+  } catch (_e) { /* corrupt image — placeholder */ }
+  return null;
 }
 
 // ── TabState — per-tab browseable snapshot ────────────────────────────────────
@@ -770,7 +804,15 @@ export class BrowserApp implements App {
       canvas.fillRect(tx + tabW - 1, 1, 1, TAB_BAR_H - 2, CLR_TOOLBAR_BD);
 
       var t       = this._tabs[ti];
-      var label   = t.loading ? 'Loading...' : (t.title || t.url || 'New Tab');
+      // Live title for the ACTIVE tab: _pageTitle/_loading update during the
+      // page load, but the tab snapshot only syncs on tab switch — without
+      // this the tab label stays stuck at the previous URL ("about:blank").
+      var label: string;
+      if (isAct) {
+        label = this._loading ? 'Loading...' : (this._pageTitle || this._pageURL || 'New Tab');
+      } else {
+        label = t.loading ? 'Loading...' : (t.title || t.url || 'New Tab');
+      }
       var maxCh   = Math.max(1, Math.floor((tabW - 20) / CHAR_W));
       var display = label.length > maxCh ? label.slice(0, maxCh - 1) + '\u2026' : label;
       var txtClr  = isAct ? CLR_BTN_TXT : CLR_STATUS_TXT;
@@ -2098,22 +2140,12 @@ export class BrowserApp implements App {
         var dataStr   = comma >= 0 ? src.slice(comma + 1) : '';
         var isBase64  = meta.indexOf(';base64') >= 0;
         var rawBytes  = isBase64 ? decodeBase64(dataStr) : Array.from(dataStr).map(c => c.charCodeAt(0));
-        var decoded: DecodedImage | null = decodeBMP(rawBytes);
+        var decoded: DecodedImage | null = decodeAnyImage(rawBytes);
         if (!decoded) {
-          // Try PNG
-          if (rawBytes.length > 8 && rawBytes[0] === 0x89 && rawBytes[1] === 0x50) {
-            try { decoded = decodePNG(new Uint8Array(rawBytes)); } catch (_e) {}
-          }
-          // Try JPEG
-          if (!decoded && rawBytes.length > 3 && rawBytes[0] === 0xFF && rawBytes[1] === 0xD8) {
-            try { decoded = decodeJPEG(new Uint8Array(rawBytes)); } catch (_e) {}
-          }
-          if (!decoded) {
-            var pngDim0 = readPNGDimensions(rawBytes);
-            if (pngDim0) {
-              wp.imgNatW = pngDim0.w; wp.pw = Math.min(pngDim0.w, 600);
-              wp.imgNatH = pngDim0.h; wp.ph = Math.round(pngDim0.h * wp.pw / pngDim0.w);
-            }
+          var pngDim0 = readPNGDimensions(rawBytes);
+          if (pngDim0) {
+            wp.imgNatW = pngDim0.w; wp.pw = Math.min(pngDim0.w, 600);
+            wp.imgNatH = pngDim0.h; wp.ph = Math.round(pngDim0.h * wp.pw / pngDim0.w);
           }
         }
         if (decoded) { wp.imgData = decoded.data; wp.pw = decoded.w; wp.ph = decoded.h; }
@@ -2136,20 +2168,9 @@ export class BrowserApp implements App {
       (function(ww: typeof wp, srcURL: string, rawSrc: string) {
         os.fetchAsync(srcURL, function(resp: FetchResponse | null, _err?: string) {
           if (resp && resp.status === 200 && resp.body.length >= 2) {
-            var imgDecoded: DecodedImage | null = null;
-            var b0 = resp.body[0] ?? 0;
-            var b1 = resp.body[1] ?? 0;
-            if (b0 === 0x42 && b1 === 0x4D) {
-              // BMP — full pixel decode
-              imgDecoded = decodeBMP(resp.body);
-            } else if (b0 === 0x89 && b1 === 0x50) {
-              // PNG — full decode using inline TypeScript PNG decoder
-              try { imgDecoded = decodePNG(new Uint8Array(resp.body)); } catch (_e) {}
-            } else if (b0 === 0xFF && b1 === 0xD8) {
-              // JPEG — full decode using inline TypeScript JPEG decoder
-              try { imgDecoded = decodeJPEG(new Uint8Array(resp.body)); } catch (_e) {}
-            } else {
-              // Other — read dimensions only, show sized placeholder
+            var imgDecoded: DecodedImage | null = decodeAnyImage(resp.body);
+            if (!imgDecoded) {
+              // Unknown format — read dimensions only, show sized placeholder
               var pDim = readPNGDimensions(resp.body);
               if (pDim) {
                 ww.imgNatW = pDim.w; ww.pw = Math.min(pDim.w, 600);
@@ -2180,15 +2201,7 @@ export class BrowserApp implements App {
         os.fetchAsync(resolvedBg, function(resp: FetchResponse | null) {
           var bgDec: DecodedImage | null = null;
           if (resp && resp.status === 200) {
-            var _bb = resp.body || [];
-            var _b0 = _bb[0] ?? 0, _b1 = _bb[1] ?? 0;
-            if (_b0 === 0x89 && _b1 === 0x50) {
-              try { bgDec = decodePNG(new Uint8Array(_bb)); } catch (_e) {}
-            } else if (_b0 === 0xFF && _b1 === 0xD8) {
-              try { bgDec = decodeJPEG(new Uint8Array(_bb)); } catch (_e) {}
-            } else {
-              bgDec = decodeBMP(_bb);
-            }
+            bgDec = decodeAnyImage(resp.body || []);
           }
           self._bgImageMap.set(bgSrc, bgDec);
           pendingCount--;
@@ -2870,9 +2883,9 @@ export class BrowserApp implements App {
               // CSS rules.  Doing a parseHTMLFromTokens here is wasted work (~2s)
               // that gets immediately replaced by the rerender.
               if (!_isJSPage) {
-                var r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, _pass1NodeCount > 20);
+                var r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, false);
                 pumpCursor();
-                if (r3.nodes.length < 10 && _pass1NodeCount > 20 && !(r3.nodes.length > 0)) {
+                if (r3.nodes.length < 5 && _pass1NodeCount > 20) {
                   r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, true);
                   pumpCursor();
                 }
@@ -2894,21 +2907,24 @@ export class BrowserApp implements App {
     if (sheets.length > 0) {
       try {
         var _shT2b = Date.now();
-        // JS-heavy sites (e.g. Google, React SPAs) use CSS display:none to hide
-        // ALL content until JavaScript runs (FOUC prevention).  For such pages,
-        // skip display:none filtering entirely (ignoreDisplayNone=true) since JS
-        // controls visibility at runtime.  For pure-CSS pages, honour display:none.
-        var _p2IgnoreNone = r.scripts.length > 0 && _pass1NodeCount > 20;
+        // Honour CSS display:none — hidden dialogs/menus must stay hidden or
+        // they render on top of the visible content (observed on google.com:
+        // "Remove file attachment" / "Canvas" dialog buttons overlapping the
+        // page).  Genuine FOUC pages that CSS-hide EVERYTHING until JS runs
+        // are handled by the blank-page fallback below.
+        var _p2IgnoreNone = false;
 
         r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, _p2IgnoreNone);
         pumpCursor();  // keep cursor alive after pass2 parse (~500-2000ms)
         os.debug.log('[browser] pass2 parseHTML:', r.nodes.length, 'nodes in', (Date.now() - _shT2b) + 'ms',
           _p2IgnoreNone ? '(ignoreDisplayNone)' : '');
 
-        // Fallback for non-JS pages: if display:none hid nearly everything,
-        // re-parse without it so something is shown.
-        if (!_p2IgnoreNone && (r.nodes.length < 10 || r.nodes.length < _pass1NodeCount * 0.4) && _pass1NodeCount > 20) {
-          os.debug.log('[browser] pass2 too few nodes (' + r.nodes.length + ' vs pass1=' + _pass1NodeCount + ') — re-parsing without display:none');
+        // Blank-page fallback: if display:none hid essentially everything
+        // (FOUC prevention), re-parse ignoring rule-based display:none so
+        // SOMETHING is shown.  Threshold is deliberately tiny — pass1 counts
+        // hidden + script nodes, so percentage-based tests fire spuriously.
+        if (r.nodes.length < 5 && _pass1NodeCount > 20) {
+          os.debug.log('[browser] pass2 blank page (' + r.nodes.length + ' nodes vs pass1=' + _pass1NodeCount + ') — re-parsing without display:none');
           var _shT2c = Date.now();
           r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, true);  // ignoreDisplayNone=true
           pumpCursor();
@@ -3016,11 +3032,15 @@ export class BrowserApp implements App {
               }
             }
           }
-          // During rerender, use ignoreDisplayNone=true to override CSS-rule-based
-          // display:none (which hides content until JS fully runs), while still
-          // respecting inline-style display:none (set explicitly by JS).
+          // Rerender honours CSS display:none: JS-driven visibility changes
+          // arrive as inline styles / class changes in bodyTokens (serialised
+          // from the live child DOM), so rule-based hiding is authoritative.
+          // Blank-page fallback below covers CSS-hides-everything pages.
           var _rrT0 = Date.now();
-          var r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex, true);
+          var r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex, false);
+          if (r2.nodes.length < 5) {
+            r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex, true);
+          }
           pumpCursor();  // keep cursor alive after rerender parse
           var [_cacheHits, _cacheTotal, _cacheSize] = getCSSMatchCacheStats();
           os.debug.log('[browser] rerender CSS in', (Date.now() - _rrT0) + 'ms, rules:', sheets.length, 'cacheHit:', _cacheHits + '/' + _cacheTotal, 'cacheKeys:', _cacheSize);
