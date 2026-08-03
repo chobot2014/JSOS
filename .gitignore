@@ -54,3 +54,4 @@ logs/
 *.log
 
 build-*.txt
+test-output/

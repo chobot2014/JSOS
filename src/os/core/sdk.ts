@@ -1355,10 +1355,41 @@ function _doFetch(
   }
 
   var step = _buildFetchCoroutine(f);
-  var id   = threadManager.runCoroutine('fetch:' + parsed.host, step);
+  // Track the fetch by coroutine id so fetchCancel() can clean up the socket,
+  // DNS port and — critically — the dedup-map entry.  Cancelling the raw
+  // coroutine (os.cancel) used to leave the _fetchDedup entry behind forever:
+  // every later fetch of the same URL "dedup hit" onto a dead queue and never
+  // completed (observed as "subsequent websites don't load").
+  var id   = threadManager.runCoroutine('fetch:' + parsed.host, function (): 'done' | 'pending' {
+    var r = step();
+    if (r === 'done') _inflightFetches.delete(f.coroId);
+    return r;
+  });
   f.coroId = id;
+  (f as any)._dedupURL = _isIdempotent ? url : '';
+  _inflightFetches.set(id, f);
   (kernel as any).serialPut('[fetch] new coro id=' + id + ' stage=' + f.stage + ' host=' + parsed.host + ' path=' + parsed.path.slice(0, 80) + '\n');
   return id;
+}
+
+/** In-flight fetches by coroutine id — for fetchCancel() cleanup. */
+var _inflightFetches = new Map<number, InFlightFetch>();
+
+/**
+ * Cancel an in-flight os.fetchAsync by its returned id, releasing the socket,
+ * pending DNS query and the request-dedup entry.  Queued dedup callbacks for
+ * the same URL are dropped (they belong to the page being abandoned).
+ * Safe to call with an id that has already completed.
+ */
+function _fetchCancel(coroId: number): void {
+  var f = _inflightFetches.get(coroId);
+  if (f) {
+    _inflightFetches.delete(coroId);
+    var du = (f as any)._dedupURL;
+    if (du) _fetchDedup.delete(du);
+    try { _cleanupFetch(f); } catch (_e) {}
+  }
+  threadManager.cancelCoroutine(coroId);
 }
 
 // ── SDK implementation ────────────────────────────────────────────────────────
@@ -4228,6 +4259,15 @@ const sdk = {
     opts?: FetchOptions,
   ): number {
     return _doFetch(url, callback, opts);
+  },
+
+  /**
+   * Cancel an in-flight os.fetchAsync by id.  Unlike os.cancel(), this also
+   * releases the socket/DNS state and the request-dedup entry so the same
+   * URL can be fetched again later.
+   */
+  fetchCancel(coroId: number): void {
+    _fetchCancel(coroId);
   },
 
   /**

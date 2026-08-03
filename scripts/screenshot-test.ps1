@@ -1,5 +1,12 @@
-# Boot JSOS headless, take timed screenshots via QEMU monitor, then kill.
-param([int]$BootWait = 45, [int]$Shots = 3, [int]$ShotGap = 8)
+# Boot JSOS headless, take timed screenshots via QEMU monitor, optionally
+# navigate the browser to a second URL (Ctrl+L + typed keys), then kill.
+param(
+    [int]$BootWait = 45,
+    [int]$Shots = 2,
+    [int]$ShotGap = 8,
+    [string]$Navigate = "",     # e.g. "example.com" — typed after first shots
+    [int]$NavWait = 25          # seconds to wait after navigation
+)
 
 $qemu = "C:\Program Files\qemu\qemu-system-x86_64.exe"
 New-Item -ItemType Directory -Path "test-output" -Force | Out-Null
@@ -24,24 +31,53 @@ $proc = Start-Process -FilePath $qemu -ArgumentList @(
 Write-Host "Waiting ${BootWait}s for boot + page load..."
 Start-Sleep -Seconds $BootWait
 
-function Send-Monitor([string]$cmd) {
-    try {
-        $client = New-Object System.Net.Sockets.TcpClient("127.0.0.1", 45454)
-        $stream = $client.GetStream()
-        $writer = New-Object System.IO.StreamWriter($stream)
-        $writer.AutoFlush = $true
-        Start-Sleep -Milliseconds 300
-        $writer.WriteLine($cmd)
-        Start-Sleep -Milliseconds 700
-        $client.Close()
-    } catch { Write-Host "monitor error: $_" }
+# Persistent monitor connection
+$client = $null
+$writer = $null
+function Open-Monitor {
+    $script:client = New-Object System.Net.Sockets.TcpClient("127.0.0.1", 45454)
+    $script:writer = New-Object System.IO.StreamWriter($script:client.GetStream())
+    $script:writer.AutoFlush = $true
+    Start-Sleep -Milliseconds 300
+}
+function Send-Monitor([string]$cmd, [int]$delayMs = 120) {
+    $script:writer.WriteLine($cmd)
+    Start-Sleep -Milliseconds $delayMs
+}
+Open-Monitor
+
+$shotNum = 0
+function Take-Shot {
+    $script:shotNum++
+    $path = (Resolve-Path "test-output").Path + "\shot$script:shotNum.png"
+    Send-Monitor ("screendump " + $path.Replace('\','/') + " -f png") 700
+    Write-Host "screenshot $script:shotNum taken"
 }
 
 for ($i = 1; $i -le $Shots; $i++) {
-    $path = (Resolve-Path "test-output").Path + "\shot$i.png"
-    Send-Monitor ("screendump " + $path.Replace('\','/') + " -f png")
-    Write-Host "screenshot $i taken"
+    Take-Shot
     if ($i -lt $Shots) { Start-Sleep -Seconds $ShotGap }
+}
+
+if ($Navigate) {
+    Write-Host "Navigating to $Navigate ..."
+    Send-Monitor "sendkey ctrl-l" 400
+    foreach ($ch in $Navigate.ToCharArray()) {
+        $key = switch -CaseSensitive ([string]$ch) {
+            "." { "dot" }
+            "/" { "slash" }
+            "-" { "minus" }
+            ":" { "shift-semicolon" }
+            default { ([string]$ch).ToLower() }
+        }
+        Send-Monitor "sendkey $key" 90
+    }
+    Send-Monitor "sendkey ret" 200
+    Write-Host "Waiting ${NavWait}s for page load..."
+    Start-Sleep -Seconds $NavWait
+    Take-Shot
+    Start-Sleep -Seconds 6
+    Take-Shot
 }
 
 if (-not $proc.HasExited) { $proc.Kill() }

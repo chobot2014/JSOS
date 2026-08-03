@@ -512,7 +512,10 @@ export class BrowserApp implements App {
         }
         var raw = this._urlInput.trim();
         this._urlSuggestions = []; this._urlSuggestIdx = -1;
-        if (raw) { this._urlBarFocus = false; this._navigate(raw); }
+        if (raw) {
+          this._urlBarFocus = false;
+          this._navigate(this._normalizeURLInput(raw));
+        }
         return;
       }
       if (ch === '\x1b') {
@@ -2288,6 +2291,28 @@ export class BrowserApp implements App {
     this._startFetch(url);
   }
 
+  /**
+   * Normalize what the user typed into the URL bar:
+   *  - "example.com"      → "https://example.com"
+   *  - "localhost:8080"   → "http://localhost:8080"
+   *  - "about:...", full URLs → unchanged
+   *  - anything without a dot and not host-like → web search
+   */
+  private _normalizeURLInput(raw: string): string {
+    if (raw.startsWith('http://') || raw.startsWith('https://') ||
+        raw.startsWith('about:')  || raw.startsWith('data:')    ||
+        raw.startsWith('blob:')   || raw.startsWith('file:')) {
+      return raw;
+    }
+    // Host-like: contains a dot or a port, no spaces
+    if (raw.indexOf(' ') < 0 && (raw.indexOf('.') > 0 || /^[\w-]+:\d+/.test(raw))) {
+      var isLocal = raw.startsWith('localhost') || /^\d{1,3}(\.\d{1,3}){3}/.test(raw);
+      return (isLocal ? 'http://' : 'https://') + raw;
+    }
+    // Fall back to a web search
+    return 'https://www.google.com/search?q=' + urlEncode(raw);
+  }
+
   private _resolveHref(href: string): string {
     if (href.startsWith('http://') || href.startsWith('https://') ||
         href.startsWith('about:')  || href.startsWith('data:')    ||
@@ -2340,7 +2365,17 @@ export class BrowserApp implements App {
   }
 
   private _cancelFetch(): void {
-    if (this._fetchCoroId >= 0) { os.cancel(this._fetchCoroId); this._fetchCoroId = -1; }
+    // fetchCancel (not plain os.cancel): releases socket/DNS state AND the
+    // fetch-dedup entry — a cancelled entry left in the dedup map made every
+    // later fetch of the same URL queue onto a dead list and hang forever.
+    if (this._fetchCoroId >= 0) {
+      if ((os as any).fetchCancel) (os as any).fetchCancel(this._fetchCoroId);
+      else os.cancel(this._fetchCoroId);
+      this._fetchCoroId = -1;
+    }
+    // Cancel in-flight sliced parses from the old page.
+    if (this._pass2CoroId    >= 0) { os.cancel(this._pass2CoroId);    this._pass2CoroId    = -1; }
+    if (this._rerenderCoroId >= 0) { os.cancel(this._rerenderCoroId); this._rerenderCoroId = -1; }
     if (this._pageJS) { this._pageJS.dispose(); this._pageJS = null; }
   }
 
