@@ -9,7 +9,7 @@
  * Manages process states, time slices, and context switching.
  *
  * Integration:
- *   • Hardware timer (100 Hz IRQ0) → kernel.registerSchedulerHook → threadManager.tick()
+ *   • Hardware timer (1000 Hz IRQ0) → kernel.registerSchedulerHook → threadManager.tick()
  *     Handles kernel-thread preemption and sleeping-thread wakeup.
  *   • WM event loop (~50 fps)       → scheduler.tick()
  *     Handles process-level CPU-time accounting, signal delivery, and
@@ -629,7 +629,7 @@ export class ProcessScheduler {
   /**
    * Returns accounting data for pid:
    *   cpuMs    — total CPU time consumed (frames × 20 ms)
-   *   wallMs   — elapsed wall-clock time (ticks since start × 10 ms @ 100 Hz)
+   *   wallMs   — elapsed wall-clock time (1 tick = 1 ms at 1000 Hz)
    *   ioBytes  — total bytes read+written (updated by fs/net subsystems)
    */
   getAccounting(pid: number): { pid: number; cpuMs: number; wallMs: number; ioBytes: number } | null {

@@ -195,11 +195,11 @@ function main(): void {
   }
 
   // ── Phase 5: Preemptive multitasking ───────────────────────────────────
-  // The C-layer IRQ0 hook drives kernel-thread preemption at 100 Hz.
+  // The C-layer IRQ0 hook drives kernel-thread preemption at 1000 Hz.
   // Process-level scheduling (signals, time slices) is driven by the WM
   // frame loop via scheduler.tick() (~50 fps) — see ui/wm.ts tick().
   kernel.registerSchedulerHook(function() { return threadManager.tick(); });
-  kernel.serialPut('Preemptive scheduler active (100Hz)\n');
+  kernel.serialPut('Preemptive scheduler active (1000Hz)\n');
 
   // Create the three canonical kernel threads.
   var idleThread = threadManager.createThread('idle',   39);
@@ -366,7 +366,7 @@ function main(): void {
       kernel.serialPut('Terminal app launched\n');
       kernel.serialPut('REPL ready (windowed mode)\n');
 
-      // WM event loop — target ~50 fps (20 ms/frame at 100 Hz PIT).
+      // WM event loop — target ~60 fps (16 ms/frame; 1000 Hz PIT, 1 tick = 1 ms).
       // kernel.yield() wakes any sleeping JS processes before input/render.
       // kernel.sleep() uses 'hlt' so the CPU is truly idle between frames
       // instead of burning 100% on a spin-wait.

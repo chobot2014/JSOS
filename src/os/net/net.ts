@@ -2039,7 +2039,7 @@ export class NetworkStack {
 
   /**
    * Send an ARP request for targetIP and poll the NIC until we receive a reply
-   * or the timeout (in PIT ticks, ~10 ms each) expires.
+   * or the timeout (in PIT ticks, 1 ms each) expires.
    * Returns the resolved MAC or null on timeout.
    */
   arpWait(targetIP: IPv4Address, timeoutTicks: number = 300): MACAddress | null {
@@ -2165,7 +2165,7 @@ export class NetworkStack {
 
   /**
    * [Item 264] Enable/configure TCP keepalive on a socket's connection.
-   * @param idle     Idle ticks before first probe (default 7500 ≈ 75 s at 100 Hz)
+   * @param idle     Idle ticks before first probe (default 75 000 = 75 s at 1000 Hz)
    * @param interval Ticks between probes (default 750)
    * @param maxProbes Max unanswered probes before aborting connection (default 9)
    */

@@ -23,7 +23,7 @@ const QTYPE_AAAA = 28;
 const QTYPE_CNAME = 5;
 const QCLASS_IN  = 1;
 const MAX_CNAME_HOPS = 10;
-/** Default per-query timeout in PIT ticks (~10 ms each). */
+/** Default per-query timeout in PIT ticks (1 ms each at 1000 Hz). */
 const DNS_TIMEOUT_TICKS = 1000;  // 1 s per attempt (1 tick = 1 ms)
 const DNS_RETRIES = 3;
 

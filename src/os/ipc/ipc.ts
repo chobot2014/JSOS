@@ -614,7 +614,7 @@ export function setTimeout_ipc(fn: () => void, ms: number): void {
 
 /** Repeating timer: calls `fn` every `ms` milliseconds. Returns a handle. */
 export function setInterval_ipc(fn: () => void, ms: number): number {
-  var ticks    = Math.max(1, Math.round(ms / 10));
+  var ticks    = Math.max(1, Math.round(ms));   // 1 tick = 1 ms (1000 Hz)
   var deadline = kernel.getTicks() + ticks;
   var id       = nextTimerId++;
   pendingTimers.push({ deadline, fn, repeat: true, interval: ticks, id });
@@ -991,7 +991,7 @@ export function select(fds: ReadableFd[], timeoutMs = -1): ReadableFd[] {
   if (fds.length === 0) return [];
 
   var deadline = timeoutMs >= 0
-    ? kernel.getTicks() + Math.ceil(timeoutMs / 10)
+    ? kernel.getTicks() + Math.ceil(timeoutMs)   // 1 tick = 1 ms
     : Infinity;
 
   while (true) {
@@ -1040,7 +1040,7 @@ export function poll(fds: PollFd[], timeoutMs = -1): number {
   for (var i = 0; i < fds.length; i++) fds[i].revents = 0;
 
   var deadline = timeoutMs >= 0
-    ? kernel.getTicks() + Math.ceil(timeoutMs / 10)
+    ? kernel.getTicks() + Math.ceil(timeoutMs)   // 1 tick = 1 ms
     : Infinity;
 
   while (true) {
@@ -1121,7 +1121,7 @@ export function waitForSignal(pid: number, signum: SignalNumber, timeoutMs?: num
     }
     ipc.signals.handle(pid, signum, handler);
     if (timeoutMs !== undefined && timeoutMs > 0) {
-      var deadline = kernel.getTicks() + Math.ceil(timeoutMs / 10);
+      var deadline = kernel.getTicks() + Math.ceil(timeoutMs);   // 1 tick = 1 ms
       var check = setInterval(function() {
         if (resolved) { clearInterval(check); return; }
         if (kernel.getTicks() >= deadline) {
@@ -1396,7 +1396,7 @@ export class IPCBus {
       };
       subs.add(handler);
       // timeout
-      var deadline = kernel.getTicks() + Math.ceil(timeoutMs / 10);
+      var deadline = kernel.getTicks() + Math.ceil(timeoutMs);   // 1 tick = 1 ms
       var iv = setInterval(function() {
         if (self_resolved) { clearInterval(iv); return; }
         if (kernel.getTicks() > deadline) {

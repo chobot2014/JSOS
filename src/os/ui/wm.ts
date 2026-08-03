@@ -617,7 +617,7 @@ export class WindowManager {
     showToast(msg, durationMs, bgColor) {
     var dur = durationMs || 3000;
     var bg  = bgColor || 0xFF1A3A6A;
-    var exp = kernel.getTicks() + Math.round(dur / 10);
+    var exp = kernel.getTicks() + Math.round(dur);   // 1 tick = 1 ms
     this._toasts.push({ msg: msg, bg: bg, expires: exp });
     this._wmDirty = true;
   }

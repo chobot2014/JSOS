@@ -16,7 +16,7 @@
  *     bufCache.put('ata0', lba, block);
  *   }
  *
- *   // OS timer tick ~100 Hz: item 189 writeback every 30 s
+ *   // OS timer tick 1000 Hz: item 189 writeback every 30 s
  *   writebackTimer.tick(kernel.getTicks());
  */
 

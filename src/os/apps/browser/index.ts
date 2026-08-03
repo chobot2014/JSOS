@@ -300,6 +300,58 @@ export class BrowserApp implements App {
   private _fetchCoroId = -1;
   /** Coroutine id of the in-flight time-sliced rerender parse (-1 = none). */
   private _rerenderCoroId = -1;
+  /** Coroutine id of the in-flight time-sliced pass2 styled parse (-1 = none). */
+  private _pass2CoroId = -1;
+
+  /**
+   * Run the pass2 styled parse as a time-sliced coroutine (~8 ms per frame).
+   * On completion the styled result replaces the quick pass1 render.
+   * Handles the blank-page fallback (CSS hides everything → re-parse ignoring
+   * rule-based display:none) by chaining a second sliced parse.
+   * Cancelled implicitly when the user navigates away (URL check) and
+   * explicitly when a newer pass2 starts.
+   */
+  private _startPass2(tokens: any[], sheets: CSSRule[], index: RuleIndex | null,
+                      url: string, fallbackTitle: string, pass1NodeCount: number): void {
+    var self = this;
+    if (this._pass2CoroId >= 0) { os.cancel(this._pass2CoroId); this._pass2CoroId = -1; }
+    var _p2T0  = Date.now();
+    var _gen   = parseHTMLFromTokensSliced(tokens, sheets, index, false);
+    var _stage: 'main' | 'fallback' = 'main';
+    this._pass2CoroId = os.process.coroutine('browser:pass2', function (): 'done' | 'pending' {
+      if (self._pageURL !== url) { self._pass2CoroId = -1; return 'done'; }  // navigated away
+      // 24 ms slice: pass2 is the first styled render the user sees — finishing
+      // fast matters more than a perfectly even frame rate during page load.
+      var _sliceEnd = Date.now() + 24;
+      var _st = _gen.next();
+      while (!_st.done && Date.now() < _sliceEnd) _st = _gen.next();
+      if (!_st.done) return 'pending';
+      var r2 = _st.value;
+      // Blank-page fallback: CSS hid essentially everything (FOUC prevention)
+      // — chain a second sliced parse that ignores rule-based display:none.
+      if (_stage === 'main' && r2.nodes.length < 5 && pass1NodeCount > 20) {
+        os.debug.log('[browser] pass2 blank page (' + r2.nodes.length + ' nodes) — re-parsing without display:none');
+        _stage = 'fallback';
+        _gen = parseHTMLFromTokensSliced(tokens, sheets, index, true);
+        return 'pending';
+      }
+      self._pass2CoroId = -1;
+      os.debug.log('[browser] pass2 parseHTML:', r2.nodes.length, 'nodes in', (Date.now() - _p2T0) + 'ms (sliced' + (_stage === 'fallback' ? '+fallback' : '') + ')');
+      try {
+        self._forms       = r2.forms;
+        self._pageBaseURL = r2.baseURL ? self._resolveHref(r2.baseURL) : '';
+        // Preserve scroll across the styled swap (user may have scrolled the
+        // quick pass1 render already).
+        var _keepScroll = self._scrollY;
+        self._layoutPage(r2.nodes as any, r2.widgets as any,
+                         r2.title || self._pageTitle || fallbackTitle || url, url, true /*isRerender*/);
+        self._scrollY = Math.min(_keepScroll, self._maxScrollY);
+      } catch (_p2Err) {
+        os.debug.log('[browser] pass2 apply THREW:', String(_p2Err).slice(0, 200));
+      }
+      return 'done';
+    });
+  }
 
   // URL bar autocomplete (item 632)
   private _urlSuggestions: HistoryEntry[] = [];
@@ -2905,39 +2957,14 @@ export class BrowserApp implements App {
     // ── Pass 2: re-parse with all available CSS (inline + any cached external) ─
     // Build the RuleIndex once here; cache it so the rerender closure and r3 path
     // can reuse it without rebuilding 800+ rules on every DOM mutation tick.
+    //
+    // Pass2 is TIME-SLICED: the page renders immediately from the pass1 result
+    // (placeholder for JS pages, unstyled parse for static pages) and the
+    // styled parse runs in a coroutine at ~8 ms/frame, swapping in when done.
+    // A ~700 ms styled parse no longer stalls a single frame.
     var _cachedIndex: RuleIndex | null = sheets.length > 0 ? buildSheetIndex(sheets) : null;
     if (sheets.length > 0) {
-      try {
-        var _shT2b = Date.now();
-        // Honour CSS display:none — hidden dialogs/menus must stay hidden or
-        // they render on top of the visible content (observed on google.com:
-        // "Remove file attachment" / "Canvas" dialog buttons overlapping the
-        // page).  Genuine FOUC pages that CSS-hide EVERYTHING until JS runs
-        // are handled by the blank-page fallback below.
-        var _p2IgnoreNone = false;
-
-        r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, _p2IgnoreNone);
-        pumpCursor();  // keep cursor alive after pass2 parse (~500-2000ms)
-        os.debug.log('[browser] pass2 parseHTML:', r.nodes.length, 'nodes in', (Date.now() - _shT2b) + 'ms',
-          _p2IgnoreNone ? '(ignoreDisplayNone)' : '');
-
-        // Blank-page fallback: if display:none hid essentially everything
-        // (FOUC prevention), re-parse ignoring rule-based display:none so
-        // SOMETHING is shown.  Threshold is deliberately tiny — pass1 counts
-        // hidden + script nodes, so percentage-based tests fire spuriously.
-        if (r.nodes.length < 5 && _pass1NodeCount > 20) {
-          os.debug.log('[browser] pass2 blank page (' + r.nodes.length + ' nodes vs pass1=' + _pass1NodeCount + ') — re-parsing without display:none');
-          var _shT2c = Date.now();
-          r = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, true);  // ignoreDisplayNone=true
-          pumpCursor();
-          os.debug.log('[browser] pass2-fallback:', r.nodes.length, 'nodes', r.widgets.length, 'widgets in', (Date.now() - _shT2c) + 'ms');
-        }
-
-        this._forms       = r.forms;
-        this._pageBaseURL = r.baseURL ? this._resolveHref(r.baseURL) : '';
-      } catch (_p2Err) {
-        os.debug.log('[browser] pass2 parseHTML THREW:', String(_p2Err).slice(0, 200));
-      }
+      this._startPass2(_htmlTokens, sheets, _cachedIndex, url, fallbackTitle, _pass1NodeCount);
     }
 
     // Dispose any previous page JS before setting up the new page
@@ -2992,6 +3019,10 @@ export class BrowserApp implements App {
         confirm: (_msg: string): boolean => true,   // no blocking UI — default accept
         prompt:  (_msg: string, def: string): string => def,
         rerender: (tokens: any[]) => {
+          // A JS-driven rerender reflects the CURRENT child DOM — it supersedes
+          // any in-flight pass2 parse of the ORIGINAL page HTML.  Cancel pass2
+          // so its (older) result can't land after and overwrite this one.
+          if (self2._pass2CoroId >= 0) { os.cancel(self2._pass2CoroId); self2._pass2CoroId = -1; }
           // Re-parse the mutated body from pre-tokenised tokens (item 1.2).
           // Wrap in synthetic <body> open/close for the parser.
           var bodyTokens: any[] = [{ kind: 'open', tag: 'body', text: '', attrs: new Map() }];

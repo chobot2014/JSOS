@@ -226,22 +226,33 @@ export class ThreadManager {
   /**
    * Advance registered coroutines by one step each, with optional time budget.
    * Uses a snapshot so that a step() may add or cancel coroutines safely.
-   * @param frameStart — kernel.getTicks() at frame start; when provided,
-   *   remaining coroutines are deferred when frame exceeds ~16ms (PIT = 1000 Hz,
-   *   1 tick = 1 ms).
+   * @param frameStart — kernel.getTicks() at frame start (kept for API compat;
+   *   the budget below is measured from the START OF THE COROUTINE PHASE, not
+   *   frame start — otherwise a busy render/tick phase would leave zero budget
+   *   and starve coroutines for the whole page load, e.g. sliced pass2 parses
+   *   took 34 s wall because they were deferred on almost every frame).
    */
+  private _rrOffset = 0;   // round-robin start offset for fairness
   tickCoroutines(frameStart?: number): void {
+    void frameStart;
     if (this._coroutines.length === 0) return;
     var snap = this._coroutines.slice();   // snapshot before iteration
     var startCid = this._nextCid;          // IDs created during this tick are >= startCid
     var keep: Array<{ id: number; name: string; step: CoroutineStep }> = [];
-    for (var i = 0; i < snap.length; i++) {
-      // Time budget: defer remaining coroutines when frame exceeds ~16ms.
-      // NOTE 1 tick = 1 ms (1000 Hz PIT) — the old ">= 2" here assumed 100 Hz
-      // and gave coroutines only 2 ms/frame, starving sliced work 10×.
-      if (frameStart !== undefined && i > 0 && kernel.getTicks() - frameStart >= 16) {
-        for (var r = i; r < snap.length; r++) keep.push(snap[r]);
-        break;
+    var _coStart = kernel.getTicks();      // coroutine-phase budget: ~16 ms guaranteed
+    // Rotate the starting index each frame so that when the budget runs out,
+    // it's a different coroutine that gets deferred (fair round-robin).
+    var n   = snap.length;
+    var off = this._rrOffset % n;
+    this._rrOffset = (this._rrOffset + 1) % 0x7FFFFFFF;
+    var deferred: boolean[] = new Array(n);
+    for (var ii = 0; ii < n; ii++) {
+      var i = (ii + off) % n;
+      // Time budget: defer remaining coroutines when this phase exceeds ~16 ms
+      // (1 tick = 1 ms at 1000 Hz).  Always step at least one coroutine.
+      if (ii > 0 && kernel.getTicks() - _coStart >= 16) {
+        deferred[i] = true;
+        continue;
       }
       var c = snap[i];
       var result: 'done' | 'pending';
@@ -251,7 +262,11 @@ export class ThreadManager {
         (kernel as any).serialPut('[coroutine] ' + c.name + ' threw: ' + _eMsg + '\n');
         result = 'done';
       }
-      if (result === 'pending') keep.push(c);
+      deferred[i] = (result === 'pending');
+    }
+    // Preserve original order: keep deferred/pending coroutines
+    for (var ki = 0; ki < n; ki++) {
+      if (deferred[ki]) keep.push(snap[ki]);
     }
     // O(n) merge: append coroutines added during this tick (id >= startCid)
     for (var k = 0; k < this._coroutines.length; k++) {

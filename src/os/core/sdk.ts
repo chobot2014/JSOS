@@ -2122,7 +2122,7 @@ const sdk = {
     uptime(): number {
       return kernel.getUptime();
     },
-    /** Raw PIT tick count (~100 Hz, 1 tick ≈ 10 ms). */
+    /** Raw PIT tick count (1000 Hz, 1 tick = 1 ms). */
     ticks(): number {
       return kernel.getTicks();
     },
@@ -3688,7 +3688,7 @@ const sdk = {
       sdk.audio.tone(freq);
       if (durationMs && durationMs > 0) {
         sdk.process.coroutine('audio:beep', (function() {
-          var endTicks = kernel.getTicks() + Math.ceil(durationMs / 10);
+          var endTicks = kernel.getTicks() + Math.ceil(durationMs);   // 1 tick = 1 ms
           return function(): 'done'|'pending' {
             if (kernel.getTicks() >= endTicks) { sdk.audio.silence(); return 'done'; }
             return 'pending';
@@ -3715,7 +3715,7 @@ const sdk = {
         if (idx >= notes.length) { sdk.audio.silence(); return 'done'; }
         if (now >= noteEndTick) {
           var note = notes[idx++];
-          noteEndTick = now + Math.ceil(note.duration / 10);
+          noteEndTick = now + Math.ceil(note.duration);   // 1 tick = 1 ms
           if (note.freq > 0) sdk.audio.tone(note.freq);
           else sdk.audio.silence();
         }
