@@ -4006,7 +4006,7 @@ const sdk = {
     measure(label: string, fn: () => void): number {
       var t0 = kernel.getTicks();
       try { fn(); } catch (_e) {}
-      var elapsed = (kernel.getTicks() - t0) * 10; // ticks are ~10ms
+      var elapsed = kernel.getTicks() - t0; // 1 tick = 1 ms (1000 Hz PIT)
       sdk.debug.log('measure(' + label + '):', elapsed + 'ms');
       return elapsed;
     },

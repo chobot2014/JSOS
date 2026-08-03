@@ -2169,7 +2169,7 @@ export class NetworkStack {
    * @param interval Ticks between probes (default 750)
    * @param maxProbes Max unanswered probes before aborting connection (default 9)
    */
-  setKeepAlive(sock: Socket, enable: boolean, idle: number = 7500,
+  setKeepAlive(sock: Socket, enable: boolean, idle: number = 75000,
                interval: number = 750, maxProbes: number = 9): void {
     var conn = this._connForSock(sock);
     if (conn) {
@@ -2202,8 +2202,8 @@ export class NetworkStack {
       });
       conn.sendSeq = (conn.sendSeq + 1) >>> 0;
       if (this.nicReady) {
-        // Block-poll NIC until ESTABLISHED or timeout (200 ticks ≈ 2 s)
-        var deadline = kernel.getTicks() + 200;
+        // Block-poll NIC until ESTABLISHED or timeout (2 s; 1 tick = 1 ms)
+        var deadline = kernel.getTicks() + 2000;
         while (kernel.getTicks() < deadline && conn.state === 'SYN_SENT') {
           pumpCursor();  // keep cursor alive during TCP connect
           this.pollNIC();

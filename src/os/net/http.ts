@@ -508,7 +508,7 @@ export function httpGet(
 
   // Accumulate response into a chunk list — avoid O(n²) concat on every packet
   var chunks: number[][] = [];
-  var deadline = kernel.getTicks() + 500;  // 5 seconds
+  var deadline = kernel.getTicks() + 5000;  // 5 s (1 tick = 1 ms)
   var _ttfbMarked = false;
   while (kernel.getTicks() < deadline) {
     pumpCursor();  // keep cursor alive during sync httpGet
@@ -517,7 +517,7 @@ export function httpGet(
     if (chunk && chunk.length > 0) {
       if (!_ttfbMarked) { _wt.markTtfb(); _ttfbMarked = true; }
       chunks.push(chunk);
-      deadline = kernel.getTicks() + 100;  // reset on new data
+      deadline = kernel.getTicks() + 1000;  // reset on new data
     } else if (net.connClosed(sock)) {
       break;  // server sent FIN and buffer is drained — response complete
     }
@@ -630,7 +630,7 @@ export function httpsGet(
 
   // Receive and accumulate response
   var tlsChunks: number[][] = [];
-  var tlsDeadline = kernel.getTicks() + 500;  // 5 seconds
+  var tlsDeadline = kernel.getTicks() + 5000;  // 5 s (1 tick = 1 ms)
   var _ttfb2Marked = false;
   while (kernel.getTicks() < tlsDeadline) {
     pumpCursor();  // keep cursor alive during sync httpsGet
@@ -638,7 +638,7 @@ export function httpsGet(
     if (chunk2 && chunk2.length > 0) {
       if (!_ttfb2Marked) { _wt2.markTtfb(); _ttfb2Marked = true; }
       tlsChunks.push(chunk2);
-      tlsDeadline = kernel.getTicks() + 100;  // reset on new data
+      tlsDeadline = kernel.getTicks() + 1000;  // reset on new data
     } else if (tls.isClosed()) {
       break;  // peer closed and no decryptable data left — response complete
     }

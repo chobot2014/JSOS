@@ -639,7 +639,7 @@ export class ProcessScheduler {
     return {
       pid,
       cpuMs:   p.cpuTime * 20,
-      wallMs:  (now - p.startTime) * 10,
+      wallMs:  (now - p.startTime),   // 1 tick = 1 ms (1000 Hz)
       ioBytes: p.ioBytes,
     };
   }

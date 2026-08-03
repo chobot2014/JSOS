@@ -171,7 +171,7 @@ function parseDHCP(data: number[]): DHCPResponse | null {
  * Updates the net stack configuration on success.
  * Returns the obtained config or null on failure.
  */
-export function dhcpDiscover(timeoutTicks: number = 200): DHCPConfig | null {
+export function dhcpDiscover(timeoutTicks: number = 2000): DHCPConfig | null {
   var mac = macToBytes(net.mac);
   var xid = (kernel.getTicks() * 0x9e3779b9) >>> 0;
 

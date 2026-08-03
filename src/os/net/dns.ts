@@ -24,7 +24,7 @@ const QTYPE_CNAME = 5;
 const QCLASS_IN  = 1;
 const MAX_CNAME_HOPS = 10;
 /** Default per-query timeout in PIT ticks (~10 ms each). */
-const DNS_TIMEOUT_TICKS = 100;   // 1 s per attempt
+const DNS_TIMEOUT_TICKS = 1000;  // 1 s per attempt (1 tick = 1 ms)
 const DNS_RETRIES = 3;
 
 // ── Packet encoder ────────────────────────────────────────────────────────────
@@ -767,7 +767,7 @@ export function dnsCacheSnapshot(): Array<{ key: string; ip: string; ttlLeft: nu
   var now  = kernel.getTicks();
   var rows: Array<{ key: string; ip: string; ttlLeft: number }> = [];
   dnsCache.forEach(function(e, k) {
-    rows.push({ key: k, ip: e.ip, ttlLeft: Math.max(0, Math.floor((e.expiresAt - now) / 100)) });
+    rows.push({ key: k, ip: e.ip, ttlLeft: Math.max(0, Math.floor((e.expiresAt - now) / 1000)) });
   });
   return rows;
 }

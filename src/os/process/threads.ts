@@ -144,8 +144,8 @@ export class ThreadManager {
     var t = this._byTid(tid);
     if (t) {
       t.state = 'sleeping';
-      // Timer fires at ~100 Hz → 1 tick ≈ 10 ms.
-      t.sleepUntil = kernel.getTicks() + Math.ceil(ms / 10);
+      // Timer fires at 1000 Hz → 1 tick = 1 ms.
+      t.sleepUntil = kernel.getTicks() + Math.max(1, Math.ceil(ms));
     }
   }
 
@@ -227,7 +227,8 @@ export class ThreadManager {
    * Advance registered coroutines by one step each, with optional time budget.
    * Uses a snapshot so that a step() may add or cancel coroutines safely.
    * @param frameStart — kernel.getTicks() at frame start; when provided,
-   *   remaining coroutines are deferred when frame exceeds ~20ms (2 ticks).
+   *   remaining coroutines are deferred when frame exceeds ~16ms (PIT = 1000 Hz,
+   *   1 tick = 1 ms).
    */
   tickCoroutines(frameStart?: number): void {
     if (this._coroutines.length === 0) return;
@@ -235,8 +236,10 @@ export class ThreadManager {
     var startCid = this._nextCid;          // IDs created during this tick are >= startCid
     var keep: Array<{ id: number; name: string; step: CoroutineStep }> = [];
     for (var i = 0; i < snap.length; i++) {
-      // Time budget: defer remaining coroutines when frame exceeds ~20ms
-      if (frameStart !== undefined && i > 0 && kernel.getTicks() - frameStart >= 2) {
+      // Time budget: defer remaining coroutines when frame exceeds ~16ms.
+      // NOTE 1 tick = 1 ms (1000 Hz PIT) — the old ">= 2" here assumed 100 Hz
+      // and gave coroutines only 2 ms/frame, starving sliced work 10×.
+      if (frameStart !== undefined && i > 0 && kernel.getTicks() - frameStart >= 16) {
         for (var r = i; r < snap.length; r++) keep.push(snap[r]);
         break;
       }

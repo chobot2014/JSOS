@@ -425,6 +425,17 @@ export function parseHTMLFromTokens(tokens: HtmlToken[], sheets: CSSRule[] = [],
   return _parseTokens(tokens, sheets, false, ruleIndex, ignoreDisplayNone);
 }
 
+/**
+ * Time-sliceable parse: returns a generator that yields the current token
+ * index every 32 tokens.  Drive it from a coroutine with a per-frame time
+ * budget so multi-hundred-ms parses (page rerenders) never stall a frame.
+ * The final ParseResult is the generator's return value (`.value` when
+ * `.done` is true).
+ */
+export function parseHTMLFromTokensSliced(tokens: HtmlToken[], sheets: CSSRule[] = [], ruleIndex?: RuleIndex | null, ignoreDisplayNone?: boolean): Generator<number, ParseResult, void> {
+  return _parseTokensGen(tokens, sheets, false, ruleIndex, ignoreDisplayNone);
+}
+
 export function parseHTML(html: string, sheets: CSSRule[] = [], ruleIndex?: RuleIndex | null): ParseResult {
   var tokens   = tokenise(html);
   // Detect quirks mode from raw HTML (needs the source string)
@@ -432,7 +443,15 @@ export function parseHTML(html: string, sheets: CSSRule[] = [], ruleIndex?: Rule
   return _parseTokens(tokens, sheets, !_dtMatch, ruleIndex);
 }
 
+/** Synchronous driver over the generator — preserves the original API. */
 function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolean, prebuiltIndex?: RuleIndex | null, ignoreDisplayNone?: boolean): ParseResult {
+  var g = _parseTokensGen(tokens, sheets, quirksMode, prebuiltIndex, ignoreDisplayNone);
+  var r = g.next();
+  while (!r.done) r = g.next();
+  return r.value;
+}
+
+function* _parseTokensGen(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolean, prebuiltIndex?: RuleIndex | null, ignoreDisplayNone?: boolean): Generator<number, ParseResult, void> {
   var nodes:   RenderNode[]      = [];
   var title    = '';
   var forms:   FormState[]       = [];
@@ -1126,6 +1145,10 @@ function _parseTokens(tokens: HtmlToken[], sheets: CSSRule[], quirksMode: boolea
   }
 
   for (var i = 0; i < tokens.length; i++) {
+    // Resumption point for time-sliced parsing (parseHTMLFromTokensSliced).
+    // Every 32 tokens costs one generator suspend check — negligible for the
+    // sync driver, and lets coroutine drivers cap per-frame parse time.
+    if ((i & 31) === 0 && i > 0) yield i;
     var tok = tokens[i];
 
     if (inScript) {

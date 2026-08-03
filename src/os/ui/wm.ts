@@ -701,9 +701,10 @@ export class WindowManager {
     if (threadManager.hasCoroutines()) _activity = true;
 
     // ── Low-priority subsystems — skip when frame budget exhausted ──────────
+    // 1 tick = 1 ms (1000 Hz PIT): allow ~16 ms of frame work before deferring.
     var _elapsed = kernel.getTicks() - _t0;
-    if (_elapsed < 2) net.tcpTick();
-    if (_elapsed < 2) systemProfiler.tick();
+    if (_elapsed < 16) net.tcpTick();
+    if (_elapsed < 16) systemProfiler.tick();
     // GC: run at reduced frequency (every 4th frame) to free frame budget
     if ((_wmGCTick & 3) === 0) {
       try { globalGC.tick(_wmGCTick); } catch (_) {}
@@ -717,7 +718,7 @@ export class WindowManager {
     // each cycle stays small and invisible.
     var _nowTicks = kernel.getTicks();
     if (!_activity && !this._wmDirty && !threadManager.hasCoroutines() &&
-        _nowTicks - _lastNativeGCTick >= 1000) {
+        _nowTicks - _lastNativeGCTick >= 10000) {   // ≥10 s (1 tick = 1 ms)
       _lastNativeGCTick = _nowTicks;
       try { kernel.gc(); } catch (_) {}
     }
@@ -817,8 +818,8 @@ export class WindowManager {
         kernel.serialPut('[wm] serviceTimers(' + id + ') threw: ' + String(e2).slice(0, 120) + '\n');
       }
       try {
-        /* Defer JIT compilation when frame is already over budget (~20ms) */
-        if (kernel.getTicks() - _t0 < 2) {
+        /* Defer JIT compilation when frame is already over budget (1 tick = 1 ms) */
+        if (kernel.getTicks() - _t0 < 16) {
           var pendingBC = kernel.procPendingJIT(id);
           if (pendingBC !== 0) { _serviceChildJIT(id, pendingBC); }
         }
@@ -1158,7 +1159,7 @@ export class WindowManager {
 
     // Check clock — redraw taskbar only on minute boundary (not full composite)
     var ticks = kernel.getTicks();
-    var mins = Math.floor(ticks / 6000) % 60;
+    var mins = Math.floor(ticks / 60000) % 60;   // 1 tick = 1 ms
     var _clockChanged = false;
     if (mins !== this._lastClockMin) { this._lastClockMin = mins; _clockChanged = true; }
 

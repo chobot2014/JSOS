@@ -487,9 +487,9 @@ export class Channel<T> {
 
   /**
    * Blocking receive — waits up to `timeoutTicks` for an item.
-   * Default timeout is 100 ticks (~1 s at 100 Hz).
+   * Default timeout is 1000 ticks (1 s at 1000 Hz).
    */
-  recv(timeoutTicks = 100): T | null {
+  recv(timeoutTicks = 1000): T | null {
     var deadline = kernel.getTicks() + timeoutTicks;
     while (this.buf.length === 0 && !this._closed) {
       if (kernel.getTicks() >= deadline) return null;
@@ -600,15 +600,14 @@ export function shmUnlink(name: string): boolean { return sharedMem.delete(name)
  * Uses kernel.sleep() which yields to the QEMU/hardware interrupt handler.
  */
 export function sleep(ms: number): void {
-  // kernel.sleep takes ticks; the tick rate is exposed via kernel.tickRateHz
-  // Default: 100Hz → 1 tick = 10ms
-  var ticks = Math.max(1, Math.round(ms / 10));
+  // kernel.sleep takes ticks; PIT runs at 1000 Hz → 1 tick = 1 ms
+  var ticks = Math.max(1, Math.round(ms));
   kernel.sleep(ticks);
 }
 
 /** One-shot timer: calls `fn` after `ms` milliseconds (cooperative). */
 export function setTimeout_ipc(fn: () => void, ms: number): void {
-  var deadline = kernel.getTicks() + Math.max(1, Math.round(ms / 10));
+  var deadline = kernel.getTicks() + Math.max(1, Math.round(ms));
   // Register with the global tick runner
   pendingTimers.push({ deadline, fn, repeat: false, interval: 0 });
 }

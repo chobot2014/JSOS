@@ -36,7 +36,7 @@ import type {
 } from './types.js';
 
 import { parseURL, urlEncode, encodeFormData, decodeBMP, readPNGDimensions, decodeBase64 } from './utils.js';
-import { parseHTML, parseHTMLFromTokens, tokenise, fastExtractFromTokens } from './html.js';
+import { parseHTML, parseHTMLFromTokens, parseHTMLFromTokensSliced, tokenise, fastExtractFromTokens } from './html.js';
 import { parseStylesheet, buildSheetIndex, type CSSRule, type RuleIndex, resetCSSVars, setViewport, flushCSSMatchCache, getCSSMatchCacheStats, flushSheetCache } from './stylesheet.js';
 import { decodePNG }    from './img-png.js';
 import { decodeJPEG }   from './img-jpeg.js';
@@ -298,6 +298,8 @@ export class BrowserApp implements App {
 
   // Async fetch coroutine id
   private _fetchCoroId = -1;
+  /** Coroutine id of the in-flight time-sliced rerender parse (-1 = none). */
+  private _rerenderCoroId = -1;
 
   // URL bar autocomplete (item 632)
   private _urlSuggestions: HistoryEntry[] = [];
@@ -3035,18 +3037,33 @@ export class BrowserApp implements App {
           // Rerender honours CSS display:none: JS-driven visibility changes
           // arrive as inline styles / class changes in bodyTokens (serialised
           // from the live child DOM), so rule-based hiding is authoritative.
-          // Blank-page fallback below covers CSS-hides-everything pages.
+          //
+          // Time-sliced: the parse runs inside a coroutine, max ~8 ms per WM
+          // frame, so a 400-500 ms style recompute no longer stalls the whole
+          // OS for one long frame.  A newer rerender request cancels the
+          // in-flight one (only the latest DOM snapshot matters).
           var _rrT0 = Date.now();
-          var r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex, false);
-          if (r2.nodes.length < 5) {
-            r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex, true);
-          }
-          pumpCursor();  // keep cursor alive after rerender parse
-          var [_cacheHits, _cacheTotal, _cacheSize] = getCSSMatchCacheStats();
-          os.debug.log('[browser] rerender CSS in', (Date.now() - _rrT0) + 'ms, rules:', sheets.length, 'cacheHit:', _cacheHits + '/' + _cacheTotal, 'cacheKeys:', _cacheSize);
-          self2._forms = r2.forms;
-          self2._layoutPage(r2.nodes as any, r2.widgets as any, self2._pageTitle, self2._pageURL, true /*isRerender*/);
-          pumpCursor();  // keep cursor alive after rerender layout
+          if (self2._rerenderCoroId >= 0) { os.cancel(self2._rerenderCoroId); self2._rerenderCoroId = -1; }
+          var _rrGen = parseHTMLFromTokensSliced(bodyTokens, sheets, _cachedIndex, false);
+          var _rrURL = self2._pageURL;   // cancel silently if user navigated away
+          self2._rerenderCoroId = os.process.coroutine('browser:rerender', function (): 'done' | 'pending' {
+            if (self2._pageURL !== _rrURL) { self2._rerenderCoroId = -1; return 'done'; }
+            var _sliceEnd = Date.now() + 8;   // ~8 ms parse budget per frame
+            var _st = _rrGen.next();
+            while (!_st.done && Date.now() < _sliceEnd) _st = _rrGen.next();
+            if (!_st.done) return 'pending';
+            self2._rerenderCoroId = -1;
+            var r2 = _st.value;
+            if (r2.nodes.length < 5) {
+              // Blank-page fallback (rare) — small parse, run synchronously
+              r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex, true);
+            }
+            var [_cacheHits, _cacheTotal, _cacheSize] = getCSSMatchCacheStats();
+            os.debug.log('[browser] rerender CSS in', (Date.now() - _rrT0) + 'ms (sliced), rules:', sheets.length, 'cacheHit:', _cacheHits + '/' + _cacheTotal, 'cacheKeys:', _cacheSize);
+            self2._forms = r2.forms;
+            self2._layoutPage(r2.nodes as any, r2.widgets as any, self2._pageTitle, self2._pageURL, true /*isRerender*/);
+            return 'done';
+          });
         },
         log: (msg: string) => os.debug.log(msg),
         getWidgetValue: (id: string) => {
