@@ -2353,26 +2353,8 @@ export class BrowserApp implements App {
       var isLocal = raw.startsWith('localhost') || /^\d{1,3}(\.\d{1,3}){3}/.test(raw);
       return (isLocal ? 'http://' : 'https://') + raw;
     }
-    // Fall back to a web search (server-rendered results — see _rewriteSearchURL)
-    return 'https://www.mojeek.com/search?q=' + urlEncode(raw);
-  }
-
-  /**
-   * Compat rewrite for search engines that no longer serve server-rendered
-   * results.  google.com/search and bing.com/search ship a JS-only shell whose
-   * results are drawn client-side by a ~1 MB script our engine skips
-   * (external-too-large cap) — the page stays blank.  DuckDuckGo bot-blocks
-   * our TLS fingerprint (CAPTCHA), so searches are transparently routed to
-   * Mojeek, which serves real server-rendered results.  Other URLs pass
-   * through unchanged.
-   */
-  private _rewriteSearchURL(url: string): string {
-    var m = /^https?:\/\/(?:www\.)?(?:google\.[a-z.]+|bing\.com|(?:html|lite)\.duckduckgo\.com)\/(?:search|html|lite)\/?\?(.*)$/i.exec(url);
-    if (!m) return url;
-    var qm = /(?:^|&)q=([^&]*)/.exec(m[1]!);
-    if (!qm) return url;
-    this._status = 'Search rewritten to Mojeek (Google Search requires unsupported JS)';
-    return 'https://www.mojeek.com/search?q=' + qm[1];
+    // Fall back to a web search
+    return 'https://www.google.com/search?q=' + urlEncode(raw);
   }
 
   private _resolveHref(href: string): string {
@@ -2523,8 +2505,6 @@ export class BrowserApp implements App {
   }
 
   private _startFetch(rawURL: string): void {
-    // Compat: JS-only search shells (google/bing) → server-rendered DDG HTML.
-    rawURL = this._rewriteSearchURL(rawURL);
     this._cancelFetch();
     this._renderedRichness = 0;      // reset render-richness arbitration
     this._renderedBy       = 'pass1';

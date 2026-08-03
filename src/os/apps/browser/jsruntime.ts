@@ -9458,14 +9458,15 @@ export function createPageJS(
     // frame up for every eval, not just external/large scripts.
     var _useGuarded = typeof (kernel as any).evalGuarded === 'function';
     // ── External script size cap ─────────────────────────────────────────────
-    // Google's XJS bundle (987KB) overflows QuickJS compiler buffers during
-    // parsing, causing heap corruption that kills the main runtime.  Cap
-    // external scripts at 512KB — inline scripts are always small and safe.
-    // All normal frameworks (jQuery 87KB, React 130KB, Angular 150KB, Vue 100KB)
-    // fit under 512KB.  Google's inline scripts already handle core UI; the
-    // mega-bundle adds optional features we can skip.
-    if (scriptURL && code.length > 512 * 1024) {
-      cb.log('[JS exec] external-too-large ' + (code.length / 1024).toFixed(0) + 'KB — skipping (cap=512KB): ' + scriptURL.slice(0, 80));
+    // Historical: Google's XJS bundle (~1 MB) overflowed QuickJS compiler
+    // buffers in the MAIN runtime, corrupting the OS heap — hence a 512 KB cap.
+    // Page scripts now execute in an ISOLATED CHILD runtime (own heap, 2 MB
+    // stack, contained CPU-fault recovery, double-free quarantine): a compiler
+    // blow-up recycles the child instead of killing the OS.  Allow up to 2 MB —
+    // google.com/search results are drawn by that mega-bundle, and skipping it
+    // left the search page permanently blank.
+    if (scriptURL && code.length > 2 * 1024 * 1024) {
+      cb.log('[JS exec] external-too-large ' + (code.length / 1024).toFixed(0) + 'KB — skipping (cap=2MB): ' + scriptURL.slice(0, 80));
       return;
     }
     if (code.length > 2 * 1024 * 1024) {

@@ -2257,9 +2257,11 @@ static JSValue js_proc_create(JSContext *c, JSValueConst this_val,
                                                     * window for heap corruption.  64 MB keeps
                                                     * the live set compact while still giving
                                                     * headroom for React/Vue reconciliation. */
-    JS_SetMaxStackSize(p->rt, 512 * 1024);        /* 512 KB — deep component trees (React,
-                                                    * Angular), recursive HTML parser, deeply
-                                                    * nested JS eval all need headroom. */
+    JS_SetMaxStackSize(p->rt, 2 * 1024 * 1024);   /* 2 MB — large bundles (Google XJS ~1 MB)
+                                                    * recurse deeply during COMPILATION, not
+                                                    * just execution; 512 KB overflowed.  Deep
+                                                    * component trees (React, Angular) and the
+                                                    * recursive HTML parser also need headroom. */
     p->ctx = JS_NewContext(p->rt);
     if (!p->ctx) { JS_FreeRuntime(p->rt); p->rt = NULL; return JS_NewInt32(c, -1); }
     /* Inject minimal child kernel API */
