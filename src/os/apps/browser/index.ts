@@ -187,6 +187,25 @@ function decodeAnyImage(body: number[]): DecodedImage | null {
   return null;
 }
 
+// ── Render-richness metric ───────────────────────────────────────────────────
+/**
+ * Total visible text characters in a parse result (capped at 20 000).
+ * Used to arbitrate between competing renders: node COUNT is misleading — a
+ * broken child-DOM serialisation can produce many structurally-valid nodes
+ * with no text (observed: mojeek rendered logo-only from 131 empty nodes
+ * while the 326-node static parse with full text was discarded).
+ */
+function _textRichness(nodes: any[]): number {
+  var total = 0;
+  var walk = function (n: any): void {
+    if (total > 20000 || !n) return;
+    if (n.spans) for (var i = 0; i < n.spans.length; i++) total += ((n.spans[i] && n.spans[i].text) || '').trim().length;
+    if (n.children) for (var j = 0; j < n.children.length; j++) walk(n.children[j]);
+  };
+  for (var k = 0; k < nodes.length && total <= 20000; k++) walk(nodes[k]);
+  return total;
+}
+
 // ── TabState — per-tab browseable snapshot ────────────────────────────────────
 
 interface TabState {
@@ -302,6 +321,13 @@ export class BrowserApp implements App {
   private _rerenderCoroId = -1;
   /** Coroutine id of the in-flight time-sliced pass2 styled parse (-1 = none). */
   private _pass2CoroId = -1;
+  /** Text richness (character count) + source of the currently displayed
+   *  layout — arbitrates between the async pass2 (original HTML, styled) and
+   *  JS-driven rerenders (live child DOM): whichever is RICHER wins.  Guards
+   *  against a sparse/broken child-DOM serialisation blanking a good static
+   *  render, and against a stale pass2 overwriting a good live render. */
+  private _renderedRichness = 0;
+  private _renderedBy: 'pass1' | 'pass2' | 'rerender' = 'pass1';
 
   /**
    * Run the pass2 styled parse as a time-sliced coroutine (~8 ms per frame).
@@ -337,6 +363,13 @@ export class BrowserApp implements App {
       }
       self._pass2CoroId = -1;
       os.debug.log('[browser] pass2 parseHTML:', r2.nodes.length, 'nodes in', (Date.now() - _p2T0) + 'ms (sliced' + (_stage === 'fallback' ? '+fallback' : '') + ')');
+      // Arbitration: a live rerender may have already drawn.  Only replace it
+      // when pass2 has substantially more TEXT (broken/sparse child-DOM case).
+      var _p2Rich = _textRichness(r2.nodes as any);
+      if (self._renderedBy === 'rerender' && _p2Rich <= self._renderedRichness * 1.5) {
+        os.debug.log('[browser] pass2 skipped — live rerender is richer (' + self._renderedRichness + ' vs ' + _p2Rich + ' chars)');
+        return 'done';
+      }
       try {
         self._forms       = r2.forms;
         self._pageBaseURL = r2.baseURL ? self._resolveHref(r2.baseURL) : '';
@@ -346,11 +379,13 @@ export class BrowserApp implements App {
         self._layoutPage(r2.nodes as any, r2.widgets as any,
                          r2.title || self._pageTitle || fallbackTitle || url, url, true /*isRerender*/);
         self._scrollY = Math.min(_keepScroll, self._maxScrollY);
+        self._renderedRichness = _p2Rich;
+        self._renderedBy = 'pass2';
       } catch (_p2Err) {
         os.debug.log('[browser] pass2 apply THREW:', String(_p2Err).slice(0, 200));
       }
       return 'done';
-    });
+    }, true /* priority — must not be starved behind background fetches */);
   }
 
   // URL bar autocomplete (item 632)
@@ -1078,6 +1113,8 @@ export class BrowserApp implements App {
     }
     // Clip stack for overflow:hidden containers (item 3.10)
     var _clipStack: Array<{endY: number; saved: ReturnType<typeof canvas.saveClipRect>}> = [];
+    // Paint diagnostics (logged once per content version below)
+    var _pdSpans = 0; var _pdFirst = '';
     // Track active boxDeco region for contained background fills
     var _activeDecoX = 0;
     var _activeDecoW = w;
@@ -1435,6 +1472,10 @@ export class BrowserApp implements App {
       for (var j = 0; j < line.nodes.length; j++) {
         var span = line.nodes[j];
         if (!span.text) continue;
+        if (span.text.trim()) {
+          _pdSpans++;
+          if (!_pdFirst) _pdFirst = 'absY=' + absY + ' x=' + span.x + ' "' + span.text.slice(0, 14) + '"';
+        }
         var clr = span.color;
         if (span.href) {
           clr = this._visited.has(span.href) ? CLR_VISITED
@@ -1738,6 +1779,9 @@ export class BrowserApp implements App {
 
     // Phase 3.1: restore clip rect and record what was rendered.
     canvas.restoreClipRect(_savedClip);
+    if (this._tileContentVer !== this._contentVersion) {
+      os.debug.log('[browser] paint: textSpans=' + _pdSpans + ' first{' + _pdFirst + '} scrollY=' + _sv + ' lo=' + _lo + '/' + _lines.length);
+    }
     this._tileContentVer = this._contentVersion;
     this._tileScrollY    = this._scrollY;
   }
@@ -2309,8 +2353,26 @@ export class BrowserApp implements App {
       var isLocal = raw.startsWith('localhost') || /^\d{1,3}(\.\d{1,3}){3}/.test(raw);
       return (isLocal ? 'http://' : 'https://') + raw;
     }
-    // Fall back to a web search
-    return 'https://www.google.com/search?q=' + urlEncode(raw);
+    // Fall back to a web search (server-rendered results — see _rewriteSearchURL)
+    return 'https://www.mojeek.com/search?q=' + urlEncode(raw);
+  }
+
+  /**
+   * Compat rewrite for search engines that no longer serve server-rendered
+   * results.  google.com/search and bing.com/search ship a JS-only shell whose
+   * results are drawn client-side by a ~1 MB script our engine skips
+   * (external-too-large cap) — the page stays blank.  DuckDuckGo bot-blocks
+   * our TLS fingerprint (CAPTCHA), so searches are transparently routed to
+   * Mojeek, which serves real server-rendered results.  Other URLs pass
+   * through unchanged.
+   */
+  private _rewriteSearchURL(url: string): string {
+    var m = /^https?:\/\/(?:www\.)?(?:google\.[a-z.]+|bing\.com|(?:html|lite)\.duckduckgo\.com)\/(?:search|html|lite)\/?\?(.*)$/i.exec(url);
+    if (!m) return url;
+    var qm = /(?:^|&)q=([^&]*)/.exec(m[1]!);
+    if (!qm) return url;
+    this._status = 'Search rewritten to Mojeek (Google Search requires unsupported JS)';
+    return 'https://www.mojeek.com/search?q=' + qm[1];
   }
 
   private _resolveHref(href: string): string {
@@ -2461,7 +2523,11 @@ export class BrowserApp implements App {
   }
 
   private _startFetch(rawURL: string): void {
+    // Compat: JS-only search shells (google/bing) → server-rendered DDG HTML.
+    rawURL = this._rewriteSearchURL(rawURL);
     this._cancelFetch();
+    this._renderedRichness = 0;      // reset render-richness arbitration
+    this._renderedBy       = 'pass1';
     this._pageURL       = rawURL;
     this._urlInput      = rawURL;
     this._loading       = true;
@@ -2967,22 +3033,14 @@ export class BrowserApp implements App {
               flushCSSMatchCache();
               _cachedIndex = buildSheetIndex(sheets);
 
-              // For JS-heavy pages, skip the full re-parse+layout of the original
-              // HTML — the JS-driven rerender will produce the real DOM with these
-              // CSS rules.  Doing a parseHTMLFromTokens here is wasted work (~2s)
-              // that gets immediately replaced by the rerender.
-              if (!_isJSPage) {
-                var r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, false);
-                pumpCursor();
-                if (r3.nodes.length < 5 && _pass1NodeCount > 20) {
-                  r3 = parseHTMLFromTokens(_htmlTokens, sheets, _cachedIndex, true);
-                  pumpCursor();
-                }
-                _self_css._forms       = r3.forms;
-                _self_css._pageBaseURL = r3.baseURL ? _self_css._resolveHref(r3.baseURL) : '';
-                _self_css._layoutPage(r3.nodes as any, r3.widgets as any, r3.title || fallbackTitle || url, url);
-                pumpCursor();
-              }
+              // Re-parse the ORIGINAL html with the full external CSS — as a
+              // priority sliced coroutine for ALL pages.  For JS pages the
+              // completion-time arbitration keeps whichever render (this or
+              // the JS-driven rerender) is richer, so this is no longer
+              // wasted work — it's the safety net for pages whose child-DOM
+              // serialisation comes out sparse (observed: mojeek — only the
+              // logo rendered because this path was skipped for JS pages).
+              _self_css._startPass2(_htmlTokens, sheets, _cachedIndex, url, fallbackTitle, _pass1NodeCount);
             }
           });
         })(_uncachedCSSLinks[_uli]!);
@@ -2990,15 +3048,17 @@ export class BrowserApp implements App {
     }
 
     // ── Pass 2: re-parse with all available CSS (inline + any cached external) ─
-    // Build the RuleIndex once here; cache it so the rerender closure and r3 path
-    // can reuse it without rebuilding 800+ rules on every DOM mutation tick.
+    // Build the RuleIndex once here; cache it so the rerender closure and the
+    // external-CSS completion path can reuse it without rebuilding 800+ rules
+    // on every DOM mutation tick.
     //
-    // Pass2 is TIME-SLICED: the page renders immediately from the pass1 result
-    // (placeholder for JS pages, unstyled parse for static pages) and the
-    // styled parse runs in a coroutine at ~8 ms/frame, swapping in when done.
-    // A ~700 ms styled parse no longer stalls a single frame.
+    // Pass2 is TIME-SLICED (priority coroutine): the page renders immediately
+    // from the pass1 result and the full parse swaps in when done.  It runs
+    // even with ZERO stylesheets — for JS pages the pass1 result is a
+    // placeholder, and if the JS-driven rerender comes out sparse the pass2
+    // parse of the original HTML is the only thing that shows the content.
     var _cachedIndex: RuleIndex | null = sheets.length > 0 ? buildSheetIndex(sheets) : null;
-    if (sheets.length > 0) {
+    if (_isJSPage || sheets.length > 0) {
       this._startPass2(_htmlTokens, sheets, _cachedIndex, url, fallbackTitle, _pass1NodeCount);
     }
 
@@ -3054,12 +3114,11 @@ export class BrowserApp implements App {
         confirm: (_msg: string): boolean => true,   // no blocking UI — default accept
         prompt:  (_msg: string, def: string): string => def,
         rerender: (tokens: any[]) => {
-          // A JS-driven rerender reflects the CURRENT child DOM — it supersedes
-          // any in-flight pass2 parse of the ORIGINAL page HTML.  Cancel pass2
-          // so its (older) result can't land after and overwrite this one.
-          if (self2._pass2CoroId >= 0) { os.cancel(self2._pass2CoroId); self2._pass2CoroId = -1; }
           // Re-parse the mutated body from pre-tokenised tokens (item 1.2).
           // Wrap in synthetic <body> open/close for the parser.
+          // NOTE: the in-flight pass2 (original HTML) is deliberately NOT
+          // cancelled — completion-time arbitration keeps whichever result is
+          // richer, protecting against sparse child-DOM serialisations.
           var bodyTokens: any[] = [{ kind: 'open', tag: 'body', text: '', attrs: new Map() }];
           for (var _ti = 0; _ti < tokens.length; _ti++) bodyTokens.push(tokens[_ti]);
           bodyTokens.push({ kind: 'close', tag: 'body', text: '', attrs: new Map() });
@@ -3100,17 +3159,15 @@ export class BrowserApp implements App {
               }
             }
           }
-          // Rerender honours CSS display:none: JS-driven visibility changes
-          // arrive as inline styles / class changes in bodyTokens (serialised
-          // from the live child DOM), so rule-based hiding is authoritative.
-          //
-          // Time-sliced: the parse runs inside a coroutine, max ~8 ms per WM
-          // frame, so a 400-500 ms style recompute no longer stalls the whole
-          // OS for one long frame.  A newer rerender request cancels the
-          // in-flight one (only the latest DOM snapshot matters).
+          // Rerender reflects the LIVE child DOM.  Use ignoreDisplayNone=true:
+          // sites CSS-hide content until their JS adds ready-classes our engine
+          // can't always replicate (observed: mojeek search — fully blank when
+          // honouring rule-based display:none).  JS-driven hiding arrives as
+          // INLINE styles, which ignore-mode still respects, so intentionally
+          // hidden elements stay hidden.
           var _rrT0 = Date.now();
           if (self2._rerenderCoroId >= 0) { os.cancel(self2._rerenderCoroId); self2._rerenderCoroId = -1; }
-          var _rrGen = parseHTMLFromTokensSliced(bodyTokens, sheets, _cachedIndex, false);
+          var _rrGen = parseHTMLFromTokensSliced(bodyTokens, sheets, _cachedIndex, true);
           var _rrURL = self2._pageURL;   // cancel silently if user navigated away
           self2._rerenderCoroId = os.process.coroutine('browser:rerender', function (): 'done' | 'pending' {
             if (self2._pageURL !== _rrURL) { self2._rerenderCoroId = -1; return 'done'; }
@@ -3120,16 +3177,22 @@ export class BrowserApp implements App {
             if (!_st.done) return 'pending';
             self2._rerenderCoroId = -1;
             var r2 = _st.value;
-            if (r2.nodes.length < 5) {
-              // Blank-page fallback (rare) — small parse, run synchronously
-              r2 = parseHTMLFromTokens(bodyTokens, sheets, _cachedIndex, true);
+            // Arbitration: skip drastically text-sparser rerenders — a broken/
+            // partial child-DOM serialisation must not blank a good render.
+            var _rrRich = _textRichness(r2.nodes as any);
+            if (self2._renderedRichness > 500 && _rrRich < self2._renderedRichness * 0.5) {
+              os.debug.log('[browser] rerender skipped — text-sparser than current render (' +
+                           _rrRich + ' vs ' + self2._renderedRichness + ' chars)');
+              return 'done';
             }
             var [_cacheHits, _cacheTotal, _cacheSize] = getCSSMatchCacheStats();
             os.debug.log('[browser] rerender CSS in', (Date.now() - _rrT0) + 'ms (sliced), rules:', sheets.length, 'cacheHit:', _cacheHits + '/' + _cacheTotal, 'cacheKeys:', _cacheSize);
             self2._forms = r2.forms;
             self2._layoutPage(r2.nodes as any, r2.widgets as any, self2._pageTitle, self2._pageURL, true /*isRerender*/);
+            self2._renderedRichness = _rrRich;
+            self2._renderedBy = 'rerender';
             return 'done';
-          });
+          }, true /* priority */);
         },
         log: (msg: string) => os.debug.log(msg),
         getWidgetValue: (id: string) => {
@@ -3329,6 +3392,23 @@ export class BrowserApp implements App {
     // Also check for background images that need fetching (item 386)
     var hasBgImages = this._pageLines.some(ln => ln.bgImageUrl != null && !this._bgImageMap.has(ln.bgImageUrl));
     if (hasImages || hasBgImages) this._fetchImages();
+
+    // Layout diagnostics: text-line count + char count identify content-vs-
+    // paint bugs from the serial log alone (blank-page debugging).
+    var _dTextLines = 0, _dChars = 0, _dFirstY = -1;
+    for (var _dli = 0; _dli < this._pageLines.length; _dli++) {
+      var _dt = '';
+      var _dns = this._pageLines[_dli].nodes;
+      for (var _dni = 0; _dni < _dns.length; _dni++) _dt += _dns[_dni].text || '';
+      if (_dt.trim()) {
+        _dTextLines++; _dChars += _dt.trim().length;
+        if (_dFirstY < 0) _dFirstY = this._pageLines[_dli].y;
+      }
+    }
+    os.debug.log('[browser] layout applied: lines=' + this._pageLines.length +
+                 ' textLines=' + _dTextLines + ' chars=' + _dChars +
+                 ' firstTextY=' + _dFirstY +
+                 ' maxScrollY=' + this._maxScrollY + (isRerender ? ' (rerender)' : ''));
 
     // ── Write layout rects back to VElements for getBoundingClientRect() ──────
     if (this._pageJS) this._pushLayoutRects();

@@ -184,16 +184,20 @@ export class ThreadManager {
 
   // ── Coroutine scheduler ────────────────────────────────────────────────────
 
-  private _coroutines: Array<{ id: number; name: string; step: CoroutineStep }> = [];
+  private _coroutines: Array<{ id: number; name: string; step: CoroutineStep; priority?: boolean }> = [];
   private _nextCid = 0;
 
   /**
    * Register a coroutine.  `step` is called once per WM frame until it
    * returns 'done'.  Returns the coroutine id (can be passed to cancelCoroutine).
+   * @param priority — priority coroutines are stepped FIRST every frame and
+   *   are exempt from the time-budget deferral.  Use for latency-critical
+   *   sliced work (e.g. browser page parses) that must not be starved by a
+   *   crowd of background fetches; the step itself must stay small (~24 ms).
    */
-  runCoroutine(name: string, step: CoroutineStep): number {
+  runCoroutine(name: string, step: CoroutineStep, priority?: boolean): number {
     var id = this._nextCid++;
-    this._coroutines.push({ id, name, step });
+    this._coroutines.push({ id, name, step, priority });
     return id;
   }
 
@@ -238,22 +242,14 @@ export class ThreadManager {
     if (this._coroutines.length === 0) return;
     var snap = this._coroutines.slice();   // snapshot before iteration
     var startCid = this._nextCid;          // IDs created during this tick are >= startCid
-    var keep: Array<{ id: number; name: string; step: CoroutineStep }> = [];
+    var keep: Array<{ id: number; name: string; step: CoroutineStep; priority?: boolean }> = [];
     var _coStart = kernel.getTicks();      // coroutine-phase budget: ~16 ms guaranteed
-    // Rotate the starting index each frame so that when the budget runs out,
-    // it's a different coroutine that gets deferred (fair round-robin).
     var n   = snap.length;
     var off = this._rrOffset % n;
     this._rrOffset = (this._rrOffset + 1) % 0x7FFFFFFF;
     var deferred: boolean[] = new Array(n);
-    for (var ii = 0; ii < n; ii++) {
-      var i = (ii + off) % n;
-      // Time budget: defer remaining coroutines when this phase exceeds ~16 ms
-      // (1 tick = 1 ms at 1000 Hz).  Always step at least one coroutine.
-      if (ii > 0 && kernel.getTicks() - _coStart >= 16) {
-        deferred[i] = true;
-        continue;
-      }
+
+    var stepOne = (i: number): void => {
       var c = snap[i];
       var result: 'done' | 'pending';
       try { result = c.step(); } catch (_e) {
@@ -263,7 +259,27 @@ export class ThreadManager {
         result = 'done';
       }
       deferred[i] = (result === 'pending');
+    };
+
+    // Phase 1: PRIORITY coroutines — always stepped, never budget-deferred.
+    for (var pi = 0; pi < n; pi++) {
+      if (snap[pi].priority) stepOne(pi);
     }
+    // Phase 2: normal coroutines — round-robin under the remaining budget.
+    var steppedAny = false;
+    for (var ii = 0; ii < n; ii++) {
+      var i = (ii + off) % n;
+      if (snap[i].priority) continue;   // already stepped
+      // Time budget: defer remaining normal coroutines when the phase exceeds
+      // ~16 ms (1 tick = 1 ms at 1000 Hz).  Always step at least one.
+      if (steppedAny && kernel.getTicks() - _coStart >= 16) {
+        deferred[i] = true;
+        continue;
+      }
+      stepOne(i);
+      steppedAny = true;
+    }
+
     // Preserve original order: keep deferred/pending coroutines
     for (var ki = 0; ki < n; ki++) {
       if (deferred[ki]) keep.push(snap[ki]);

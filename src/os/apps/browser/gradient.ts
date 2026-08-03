@@ -394,27 +394,47 @@ function _renderLinear(
   var lineLen = Math.abs(w * cos) + Math.abs(h * sin);
   if (lineLen < 1) lineLen = 1;
 
-  // For each scan line, compute the average t for the scan line's centre
-  // (linear gradients are uniform across perpendicular lines, so per-row
-  // is exact for horizontal/vertical and approximate for diagonals —
-  // we use per-pixel for full accuracy).
+  // 256-entry colour LUT over t ∈ [0,1] — sampleStops per pixel is far too
+  // slow in interpreted QuickJS (a full-width header box previously took
+  // seconds and blew the 3 s render budget, tearing the whole page paint).
+  var lut = new Uint32Array(257);
+  for (var li = 0; li <= 256; li++) lut[li] = sampleStops(stops, normT(li / 256, repeating)) >>> 0;
 
-  for (var row = 0; row < h; row++) {
-    var py = y + row;
-    // Sample at multiple x positions? For performance use start-of-row and
-    // end-of-row and check if they differ by more than 1 colour stop band.
-    var tLeft  = _linearT(0,     row, w, h, cos, sin, lineLen);
-    var tRight = _linearT(w - 1, row, w, h, cos, sin, lineLen);
+  // t is affine in (col,row): t(col,row) = t00 + col·dtc + row·dtr
+  var t00 = _linearT(0, 0, w, h, cos, sin, lineLen);
+  var dtc = w > 1 ? _linearT(1, 0, w, h, cos, sin, lineLen) - t00 : 0;
+  var dtr = h > 1 ? _linearT(0, 1, w, h, cos, sin, lineLen) - t00 : 0;
 
-    if (Math.abs(tLeft - tRight) < 0.005) {
-      // Solid horizontal band — one fillRect call
-      canvas.fillRect(x, py, w, 1, sampleStops(stops, normT((tLeft + tRight) / 2, repeating)));
+  if (Math.abs(dtc) < 1e-6) {
+    // Vertical gradient — one fillRect per row: O(h) canvas calls
+    for (var row = 0; row < h; row++) {
+      var tv = normT(t00 + row * dtr, repeating);
+      canvas.fillRect(x, y + row, w, 1, lut[(tv * 256) | 0]!);
+    }
+    return;
+  }
+  if (Math.abs(dtr) < 1e-6) {
+    // Horizontal gradient — one fillRect per column: O(w) canvas calls
+    for (var col = 0; col < w; col++) {
+      var th = normT(t00 + col * dtc, repeating);
+      canvas.fillRect(x + col, y, 1, h, lut[(th * 256) | 0]!);
+    }
+    return;
+  }
+
+  // Diagonal — incremental t + LUT into a row buffer, one blit per row
+  var rowBuf = new Uint32Array(w);
+  var canBlit = typeof (canvas as any).blitPixelsDirect === 'function';
+  for (var row2 = 0; row2 < h; row2++) {
+    var t = t00 + row2 * dtr;
+    for (var col2 = 0; col2 < w; col2++, t += dtc) {
+      var tn = repeating ? normT(t, true) : (t < 0 ? 0 : t > 1 ? 1 : t);
+      rowBuf[col2] = lut[(tn * 256) | 0]!;
+    }
+    if (canBlit) {
+      (canvas as any).blitPixelsDirect(rowBuf, w, 1, x, y + row2);
     } else {
-      // Need per-pixel (diagonal gradient)
-      for (var col = 0; col < w; col++) {
-        var t = normT(_linearT(col, row, w, h, cos, sin, lineLen), repeating);
-        canvas.setPixel(x + col, py, sampleStops(stops, t));
-      }
+      for (var col3 = 0; col3 < w; col3++) canvas.setPixel(x + col3, y + row2, rowBuf[col3]!);
     }
   }
 }
@@ -447,13 +467,27 @@ function _renderRadial(
   if (rx < 1) rx = 1;
   if (ry < 1) ry = 1;
 
+  // 256-entry LUT + row blit — per-pixel sampleStops+setPixel is seconds-slow
+  // in interpreted QuickJS on big boxes (blew the render budget).
+  var lut = new Uint32Array(257);
+  for (var li = 0; li <= 256; li++) lut[li] = sampleStops(stops, normT(li / 256, repeating)) >>> 0;
+  var rowBuf = new Uint32Array(w);
+  var canBlit = typeof (canvas as any).blitPixelsDirect === 'function';
+
   for (var row = 0; row < h; row++) {
     var py = y + row;
+    var ny = (row - cyPx) / ry;
+    var ny2 = ny * ny;
     for (var col = 0; col < w; col++) {
       var nx = (col - cxPx) / rx;
-      var ny = (row - cyPx) / ry;
-      var t  = Math.sqrt(nx * nx + ny * ny);
-      canvas.setPixel(x + col, py, sampleStops(stops, normT(t, repeating)));
+      var t  = Math.sqrt(nx * nx + ny2);
+      var tn = repeating ? normT(t, true) : (t > 1 ? 1 : t);
+      rowBuf[col] = lut[(tn * 256) | 0]!;
+    }
+    if (canBlit) {
+      (canvas as any).blitPixelsDirect(rowBuf, w, 1, x, py);
+    } else {
+      for (var col2 = 0; col2 < w; col2++) canvas.setPixel(x + col2, py, rowBuf[col2]!);
     }
   }
 }
@@ -472,15 +506,26 @@ function _renderConic(
   var cyPx = normCy * h;
   var fromRad = (fromDeg * Math.PI) / 180;
 
+  // LUT + row blit (see _renderRadial) — atan2+sampleStops per pixel is slow
+  var lut = new Uint32Array(257);
+  for (var li = 0; li <= 256; li++) lut[li] = sampleStops(stops, li / 256) >>> 0;
+  var rowBuf = new Uint32Array(w);
+  var canBlit = typeof (canvas as any).blitPixelsDirect === 'function';
+
   for (var row = 0; row < h; row++) {
     var py = y + row;
+    var dy = row - cyPx;
     for (var col = 0; col < w; col++) {
       var dx = col - cxPx;
-      var dy = row - cyPx;
       var angle = Math.atan2(dy, dx) - fromRad;
       // Normalise to [0,1]
       var t = ((angle / (2 * Math.PI)) % 1 + 1) % 1;
-      canvas.setPixel(x + col, py, sampleStops(stops, t));
+      rowBuf[col] = lut[(t * 256) | 0]!;
+    }
+    if (canBlit) {
+      (canvas as any).blitPixelsDirect(rowBuf, w, 1, x, py);
+    } else {
+      for (var col2 = 0; col2 < w; col2++) canvas.setPixel(x + col2, py, rowBuf[col2]!);
     }
   }
 }

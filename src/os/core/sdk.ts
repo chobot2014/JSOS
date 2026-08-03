@@ -2418,8 +2418,8 @@ const sdk = {
      * step() is called once per WM frame (~16 ms).  Return 'done' to stop.
      * Returns an id for os.process.cancel().
      */
-    coroutine(name: string, step: () => 'done' | 'pending'): number {
-      return threadManager.runCoroutine(name, step);
+    coroutine(name: string, step: () => 'done' | 'pending', priority?: boolean): number {
+      return threadManager.runCoroutine(name, step, priority);
     },
     /**
      * Zero-copy shared memory between parent and a child JSProcess.

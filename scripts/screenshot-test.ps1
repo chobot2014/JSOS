@@ -68,6 +68,12 @@ if ($Navigate) {
             "/" { "slash" }
             "-" { "minus" }
             ":" { "shift-semicolon" }
+            "?" { "shift-slash" }
+            "=" { "equal" }
+            "&" { "shift-7" }
+            "+" { "shift-equal" }
+            "%" { "shift-5" }
+            "_" { "shift-minus" }
             default { ([string]$ch).ToLower() }
         }
         Send-Monitor "sendkey $key" 90
