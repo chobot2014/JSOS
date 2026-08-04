@@ -326,6 +326,7 @@ export class Canvas {
   // ── Pixel access ──────────────────────────────────────────────────────
 
   setPixel(x: number, y: number, color: PixelColor): void {
+    x = x | 0; y = y | 0;   // fractional coords → silent typed-array misses
     if (x < 0 || x >= this.width || y < 0 || y >= this.height) return;
     if (this._clip) {
       var c2 = this._clip;
@@ -392,6 +393,11 @@ export class Canvas {
   }
 
   fillRect(x: number, y: number, w: number, h: number, color: PixelColor): void {
+    // Integer-snap: callers pass fractional coords (e.g. drawTextScaled with
+    // fontScale 1.6 → x = cx + run*1.6).  The JIT fast-path below hands these
+    // to a NATIVE int32 fill kernel — a fractional width/coordinate there
+    // produced runaway fills (single glyph = >3 s, wild memory writes).
+    x = x | 0; y = y | 0; w = Math.ceil(w); h = Math.ceil(h);
     var c  = Canvas._bgra(color);
     var x1 = Math.max(x, 0);
     var y1 = Math.max(y, 0);
@@ -430,6 +436,11 @@ export class Canvas {
   }
 
   drawLine(x0: number, y0: number, x1: number, y1: number, color: PixelColor): void {
+    // Integer-snap: Bresenham's only exit is EXACT equality with the end
+    // point — fractional endpoints (e.g. underline at x+len*8*1.6 from
+    // fontScale maths) never match and the for(;;) loop runs forever
+    // (observed: single scaled link underline = >3 s render budget abort).
+    x0 = x0 | 0; y0 = y0 | 0; x1 = x1 | 0; y1 = y1 | 0;
     var dx = Math.abs(x1 - x0);
     var dy = Math.abs(y1 - y0);
     var sx = x0 < x1 ? 1 : -1;

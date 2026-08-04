@@ -328,6 +328,9 @@ export class BrowserApp implements App {
    *  render, and against a stale pass2 overwriting a good live render. */
   private _renderedRichness = 0;
   private _renderedBy: 'pass1' | 'pass2' | 'rerender' = 'pass1';
+  /** Paint abort sentinel — line index/y the previous (killed) paint died on. */
+  private _ppAbortI = -1;
+  private _ppAbortY = -1;
 
   /**
    * Run the pass2 styled parse as a time-sliced coroutine (~8 ms per frame).
@@ -843,7 +846,10 @@ export class BrowserApp implements App {
   tick(): void {
     if (this._pageJS) {
       var nowMs = Date.now() - this._jsStartMs;
+      var _tkT0 = Date.now();
       this._pageJS.tick(nowMs);
+      var _tkD = Date.now() - _tkT0;
+      if (_tkD >= 500) os.debug.log('[browser] SLOW TICK pageJS.tick ' + _tkD + 'ms');
     }
   }
 
@@ -857,12 +863,18 @@ export class BrowserApp implements App {
     if (!this._dirty) return false;
     this._dirty = false;
 
-    this._drawTabBar(canvas);
-    this._drawToolbar(canvas);
-    this._drawContent(canvas);           // reads this._damage before clearing
+    var _rsT = Date.now(); var _rsLast = _rsT;
+    var _rsMark = (label: string): void => {
+      var _n = Date.now();
+      if (_n - _rsLast >= 500) os.debug.log('[browser] SLOW STAGE ' + label + ' ' + (_n - _rsLast) + 'ms');
+      _rsLast = _n;
+    };
+    this._drawTabBar(canvas);    _rsMark('tabBar');
+    this._drawToolbar(canvas);   _rsMark('toolbar');
+    this._drawContent(canvas);   _rsMark('content');  // reads this._damage before clearing
     this._damage = null;                 // clear damage rect after content used it (item 2.4)
-    this._drawStatusBar(canvas);
-    if (this._findMode) this._drawFindBar(canvas);
+    this._drawStatusBar(canvas); _rsMark('statusBar');
+    if (this._findMode) { this._drawFindBar(canvas); _rsMark('findBar'); }
     return true;
   }
 
@@ -1114,13 +1126,43 @@ export class BrowserApp implements App {
     // Clip stack for overflow:hidden containers (item 3.10)
     var _clipStack: Array<{endY: number; saved: ReturnType<typeof canvas.saveClipRect>}> = [];
     // Paint diagnostics (logged once per content version below)
-    var _pdSpans = 0; var _pdFirst = '';
+    var _pdSpans = 0; var _pdFirst = ''; var _pdLight = 0;
+    // Abort sentinel: if the previous paint was killed by the render budget
+    // (uncatchable interrupt — unwinds before any summary log), the sentinel
+    // still holds the line it died on.  Report it now.
+    if (this._ppAbortI >= 0) {
+      var _abMsg = '[browser] PREV PAINT ABORTED at line#' + this._ppAbortI + ' y=' + this._ppAbortY + ' of ' + _lines.length;
+      var _abL = _lines[this._ppAbortI];
+      if (_abL) {
+        var _abD = _abL.boxDeco as any;
+        _abMsg += ' lineH=' + _abL.lineH + ' spans=' + _abL.nodes.length;
+        if (_abD) {
+          _abMsg += ' deco{x=' + _abD.x + ',w=' + _abD.w + ',h=' + _abD.h +
+                    ',r=' + (_abD.borderRadius || 0) + ',bw=' + (_abD.borderWidth || 0) +
+                    (_abD.boxShadow ? ',shadow="' + String(_abD.boxShadow).slice(0, 40) + '"' : '') +
+                    (_abD.bgGradient ? ',grad="' + String(_abD.bgGradient).slice(0, 40) + '"' : '') +
+                    (_abD.outlineWidth ? ',ow=' + _abD.outlineWidth : '') +
+                    (_abD.bgColor !== undefined ? ',bg' : '') +
+                    (_abD.overflowHidden ? ',ovh' : '') + '}';
+        }
+        var _abSp = _abL.nodes[0] as any;
+        if (_abSp) _abMsg += ' sp0{fs=' + (_abSp.fontScale || 1) + ' "' + String(_abSp.text || '').slice(0, 16) + '"}';
+      }
+      os.debug.log(_abMsg);
+    }
+    this._ppAbortI = -1; this._ppAbortY = -1;
+    // Per-line paint profiler: track the 3 slowest lines so budget-blowing
+    // paints (>300 ms) identify their hot spot from the serial log alone.
+    var _ppT0 = Date.now();
+    var _ppWorst: Array<{ i: number; ms: number; info: string }> = [];
     // Track active boxDeco region for contained background fills
     var _activeDecoX = 0;
     var _activeDecoW = w;
     var _activeDecoEndY = -1; // absolute Y where the active deco box ends
     for (var i = _lo; i < _lines.length; i++) {
       var line  = _lines[i];
+      this._ppAbortI = i; this._ppAbortY = line.y;   // abort sentinel
+      var _ppLineT = Date.now();
       var lineY = line.y - _sv;
       if (lineY > ch) break;
       var absY = y0 + lineY;
@@ -1475,6 +1517,10 @@ export class BrowserApp implements App {
         if (span.text.trim()) {
           _pdSpans++;
           if (!_pdFirst) _pdFirst = 'absY=' + absY + ' x=' + span.x + ' "' + span.text.slice(0, 14) + '"';
+          // White-on-white detector: count spans whose colour is near-white
+          var _pdc = span.color >>> 0;
+          var _pdLum = (((_pdc >> 16) & 0xFF) + ((_pdc >> 8) & 0xFF) + (_pdc & 0xFF)) / 3;
+          if (_pdLum > 235) _pdLight++;
         }
         var clr = span.color;
         if (span.href) {
@@ -1532,10 +1578,37 @@ export class BrowserApp implements App {
           canvas.drawLine(span.x, mY, span.x + span.text.length * sCW, mY, delClr);
         }
       }
+      // Per-line paint profiling — keep the 3 slowest lines
+      var _ppD = Date.now() - _ppLineT;
+      if (_ppD >= 20) {
+        var _ppDk = line.boxDeco;
+        var _ppInfo = 'y=' + line.y + ' ms=' + _ppD +
+          (_ppDk ? ' deco{w=' + _ppDk.w + ',h=' + _ppDk.h +
+                   (_ppDk.boxShadow ? ',shadow' : '') +
+                   ((_ppDk.borderRadius || 0) > 0 ? ',radius' : '') +
+                   (_ppDk.bgGradient ? ',grad' : '') +
+                   (_ppDk.bgColor !== undefined ? ',bg' : '') + '}' : '') +
+          ' spans=' + line.nodes.length;
+        // Log ≥30ms lines IMMEDIATELY (max 10/paint) — a budget abort unwinds
+        // the paint before the end-of-function summary would run.
+        if (_ppD >= 30 && _ppWorst.length < 10) os.debug.log('[browser] SLOW LINE ' + _ppInfo);
+        _ppWorst.push({ i: i, ms: _ppD, info: _ppInfo });
+        if (_ppWorst.length > 6) {
+          _ppWorst.sort(function (a, b) { return b.ms - a.ms; });
+          _ppWorst.length = 3;
+        }
+      }
     }
 
     // Clean up any remaining overflow:hidden clip rects
     while (_clipStack.length > 0) { canvas.restoreClipRect(_clipStack.pop()!.saved); }
+    var _dcMarkT = Date.now();
+    var _dcMark = (label: string): void => {
+      var _n = Date.now();
+      if (_n - _dcMarkT >= 300) os.debug.log('[browser] SLOW DC-STAGE ' + label + ' ' + (_n - _dcMarkT) + 'ms');
+      _dcMarkT = _n;
+    };
+    if (Date.now() - _ppT0 >= 300) os.debug.log('[browser] SLOW DC-STAGE lineLoop ' + (Date.now() - _ppT0) + 'ms (' + (_lines.length - _lo) + ' lines)');
 
     // ── Sticky second pass — paint "stuck" sticky elements on top of main content
     // An element is "stuck" when it has scrolled past its natural flow position
@@ -1726,6 +1799,7 @@ export class BrowserApp implements App {
     }
 
     this._drawWidgets(canvas, y0, ch);
+    _dcMark('widgets');
 
     // Phase 3.1: lift damage clip before drawing scrollbar and canvas elements —
     // scrollbar thumb position changes on every scroll, canvas elements are always current.
@@ -1776,11 +1850,20 @@ export class BrowserApp implements App {
         canvas.blitPixelsDirect(_cPixels, _cb.width, _cb.height, _cRect.x, _cdy);
       }
     }
+    _dcMark('canvasComposite');
 
     // Phase 3.1: restore clip rect and record what was rendered.
     canvas.restoreClipRect(_savedClip);
+    this._ppAbortI = -1; this._ppAbortY = -1;   // completed — clear abort sentinel
     if (this._tileContentVer !== this._contentVersion) {
-      os.debug.log('[browser] paint: textSpans=' + _pdSpans + ' first{' + _pdFirst + '} scrollY=' + _sv + ' lo=' + _lo + '/' + _lines.length);
+      os.debug.log('[browser] paint: textSpans=' + _pdSpans + ' lightSpans=' + _pdLight + ' first{' + _pdFirst + '} scrollY=' + _sv + ' lo=' + _lo + '/' + _lines.length);
+    }
+    var _ppTotal = Date.now() - _ppT0;
+    if (_ppTotal >= 300) {
+      _ppWorst.sort(function (a, b) { return b.ms - a.ms; });
+      var _ppMsg = '[browser] SLOW PAINT ' + _ppTotal + 'ms;';
+      for (var _ppI = 0; _ppI < Math.min(3, _ppWorst.length); _ppI++) _ppMsg += ' [' + _ppWorst[_ppI].info + ']';
+      os.debug.log(_ppMsg);
     }
     this._tileContentVer = this._contentVersion;
     this._tileScrollY    = this._scrollY;

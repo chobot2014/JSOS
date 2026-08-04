@@ -2126,7 +2126,10 @@ export function createPageJS(
     if (_rerenderCount >= 1 && _nowMs - _lastRerenderMs < _FULL_RERENDER_COOLDOWN) return;
     // Update title if changed
     if (doc.title) cb.setTitle(doc.title);
+    var _vtT0 = Date.now();
     var _bodyTokens = vdocToTokens(doc);
+    var _vtD = Date.now() - _vtT0;
+    if (_vtD >= 500) cb.log('[JS] SLOW vdocToTokens ' + _vtD + 'ms (' + _bodyTokens.length + ' tokens)');
     _rerenderCount++;
     _rerenderBusy = true;
     _lastRerenderMs = _nowMs;
@@ -6014,6 +6017,50 @@ export function createPageJS(
   /** Running animations: keyed by element, value = CSSAnimation */
   var _activeAnims = new Map<VElement, CSSAnimation>();
   var _lastAnimScanGen = -1;
+  var _lastAnimScanMs  = -1e9;
+
+  // ── Animation-selector prefilter ────────────────────────────────────
+  // _scanAnimations used to call getComputedStyle() (a FULL cascade against
+  // every stylesheet rule) on EVERY DOM element — 21-24 s per tick on a
+  // 2858-rule sheet.  Instead, collect the tag/class/id tokens appearing in
+  // selectors of rules that declare `animation*`; only elements matching a
+  // token (or with inline animation style) pay for getComputedStyle.
+  var _animTokCache: { toks: Set<string> | null; sheets: number } = { toks: null, sheets: -1 };
+  function _getAnimTokens(): Set<string> | null {
+    var nSheets = doc._styleSheets.length;
+    if (_animTokCache.sheets === nSheets) return _animTokCache.toks;
+    var toks: Set<string> | null = null;
+    var hasKeyframes = false;
+    try {
+      for (var _si = 0; _si < nSheets; _si++) {
+        var _sh = doc._styleSheets[_si] as any;
+        if (!_sh || !_sh.cssRules) continue;
+        for (var _ri = 0; _ri < _sh.cssRules.length; _ri++) {
+          var _r = _sh.cssRules[_ri] as any;
+          if (!_r) continue;
+          if (_r.type === 7) { hasKeyframes = true; continue; }
+          var _selTxt = _r.selectorText as string | undefined;
+          if (!_selTxt) continue;
+          var _body = '';
+          try { _body = (_r.style && _r.style.cssText) || _r.cssText || ''; } catch (_) {}
+          if (_body.indexOf('animation') < 0) continue;
+          if (!toks) toks = new Set<string>();
+          var _m = _selTxt.match(/[#.][A-Za-z_][\w-]*/g);   // CLASS/ID tokens only —
+          // bare tag tokens (div, a, span…) match nearly every element and
+          // defeat the prefilter (observed: 2 s per rescan on mojeek).
+          if (_m) for (var _mi = 0; _mi < _m.length; _mi++) {
+            toks.add(_m[_mi].slice(1).toLowerCase());
+          }
+        }
+      }
+    } catch (_) {}
+    // No @keyframes anywhere → no CSS animation can ever activate
+    if (!hasKeyframes) toks = null;
+    else if (!toks) toks = new Set<string>();  // keyframes but no matched selectors — inline-only
+    _animTokCache.toks = toks;
+    _animTokCache.sheets = nSheets;
+    return toks;
+  }
 
   /** Look up a @keyframes rule by name from all loaded stylesheets. */
   function _getKeyframesRule(name: string): AnimationKeyframe[] | null {
@@ -6085,18 +6132,43 @@ export function createPageJS(
     return { id: name, keyframes: kfs, duration, delay, iterations, direction, fillMode, startTime: nowMs } as CSSAnimation;
   }
 
+  /** Elements already animation-checked — rescans only pay for NEW elements. */
+  var _animScanned = new WeakSet<VElement>();
+
   /** Scan the whole DOM for elements with `animation` CSS, update _activeAnims. */
   function _scanAnimations(nowMs: number): void {
     _lastAnimScanGen = currentStyleGeneration();
+    var _animToks = _getAnimTokens();
+    if (_animToks === null) return;   // no @keyframes in any sheet — nothing can animate
     function _walkAnimEl(node: VNode): void {
       if (node.nodeType === 1) {
         var el2 = node as VElement;
-        if (!_activeAnims.has(el2)) {
-          var cs2 = getComputedStyle(el2);
-          var animCss = cs2.getPropertyValue('animation') || cs2.getPropertyValue('animation-name') || '';
-          if (animCss && animCss !== 'none') {
-            var anim = _parseAnimationProp(animCss, nowMs);
-            if (anim) _activeAnims.set(el2, anim);
+        if (!_activeAnims.has(el2) && !_animScanned.has(el2)) {
+          _animScanned.add(el2);
+          // Cheap prefilter: inline animation style OR selector-token match —
+          // only then pay for the full getComputedStyle cascade.
+          var _inlAnim = el2._style._map.get('animation') || el2._style._map.get('animation-name') || '';
+          var _cand = !!_inlAnim;
+          if (!_cand && _animToks!.size > 0) {
+            var _eid = (el2.getAttribute && el2.getAttribute('id')) || '';
+            if (_eid && _animToks!.has(_eid.toLowerCase())) _cand = true;
+            if (!_cand) {
+              var _ecls = (el2.getAttribute && el2.getAttribute('class')) || '';
+              if (_ecls) {
+                var _cparts = _ecls.split(/\s+/);
+                for (var _cpi = 0; _cpi < _cparts.length; _cpi++) {
+                  if (_cparts[_cpi] && _animToks!.has(_cparts[_cpi].toLowerCase())) { _cand = true; break; }
+                }
+              }
+            }
+          }
+          if (_cand) {
+            var cs2 = getComputedStyle(el2);
+            var animCss = cs2.getPropertyValue('animation') || cs2.getPropertyValue('animation-name') || '';
+            if (animCss && animCss !== 'none') {
+              var anim = _parseAnimationProp(animCss, nowMs);
+              if (anim) _activeAnims.set(el2, anim);
+            }
           }
         }
         for (var ci = 0; ci < node.childNodes.length; ci++) _walkAnimEl(node.childNodes[ci]);
@@ -10856,6 +10928,13 @@ export function createPageJS(
       }
       if (_pageFaulted) return;
       var frameStart = _perf.now();
+      // Phase profiler — identifies which tick phase blows the frame budget
+      var _phT = Date.now();
+      var _phMark = function (label: string): void {
+        var _n = Date.now();
+        if (_n - _phT >= 500) cb.log('[JS] SLOW PHASE ' + label + ' ' + (_n - _phT) + 'ms');
+        _phT = _n;
+      };
       // Fire RAF callbacks — coalesce rerender to end of tick
       if (rafCallbacks.length) {
         var cbs = rafCallbacks.splice(0);
@@ -10864,6 +10943,7 @@ export function createPageJS(
           _drainMicrotasks();
         }
       }
+      _phMark('raf');
       // Fire elapsed timers (drain microtasks after each)
       var elapsed = nowMs;
       for (var i = timers.length - 1; i >= 0; i--) {
@@ -10875,33 +10955,52 @@ export function createPageJS(
           else { timers.splice(i, 1); }
         }
       }
+      _phMark('timers');
       // Advance CSS transitions
       if (_activeTrans.length > 0) {
         _tickTransitions(nowMs);
       }
-      // Advance CSS @keyframes animations
-      if (currentStyleGeneration() !== _lastAnimScanGen) _scanAnimations(nowMs);
+      // Advance CSS @keyframes animations.  Rescan when the style generation
+      // changed, but (a) at most every 2 s — the scan walks the whole DOM —
+      // and (b) absorbing self-bumps: _tickAnimations/_tickTransitions bump
+      // the generation every frame while animating, which previously forced
+      // a full rescan EVERY tick.
+      if (currentStyleGeneration() !== _lastAnimScanGen && nowMs - _lastAnimScanMs >= 5000) {
+        _lastAnimScanMs = nowMs;
+        _scanAnimations(nowMs);
+      }
       if (_activeAnims.size > 0) {
         _tickAnimations(nowMs);
       }
+      // Self-bump absorption: generation changes made by the animation/
+      // transition tickers themselves don't require a rescan.
+      if (_activeAnims.size > 0 || _activeTrans.length > 0) {
+        _lastAnimScanGen = currentStyleGeneration();
+      }
+      _phMark('css-anim');
       // Pump Intersection and Resize Observers (use real viewport height)
       var viewH = ((win['innerHeight'] as number) || 768);
       var viewW = ((win['innerWidth']  as number) || 1024);
       for (var io of _ioObservers) io._tick(viewH, viewW);
       for (var ro of _roObservers) ro._tick();
+      _phMark('observers');
       // Poll WebSocket connections for incoming data
       if (_wsSockets.length > 0) _tickWebSockets();
       // Poll EventSource / SSE streams
       if (_sseSockets.length > 0) _tickSSE();
+      _phMark('ws-sse');
       // Pump all Web Workers
       tickAllWorkers();
+      _phMark('workers');
       // Pump child runtime (drives setTimeout, Promise chains, React re-renders in child proc)
       if (_pageChildId >= 0) {
         _childTick();
       }
+      _phMark('childTick');
       // Coalesced rerender — run ONCE at end of tick instead of after every phase
       checkDirty();
       if (needsRerender) doRerender();
+      _phMark('rerender');
       // Record frame timing
       _perf.recordFrame(frameStart, _perf.now() - frameStart);
     },
